@@ -30,6 +30,7 @@ from lup.metrics import get_metrics_summary, log_metrics_summary, reset_metrics
 from lup.notes import NotesConfig, setup_notes
 from lup.paths import agent_version
 from lup.realtime import (
+    ActionCallback,
     Scheduler,
     create_meta_before_sleep_guard,
     create_pending_event_guard,
@@ -42,12 +43,13 @@ from lup.trace import TraceLogger
 from inkwell.agent.config import settings
 from inkwell.agent.models import AgentSessionResult, WritingOutput
 from inkwell.agent.prompts import get_system_prompt
+from inkwell.agent.session import WritingContext, WritingSessionState
 from inkwell.agent.subagents import get_subagents
 from inkwell.agent.tool_policy import ToolPolicy
 from inkwell.agent.tools.author import AUTHOR_TOOLS
 from inkwell.agent.tools.extract import EXTRACT_TOOLS
 from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS
-from inkwell.agent.tools.realtime import ContextOutput, create_realtime_tools
+from inkwell.agent.tools.realtime import create_realtime_tools
 from inkwell.agent.tools.reflect import create_reflect_tools
 from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
 from inkwell.agent.tools.research.exa import EXA_TOOLS
@@ -63,16 +65,25 @@ def build_context(
     last_events: int,
     *,
     scheduler: Scheduler,
-    session_state: dict[str, str],
-) -> ContextOutput:
-    """Build context state for the realtime context tool."""
-    return ContextOutput(
-        **{
-            "stage": session_state.get("stage", "starting"),
-            "doc_id": session_state.get("doc_id", ""),
-            "doc_url": session_state.get("doc_url", ""),
-            "scheduler": scheduler.get_state(),
-        }
+    session_state: WritingSessionState,
+) -> WritingContext:
+    """Build context state for the realtime context tool.
+
+    Queries the Google Doc for new author comments and returns live
+    session state including section status and pending questions.
+    """
+    new_comments = session_state.get_new_author_comments()
+    terminal_messages = session_state.consume_terminal_messages()
+
+    return WritingContext(
+        stage=session_state.stage,
+        doc_id=session_state.doc_id,
+        doc_url=session_state.doc_url,
+        sections_status=list(session_state.sections),
+        pending_questions=list(session_state.pending_questions),
+        new_author_comments=new_comments,
+        terminal_messages=terminal_messages,
+        scheduler=cast(dict[str, object], scheduler.get_state()),
     )
 
 
@@ -84,7 +95,7 @@ def build_agent_servers(
     gate: ReflectionGate | None = None,
     scheduler: Scheduler | None = None,
     trace_logger: TraceLogger | None = None,
-    session_state: dict[str, str] | None = None,
+    session_state: WritingSessionState | None = None,
 ) -> dict[str, McpServerConfig]:
     """Create the agent's MCP servers."""
     all_doc_tools = [*GOOGLE_DOCS_TOOLS, *AUTHOR_TOOLS]
@@ -126,13 +137,14 @@ def build_agent_servers(
     ]
 
     if scheduler is not None:
-        state = session_state or {}
+        state = session_state or WritingSessionState()
         realtime_tools = create_realtime_tools(
             scheduler=scheduler,
             build_context=lambda n: build_context(
                 n, scheduler=scheduler, session_state=state
             ),
             trace_logger=trace_logger,
+            session_notes=state.notes,
         )
         session_server = create_mcp_server(
             name="session",
@@ -154,7 +166,7 @@ def build_options(
     sandbox: Sandbox | None = None,
     scheduler: Scheduler | None = None,
     trace_logger: TraceLogger | None = None,
-    session_state: dict[str, str] | None = None,
+    session_state: WritingSessionState | None = None,
     persistent: bool = True,
 ) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions for the writing agent."""
@@ -183,7 +195,7 @@ def build_options(
             sleep_tool_name="mcp__session__sleep",
         )
         event_hooks = create_pending_event_guard(
-            check_unread=lambda: 0,
+            check_unread=lambda: (session_state or WritingSessionState()).check_unread_comments(),
             scheduler=scheduler,
             guarded_tools=["mcp__session__sleep"],
         )
@@ -283,7 +295,7 @@ async def run_agent(
     session_id: str | None = None,
     task_id: str | None = None,
     persistent: bool = True,
-    on_action: None = None,
+    on_action: ActionCallback | None = None,
 ) -> AgentSessionResult:
     """Run the writing agent on a task.
 
@@ -314,13 +326,15 @@ async def run_agent(
         timeout_seconds=settings.sandbox_timeout_seconds,
     )
 
-    session_state: dict[str, str] = {"stage": "starting"}
+    session_state = WritingSessionState()
 
     scheduler: Scheduler | None = None
     if persistent:
 
         async def action_callback(content: str) -> None:
             logger.info("Agent action: %s", content[:100])
+            if on_action:
+                await on_action(content)
 
         scheduler = Scheduler(on_action=action_callback)
 

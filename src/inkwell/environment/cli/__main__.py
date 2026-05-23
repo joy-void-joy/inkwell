@@ -9,6 +9,7 @@ Usage:
 
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -51,7 +52,15 @@ async def run_session(
 ) -> AgentSessionResult:
     logger.info("Starting session with model: %s", settings.model)
 
-    result = await run_agent(task, session_id=session_id, persistent=persistent)
+    async def on_action(content: str) -> None:
+        typer.echo(f"\n[inkwell] {content}")
+
+    result = await run_agent(
+        task,
+        session_id=session_id,
+        persistent=persistent,
+        on_action=on_action if persistent else None,
+    )
 
     logger.info(
         "Session %s completed (cost: $%.4f, duration: %.1fs)",

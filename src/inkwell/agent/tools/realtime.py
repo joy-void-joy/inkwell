@@ -187,23 +187,21 @@ def create_realtime_tools(
     scheduler: Scheduler,
     build_context: Callable[[int], ContextOutput],
     trace_logger: TraceLogger | None = None,
+    session_notes: dict[str, str] | None = None,
 ) -> list[LupMcpTool]:
     """Create the standard set of real-time MCP tools.
-
-    This is a TEMPLATE — customize for your domain. The tools are
-    closures bound to the session state via the scheduler and
-    build_context callback.
 
     Args:
         scheduler: The Scheduler instance for this session.
         build_context: Callable(last_events: int) -> ContextOutput that
             builds the context state and advances the read pointer.
-            Use ``ContextOutput(**your_dict)`` — extra fields are accepted.
         trace_logger: Optional TraceLogger for meta assessments.
+        session_notes: Mutable dict for the notes tool to read/write.
 
     Returns:
         List of LupMcpTool instances.
     """
+    notes_store = session_notes if session_notes is not None else {}
 
     # -- Communication tools -------------------------------------------
 
@@ -313,12 +311,36 @@ def create_realtime_tools(
         return build_context(inp.last_events)
 
     @lup_tool(
-        "Read or write private session notes. Not visible to the user.",
+        "Read or write private session notes. Not visible to the user. "
+        "Use for tracking decisions, intermediate state, or anything "
+        "you need to remember across sleep cycles.",
         name="notes",
     )
-    async def notes_tool(_inp: NotesInput) -> NotesOutput:
-        # NOTE: This is a template. Wire to your session's notes dict.
-        return NotesOutput(message="Notes tool not wired. Customize in your session.")
+    async def notes_tool(inp: NotesInput) -> NotesOutput:
+        match inp.action:
+            case "write":
+                if not inp.key:
+                    raise ToolError("Key required for write.")
+                notes_store[inp.key] = inp.content
+                return NotesOutput(message=f"Note '{inp.key}' saved.")
+            case "read":
+                if not inp.key:
+                    raise ToolError("Key required for read.")
+                content = notes_store.get(inp.key)
+                if content is None:
+                    return NotesOutput(message=f"No note with key '{inp.key}'.")
+                return NotesOutput(message=content)
+            case "list":
+                if not notes_store:
+                    return NotesOutput(message="No notes.")
+                keys = ", ".join(sorted(notes_store))
+                return NotesOutput(message=f"Notes: {keys}")
+            case "delete":
+                if inp.key in notes_store:
+                    del notes_store[inp.key]
+                    return NotesOutput(message=f"Note '{inp.key}' deleted.")
+                return NotesOutput(message=f"No note with key '{inp.key}'.")
+        raise ToolError(f"Unknown action: {inp.action}. Use write, read, list, or delete.")
 
     @lup_tool(
         "Capture threads worth exploring later. Cancelled actions "

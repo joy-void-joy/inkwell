@@ -169,9 +169,7 @@ class ExtractUrlOutput(BaseModel):
 
 
 class ExtractFileInput(BaseModel):
-    path: str = Field(
-        description="Local file path (markdown, text, or PDF)"
-    )
+    path: str = Field(description="Local file path (markdown, text, or PDF)")
 
 
 class ExtractFileOutput(BaseModel):
@@ -255,14 +253,74 @@ async def extract_file(params: ExtractFileInput) -> ExtractFileOutput:
         content = file_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         raise ToolError(
-            f"Could not read {file_path} as text. "
-            "Supported formats: .md, .txt, .text"
+            f"Could not read {file_path} as text. Supported formats: .md, .txt, .text"
         )
 
     return ExtractFileOutput(
         path=str(file_path),
         content=content[:50000],
         word_count=len(content.split()),
+    )
+
+
+async def do_extract_source(source: str) -> str:
+    """Extract text from a Claude share link, URL, or file path.
+
+    Used by the pipeline. Returns raw markdown text.
+    For richer structured output, use the individual MCP tools.
+    """
+    from pathlib import Path
+
+    if "claude.ai/share/" in source:
+        share_id = extract_share_id(source)
+        data = await fetch_snapshot(share_id)
+        chat_messages = data.get("chat_messages", [])
+        if not isinstance(chat_messages, list):
+            raise RuntimeError("Unexpected response format: no chat_messages array")
+        parts: list[str] = []
+        for msg in chat_messages:
+            if not isinstance(msg, dict):
+                continue
+            sender = msg.get("sender", "")
+            if not isinstance(sender, str):
+                continue
+            text = message_text(msg)
+            if not text.strip():
+                continue
+            speaker = "user" if sender == "human" else "claude"
+            parts.append(f"<{speaker}>\n{text}\n</{speaker}>")
+        if not parts:
+            raise RuntimeError("No messages found in conversation")
+        return "\n\n".join(parts)
+
+    path = Path(source).expanduser()
+    if path.exists():
+        try:
+            return path.read_text(encoding="utf-8")[:50000]
+        except UnicodeDecodeError as e:
+            raise RuntimeError(f"Could not read {path} as text") from e
+
+    if source.startswith(("http://", "https://")):
+        import trafilatura
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=20.0,
+                follow_redirects=True,
+                headers={"User-Agent": CLAUDE_HEADERS["User-Agent"]},
+            ) as client:
+                resp = await client.get(source)
+                resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"Failed to fetch {source}: {e}") from e
+        text = trafilatura.extract(resp.text) or ""
+        if not text:
+            raise RuntimeError(f"Could not extract text from {source}")
+        return text[:50000]
+
+    raise RuntimeError(
+        f"Cannot extract source: {source!r}. "
+        "Provide a Claude share link, URL, or file path."
     )
 
 

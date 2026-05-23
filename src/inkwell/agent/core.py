@@ -7,8 +7,9 @@ it checks for new author comments and decides whether to continue or adjust.
 
 Exports:
 - setup_session() — create all infrastructure for a writing session
-- run_agent() — one-shot batch execution (setup + query + collect)
-- build_options() — build ClaudeAgentOptions (used by chat session)
+- run_batch() — run the pipeline non-interactively
+- run_agent() — one-shot freeform execution (no pipeline)
+- build_options() — build ClaudeAgentOptions (used by devtools REPL)
 - build_agent_servers() — create MCP servers (used by devtools REPL)
 - build_result() — convert a ResponseCollector into AgentSessionResult
 """
@@ -31,11 +32,16 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 from claude_agent_sdk import McpServerConfig
-from claude_agent_sdk.types import HookContext, SyncHookJSONOutput
+from claude_agent_sdk.types import HookContext, HookEvent, SyncHookJSONOutput
 
 from lup.client import ResponseCollector, TokenUsage, query
 from lup.history import save_session
-from lup.hooks import HooksConfig, block_hook_output, create_permission_hooks, merge_hooks
+from lup.hooks import (
+    HooksConfig,
+    block_hook_output,
+    create_permission_hooks,
+    merge_hooks,
+)
 from lup.mcp import create_mcp_server, extract_sdk_tools
 from lup.metrics import get_metrics_summary, log_metrics_summary, reset_metrics
 from lup.notes import NotesConfig, setup_notes
@@ -46,21 +52,19 @@ from lup.realtime import (
     create_meta_before_sleep_guard,
     create_pending_event_guard,
 )
-from lup.reflect import ReflectionGate, create_reflection_gate
 from lup.sandbox import Sandbox
 from lup.trace import TraceLogger
 
 from inkwell.agent.config import settings
 from inkwell.agent.models import AgentSessionResult, WritingOutput
+from inkwell.agent.pipeline import PipelineListener, run_pipeline
 from inkwell.agent.prompts import get_system_prompt
 from inkwell.agent.session import WritingContext, WritingSessionState
-from inkwell.agent.agents import get_agents
 from inkwell.agent.tool_policy import ToolPolicy
 from inkwell.agent.tools.author import AUTHOR_TOOLS
 from inkwell.agent.tools.extract import EXTRACT_TOOLS
 from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS, configure_session_state
 from inkwell.agent.tools.realtime import create_realtime_tools
-from inkwell.agent.tools.reflect import create_reflect_tools
 from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
 from inkwell.agent.tools.research.exa import EXA_TOOLS
 from inkwell.agent.tools.research.fetch import FETCH_TOOLS
@@ -82,13 +86,8 @@ def build_context(
     scheduler: Scheduler,
     session_state: WritingSessionState,
 ) -> WritingContext:
-    """Build context state for the realtime context tool.
-
-    Queries the Google Doc for new author comments and returns live
-    session state including section status and pending questions.
-    """
+    """Build context state for the realtime context tool."""
     new_comments = session_state.get_new_author_comments()
-    terminal_messages = session_state.consume_terminal_messages()
 
     return WritingContext(
         stage=session_state.stage,
@@ -97,51 +96,14 @@ def build_context(
         sections_status=list(session_state.sections),
         pending_questions=list(session_state.pending_questions),
         new_author_comments=new_comments,
-        terminal_messages=terminal_messages,
         scheduler=cast(dict[str, object], scheduler.get_state()),
-    )
-
-
-def create_terminal_input_guard(
-    session_state: WritingSessionState,
-) -> HooksConfig:
-    """Create a PreToolUse hook that surfaces terminal input to the agent.
-
-    Checks for pending terminal messages before every tool call. If messages
-    exist, blocks the tool call and injects the messages as a notification,
-    forcing the agent to acknowledge and integrate them before proceeding.
-    """
-
-    async def guard(
-        input_data: HookInput,
-        _tool_use_id: str | None,  # claude: ignore
-        _context: HookContext,  # claude: ignore
-    ) -> SyncHookJSONOutput:
-        if input_data["hook_event_name"] != "PreToolUse":
-            return SyncHookJSONOutput()
-        messages = session_state.consume_terminal_messages()
-        if not messages:
-            return SyncHookJSONOutput()
-        text = "\n".join(f"[Author]: {m}" for m in messages)
-        return block_hook_output(
-            f"Author input received:\n{text}\n\nIntegrate this feedback before continuing."
-        )
-
-    return cast(
-        HooksConfig,
-        {"PreToolUse": [HookMatcher(hooks=[guard])]},
     )
 
 
 def create_writing_stop_guard(
     session_state: WritingSessionState,
 ) -> HooksConfig:
-    """Stop guard that adapts to pipeline state.
-
-    Allows the agent to finish normally when no writing pipeline is active
-    (chat mode). Once a Google Doc is created, forces the agent to sleep
-    between stages until the pipeline completes.
-    """
+    """Stop guard that adapts to pipeline state."""
 
     async def stop_guard(
         input_data: HookInput,
@@ -159,10 +121,8 @@ def create_writing_stop_guard(
             "feedback or revision requests at any time."
         )
 
-    return cast(
-        HooksConfig,
-        {"Stop": [HookMatcher(hooks=[stop_guard])]},
-    )
+    key: HookEvent = "Stop"
+    return {key: [HookMatcher(hooks=[stop_guard])]}
 
 
 class SessionSetup(NamedTuple):
@@ -184,8 +144,8 @@ def setup_session(
     """Create all infrastructure for a writing session.
 
     Returns a SessionSetup with notes, trace, sandbox, session state,
-    scheduler, and pre-built ClaudeAgentOptions. Used by both run_agent()
-    (batch mode) and chat_session() (interactive mode).
+    scheduler, and pre-built ClaudeAgentOptions. Used by run_agent()
+    (freeform mode) and as infrastructure for the pipeline.
     """
     notes = setup_notes(session_id, "0")
     trace_path = TRACES_PATH / session_id / f"{datetime.now().strftime('%H%M%S')}.md"
@@ -236,22 +196,20 @@ def setup_session(
 def build_agent_servers(
     *,
     session_dir: Path,
-    outputs_dir: Path | None = None,
     sandbox: Sandbox | None = None,
-    gate: ReflectionGate | None = None,
     scheduler: Scheduler | None = None,
     trace_logger: TraceLogger | None = None,
     session_state: WritingSessionState | None = None,
+    policy: ToolPolicy | None = None,
 ) -> dict[str, McpServerConfig]:
     """Create the agent's MCP servers."""
     if session_state is not None:
         configure_session_state(session_state)
 
-    all_doc_tools = [*GOOGLE_DOCS_TOOLS, *AUTHOR_TOOLS, *VOICE_TOOLS, *FORMAT_TOOLS]
     docs_server = create_mcp_server(
         name="docs",
         version="1.0.0",
-        tools=extract_sdk_tools(all_doc_tools),
+        tools=extract_sdk_tools([*GOOGLE_DOCS_TOOLS, *AUTHOR_TOOLS, *VOICE_TOOLS]),
     )
 
     extract_server = create_mcp_server(
@@ -274,22 +232,17 @@ def build_agent_servers(
         tools=extract_sdk_tools(research_tools),
     )
 
-    reflect_kit = create_reflect_tools(
-        session_dir=session_dir,
-        outputs_dir=outputs_dir,
-        gate=gate,
-    )
-    reflect_server = create_mcp_server(
-        name="notes",
+    format_server = create_mcp_server(
+        name="format",
         version="1.0.0",
-        tools=extract_sdk_tools(reflect_kit["tools"]),
+        tools=extract_sdk_tools(FORMAT_TOOLS),
     )
 
     all_servers: list[McpServerConfig] = [
         docs_server,
         extract_server,
         research_server,
-        reflect_server,
+        format_server,
     ]
 
     if scheduler is not None:
@@ -300,7 +253,6 @@ def build_agent_servers(
                 n, scheduler=scheduler, session_state=state
             ),
             trace_logger=trace_logger,
-            session_notes=state.notes,
         )
         session_server = create_mcp_server(
             name="session",
@@ -312,8 +264,8 @@ def build_agent_servers(
     if sandbox is not None:
         all_servers.append(sandbox.create_mcp_server())
 
-    policy = ToolPolicy.from_settings(settings)
-    return policy.get_mcp_servers(*all_servers)
+    resolved_policy = policy or ToolPolicy.from_settings(settings)
+    return resolved_policy.get_mcp_servers(*all_servers)
 
 
 def build_options(
@@ -326,51 +278,34 @@ def build_options(
     persistent: bool = True,
 ) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions for the writing agent."""
-    gate = ReflectionGate()
+    policy = ToolPolicy.from_settings(settings)
+
     servers = build_agent_servers(
         session_dir=notes_config.session,
-        outputs_dir=notes_config.output.parent,
         sandbox=sandbox,
-        gate=gate,
         scheduler=scheduler,
         trace_logger=trace_logger,
         session_state=session_state,
+        policy=policy,
     )
 
-    permission_hooks = create_permission_hooks(notes_config.rw, notes_config.ro)
+    hooks = create_permission_hooks(notes_config.rw, notes_config.ro)
 
     if persistent and scheduler is not None:
-        gate_hooks = create_reflection_gate(
-            gate=gate,
-            gated_tool="StructuredOutput",
-            reflection_tool_name="mcp__notes__review",
-        )
         state = session_state or WritingSessionState()
-        stop_hooks = create_writing_stop_guard(state)
-        meta_hooks = create_meta_before_sleep_guard(
-            scheduler=scheduler,
-            sleep_tool_name="mcp__session__sleep",
-        )
-        event_hooks = create_pending_event_guard(
-            check_unread=state.check_unread_comments,
-            scheduler=scheduler,
-            guarded_tools=["mcp__session__sleep"],
-        )
-        terminal_hooks = create_terminal_input_guard(state)
-        hooks = merge_hooks(permission_hooks, gate_hooks)
-        hooks = merge_hooks(hooks, stop_hooks)
-        hooks = merge_hooks(hooks, meta_hooks)
-        hooks = merge_hooks(hooks, event_hooks)
-        hooks = merge_hooks(hooks, terminal_hooks)
-    else:
-        gate_hooks = create_reflection_gate(
-            gate=gate,
-            gated_tool="StructuredOutput",
-            reflection_tool_name="mcp__notes__review",
-        )
-        hooks = merge_hooks(permission_hooks, gate_hooks)
-
-    policy = ToolPolicy.from_settings(settings)
+        for layer in [
+            create_writing_stop_guard(state),
+            create_meta_before_sleep_guard(
+                scheduler=scheduler,
+                sleep_tool_name="mcp__session__sleep",
+            ),
+            create_pending_event_guard(
+                check_unread=state.check_unread_comments,
+                scheduler=scheduler,
+                guarded_tools=["mcp__session__sleep"],
+            ),
+        ]:
+            hooks = merge_hooks(hooks, layer)
 
     return ClaudeAgentOptions(
         model=settings.model,
@@ -389,7 +324,6 @@ def build_options(
             "allowUnsandboxedCommands": False,
         },
         mcp_servers=servers,
-        agents=get_agents(),
         add_dirs=[str(d) for d in notes_config.all_dirs],
         allowed_tools=policy.get_allowed_tools(),
         output_format={
@@ -402,14 +336,16 @@ def build_options(
 def extract_sources(blocks: list[ContentBlock]) -> list[str]:
     sources: list[str] = []
     for block in blocks:
-        if isinstance(block, ToolUseBlock) and block.name in (
-            "WebSearch",
-            "WebFetch",
-        ):
-            if isinstance(block.input, dict):
-                source = block.input.get("url") or block.input.get("query")
-                if source:
-                    sources.append(str(source))
+        if not isinstance(block, ToolUseBlock):
+            continue
+        if block.name not in ("WebSearch", "WebFetch"):
+            continue
+        tool_input = block.input
+        for key in ("url", "query"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value:
+                sources.append(value)
+                break
     return sources
 
 
@@ -448,6 +384,71 @@ def build_result(
     )
 
 
+async def run_batch(
+    source: str,
+    *,
+    target_format: str = "lesswrong",
+    session_id: str | None = None,
+    task_id: str | None = None,
+    refs: list[str] | None = None,
+    listener: PipelineListener | None = None,
+) -> AgentSessionResult:
+    """Run the writing pipeline.
+
+    This is the primary entry point for both batch and interactive modes.
+    The listener controls progress display and feedback collection.
+
+    Args:
+        source: Claude share link, URL, or file path.
+        target_format: Output format (lesswrong, twitter, blog).
+        session_id: Optional session identifier.
+        task_id: Optional task identifier.
+        refs: Additional reference URLs or file paths.
+        listener: Pipeline event listener (default logs to stdout).
+    """
+    if session_id is None:
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    logger.info("Starting pipeline session %s", session_id)
+    reset_metrics()
+
+    setup_notes(session_id, "0")
+    trace_path = TRACES_PATH / session_id / f"{datetime.now().strftime('%H%M%S')}.md"
+    trace_logger = TraceLogger(trace_path=trace_path, title=f"Pipeline {session_id}")
+
+    session_state = WritingSessionState()
+
+    output = await run_pipeline(
+        source,
+        target_format=target_format,
+        session_state=session_state,
+        trace_logger=trace_logger,
+        refs=refs,
+        listener=listener,
+        max_budget_usd=settings.max_budget_usd,
+    )
+
+    trace_logger.save()
+    log_metrics_summary()
+
+    result = AgentSessionResult(
+        session_id=session_id,
+        task_id=task_id,
+        agent_version=agent_version(),
+        timestamp=datetime.now().isoformat(),
+        output=output,
+        reasoning="",
+        sources_consulted=[],
+        duration_seconds=None,
+        cost_usd=None,
+        token_usage=None,
+        tool_metrics=get_metrics_summary(),
+    )
+
+    save_session(result, session_id=result.session_id)
+    return result
+
+
 async def run_agent(
     task: str,
     *,
@@ -456,12 +457,15 @@ async def run_agent(
     persistent: bool = True,
     on_action: ActionCallback | None = None,
 ) -> AgentSessionResult:
-    """Run the writing agent on a task (batch mode).
+    """Run the writing agent as a freeform LLM session.
 
-    For interactive use, see chat_session() in environment/cli/chat.py.
+    For the structured pipeline, use run_batch() instead.
+    This mode gives the agent all tools and a system prompt, then
+    lets it work freely — useful for open-ended tasks that don't
+    follow the extract-plan-research-write pipeline.
 
     Args:
-        task: The writing task — a Claude share link, brief, or revision request.
+        task: The writing task — a brief, revision request, or freeform instruction.
         session_id: Optional session identifier.
         task_id: Optional task identifier.
         persistent: Whether to use sleep/wake persistent mode.
@@ -470,7 +474,7 @@ async def run_agent(
     if session_id is None:
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    logger.info("Starting session %s (persistent=%s)", session_id, persistent)
+    logger.info("Starting freeform session %s (persistent=%s)", session_id, persistent)
     reset_metrics()
 
     setup = setup_session(

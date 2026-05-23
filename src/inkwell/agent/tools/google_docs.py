@@ -7,14 +7,16 @@ Requires Google OAuth credentials configured via `inkwell setup`.
 """
 
 # claude: ignore
-# pyright: reportAttributeAccessIssue=false
+# pyright: reportAttributeAccessIssue=false, reportIndexIssue=false
 # googleapiclient returns untyped Resource objects throughout.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from googleapiclient.errors import HttpError
 from pydantic import BaseModel, Field
 
 from inkwell.agent.google_auth import ServiceFactory, get_service_factory
@@ -45,6 +47,40 @@ def services() -> ServiceFactory:
     return SERVICES
 
 
+def require_doc_id() -> str:
+    """Get doc_id from session state. Raises ToolError if no doc exists."""
+    if SESSION_STATE is None or not SESSION_STATE.doc_id:
+        raise ToolError("No Google Doc created yet. Use create_doc first.")
+    return SESSION_STATE.doc_id
+
+
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503}
+
+
+async def execute_with_retry(
+    request: object,
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 2.0,
+) -> object:
+    """Execute a Google API request with retry on transient errors."""
+    for attempt in range(max_attempts):
+        try:
+            return request.execute()  # type: ignore[union-attr]
+        except HttpError as exc:
+            if exc.resp.status not in RETRYABLE_STATUS_CODES:
+                raise
+            if attempt == max_attempts - 1:
+                raise
+            delay = base_delay * (2**attempt)
+            logger.warning(
+                "Google API %d, retrying in %.1fs (attempt %d/%d)",
+                exc.resp.status, delay, attempt + 1, max_attempts,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("Unreachable")
+
+
 # ---------------------------------------------------------------------------
 # Input / Output schemas
 # ---------------------------------------------------------------------------
@@ -63,7 +99,6 @@ class CreateDocOutput(BaseModel):
 
 
 class CreateTabInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
     tab_name: str = Field(description="Name for the new tab")
 
 
@@ -74,7 +109,6 @@ class CreateTabOutput(BaseModel):
 
 
 class WriteTabInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
     tab_id: str = Field(description="Tab ID to write to")
     content: str = Field(description="Markdown content to write (replaces tab content)")
 
@@ -86,7 +120,6 @@ class WriteTabOutput(BaseModel):
 
 
 class ReadTabInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
     tab_id: str | None = Field(
         default=None, description="Tab ID to read (None = first/default tab)"
     )
@@ -99,7 +132,6 @@ class ReadTabOutput(BaseModel):
 
 
 class InsertCommentInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
     content: str = Field(description="Comment text (e.g., a question for the author)")
     anchor_text: str | None = Field(
         default=None,
@@ -114,7 +146,6 @@ class InsertCommentOutput(BaseModel):
 
 
 class ReadCommentsInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
     include_resolved: bool = Field(
         default=False, description="Whether to include resolved comments"
     )
@@ -135,7 +166,6 @@ class ReadCommentsOutput(BaseModel):
 
 
 class UpdateOverviewInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
     content: str = Field(
         description="Markdown content for the Overview tab (replaces existing)"
     )
@@ -147,7 +177,7 @@ class UpdateOverviewOutput(BaseModel):
 
 
 class ListTabsInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
+    pass
 
 
 class TabInfo(BaseModel):
@@ -243,6 +273,135 @@ def find_tab_by_id(doc: object, tab_id: str | None) -> tuple[str, object]:
 
 
 # ---------------------------------------------------------------------------
+# Shared operations (called by both MCP tools and pipeline)
+# ---------------------------------------------------------------------------
+
+
+async def do_create_doc(
+    title: str,
+    share_with: str | None = None,
+    session_state: WritingSessionState | None = None,
+) -> tuple[str, str]:
+    """Create a Google Doc. Returns (doc_id, url)."""
+    svc = services()
+    docs = svc.docs_service()
+    result = await execute_with_retry(
+        docs.documents().create(body={"title": title})
+    )
+    doc_id = result["documentId"]
+
+    if share_with:
+        drive = svc.drive_service()
+        await execute_with_retry(
+            drive.permissions().create(
+                fileId=doc_id,
+                body={
+                    "type": "user",
+                    "role": "writer",
+                    "emailAddress": share_with,
+                },
+                sendNotificationEmail=False,
+            )
+        )
+
+    url = f"https://docs.google.com/document/d/{doc_id}/edit"
+
+    if session_state is not None:
+        session_state.set_doc(doc_id, url)
+
+    return doc_id, url
+
+
+async def do_create_tab(
+    doc_id: str,
+    name: str,
+    session_state: WritingSessionState | None = None,
+) -> str:
+    """Create a tab in a Google Doc. Returns the tab ID."""
+    svc = services()
+    docs = svc.docs_service()
+    result = await execute_with_retry(
+        docs.documents().batchUpdate(
+            documentId=doc_id,
+            body={"requests": [{"addTab": {"tabProperties": {"title": name}}}]},
+        )
+    )
+    tab_id = ""
+    replies = result.get("replies", [])
+    if replies:
+        first = replies[0]
+        if isinstance(first, dict):
+            props = first.get("addTab", {}).get("tabProperties", {})
+            if isinstance(props, dict):
+                tab_id = str(props.get("tabId", ""))
+
+    if session_state is not None:
+        session_state.add_section(name, tab_id)
+
+    return tab_id
+
+
+async def do_write_tab(
+    doc_id: str,
+    tab_id: str,
+    markdown: str,
+    session_state: WritingSessionState | None = None,
+) -> None:
+    """Write markdown content to a tab (replaces existing content)."""
+    svc = services()
+    docs = svc.docs_service()
+
+    doc = await execute_with_retry(
+        docs.documents().get(documentId=doc_id, includeTabsContent=True)
+    )
+    _, tab = find_tab_by_id(doc, tab_id)
+    end_index = get_tab_end_index(tab)
+
+    requests: list[dict[str, object]] = []
+    if end_index > 1:
+        requests.append(clear_tab_request(end_index, tab_id=tab_id))
+    requests.extend(markdown_to_requests(markdown, tab_id=tab_id))
+
+    if requests:
+        await execute_with_retry(
+            docs.documents().batchUpdate(
+                documentId=doc_id, body={"requests": requests}
+            )
+        )
+
+    if session_state is not None:
+        for section in session_state.sections:
+            if section["tab_id"] == tab_id and section["status"] in ("planned", "writing"):
+                section["status"] = "drafted"
+                break
+
+
+async def do_insert_comment(
+    doc_id: str,
+    content: str,
+    anchor_text: str | None = None,
+    session_state: WritingSessionState | None = None,
+) -> str:
+    """Insert a comment on the doc. Returns comment ID."""
+    svc = services()
+    drive = svc.drive_service()
+    body: dict[str, object] = {"content": content}
+    if anchor_text:
+        body["quotedFileContent"] = {"mimeType": "text/plain", "value": anchor_text}
+    result = await execute_with_retry(
+        drive.comments().create(
+            fileId=doc_id, body=body, fields="commentId"
+        )
+    )
+    comment_id = str(result.get("commentId", ""))
+
+    if session_state is not None:
+        session_state.mark_agent_comment(comment_id)
+
+    return comment_id
+
+
+# ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
 
@@ -254,28 +413,9 @@ def find_tab_by_id(doc: object, tab_id: str | None) -> tuple[str, object]:
     "Returns the doc ID and URL."
 )
 async def create_doc(params: CreateDocInput) -> CreateDocOutput:
-    svc = services()
-    docs = svc.docs_service()
-    result = docs.documents().create(body={"title": params.title}).execute()
-    doc_id = result["documentId"]
-
-    if params.share_with:
-        drive = svc.drive_service()
-        drive.permissions().create(
-            fileId=doc_id,
-            body={
-                "type": "user",
-                "role": "writer",
-                "emailAddress": params.share_with,
-            },
-            sendNotificationEmail=False,
-        ).execute()
-
-    url = f"https://docs.google.com/document/d/{doc_id}/edit"
-
-    if SESSION_STATE is not None:
-        SESSION_STATE.set_doc(doc_id, url)
-
+    doc_id, url = await do_create_doc(
+        params.title, params.share_with, session_state=SESSION_STATE,
+    )
     return CreateDocOutput(doc_id=doc_id, url=url)
 
 
@@ -286,46 +426,9 @@ async def create_doc(params: CreateDocInput) -> CreateDocOutput:
     "parallel writing."
 )
 async def create_tab(params: CreateTabInput) -> CreateTabOutput:
-    svc = services()
-    docs = svc.docs_service()
-
-    requests = [
-        {
-            "addTab": {
-                "tabProperties": {
-                    "title": params.tab_name,
-                }
-            }
-        }
-    ]
-    result = (
-        docs.documents()
-        .batchUpdate(
-            documentId=params.doc_id,
-            body={"requests": requests},
-        )
-        .execute()
-    )
-
-    replies = result.get("replies", [])
-    tab_id = ""
-    if replies:
-        first_reply = replies[0]
-        if isinstance(first_reply, dict):
-            add_tab = first_reply.get("addTab", {})
-            if isinstance(add_tab, dict):
-                props = add_tab.get("tabProperties", {})
-                if isinstance(props, dict):
-                    tab_id = str(props.get("tabId", ""))
-
-    if SESSION_STATE is not None:
-        SESSION_STATE.add_section(params.tab_name, tab_id)
-
-    return CreateTabOutput(
-        doc_id=params.doc_id,
-        tab_id=tab_id,
-        tab_name=params.tab_name,
-    )
+    doc_id = require_doc_id()
+    tab_id = await do_create_tab(doc_id, params.tab_name, session_state=SESSION_STATE)
+    return CreateTabOutput(doc_id=doc_id, tab_id=tab_id, tab_name=params.tab_name)
 
 
 @lup_tool(
@@ -335,43 +438,10 @@ async def create_tab(params: CreateTabInput) -> CreateTabOutput:
     "updates, read first, modify, then write back."
 )
 async def write_tab(params: WriteTabInput) -> WriteTabOutput:
-    svc = services()
-    docs = svc.docs_service()
-
-    doc = (
-        docs.documents()
-        .get(
-            documentId=params.doc_id,
-            includeTabsContent=True,
-        )
-        .execute()
-    )
-
-    _, tab = find_tab_by_id(doc, params.tab_id)
-    end_index = get_tab_end_index(tab)
-
-    requests: list[dict[str, object]] = []
-
-    if end_index > 1:
-        requests.append(clear_tab_request(end_index, tab_id=params.tab_id))
-
-    content_requests = markdown_to_requests(params.content, tab_id=params.tab_id)
-    requests.extend(content_requests)
-
-    if requests:
-        docs.documents().batchUpdate(
-            documentId=params.doc_id,
-            body={"requests": requests},
-        ).execute()
-
-    if SESSION_STATE is not None:
-        for section in SESSION_STATE.sections:
-            if section["tab_id"] == params.tab_id and section["status"] in ("planned", "writing"):
-                section["status"] = "drafted"
-                break
-
+    doc_id = require_doc_id()
+    await do_write_tab(doc_id, params.tab_id, params.content, session_state=SESSION_STATE)
     return WriteTabOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         tab_id=params.tab_id,
         characters_written=len(params.content),
     )
@@ -383,23 +453,22 @@ async def write_tab(params: WriteTabInput) -> WriteTabOutput:
     "current state of any tab. Returns plain text content."
 )
 async def read_tab(params: ReadTabInput) -> ReadTabOutput:
+    doc_id = require_doc_id()
     svc = services()
     docs = svc.docs_service()
 
-    doc = (
-        docs.documents()
-        .get(
-            documentId=params.doc_id,
+    doc = await execute_with_retry(
+        docs.documents().get(
+            documentId=doc_id,
             includeTabsContent=True,
         )
-        .execute()
     )
 
     tab_id, tab = find_tab_by_id(doc, params.tab_id)
     content = extract_tab_text(tab)
 
     return ReadTabOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         tab_id=tab_id,
         content=content,
     )
@@ -413,34 +482,12 @@ async def read_tab(params: ReadTabInput) -> ReadTabOutput:
     "Anchor to specific text by providing anchor_text."
 )
 async def insert_comment(params: InsertCommentInput) -> InsertCommentOutput:
-    svc = services()
-    drive = svc.drive_service()
-
-    body: dict[str, object] = {"content": params.content}
-
-    if params.anchor_text:
-        body["quotedFileContent"] = {
-            "mimeType": "text/plain",
-            "value": params.anchor_text,
-        }
-
-    result = (
-        drive.comments()
-        .create(
-            fileId=params.doc_id,
-            body=body,
-            fields="commentId,content",
-        )
-        .execute()
+    doc_id = require_doc_id()
+    comment_id = await do_insert_comment(
+        doc_id, params.content, params.anchor_text, session_state=SESSION_STATE,
     )
-
-    comment_id = str(result.get("commentId", ""))
-
-    if SESSION_STATE is not None:
-        SESSION_STATE.mark_agent_comment(comment_id)
-
     return InsertCommentOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         comment_id=comment_id,
         content=params.content,
     )
@@ -452,6 +499,7 @@ async def insert_comment(params: InsertCommentInput) -> InsertCommentOutput:
     "pass. Returns comment text, anchor text, replies, and resolved status."
 )
 async def read_comments(params: ReadCommentsInput) -> ReadCommentsOutput:
+    doc_id = require_doc_id()
     svc = services()
     drive = svc.drive_service()
 
@@ -460,14 +508,14 @@ async def read_comments(params: ReadCommentsInput) -> ReadCommentsOutput:
 
     while True:
         kwargs: dict[str, object] = {
-            "fileId": params.doc_id,
+            "fileId": doc_id,
             "fields": "comments(commentId,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
             "pageSize": 100,
         }
         if page_token:
             kwargs["pageToken"] = page_token
 
-        result = drive.comments().list(**kwargs).execute()
+        result = await execute_with_retry(drive.comments().list(**kwargs))
         items = result.get("comments", [])
 
         for item in items:
@@ -514,7 +562,7 @@ async def read_comments(params: ReadCommentsInput) -> ReadCommentsOutput:
             break
 
     return ReadCommentsOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         comments=comments_list,
     )
 
@@ -526,16 +574,15 @@ async def read_comments(params: ReadCommentsInput) -> ReadCommentsOutput:
     "tab is the author's dashboard for the writing session."
 )
 async def update_overview(params: UpdateOverviewInput) -> UpdateOverviewOutput:
+    doc_id = require_doc_id()
     svc = services()
     docs = svc.docs_service()
 
-    doc = (
-        docs.documents()
-        .get(
-            documentId=params.doc_id,
+    doc = await execute_with_retry(
+        docs.documents().get(
+            documentId=doc_id,
             includeTabsContent=True,
         )
-        .execute()
     )
 
     tabs = doc.get("tabs", [])
@@ -562,17 +609,19 @@ async def update_overview(params: UpdateOverviewInput) -> UpdateOverviewOutput:
                         markdown_to_requests(params.content, tab_id=overview_tab_id)
                     )
                     if requests:
-                        docs.documents().batchUpdate(
-                            documentId=params.doc_id,
-                            body={"requests": requests},
-                        ).execute()
+                        await execute_with_retry(
+                            docs.documents().batchUpdate(
+                                documentId=doc_id,
+                                body={"requests": requests},
+                            )
+                        )
                     break
 
     if overview_tab_id is None:
         raise ToolError("No Overview tab found. Create one first with create_tab.")
 
     return UpdateOverviewOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         status="updated",
     )
 
@@ -583,10 +632,11 @@ async def update_overview(params: UpdateOverviewInput) -> UpdateOverviewOutput:
     "read/write operations."
 )
 async def list_tabs(params: ListTabsInput) -> ListTabsOutput:
+    doc_id = require_doc_id()
     svc = services()
     docs = svc.docs_service()
 
-    doc = docs.documents().get(documentId=params.doc_id).execute()
+    doc = await execute_with_retry(docs.documents().get(documentId=doc_id))
     tabs_raw = doc.get("tabs", [])
 
     tab_list: list[TabInfo] = []
@@ -604,7 +654,7 @@ async def list_tabs(params: ListTabsInput) -> ListTabsOutput:
                 )
 
     return ListTabsOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         tabs=tab_list,
     )
 

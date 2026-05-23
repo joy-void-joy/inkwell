@@ -1,28 +1,22 @@
-"""Interactive chat session for the writing agent.
+"""Interactive writing session — pipeline with live terminal + Google Doc feedback.
 
-Launches a persistent agent session with concurrent terminal input.
-The user can type at any time — a background thread reads stdin and
-routes messages to session state. The PreToolUse hook in core.py
-surfaces them before the agent's next tool call; if the agent is
-sleeping, the scheduler is woken.
+The pipeline runs stages sequentially. Between stages, the listener
+checks Google Doc comments and drains any terminal input. Both are
+passed as context to the next stage.
+
+After the pipeline completes, enters a revision loop where the user
+can request changes via the terminal.
 
 Usage:
     await chat_session()                          # open chat
-    await chat_session(initial_task="write ...")   # pre-seeded
+    await chat_session(initial_task="write ...")   # pre-seeded with source
 """
 
 import asyncio
 import logging
-import select as sel
-import signal
-import sys
-import threading
-from contextlib import AsyncExitStack
 from datetime import datetime
-from pathlib import Path
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
@@ -30,208 +24,112 @@ from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 from rich.panel import Panel
 
-from lup.client import ResponseCollector, build_client
 from lup.metrics import log_metrics_summary, reset_metrics
 from lup.paths import project_root
-from lup.trace import print_message
 
-from inkwell.agent.config import settings
-from inkwell.agent.core import setup_session
+from inkwell.agent.core import run_batch
+from inkwell.agent.models import WritingOutput
+from inkwell.agent.pipeline import PipelineError, PipelineListener
 from inkwell.agent.session import WritingSessionState
-from lup.realtime import Scheduler
 
 logger = logging.getLogger(__name__)
 
 
-async def collect_with_stdin(
-    collector: ResponseCollector,
-    session_state: WritingSessionState,
-    scheduler: Scheduler,
-    console: Console,
-) -> None:
-    """Collect agent responses while accepting terminal input concurrently.
+STAGE_LABELS: dict[str, str] = {
+    "extract": "Extracting source material",
+    "voice": "Analyzing author's voice",
+    "plan": "Planning article structure",
+    "research": "Researching claims",
+    "write": "Writing sections",
+    "merge": "Merging into draft",
+    "review": "Reviewing draft",
+    "rewrite": "Final rewrite",
+    "format": "Formatting output",
+    "revise": "Revising",
+}
 
-    A background thread reads stdin so the user can type at any time —
-    not just when the agent sleeps. Input is added to
-    session_state.terminal_messages and:
-    - During thinking: surfaced via PreToolUse hook before the next tool call
-    - During sleep/standby: wakes the scheduler
+
+class InteractiveListener(PipelineListener):
+    """Pipeline listener with Rich terminal output and terminal input.
+
+    Displays stage transitions and progress in the terminal.
+    Collects feedback from both Google Doc comments and terminal input.
     """
-    loop = asyncio.get_running_loop()
-    interrupt_count = 0
 
-    async def do_collect() -> None:
-        try:
-            async for message in collector:
-                print_message(message, trace=collector.trace_logger)
-        except (RuntimeError, OSError, ConnectionError) as exc:
-            console.print(f"\n  [red]Agent error: {exc}[/red]")
-            logger.exception("Agent collector failed")
+    def __init__(
+        self,
+        console: Console,
+        input_queue: asyncio.Queue[str],
+    ) -> None:
+        self.console = console
+        self.input_queue = input_queue
+        self.current_stage = ""
 
-    collect_task = asyncio.create_task(do_collect())
+    async def on_stage(self, stage: str, description: str) -> None:
+        self.current_stage = stage
+        label = STAGE_LABELS.get(stage, stage)
+        self.console.print(
+            f"\n  [bold blue]{label}[/bold blue]  [dim]{description}[/dim]"
+        )
 
-    def on_sigint() -> None:
-        nonlocal interrupt_count
-        interrupt_count += 1
-        if interrupt_count == 1:
-            console.print("\n  [dim]interrupting...[/dim]")
-            asyncio.ensure_future(collector.client.interrupt())
-        else:
-            collect_task.cancel()
+    async def on_progress(self, message: str) -> None:
+        self.console.print(f"  [dim]{message}[/dim]")
 
-    loop.add_signal_handler(signal.SIGINT, on_sigint)
+    async def on_complete(self, output: WritingOutput) -> None:
+        self.console.print()
+        self.console.print(
+            Panel(
+                f"[bold]{output.title}[/bold]\n\n"
+                f"[dim]Doc:[/dim]    {output.google_doc_url}\n"
+                f"[dim]Words:[/dim]  {output.word_count}\n"
+                f"[dim]Review:[/dim] {len(output.review_findings)} findings",
+                title="Pipeline complete",
+                border_style="green",
+                width=72,
+            )
+        )
 
-    input_queue: asyncio.Queue[str] = asyncio.Queue()
-    stop_reading = threading.Event()
+    async def collect_feedback(self, state: WritingSessionState) -> list[str]:
+        feedback = await super().collect_feedback(state)
 
-    def read_stdin() -> None:
-        while not stop_reading.is_set():
+        while not self.input_queue.empty():
             try:
-                ready, _, _ = sel.select([sys.stdin], [], [], 0.5)
-                if ready:
-                    line = sys.stdin.readline()
-                    if not line:
-                        break
-                    text = line.strip()
-                    if text:
-                        loop.call_soon_threadsafe(input_queue.put_nowait, text)
-            except (EOFError, OSError, ValueError):
+                msg = self.input_queue.get_nowait()
+                feedback.append(f"Author direction: {msg}")
+            except asyncio.QueueEmpty:
                 break
 
-    reader_thread = threading.Thread(target=read_stdin, daemon=True)
-    reader_thread.start()
+        if feedback:
+            self.console.print(
+                f"  [yellow]Incorporating {len(feedback)} feedback item(s)[/yellow]"
+            )
 
-    async def process_input() -> None:
-        while True:
+        return feedback
+
+    async def collect_revision(self, state: WritingSessionState) -> str | None:
+        revisions: list[str] = []
+        while not self.input_queue.empty():
             try:
-                text = await input_queue.get()
-            except asyncio.CancelledError:
+                revisions.append(self.input_queue.get_nowait())
+            except asyncio.QueueEmpty:
                 break
-            if text in ("/quit", "/exit", "/q"):
-                collect_task.cancel()
-                break
-            if handle_slash_command(text, session_state, console):
-                continue
-            session_state.add_terminal_message(text)
-            if scheduler.is_sleeping:
-                scheduler.wake("terminal")
-            console.print("  [dim]✓ noted[/dim]")
+        if revisions:
+            return " | ".join(revisions)
 
-    input_task = asyncio.create_task(process_input())
-
-    try:
-        await collect_task
-    except asyncio.CancelledError:
-        pass
-    finally:
-        loop.remove_signal_handler(signal.SIGINT)
-        stop_reading.set()
-        input_task.cancel()
+        self.console.print(
+            "\n  [dim]Type revision instructions, or /done to finish:[/dim]"
+        )
         try:
-            await input_task
-        except asyncio.CancelledError:
-            pass
-        reader_thread.join(timeout=1)
+            msg = await asyncio.wait_for(self.input_queue.get(), timeout=300)
+        except asyncio.TimeoutError:
+            return None
+        stripped = msg.strip()
+        if stripped in ("/done", "/quit", "/exit", "/q"):
+            return None
+        return stripped or None
 
 
-def handle_slash_command(
-    text: str,
-    session_state: WritingSessionState,
-    console: Console,
-) -> bool:
-    """Handle in-chat slash commands. Returns True if handled."""
-    match text:
-        case "/status":
-            show_status(session_state, console)
-            return True
-        case "/doc":
-            if session_state.doc_url:
-                console.print(f"  {session_state.doc_url}")
-            else:
-                console.print("  [dim]No Google Doc created yet[/dim]")
-            return True
-        case "/help":
-            show_help(console)
-            return True
-        case _ if text.startswith("/style add "):
-            add_style_reference(text[11:].strip(), console)
-            return True
-        case "/style list":
-            list_style_corpus(console)
-            return True
-    return False
-
-
-def show_status(
-    session_state: WritingSessionState,
-    console: Console,
-) -> None:
-    lines = [f"  [bold]Stage:[/bold] {session_state.stage}"]
-    if session_state.sections:
-        lines.append("  [bold]Sections:[/bold]")
-        markers = {"planned": "[ ]", "writing": "[>]", "drafted": "[~]", "reviewed": "[~]", "final": "[x]"}
-        for s in session_state.sections:
-            marker = markers.get(s["status"], "[ ]")
-            lines.append(f"    {marker} {s['title']} — {s['status']}")
-    if session_state.pending_questions:
-        lines.append(f"  [bold]Pending questions:[/bold] {len(session_state.pending_questions)}")
-    console.print("\n".join(lines))
-
-
-def show_help(console: Console) -> None:
-    console.print(
-        "  [bold]/status[/bold]          Pipeline progress\n"
-        "  [bold]/doc[/bold]             Open Google Doc URL\n"
-        "  [bold]/style add[/bold] path  Add a voice reference\n"
-        "  [bold]/style list[/bold]      List style corpus\n"
-        "  [bold]/quit[/bold]            Exit"
-    )
-
-
-def add_style_reference(source: str, console: Console) -> None:
-    style_dir = Path(settings.style_corpus_path)
-    style_dir.mkdir(parents=True, exist_ok=True)
-
-    source_path = Path(source).expanduser()
-    if source_path.exists():
-        content = source_path.read_text(encoding="utf-8")
-        dest = style_dir / source_path.name
-        dest.write_text(content, encoding="utf-8")
-        console.print(f"  Added {source_path.name} ({len(content)} chars)")
-    else:
-        refs_file = style_dir / "urls.txt"
-        existing = refs_file.read_text(encoding="utf-8") if refs_file.exists() else ""
-        if source not in existing:
-            with refs_file.open("a", encoding="utf-8") as f:
-                f.write(source + "\n")
-            console.print(f"  Added URL: {source}")
-        else:
-            console.print(f"  Already in corpus: {source}")
-
-
-def list_style_corpus(console: Console) -> None:
-    style_dir = Path(settings.style_corpus_path)
-    if not style_dir.exists():
-        console.print("  [dim]No style corpus. Use /style add <path>[/dim]")
-        return
-
-    files = list(style_dir.glob("*.md")) + list(style_dir.glob("*.txt"))
-    if not files:
-        console.print("  [dim]Style corpus is empty[/dim]")
-        return
-
-    for f in sorted(files):
-        if f.name == "urls.txt":
-            urls = f.read_text(encoding="utf-8").strip().split("\n")
-            for url in urls:
-                if url.strip():
-                    console.print(f"  [dim]url[/dim]  {url.strip()}")
-        else:
-            size = f.stat().st_size
-            console.print(f"  [dim]file[/dim] {f.name} ({size:,} bytes)")
-
-
-def build_prompt_session(console: Console) -> PromptSession[str]:
+def build_prompt_session() -> PromptSession[str]:
     history_dir = project_root() / ".lup"
     history_dir.mkdir(parents=True, exist_ok=True)
 
@@ -260,10 +158,6 @@ def build_prompt_session(console: Console) -> PromptSession[str]:
             }
         ),
         history=FileHistory(str(history_dir / "chat_history")),
-        completer=WordCompleter(
-            ["/quit", "/exit", "/q", "/help", "/status", "/doc", "/style add", "/style list"],
-            sentence=True,
-        ),
         key_bindings=kb,
         multiline=True,
         prompt_continuation=FormattedText([("class:prompt-continuation", "  ")]),
@@ -275,27 +169,103 @@ def show_welcome(console: Console) -> None:
         "[bold]Inkwell[/bold] — AI writing agent",
         "",
         "Paste a Claude share link, URL, or writing brief.",
-        "Type at any time — your input is picked up live.",
+        "The pipeline runs through Google Docs.",
+        "Type feedback at any time — picked up between stages.",
         "",
-        "[dim]/status  pipeline progress     /style add <path>  add voice reference[/dim]",
-        "[dim]/doc     Google Doc URL         /quit              exit[/dim]",
+        "[dim]/status  pipeline stage    /doc   open Google Doc[/dim]",
+        "[dim]/style   manage corpus     /help  show commands[/dim]",
+        "[dim]/done    finish revisions  /quit  exit[/dim]",
     ]
     console.print()
     console.print(Panel("\n".join(lines), border_style="blue", width=72))
     console.print()
 
 
+def show_help(console: Console) -> None:
+    console.print(
+        "\n  [bold]Commands:[/bold]\n"
+        "  /status   Show current pipeline stage\n"
+        "  /doc      Show Google Doc URL\n"
+        "  /style    Show style corpus entries\n"
+        "  /done     Finish revision loop\n"
+        "  /quit     Exit session\n"
+        "  /help     Show this help\n"
+    )
+
+
+async def read_terminal_input(
+    pt_session: PromptSession[str],
+    input_queue: asyncio.Queue[str],
+    console: Console,
+    listener: InteractiveListener | None = None,
+) -> None:
+    """Background task: read terminal input and push to the queue.
+
+    Slash commands that produce output are handled immediately (not queued).
+    Regular text is queued for the next stage boundary or revision prompt.
+    """
+    while True:
+        try:
+            user_input = await pt_session.prompt_async()
+        except (EOFError, asyncio.CancelledError):
+            return
+        except KeyboardInterrupt:
+            return
+
+        stripped = user_input.strip()
+        if not stripped:
+            continue
+        if stripped in ("/quit", "/exit", "/q"):
+            input_queue.put_nowait(stripped)
+            return
+
+        if stripped == "/help":
+            show_help(console)
+            continue
+        if stripped == "/status":
+            stage = listener.current_stage if listener else "unknown"
+            console.print(f"  [dim]Stage: {stage}[/dim]")
+            continue
+        if stripped == "/doc":
+            from inkwell.agent.tools.google_docs import SESSION_STATE
+
+            url = SESSION_STATE.doc_url if SESSION_STATE else ""
+            if url:
+                console.print(f"  [dim]{url}[/dim]")
+            else:
+                console.print("  [dim]No Google Doc created yet.[/dim]")
+            continue
+        if stripped.startswith("/style"):
+            from inkwell.agent.tools.voice import list_style_references
+
+            entries = list_style_references()
+            if not entries:
+                console.print("  [dim]No style corpus. Use `inkwell style add`.[/dim]")
+            else:
+                for e in entries:
+                    console.print(f"  [dim][{e.kind}] {e.name}[/dim]")
+            continue
+        if stripped.startswith("/") and stripped not in ("/done",):
+            console.print(f"  [red]Unknown command: {stripped}[/red]")
+            continue
+
+        input_queue.put_nowait(stripped)
+        console.print(f"  [dim]Queued: {stripped[:60]}[/dim]")
+
+
 async def chat_session(
     *,
     initial_task: str | None = None,
     session_id: str | None = None,
+    target_format: str = "lesswrong",
+    refs: list[str] | None = None,
     verbose: bool = False,
 ) -> None:
-    """Run an interactive chat session with the writing agent.
+    """Run the writing pipeline interactively.
 
-    The agent runs continuously through the writing pipeline and enters
-    standby mode after completion, listening for further feedback. The
-    user can type at any time — input is integrated live.
+    The pipeline runs the same stages as batch mode. The terminal
+    shows progress and accepts steering input. The Google Doc is the
+    primary collaboration surface.
     """
     if verbose:
         logging.basicConfig(level=logging.DEBUG)
@@ -308,62 +278,58 @@ async def chat_session(
     console = Console(highlight=False)
     show_welcome(console)
 
-    async def display_action(content: str) -> None:
-        console.print(f"\n[blue][inkwell][/blue] {content}")
-
     reset_metrics()
 
-    setup = setup_session(
-        session_id,
-        persistent=True,
-        on_action=display_action,
+    pt_session = build_prompt_session()
+    input_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    source = initial_task
+    if source is None:
+        try:
+            source = await pt_session.prompt_async()
+        except (EOFError, KeyboardInterrupt):
+            return
+
+        source = source.strip()
+        if not source or source in ("/quit", "/exit", "/q"):
+            return
+
+    console.print(
+        f"  [dim]Source: {source[:80]}...[/dim]"
+        if len(source) > 80
+        else f"  [dim]Source: {source}[/dim]"
     )
 
-    pt_session = build_prompt_session(console)
-    stack = AsyncExitStack()
-    stack.enter_context(setup.sandbox)
+    listener = InteractiveListener(console, input_queue)
 
-    scheduler = setup.scheduler
-    session_state = setup.session_state
-
-    if scheduler is None:
-        raise RuntimeError("Persistent mode required for chat session")
+    input_task = asyncio.create_task(
+        read_terminal_input(pt_session, input_queue, console, listener)
+    )
 
     try:
-        async with stack:
-            async with build_client(options=setup.options) as client:
-                task = initial_task
+        result = await run_batch(
+            source,
+            target_format=target_format,
+            session_id=session_id,
+            refs=refs,
+            listener=listener,
+        )
 
-                while True:
-                    if task is None:
-                        try:
-                            user_input = await pt_session.prompt_async()
-                        except (EOFError, asyncio.CancelledError):
-                            break
-                        except KeyboardInterrupt:
-                            break
+        if result.cost_usd is not None:
+            console.print(f"  [dim]Cost: ${result.cost_usd:.2f}[/dim]")
 
-                        task = user_input.strip()
-                        if not task:
-                            continue
-                        if task in ("/quit", "/exit", "/q"):
-                            break
-                        if handle_slash_command(task, session_state, console):
-                            task = None
-                            continue
-
-                    console.print("[dim]starting...[/dim]")
-                    await client.query(task)
-                    collector = ResponseCollector(
-                        client, trace_logger=setup.trace_logger
-                    )
-                    await collect_with_stdin(
-                        collector, session_state, scheduler, console
-                    )
-                    task = None
+    except PipelineError as exc:
+        console.print(f"\n  [red]Pipeline error: {exc}[/red]")
     except KeyboardInterrupt:
-        pass
+        console.print("\n  [dim]Interrupted.[/dim]")
+    except (RuntimeError, OSError, ConnectionError) as exc:
+        console.print(f"\n  [red]Error: {exc}[/red]")
+    finally:
+        input_task.cancel()
+        try:
+            await input_task
+        except asyncio.CancelledError:
+            pass
 
-    setup.trace_logger.save()
     log_metrics_summary()
     console.print("\n[dim]Session ended.[/dim]")

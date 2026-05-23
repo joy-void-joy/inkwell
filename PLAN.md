@@ -25,25 +25,32 @@
 - [x] Persistent agent mode: `WritingSessionState`, `Scheduler`, stop/meta/event guards
 - [x] Live GDoc state in `build_context`: sections, comments, terminal messages
 - [x] `check_unread` wired to real Drive API comment polling
-- [x] Notes tool wired to session storage (read/write/list/delete)
-- [x] CLI: `inkwell write`, `inkwell style add/list`, `inkwell run`, `inkwell loop`, `inkwell setup`
+- [x] CLI: `inkwell write`, `inkwell style add/list`, `inkwell run`, `inkwell setup`
 - [x] Setup wizard: Google OAuth, Exa, Claude cookie, FRED, status table
 - [x] `on_action` callback wired from CLI for terminal output
 - [x] CLAUDE.md updated for inkwell
 - [x] Upstream sync baselined
+- [x] Unified pipeline: batch and interactive share `run_pipeline()` via `PipelineListener`
+- [x] Voice analysis integrated into pipeline (structured `VoiceProfile` passed to writers)
+- [x] Format adapters wired into pipeline (auto-applied after rewrite stage)
+- [x] Author feedback collected at every stage boundary (Google Doc comments + terminal input)
+- [x] Stage prompts consolidated in `stages.py` (renamed from `agents.py`)
+- [x] `do_*` shared functions: Google Docs, voice analysis, source extraction (pipeline + MCP tools share code)
+- [x] Single source of truth for tool lists (`research_tool_names()`, `review_tool_names()` in tool_policy.py)
+- [x] `max_budget_usd` wired through all pipeline stages and `run_batch()`
+- [x] Post-pipeline revision loop via `PipelineListener.collect_revision()`
+- [x] Dead code removed (duplicate prompts, shadow PipelineError, unused vars, double ToolPolicy)
 
 ## What Remains
 
-### 1. Terminal Input During Sleep
+### 1. ~~Terminal Input During Sleep~~ Interactive Chat CLI
 
-The sleep/wake infrastructure is fully wired (Scheduler, guards, context), but the CLI
-doesn't yet accept terminal commands while the agent sleeps. `asyncio.run(run_session(...))`
-blocks — needs an event loop that feeds user input as scheduler events.
-
-- [ ] Add stdin reader in the CLI event loop during `query()` execution
-- [ ] Feed typed text to `session_state.add_terminal_message()` + `scheduler.wake("terminal")`
-- [ ] Handle `status` command (print section status without waking)
-- [ ] Handle `Ctrl+C` gracefully (save state for resume)
+- [x] Interactive chat as default (`inkwell` opens chat, subcommands pre-seed it)
+- [x] Concurrent stdin + agent response collection (`collect_with_stdin()`)
+- [x] Terminal input during sleep wakes scheduler
+- [x] Terminal input during thinking surfaced via PreToolUse hook
+- [x] In-chat slash commands: `/status`, `/doc`, `/style add|list`, `/help`, `/quit`
+- [x] Ctrl+C interrupts agent, double-tap exits
 
 ### 2. Additional Extractors
 
@@ -64,7 +71,7 @@ Lower-priority research tools not yet ported:
 
 - [ ] Unit tests for Claude conversation extractor (mock HTTP responses)
 - [ ] Unit tests for URL/file extractors
-- [ ] Unit tests for format adapters (LessWrong, Twitter, blog)
+- [x] Unit tests for format adapters (LessWrong, Twitter, blog)
 - [ ] Unit tests for research tools (mock API responses)
 - [ ] Integration test for Google Docs tools (requires credentials)
 - [ ] Integration test for full pipeline (end-to-end with a sample conversation)

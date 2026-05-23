@@ -3,6 +3,9 @@
 Transform a generic article draft into format-specific output:
 LessWrong, Twitter thread, or blog. Called by the rewriter after
 producing the final draft.
+
+Each format has a plain function (do_format_*) for direct use by the
+pipeline, and a @lup_tool wrapper for MCP access by the interactive agent.
 """
 
 import logging
@@ -52,13 +55,20 @@ class FormatBlogOutput(BaseModel):
     word_count: int = Field(description="Word count")
 
 
-@lup_tool(
-    "Format an article for LessWrong publication. Adds epistemic status "
-    "header, converts inline asides to footnotes, adds cross-references "
-    "to related posts, and ensures heading depth is appropriate for LW. "
-    "Call this after the final draft is complete."
-)
-async def format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
+def split_sentences(text: str) -> list[str]:
+    """Split text into sentences (simple heuristic)."""
+    import re  # claude: ignore
+
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Pure formatting functions (called directly by the pipeline)
+# ---------------------------------------------------------------------------
+
+
+def do_format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
     lines: list[str] = []
 
     lines.append(f"*Epistemic status: {params.epistemic_status}*")
@@ -81,9 +91,7 @@ async def format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutpu
                 aside_content = aside_text[6:].strip()
                 footnotes.append(f"[^{footnote_idx}]: {aside_content}")
                 processed = (
-                    processed[:start]
-                    + f"[^{footnote_idx}]"
-                    + processed[end + 1 :]
+                    processed[:start] + f"[^{footnote_idx}]" + processed[end + 1 :]
                 )
             else:
                 break
@@ -111,14 +119,7 @@ async def format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutpu
     )
 
 
-@lup_tool(
-    "Convert an article into a Twitter/X thread. Splits content into "
-    "individual tweets (280 char limit), adds thread numbering, ensures "
-    "each tweet can stand alone while building on the thread. The hook "
-    "parameter becomes tweet 1 — it should grab attention without "
-    "needing context. Call this after the final draft is complete."
-)
-async def format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
+def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
     tweets: list[str] = []
 
     tweets.append(params.hook.strip())
@@ -160,19 +161,12 @@ async def format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
     )
 
 
-@lup_tool(
-    "Format an article for blog publication. Adds SEO-friendly structure "
-    "with a meta description, ensures subheading density for scannability, "
-    "and optimizes paragraph length. Call this after the final draft "
-    "is complete."
-)
-async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
+def do_format_blog(params: FormatBlogInput) -> FormatBlogOutput:
     lines: list[str] = []
     lines.append(f"# {params.title}")
     lines.append("")
 
     paragraphs = params.content.split("\n\n")
-    para_since_heading = 0
 
     for para in paragraphs:
         stripped = para.strip()
@@ -180,12 +174,9 @@ async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
             continue
 
         if stripped.startswith("#"):
-            para_since_heading = 0
             lines.append(stripped)
             lines.append("")
             continue
-
-        para_since_heading += 1
 
         if len(stripped) > 800:
             mid = len(stripped) // 2
@@ -197,7 +188,6 @@ async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
                 lines.append("")
                 lines.append(stripped[break_point + 1 :].strip())
                 lines.append("")
-                para_since_heading += 1
                 continue
 
         lines.append(stripped)
@@ -211,7 +201,11 @@ async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
         if stripped and not stripped.startswith("#"):
             first_para = stripped
             break
-    meta = first_para[:157].rsplit(" ", 1)[0] + "..." if len(first_para) > 160 else first_para
+    meta = (
+        first_para[:157].rsplit(" ", 1)[0] + "..."
+        if len(first_para) > 160
+        else first_para
+    )
 
     return FormatBlogOutput(
         content=result,
@@ -220,12 +214,40 @@ async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
     )
 
 
-def split_sentences(text: str) -> list[str]:
-    """Split text into sentences (simple heuristic)."""
-    import re  # claude: ignore
+# ---------------------------------------------------------------------------
+# MCP tool wrappers (thin async wrappers for agent access)
+# ---------------------------------------------------------------------------
 
-    parts = re.split(r'(?<=[.!?])\s+', text)
-    return [p.strip() for p in parts if p.strip()]
+
+@lup_tool(
+    "Format an article for LessWrong publication. Adds epistemic status "
+    "header, converts inline asides to footnotes, adds cross-references "
+    "to related posts, and ensures heading depth is appropriate for LW. "
+    "Call this after the final draft is complete."
+)
+async def format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
+    return do_format_lesswrong(params)
+
+
+@lup_tool(
+    "Convert an article into a Twitter/X thread. Splits content into "
+    "individual tweets (280 char limit), adds thread numbering, ensures "
+    "each tweet can stand alone while building on the thread. The hook "
+    "parameter becomes tweet 1 — it should grab attention without "
+    "needing context. Call this after the final draft is complete."
+)
+async def format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
+    return do_format_twitter(params)
+
+
+@lup_tool(
+    "Format an article for blog publication. Adds SEO-friendly structure "
+    "with a meta description, ensures subheading density for scannability, "
+    "and optimizes paragraph length. Call this after the final draft "
+    "is complete."
+)
+async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
+    return do_format_blog(params)
 
 
 FORMAT_TOOLS = [format_lesswrong, format_twitter, format_blog]

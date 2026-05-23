@@ -48,9 +48,15 @@ AUTHOR_TOOLS: frozenset[str] = frozenset(
         "mcp__docs__check_author_feedback",
         "mcp__docs__update_progress",
         "mcp__docs__load_corpus",
-        "mcp__docs__format_lesswrong",
-        "mcp__docs__format_twitter",
-        "mcp__docs__format_blog",
+        "mcp__docs__analyze_voice",
+    }
+)
+
+FORMAT_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp__format__format_lesswrong",
+        "mcp__format__format_twitter",
+        "mcp__format__format_blog",
     }
 )
 
@@ -99,11 +105,8 @@ class ToolPolicy:
     def __init__(
         self,
         settings: Settings,
-        *,
-        restricted_mode: bool = False,
     ) -> None:
         self.settings = settings
-        self.restricted_mode = restricted_mode
 
         excluded: set[str] = set()
 
@@ -124,10 +127,8 @@ class ToolPolicy:
     def from_settings(
         cls,
         settings: Settings,
-        *,
-        restricted_mode: bool = False,
     ) -> ToolPolicy:
-        return cls(settings, restricted_mode=restricted_mode)
+        return cls(settings)
 
     def get_mcp_servers(
         self, *additional_servers: McpServerConfig
@@ -143,6 +144,7 @@ class ToolPolicy:
         tools.update(BUILTIN_TOOLS)
         tools.update(GOOGLE_DOCS_TOOLS)
         tools.update(AUTHOR_TOOLS)
+        tools.update(FORMAT_TOOLS)
         tools.update(EXTRACT_TOOLS)
         tools.update(RESEARCH_TOOLS)
         tools.update(REALTIME_TOOLS)
@@ -151,3 +153,25 @@ class ToolPolicy:
 
     def is_tool_available(self, tool_name: str) -> bool:
         return tool_name not in self.excluded_tools
+
+
+def research_tool_names() -> list[str]:
+    return sorted(
+        (BUILTIN_TOOLS | RESEARCH_TOOLS) - {"Write", "Task", "TodoRead", "TodoWrite"}
+    )
+
+
+def review_tool_names() -> list[str]:
+    return sorted(
+        {
+            "WebSearch",
+            "WebFetch",
+            "Read",
+            "Glob",
+            "Grep",
+            "mcp__research__exa_search",
+            "mcp__research__fetch_url",
+            "mcp__research__wiki_search",
+            "mcp__research__fetch_wikipedia",
+        }
+    )

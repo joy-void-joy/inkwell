@@ -54,6 +54,9 @@ from inkwell.agent.tools.reflect import create_reflect_tools
 from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
 from inkwell.agent.tools.research.exa import EXA_TOOLS
 from inkwell.agent.tools.research.fetch import FETCH_TOOLS
+from inkwell.agent.tools.research.fred import FRED_TOOLS
+from inkwell.agent.tools.research.markets import MARKET_TOOLS
+from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +114,14 @@ def build_agent_servers(
         tools=extract_sdk_tools(EXTRACT_TOOLS),
     )
 
-    research_tools = [*EXA_TOOLS, *ARXIV_TOOLS, *FETCH_TOOLS]
+    research_tools = [
+        *EXA_TOOLS,
+        *ARXIV_TOOLS,
+        *FETCH_TOOLS,
+        *FRED_TOOLS,
+        *MARKET_TOOLS,
+        *WIKIPEDIA_TOOLS,
+    ]
     research_server = create_mcp_server(
         name="research",
         version="1.0.0",

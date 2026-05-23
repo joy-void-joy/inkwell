@@ -21,6 +21,13 @@ def research_tools() -> list[str]:
         "mcp__research__fetch_url",
         "mcp__research__search_arxiv",
         "mcp__research__fetch_arxiv",
+        "mcp__research__fred_search",
+        "mcp__research__fred_series",
+        "mcp__research__polymarket_search",
+        "mcp__research__manifold_search",
+        "mcp__research__search_markets",
+        "mcp__research__wiki_search",
+        "mcp__research__fetch_wikipedia",
     ]
 
 
@@ -34,6 +41,8 @@ def review_tools() -> list[str]:
         "Grep",
         "mcp__research__exa_search",
         "mcp__research__fetch_url",
+        "mcp__research__wiki_search",
+        "mcp__research__fetch_wikipedia",
     ]
 
 
@@ -99,6 +108,9 @@ compile factual, well-sourced findings.
 - **search_arxiv** / **fetch_arxiv**: Academic papers for scientific claims
 - **fetch_url**: Read the full text of any URL you find
 - **WebSearch**: Broad keyword search for topics Exa misses
+- **fred_search** / **fred_series**: US economic data (GDP, unemployment, CPI, etc.)
+- **polymarket_search** / **manifold_search** / **search_markets**: Prediction market consensus
+- **wiki_search** / **fetch_wikipedia**: Wikipedia for background context and definitions
 
 ## Output
 

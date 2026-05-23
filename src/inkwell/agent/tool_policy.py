@@ -62,6 +62,13 @@ RESEARCH_TOOLS: frozenset[str] = frozenset(
         "mcp__research__fetch_url",
         "mcp__research__search_arxiv",
         "mcp__research__fetch_arxiv",
+        "mcp__research__fred_search",
+        "mcp__research__fred_series",
+        "mcp__research__polymarket_search",
+        "mcp__research__manifold_search",
+        "mcp__research__search_markets",
+        "mcp__research__wiki_search",
+        "mcp__research__fetch_wikipedia",
     }
 )
 
@@ -100,6 +107,10 @@ class ToolPolicy:
 
         if not settings.exa_api_key:
             excluded.add("mcp__research__exa_search")
+
+        if not settings.fred_api_key:
+            excluded.add("mcp__research__fred_search")
+            excluded.add("mcp__research__fred_series")
 
         self.excluded_tools: frozenset[str] = frozenset(excluded)
 

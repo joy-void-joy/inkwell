@@ -1,9 +1,7 @@
-"""Tools package - MCP tools and domain-specific utilities.
+"""Tools package — MCP tools for the inkwell writing agent.
 
-This package contains:
-- example.py: Template MCP tools to customize for your domain
+- google_docs.py: Google Docs collaboration (create, write, comment, tabs)
+- extract.py: Claude conversation extraction from share links
 - reflect.py: Forced self-review tool (reviewer sub-agent)
 - realtime.py: Real-time tools template (sleep, context, reply)
-
-Import directly from submodules (e.g., ``from lup_template.agent.tools.example import EXAMPLE_TOOLS``).
 """

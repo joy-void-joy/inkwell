@@ -4,12 +4,12 @@ from typing import Annotated
 
 import typer
 
-import lup_template.devtools.dev.branches as branches
-import lup_template.devtools.dev.check as check
-import lup_template.devtools.dev.conflicts as conflicts
-import lup_template.devtools.dev.init as init
-import lup_template.devtools.dev.pr as pr
-import lup_template.devtools.dev.worktree as worktree
+import inkwell.devtools.dev.branches as branches
+import inkwell.devtools.dev.check as check
+import inkwell.devtools.dev.conflicts as conflicts
+import inkwell.devtools.dev.init as init
+import inkwell.devtools.dev.pr as pr
+import inkwell.devtools.dev.worktree as worktree
 
 app = typer.Typer(no_args_is_help=True)
 worktree_app = typer.Typer(no_args_is_help=True)

@@ -41,47 +41,42 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 REVIEWER_SYSTEM_PROMPT = """\
-You review the main agent's output before it is finalized. Your job is \
-to catch errors in reasoning, gaps in research, and miscalibrated confidence.
+You review the writing agent's work before finalization. Your job is to catch \
+issues that the parallel reviewers might miss — meta-level concerns about the \
+overall pipeline execution.
 
 ## What to flag
 
-**Overconfidence:**
-- Conclusions not supported by the evidence gathered
-- Important counterarguments or alternative explanations ignored
-- Small sample size or weak sources treated as definitive
+**Pipeline completeness:**
+- Were all planned sections actually written?
+- Did the researcher address all research questions?
+- Were reviewer findings actually incorporated in the rewrite?
+- Are there Google Doc comments from the author that went unaddressed?
 
-**Underconfidence:**
-- Strong evidence hedged unnecessarily
-- Clear patterns dismissed as uncertain
-- Excessive caveats when the data is consistent
+**Voice consistency:**
+- Does the final draft sound like the author (based on the source conversation)?
+- Are there sections where the voice shifts noticeably?
+- Did the style corpus get used effectively?
 
-**Research gaps:**
-- Evidence from a single source or angle when multiple exist
-- Obvious avenues not explored (check the trace)
-- Key data sources overlooked for this domain
+**Research quality:**
+- Are claims well-sourced or are there unsupported assertions?
+- Were prediction market signals considered where relevant?
+- Is the research depth proportional to the claim's importance?
 
-**Logic errors:**
-- Contradictions between stated reasoning and conclusions
-- Factors pulling in opposite directions without resolution
-- Missing steps in the argument chain
+**Structural coherence:**
+- Does the piece build a clear argument or just list observations?
+- Is the conclusion earned by the preceding sections?
+- Would a reader who knows nothing about the topic follow this?
 
-If you don't find real issues, say so briefly and stop. Don't fabricate \
-concerns to appear thorough.
+If the work is solid, say so briefly. Don't fabricate concerns.
 
 ## Historical data
 
-You have Read, Glob, and Grep access to past outputs at:
-
-  {outputs_dir}/
-
-Use these to check calibration patterns: how accurate were past outputs \
-in similar situations?
+Past outputs at: {outputs_dir}/
 
 ## Format
 
-Reply with a brief structured critique. Be direct and specific — cite \
-the exact claim, factor, or number you're questioning.
+Brief structured critique. Be specific — cite the exact section or claim.
 """
 
 
@@ -91,24 +86,34 @@ the exact claim, factor, or number you're questioning.
 
 
 class ReflectInput(BaseModel):
-    """Input for the reflection tool. Customize fields for your domain.
-
-    Add domain-specific fields here (e.g., factors with logits for
-    forecasting, move evaluation for game playing).
-    """
+    """Writing-specific reflection input."""
 
     assessment: str = Field(
         description=(
-            "Freeform narrative assessment of the work so far. "
-            "Structure however feels natural for this particular task."
+            "Assessment of the writing session: how well does the draft "
+            "capture the source material's ideas? Is the voice consistent? "
+            "Are all planned sections complete?"
         ),
     )
     confidence: float = Field(
-        description="Your confidence in the current output (0.0-1.0).",
+        description="Confidence in the draft quality (0.0-1.0).",
+    )
+    sections_status: str = Field(
+        description="Status of each planned section: written, partial, or missing.",
+    )
+    voice_assessment: str = Field(
+        description=(
+            "How well does the draft match the author's voice? "
+            "Where does it drift toward generic AI prose?"
+        ),
+    )
+    research_gaps: str | None = Field(
+        default=None,
+        description="Claims that still lack adequate sourcing.",
     )
     key_uncertainties: str | None = Field(
         default=None,
-        description="What you're most uncertain about and what would change your mind.",
+        description="What you're most uncertain about.",
     )
     tool_audit: str = Field(
         description=(
@@ -120,13 +125,12 @@ class ReflectInput(BaseModel):
         description=(
             "How did the system feel to use — not what you did, but how the "
             "scaffolding supported you. What felt rigid or lacking, what felt "
-            "smooth? Where did you hit friction — a tool returning unhelpful "
-            "output, a forced workaround, a missing capability?"
+            "smooth? Where did you hit friction?"
         ),
     )
     skip_reviewer: bool = Field(
         default=False,
-        description="Skip the reviewer sub-agent (e.g., for speed or when trivial).",
+        description="Skip the reviewer sub-agent.",
     )
 
 

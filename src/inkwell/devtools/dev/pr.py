@@ -21,7 +21,7 @@ import sh
 import typer
 from pydantic import BaseModel
 
-from lup_template.devtools.dev.branches import (
+from inkwell.devtools.dev.branches import (
     detect_base_branch,
     get_integration_branch,
 )

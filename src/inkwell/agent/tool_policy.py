@@ -1,35 +1,19 @@
-"""Conditional tool availability based on configuration.
+"""Conditional tool availability for inkwell.
 
-This is a TEMPLATE. Customize for your domain.
-
-Key patterns:
-1. Define tool sets as frozensets for fast membership testing
-2. ToolPolicy class computes excluded tools at construction
-3. from_settings() factory for easy initialization
-4. Separate get_mcp_servers() and get_allowed_tools() methods
-
-Usage:
-    from lup_template.agent.config import settings
-    from lup_template.agent.tool_policy import ToolPolicy
-
-    policy = ToolPolicy.from_settings(settings)
-    mcp_servers = policy.get_mcp_servers()
-    allowed_tools = policy.get_allowed_tools()
+Manages which tools are available based on API key presence.
+Tools degrade gracefully — missing keys log warnings, don't crash.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lup_template.agent.config import Settings
+    from claude_agent_sdk import McpServerConfig
+
+    from inkwell.agent.config import Settings
 
 
-# =============================================================================
-# TOOL SETS - Define tools that require specific API keys
-# =============================================================================
-
-# Built-in SDK tools (always available)
 BUILTIN_TOOLS: frozenset[str] = frozenset(
     {
         "WebSearch",
@@ -45,31 +29,59 @@ BUILTIN_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-# Define named tool sets for each API dependency.
-# Each set groups tools that share the same API key requirement.
-# This makes it clear which tools degrade when a key is missing.
-#
-# Example:
-# EXA_TOOLS: frozenset[str] = frozenset({
-#     "mcp__search__search_exa",
-# })
-#
-# FRED_TOOLS: frozenset[str] = frozenset({
-#     "mcp__financial__fred_series",
-#     "mcp__financial__fred_search",
-# })
+GOOGLE_DOCS_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp__docs__create_doc",
+        "mcp__docs__create_tab",
+        "mcp__docs__write_tab",
+        "mcp__docs__read_tab",
+        "mcp__docs__insert_comment",
+        "mcp__docs__read_comments",
+        "mcp__docs__update_overview",
+        "mcp__docs__list_tabs",
+    }
+)
+
+AUTHOR_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp__docs__ask_author",
+        "mcp__docs__check_author_feedback",
+        "mcp__docs__update_progress",
+    }
+)
+
+EXTRACT_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp__extract__extract_conversation",
+    }
+)
+
+RESEARCH_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp__research__exa_search",
+        "mcp__research__fetch_url",
+        "mcp__research__search_arxiv",
+        "mcp__research__fetch_arxiv",
+    }
+)
+
+REALTIME_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp__session__sleep",
+        "mcp__session__context",
+        "mcp__session__reply",
+        "mcp__session__meta",
+        "mcp__session__remind",
+        "mcp__session__notes",
+        "mcp__session__ideas",
+        "mcp__session__schedule_action",
+        "mcp__session__debounce",
+    }
+)
 
 
 class ToolPolicy:
-    """Centralized policy for tool availability.
-
-    Determines which tools are available based on:
-    - API key availability (from settings)
-    - Mode configuration (e.g., restricted mode)
-    - Session context (e.g., allow certain tools only in some contexts)
-
-    Customize ``__init__`` to define your exclusion logic.
-    """
+    """Centralized policy for tool availability."""
 
     def __init__(
         self,
@@ -82,14 +94,12 @@ class ToolPolicy:
 
         excluded: set[str] = set()
 
-        # TODO: Add your exclusion logic
-        # Example:
-        # if not settings.exa_api_key:
-        #     excluded.update(EXA_TOOLS)
-        # if not settings.fred_api_key:
-        #     excluded.update(FRED_TOOLS)
-        # if self.restricted_mode:
-        #     excluded.update(LIVE_DATA_TOOLS)
+        if not settings.google_credentials_path:
+            excluded.update(GOOGLE_DOCS_TOOLS)
+            excluded.update(AUTHOR_TOOLS)
+
+        if not settings.exa_api_key:
+            excluded.add("mcp__research__exa_search")
 
         self.excluded_tools: frozenset[str] = frozenset(excluded)
 
@@ -100,72 +110,27 @@ class ToolPolicy:
         *,
         restricted_mode: bool = False,
     ) -> ToolPolicy:
-        """Create a ToolPolicy from application settings.
+        return cls(settings, restricted_mode=restricted_mode)
 
-        Args:
-            settings: Application settings with API keys.
-            restricted_mode: If True, enables additional restrictions.
-
-        Returns:
-            ToolPolicy configured based on settings.
-        """
-        return cls(
-            settings,
-            restricted_mode=restricted_mode,
-        )
-
-    def get_mcp_servers(self, *additional_servers: Any) -> dict[str, Any]:
-        """Get MCP server configuration based on policy.
-
-        Args:
-            *additional_servers: Additional MCP servers to include.
-                These should be McpSdkServerConfig objects.
-
-        Returns:
-            Dict mapping server name to server config.
-
-        Customize this to return your domain's MCP servers.
-        """
-        servers: dict[str, Any] = {}
-
-        # Add any additional servers passed in
+    def get_mcp_servers(
+        self, *additional_servers: McpServerConfig
+    ) -> dict[str, McpServerConfig]:
+        servers: dict[str, McpServerConfig] = {}
         for server in additional_servers:
             name = getattr(server, "name", str(server))
             servers[name] = server
-
-        # TODO: Add your MCP servers
-        # Example:
-        # servers["search"] = search_server
-        # servers["financial"] = financial_server
-        #
-        # Conditional inclusion:
-        # if not self.restricted_mode:
-        #     servers["live_data"] = live_data_server
-
         return servers
 
     def get_allowed_tools(self) -> list[str]:
-        """Get list of allowed tools based on policy.
-
-        Returns:
-            Sorted list of tool names that are allowed.
-        """
-        # Start with all potential tools
         tools: set[str] = set()
-
-        # Built-in tools
         tools.update(BUILTIN_TOOLS)
-
-        # TODO: Add your tool sets
-        # tools.update(EXA_TOOLS)
-        # tools.update(FRED_TOOLS)
-        # tools.update(YOUR_DOMAIN_TOOLS)
-
-        # Remove excluded tools
+        tools.update(GOOGLE_DOCS_TOOLS)
+        tools.update(AUTHOR_TOOLS)
+        tools.update(EXTRACT_TOOLS)
+        tools.update(RESEARCH_TOOLS)
+        tools.update(REALTIME_TOOLS)
         tools -= self.excluded_tools
-
         return sorted(tools)
 
     def is_tool_available(self, tool_name: str) -> bool:
-        """Check if a specific tool is available under this policy."""
         return tool_name not in self.excluded_tools

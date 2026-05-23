@@ -1,7 +1,7 @@
 """Tests for ToolPolicy class."""
 
-from lup_template.agent.config import settings
-from lup_template.agent.tool_policy import ToolPolicy
+from inkwell.agent.config import settings
+from inkwell.agent.tool_policy import ToolPolicy
 
 
 class TestToolPolicyIsToolAvailable:

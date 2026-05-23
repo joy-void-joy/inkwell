@@ -5,8 +5,8 @@ from typing import Annotated
 
 import typer
 
-import lup_template.devtools.feedback.analyze as analyze
-import lup_template.devtools.feedback.state as state
+import inkwell.devtools.feedback.analyze as analyze
+import inkwell.devtools.feedback.state as state
 from lup.paths import AGENT_VERSION
 
 app = typer.Typer(no_args_is_help=True)

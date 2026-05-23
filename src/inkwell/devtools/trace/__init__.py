@@ -4,7 +4,7 @@ from typing import Annotated
 
 import typer
 
-import lup_template.devtools.trace.traces as traces
+import inkwell.devtools.trace.traces as traces
 from lup.history import resolve_version
 from lup.paths import AGENT_VERSION
 

@@ -42,11 +42,12 @@ if TYPE_CHECKING:
 import sh
 import typer
 
-from lup_template.agent.config import settings
-from lup_template.agent.models import AgentOutput
-from lup_template.agent.prompts import get_system_prompt
-from lup_template.agent.subagents import get_subagents
-from lup_template.agent.tools.example import EXAMPLE_TOOLS
+from inkwell.agent.config import settings
+from inkwell.agent.models import WritingOutput
+from inkwell.agent.prompts import get_system_prompt
+from inkwell.agent.subagents import get_subagents
+from inkwell.agent.tools.extract import EXTRACT_TOOLS
+from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS
 from lup.mcp import LupMcpTool
 
 logger = logging.getLogger(__name__)
@@ -183,7 +184,8 @@ def print_tool_full(out: io.StringIO, tool: LupMcpTool) -> None:
 def collect_tools_by_server() -> dict[str, list[LupMcpTool]]:
     """Collect all LupMcpTool instances grouped by server name."""
     return {
-        "example": list(EXAMPLE_TOOLS),
+        "docs": list(GOOGLE_DOCS_TOOLS),
+        "extract": list(EXTRACT_TOOLS),
     }
 
 
@@ -244,7 +246,7 @@ def inspect_cmd(
             "model": settings.model,
             "max_thinking_tokens": settings.max_thinking_tokens,
             "tools": [tool_to_dict(t) for t in all_tools],
-            "output_schema": AgentOutput.model_json_schema(),
+            "output_schema": WritingOutput.model_json_schema(),
             "subagents": {
                 name: {
                     "description": agent.description,
@@ -287,9 +289,9 @@ def inspect_cmd(
     out.write("  Agent Output Schema\n")
     out.write(f"{'─' * 60}\n")
     if full:
-        print_model_source(out, AgentOutput, "AgentOutput", indent="  ")
+        print_model_source(out, WritingOutput, "WritingOutput", indent="  ")
     else:
-        for name, f in AgentOutput.model_fields.items():
+        for name, f in WritingOutput.model_fields.items():
             ann = f.annotation
             type_name = getattr(ann, "__name__", None) if ann is not None else None
             out.write(f"    {name}: {type_name or '?'}\n")
@@ -515,7 +517,7 @@ async def repl(
 
     from claude_agent_sdk.types import McpServerConfig
 
-    from lup_template.agent.core import build_agent_servers
+    from inkwell.agent.core import build_agent_servers
     from lup.client import build_client, ResponseCollector
     from lup.paths import project_root
     from lup.sandbox import Sandbox

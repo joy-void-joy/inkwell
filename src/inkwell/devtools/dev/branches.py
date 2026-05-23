@@ -194,7 +194,7 @@ def count_source_diff_lines(branch: str, integration: str) -> int:
 
 def get_integration_branch() -> str:
     """Return 'dev' if it exists locally, else 'main'."""
-    from lup_template.devtools.dev.worktree import branch_exists
+    from inkwell.devtools.dev.worktree import branch_exists
 
     if branch_exists("dev"):
         return "dev"

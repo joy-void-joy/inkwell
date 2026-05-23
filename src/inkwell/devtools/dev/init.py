@@ -59,7 +59,7 @@ def is_framework_reference(line: str) -> bool:
 
 
 def rename_imports_in_file(path: Path, new_name: str) -> list[str]:
-    """Rename ``from lup_template.`` / ``import lup_template`` imports in a single file.
+    """Rename ``from inkwell.`` / ``import lup_template`` imports in a single file.
 
     Returns a list of change descriptions (empty if no changes).
     """

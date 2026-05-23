@@ -1,15 +1,16 @@
 """Tests for output models."""
 
-from lup_template.agent.models import AgentOutput
+from inkwell.agent.models import WritingOutput
 
 
 class TestOutputSchema:
     """Tests for JSON schema generation."""
 
     def test_schema_has_required_fields(self) -> None:
-        """Schema should include required fields."""
-        schema = AgentOutput.model_json_schema()
+        schema = WritingOutput.model_json_schema()
 
         assert "properties" in schema
+        assert "title" in schema["properties"]
+        assert "google_doc_url" in schema["properties"]
+        assert "word_count" in schema["properties"]
         assert "summary" in schema["properties"]
-        assert "confidence" in schema["properties"]

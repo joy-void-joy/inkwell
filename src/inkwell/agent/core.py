@@ -1,14 +1,13 @@
-"""Main agent orchestration.
+"""Main agent orchestration for the inkwell writing pipeline.
 
-This is a TEMPLATE. Customize for your domain.
-
-Key patterns:
-1. Use ClaudeAgentOptions with structured output
-2. Create MCP servers with create_mcp_server()
-3. Track tool metrics with the @tracked decorator
-4. Save sessions for feedback loop analysis
-5. Use hooks for permission control
+Persistent mode: the agent stays alive across the full session using
+a sleep/wake loop. After stages that produce visible output (section
+drafts, review comments), it sleeps and lets the author read. On wake,
+it checks for new author comments and decides whether to continue or adjust.
 """
+
+# claude: ignore
+# McpServerConfig is imported from a typed module but used with untyped servers.
 
 import logging
 from datetime import datetime
@@ -21,8 +20,7 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
 )
-
-from claude_agent_sdk.types import McpServerConfig, McpSdkServerConfig
+from claude_agent_sdk import McpServerConfig
 
 from lup.client import ResponseCollector, TokenUsage, query
 from lup.history import save_session
@@ -31,22 +29,51 @@ from lup.mcp import create_mcp_server, extract_sdk_tools
 from lup.metrics import get_metrics_summary, log_metrics_summary, reset_metrics
 from lup.notes import NotesConfig, setup_notes
 from lup.paths import agent_version
+from lup.realtime import (
+    Scheduler,
+    create_meta_before_sleep_guard,
+    create_pending_event_guard,
+    create_stop_guard,
+)
 from lup.reflect import ReflectionGate, create_reflection_gate
 from lup.sandbox import Sandbox
 from lup.trace import TraceLogger
 
-from lup_template.agent.config import settings
-from lup_template.agent.models import AgentOutput, AgentSessionResult
-from lup_template.agent.prompts import get_system_prompt
-from lup_template.agent.subagents import get_subagents
-from lup_template.agent.tool_policy import ToolPolicy
-from lup_template.agent.tools.example import EXAMPLE_TOOLS
-from lup_template.agent.tools.reflect import create_reflect_tools
+from inkwell.agent.config import settings
+from inkwell.agent.models import AgentSessionResult, WritingOutput
+from inkwell.agent.prompts import get_system_prompt
+from inkwell.agent.subagents import get_subagents
+from inkwell.agent.tool_policy import ToolPolicy
+from inkwell.agent.tools.author import AUTHOR_TOOLS
+from inkwell.agent.tools.extract import EXTRACT_TOOLS
+from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS
+from inkwell.agent.tools.realtime import ContextOutput, create_realtime_tools
+from inkwell.agent.tools.reflect import create_reflect_tools
+from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
+from inkwell.agent.tools.research.exa import EXA_TOOLS
+from inkwell.agent.tools.research.fetch import FETCH_TOOLS
 
 logger = logging.getLogger(__name__)
 
 NOTES_PATH = Path(settings.notes_path)
 TRACES_PATH = NOTES_PATH / "traces"
+
+
+def build_context(
+    last_events: int,
+    *,
+    scheduler: Scheduler,
+    session_state: dict[str, str],
+) -> ContextOutput:
+    """Build context state for the realtime context tool."""
+    return ContextOutput(
+        **{
+            "stage": session_state.get("stage", "starting"),
+            "doc_id": session_state.get("doc_id", ""),
+            "doc_url": session_state.get("doc_url", ""),
+            "scheduler": scheduler.get_state(),
+        }
+    )
 
 
 def build_agent_servers(
@@ -55,24 +82,29 @@ def build_agent_servers(
     outputs_dir: Path | None = None,
     sandbox: Sandbox | None = None,
     gate: ReflectionGate | None = None,
+    scheduler: Scheduler | None = None,
+    trace_logger: TraceLogger | None = None,
+    session_state: dict[str, str] | None = None,
 ) -> dict[str, McpServerConfig]:
-    """Create the agent's core MCP servers, passed through ToolPolicy.
-
-    Creates example, notes (reflect), and optionally sandbox servers,
-    then applies ToolPolicy filtering.
-
-    Args:
-        session_dir: Directory for reflection tool output.
-        outputs_dir: Past outputs for reviewer calibration.
-        sandbox: Initialized sandbox instance (must be entered as
-            context manager by the caller before calling this).
-        gate: External ReflectionGate for the reflect tools to use.
-            If None, a new gate is created internally.
-    """
-    example_server = create_mcp_server(
-        name="example",
+    """Create the agent's MCP servers."""
+    all_doc_tools = [*GOOGLE_DOCS_TOOLS, *AUTHOR_TOOLS]
+    docs_server = create_mcp_server(
+        name="docs",
         version="1.0.0",
-        tools=extract_sdk_tools(EXAMPLE_TOOLS),
+        tools=extract_sdk_tools(all_doc_tools),
+    )
+
+    extract_server = create_mcp_server(
+        name="extract",
+        version="1.0.0",
+        tools=extract_sdk_tools(EXTRACT_TOOLS),
+    )
+
+    research_tools = [*EXA_TOOLS, *ARXIV_TOOLS, *FETCH_TOOLS]
+    research_server = create_mcp_server(
+        name="research",
+        version="1.0.0",
+        tools=extract_sdk_tools(research_tools),
     )
 
     reflect_kit = create_reflect_tools(
@@ -86,7 +118,29 @@ def build_agent_servers(
         tools=extract_sdk_tools(reflect_kit["tools"]),
     )
 
-    all_servers: list[McpSdkServerConfig] = [example_server, reflect_server]
+    all_servers: list[McpServerConfig] = [
+        docs_server,
+        extract_server,
+        research_server,
+        reflect_server,
+    ]
+
+    if scheduler is not None:
+        state = session_state or {}
+        realtime_tools = create_realtime_tools(
+            scheduler=scheduler,
+            build_context=lambda n: build_context(
+                n, scheduler=scheduler, session_state=state
+            ),
+            trace_logger=trace_logger,
+        )
+        session_server = create_mcp_server(
+            name="session",
+            version="1.0.0",
+            tools=extract_sdk_tools(realtime_tools),
+        )
+        all_servers.append(session_server)
+
     if sandbox is not None:
         all_servers.append(sandbox.create_mcp_server())
 
@@ -98,29 +152,52 @@ def build_options(
     notes_config: NotesConfig,
     *,
     sandbox: Sandbox | None = None,
+    scheduler: Scheduler | None = None,
+    trace_logger: TraceLogger | None = None,
+    session_state: dict[str, str] | None = None,
+    persistent: bool = True,
 ) -> ClaudeAgentOptions:
-    """Build ClaudeAgentOptions from settings and notes config.
-
-    Separated from run_agent() so the option-building logic can be
-    tested and customized independently.
-    """
+    """Build ClaudeAgentOptions for the writing agent."""
     gate = ReflectionGate()
     servers = build_agent_servers(
         session_dir=notes_config.session,
         outputs_dir=notes_config.output.parent,
         sandbox=sandbox,
         gate=gate,
+        scheduler=scheduler,
+        trace_logger=trace_logger,
+        session_state=session_state,
     )
 
     permission_hooks = create_permission_hooks(notes_config.rw, notes_config.ro)
 
-    # Reflection gate: deny StructuredOutput until agent calls review
-    gate_hooks = create_reflection_gate(
-        gate=gate,
-        gated_tool="StructuredOutput",
-        reflection_tool_name="mcp__notes__review",
-    )
-    hooks = merge_hooks(permission_hooks, gate_hooks)
+    if persistent and scheduler is not None:
+        gate_hooks = create_reflection_gate(
+            gate=gate,
+            gated_tool="StructuredOutput",
+            reflection_tool_name="mcp__notes__review",
+        )
+        stop_hooks = create_stop_guard()
+        meta_hooks = create_meta_before_sleep_guard(
+            scheduler=scheduler,
+            sleep_tool_name="mcp__session__sleep",
+        )
+        event_hooks = create_pending_event_guard(
+            check_unread=lambda: 0,
+            scheduler=scheduler,
+            guarded_tools=["mcp__session__sleep"],
+        )
+        hooks = merge_hooks(permission_hooks, gate_hooks)
+        hooks = merge_hooks(hooks, stop_hooks)
+        hooks = merge_hooks(hooks, meta_hooks)
+        hooks = merge_hooks(hooks, event_hooks)
+    else:
+        gate_hooks = create_reflection_gate(
+            gate=gate,
+            gated_tool="StructuredOutput",
+            reflection_tool_name="mcp__notes__review",
+        )
+        hooks = merge_hooks(permission_hooks, gate_hooks)
 
     policy = ToolPolicy.from_settings(settings)
 
@@ -146,13 +223,12 @@ def build_options(
         allowed_tools=policy.get_allowed_tools(),
         output_format={
             "type": "json_schema",
-            "schema": AgentOutput.model_json_schema(),
+            "schema": WritingOutput.model_json_schema(),
         },
     )
 
 
 def extract_sources(blocks: list[ContentBlock]) -> list[str]:
-    """Extract source URLs/queries from tool use blocks."""
     sources: list[str] = []
     for block in blocks:
         if isinstance(block, ToolUseBlock) and block.name in (
@@ -172,14 +248,19 @@ def build_result(
     task_id: str | None,
     collector: ResponseCollector,
 ) -> AgentSessionResult:
-    """Build a AgentSessionResult from the completed agent run."""
     result = collector.result
     if result is None:
         raise RuntimeError("No result in collector")
 
-    output = AgentOutput(summary="No output produced", factors=[], confidence=0.5)
+    output = WritingOutput(
+        title="Untitled",
+        google_doc_url="",
+        word_count=0,
+        sections_completed=0,
+        summary="No output produced",
+    )
     if result.structured_output:
-        output = AgentOutput.model_validate(result.structured_output)
+        output = WritingOutput.model_validate(result.structured_output)
 
     return AgentSessionResult(
         session_id=session_id,
@@ -201,38 +282,57 @@ async def run_agent(
     *,
     session_id: str | None = None,
     task_id: str | None = None,
+    persistent: bool = True,
+    on_action: None = None,
 ) -> AgentSessionResult:
-    """Run the agent on a task.
+    """Run the writing agent on a task.
+
+    In persistent mode (default), the agent uses a sleep/wake loop to stay
+    alive across the full writing session. The author can follow progress
+    in the Google Doc and leave comments at any time.
 
     Args:
-        task: The task/prompt for the agent.
-        session_id: Unique identifier for this session. Auto-generated if None.
-        task_id: Optional task identifier (e.g., question ID for forecasting).
-
-    Returns:
-        AgentSessionResult with the agent's output and metadata.
+        task: The writing task — a Claude share link, brief, or revision request.
+        session_id: Optional session identifier.
+        task_id: Optional task identifier.
+        persistent: Whether to use sleep/wake persistent mode.
+        on_action: Callback for agent actions (used by CLI for terminal output).
     """
     if session_id is None:
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    logger.info("Starting session %s", session_id)
+    logger.info("Starting session %s (persistent=%s)", session_id, persistent)
     reset_metrics()
 
     notes = setup_notes(session_id, task_id or "0")
     trace_path = TRACES_PATH / session_id / f"{datetime.now().strftime('%H%M%S')}.md"
     trace_logger = TraceLogger(trace_path=trace_path, title=f"Session {session_id}")
 
-    # --- Sandbox (optional, requires Docker) ---
-    # Customize: adjust pre_install, timeout, network_mode, or remove entirely
-    # if your agent doesn't need code execution.
     sandbox = Sandbox(
         session_id=session_id,
         shared_dir=notes.session / "sandbox_shared",
         timeout_seconds=settings.sandbox_timeout_seconds,
     )
 
+    session_state: dict[str, str] = {"stage": "starting"}
+
+    scheduler: Scheduler | None = None
+    if persistent:
+
+        async def action_callback(content: str) -> None:
+            logger.info("Agent action: %s", content[:100])
+
+        scheduler = Scheduler(on_action=action_callback)
+
     with sandbox:
-        options = build_options(notes, sandbox=sandbox)
+        options = build_options(
+            notes,
+            sandbox=sandbox,
+            scheduler=scheduler,
+            trace_logger=trace_logger,
+            session_state=session_state,
+            persistent=persistent,
+        )
         collector = await query(
             task,
             options=options,

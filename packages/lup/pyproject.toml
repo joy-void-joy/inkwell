@@ -1,0 +1,53 @@
+[project]
+name = "lup"
+version = "0.1.0"
+description = "Agent development library for the Claude Agent SDK"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+authors = [{ name = "Joy Void Joy", email = "joy.void.joy@gmail.com" }]
+keywords = [
+    "agent",
+    "ai",
+    "claude",
+    "llm",
+    "mcp",
+    "sdk",
+    "tools",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+dependencies = [
+    "claude-agent-sdk>=0.1.26",
+    "httpx>=0.28.1",
+    "pydantic>=2.12.5",
+    "rich>=14.3.1",
+    "tenacity>=9.0.0",
+]
+
+[project.optional-dependencies]
+docker = ["docker>=7.1.0"]
+
+[project.urls]
+Homepage = "https://github.com/joy-void-joy/lup"
+Repository = "https://github.com/joy-void-joy/lup"
+Issues = "https://github.com/joy-void-joy/lup/issues"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.13"

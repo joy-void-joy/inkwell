@@ -1,0 +1,13 @@
+{
+  "name": "lup",
+  "owner": {
+    "name": "Lup"
+  },
+  "plugins": [
+    {
+      "name": "lup",
+      "description": "Self-improving agent scaffold with feedback loop, trace analysis, and meta-level reflection",
+      "source": "./lup"
+    }
+  ]
+}

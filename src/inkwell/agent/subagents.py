@@ -83,7 +83,7 @@ planner = AgentDefinition(
         "research questions, preservable quotes, and voice analysis."
     ),
     prompt=PLANNER_PROMPT,
-    tools=["Read", "Glob", "WebFetch"],
+    tools=["Read", "Glob", "WebFetch", "mcp__docs__load_corpus"],
     model="opus",
 )
 

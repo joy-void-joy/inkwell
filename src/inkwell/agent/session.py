@@ -9,6 +9,7 @@ for the realtime context tool.
 # pyright: reportAttributeAccessIssue=false
 # Google API service objects are untyped.
 
+import asyncio
 import logging
 from typing import TypedDict
 
@@ -46,8 +47,10 @@ class WritingSessionState:
         self.sections: list[SectionStatus] = []
         self.pending_questions: list[str] = []
         self.seen_comment_ids: set[str] = set()
+        self.agent_comment_ids: set[str] = set()
         self.notes: dict[str, str] = {}
         self.terminal_messages: list[str] = []
+        self.sleep_entered: asyncio.Event = asyncio.Event()
 
     def set_doc(self, doc_id: str, doc_url: str) -> None:
         self.doc_id = doc_id
@@ -109,15 +112,25 @@ class WritingSessionState:
                 if item.get("resolved", False):
                     continue
                 comment_id = str(item.get("commentId", ""))
+                if comment_id in self.seen_comment_ids:
+                    continue
+
+                is_agent_comment = comment_id in self.agent_comment_ids
                 reply_list = item.get("replies", [])
-                if isinstance(reply_list, list) and reply_list:
-                    if comment_id not in self.seen_comment_ids:
-                        unread += 1
+                has_replies = isinstance(reply_list, list) and bool(reply_list)
+
+                if has_replies and is_agent_comment:
+                    unread += 1
+                elif not is_agent_comment:
+                    unread += 1
 
             return unread
         except Exception:
-            logger.debug("Failed to check unread comments", exc_info=True)
+            logger.warning("Failed to check unread comments", exc_info=True)
             return 0
+
+    def mark_agent_comment(self, comment_id: str) -> None:
+        self.agent_comment_ids.add(comment_id)
 
     def mark_comments_seen(self, comment_ids: list[str]) -> None:
         self.seen_comment_ids.update(comment_ids)
@@ -151,34 +164,42 @@ class WritingSessionState:
                     continue
 
                 comment_id = str(item.get("commentId", ""))
-                reply_list = item.get("replies", [])
-                if not isinstance(reply_list, list) or not reply_list:
-                    continue
                 if comment_id in self.seen_comment_ids:
                     continue
 
-                last_reply = reply_list[-1]
-                if not isinstance(last_reply, dict):
-                    continue
-
+                content = str(item.get("content", ""))
                 anchor = ""
                 quoted = item.get("quotedFileContent")
                 if isinstance(quoted, dict):
                     anchor = str(quoted.get("value", ""))
 
+                is_agent_comment = comment_id in self.agent_comment_ids
+                reply_list = item.get("replies", [])
+                has_replies = isinstance(reply_list, list) and bool(reply_list)
+
+                if has_replies:
+                    last_reply = reply_list[-1]
+                    if not isinstance(last_reply, dict):
+                        continue
+                    reply_text = str(last_reply.get("content", ""))
+                elif not is_agent_comment:
+                    reply_text = ""
+                else:
+                    continue
+
                 new_comments.append(
                     AuthorComment(
                         comment_id=comment_id,
-                        content=str(item.get("content", "")),
+                        content=content,
                         anchor_text=anchor,
-                        reply=str(last_reply.get("content", "")),
+                        reply=reply_text,
                     )
                 )
                 self.seen_comment_ids.add(comment_id)
 
             return new_comments
         except Exception:
-            logger.debug("Failed to fetch author comments", exc_info=True)
+            logger.warning("Failed to fetch author comments", exc_info=True)
             return []
 
 

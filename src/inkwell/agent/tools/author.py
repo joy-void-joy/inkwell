@@ -130,9 +130,17 @@ async def ask_author(params: AskAuthorInput) -> AskAuthorOutput:
         .execute()
     )
 
+    comment_id = str(result.get("commentId", ""))
+
+    from inkwell.agent.tools.google_docs import SESSION_STATE
+
+    if SESSION_STATE is not None:
+        SESSION_STATE.add_question(params.question)
+        SESSION_STATE.mark_agent_comment(comment_id)
+
     return AskAuthorOutput(
         doc_id=params.doc_id,
-        comment_id=result.get("commentId", ""),
+        comment_id=comment_id,
         question_type=params.question_type,
     )
 
@@ -162,6 +170,7 @@ async def check_author_feedback(
 
     replies: list[AuthorReply] = []
     unanswered = 0
+    seen_ids: list[str] = []
 
     for item in result.get("comments", []):
         if not isinstance(item, dict):
@@ -169,6 +178,7 @@ async def check_author_feedback(
         if item.get("resolved", False):
             continue
 
+        comment_id = str(item.get("commentId", ""))
         content = str(item.get("content", ""))
         anchor = ""
         quoted = item.get("quotedFileContent")
@@ -182,14 +192,20 @@ async def check_author_feedback(
                 reply_text = str(last_reply.get("content", ""))
                 replies.append(
                     AuthorReply(
-                        comment_id=str(item.get("commentId", "")),
+                        comment_id=comment_id,
                         original_question=content,
                         anchor_text=anchor,
                         author_reply=reply_text,
                     )
                 )
+                seen_ids.append(comment_id)
         elif content.startswith("["):
             unanswered += 1
+
+    from inkwell.agent.tools.google_docs import SESSION_STATE
+
+    if SESSION_STATE is not None and seen_ids:
+        SESSION_STATE.mark_comments_seen(seen_ids)
 
     return CheckFeedbackOutput(
         doc_id=params.doc_id,
@@ -210,6 +226,7 @@ async def update_progress(params: UpdateProgressInput) -> UpdateProgressOutput:
 
     status_markers = {
         "planned": "[ ]",
+        "writing": "[>]",
         "drafted": "[~]",
         "reviewed": "[~]",
         "final": "[x]",
@@ -237,6 +254,13 @@ async def update_progress(params: UpdateProgressInput) -> UpdateProgressOutput:
 
     lines.append("")
     lines.append(f"**Next:** {params.next_steps}")
+
+    from inkwell.agent.tools.google_docs import SESSION_STATE
+
+    if SESSION_STATE is not None:
+        SESSION_STATE.set_stage(params.stage)
+        for section in params.sections:
+            SESSION_STATE.update_section_status(section["title"], section["status"])
 
     content = "\n".join(lines)
 

@@ -10,7 +10,10 @@ Requires Google OAuth credentials configured via `inkwell setup`.
 # pyright: reportAttributeAccessIssue=false
 # googleapiclient returns untyped Resource objects throughout.
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -18,9 +21,18 @@ from inkwell.agent.google_auth import ServiceFactory, get_service_factory
 from inkwell.agent.markdown_to_docs import clear_tab_request, markdown_to_requests
 from lup.mcp import ToolError, lup_tool
 
+if TYPE_CHECKING:
+    from inkwell.agent.session import WritingSessionState
+
 logger = logging.getLogger(__name__)
 
 SERVICES: ServiceFactory | None = None
+SESSION_STATE: WritingSessionState | None = None
+
+
+def configure_session_state(state: WritingSessionState) -> None:
+    global SESSION_STATE  # noqa: PLW0603
+    SESSION_STATE = state
 
 
 def services() -> ServiceFactory:
@@ -259,10 +271,12 @@ async def create_doc(params: CreateDocInput) -> CreateDocOutput:
             sendNotificationEmail=False,
         ).execute()
 
-    return CreateDocOutput(
-        doc_id=doc_id,
-        url=f"https://docs.google.com/document/d/{doc_id}/edit",
-    )
+    url = f"https://docs.google.com/document/d/{doc_id}/edit"
+
+    if SESSION_STATE is not None:
+        SESSION_STATE.set_doc(doc_id, url)
+
+    return CreateDocOutput(doc_id=doc_id, url=url)
 
 
 @lup_tool(
@@ -303,6 +317,9 @@ async def create_tab(params: CreateTabInput) -> CreateTabOutput:
                 props = add_tab.get("tabProperties", {})
                 if isinstance(props, dict):
                     tab_id = str(props.get("tabId", ""))
+
+    if SESSION_STATE is not None:
+        SESSION_STATE.add_section(params.tab_name, tab_id)
 
     return CreateTabOutput(
         doc_id=params.doc_id,
@@ -346,6 +363,12 @@ async def write_tab(params: WriteTabInput) -> WriteTabOutput:
             documentId=params.doc_id,
             body={"requests": requests},
         ).execute()
+
+    if SESSION_STATE is not None:
+        for section in SESSION_STATE.sections:
+            if section["tab_id"] == params.tab_id and section["status"] in ("planned", "writing"):
+                section["status"] = "drafted"
+                break
 
     return WriteTabOutput(
         doc_id=params.doc_id,
@@ -396,7 +419,6 @@ async def insert_comment(params: InsertCommentInput) -> InsertCommentOutput:
     body: dict[str, object] = {"content": params.content}
 
     if params.anchor_text:
-        body["anchor"] = params.anchor_text
         body["quotedFileContent"] = {
             "mimeType": "text/plain",
             "value": params.anchor_text,
@@ -412,9 +434,14 @@ async def insert_comment(params: InsertCommentInput) -> InsertCommentOutput:
         .execute()
     )
 
+    comment_id = str(result.get("commentId", ""))
+
+    if SESSION_STATE is not None:
+        SESSION_STATE.mark_agent_comment(comment_id)
+
     return InsertCommentOutput(
         doc_id=params.doc_id,
-        comment_id=result.get("commentId", ""),
+        comment_id=comment_id,
         content=params.content,
     )
 
@@ -437,10 +464,6 @@ async def read_comments(params: ReadCommentsInput) -> ReadCommentsOutput:
             "fields": "comments(commentId,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
             "pageSize": 100,
         }
-        if not params.include_resolved:
-            kwargs["fields"] = (
-                "comments(commentId,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken"
-            )
         if page_token:
             kwargs["pageToken"] = page_token
 

@@ -6,27 +6,41 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-This is a **self-improving agent template and scaffold** built with the Claude Agent SDK. It serves two roles:
-
-1. **Template** — Code that downstream projects customize for their domain: agent prompts, tools, models, environment scaffolding. `/lup:brainstorm` explores the design, `/lup:init` executes the customization.
-2. **Scaffold** — Agents, commands, hooks, and workflows that downstream projects inherit and extend. These provide the development workflow (commit, rebase, feedback loop) and analysis infrastructure (trace exploration, version comparison) that every project needs.
-
-When reviewing changes from downstream repos (`/lup:update`), the goal is to **generalize domain-specific patterns back into the template**. The bias is toward inclusion: if a pattern emerged from real use, it likely belongs in the template.
+**Inkwell** is an AI writing agent that transforms conversations into polished, published articles. It takes a Claude conversation (or other source material), extracts a structured plan, researches every claim, writes each section in the author's voice, and produces a reviewed, fact-checked draft in a Google Doc.
 
 Built with Python 3.13+ and the Claude Agent SDK. Uses `uv` as the package manager.
+
+### Writing Pipeline
+
+1. **Extract** — Parse Claude share links into structured conversation markdown
+2. **Plan** — Extract article outline, research questions, preservable quotes, voice notes
+3. **Research** — Deep research with web search, arXiv, prediction markets, economic data
+4. **Write** — Parallel section writers, each in their own Google Doc tab
+5. **Merge** — Coherence editor merges sections into a unified draft
+6. **Review** — Parallel reviewers (narrative, fact-check, style) leave Google Doc comments
+7. **Rewrite** — Final pass incorporating all reviewer + author feedback
+
+### Google Docs as Live Surface
+
+The agent writes into a Google Doc that the author follows in real time:
+- **Tabs** for parallel section writing (no conflicts)
+- **Comments** for async Q&A (agent asks questions, author replies whenever)
+- **Overview tab** as a progress dashboard
+- Author can comment at any time; agent picks up feedback at checkpoints
 
 ### Naming
 
 - **Claude** = the meta-agent (Claude Code) that modifies the codebase, runs commands, and manages the development workflow
 - **Lup** = the SDK agent inside the code being built and improved — the agent that runs via the CLI and produces outputs
 
-"Lup" is the framework's name for the inner agent, not a project-specific term — it stays as "Lup" in all downstream projects. Only the template package directory (`src/lup_template/`) gets renamed; all framework vocabulary (`lup_tool`, `LupMcpTool`, `lup-devtools`, `.lup/`, `lup-tools`, etc.) stays as `lup`.
+"Lup" is the framework's name for the inner agent, not a project-specific term — it stays as "Lup" in all downstream projects. Only the template package directory (`src/inkwell/`) gets renamed; all framework vocabulary (`lup_tool`, `LupMcpTool`, `lup-devtools`, `.lup/`, `lup-tools`, etc.) stays as `lup`.
 
 ### Key Concepts
 
-- **Template Package** (`src/lup_template/`): Domain-specific code for the self-improving agent.
-  - **Agent** (`src/lup_template/agent/`): The agent code that the feedback loop improves. Contains core orchestration, tools, subagents, and configuration.
-  - **Environment** (`src/lup_template/environment/`): Domain-specific scaffolding (user interaction, game logic, etc.). Evolves with application requirements, but not via the feedback loop.
+- **Inkwell Package** (`src/inkwell/`): The writing agent application.
+  - **Agent** (`src/inkwell/agent/`): Pipeline orchestration, subagents, tools, models. Improved via the feedback loop.
+  - **Environment** (`src/inkwell/environment/`): CLI interface for user interaction.
+- **Subagents**: planner, researcher, section_writer, coherence_editor, narrative_reviewer, fact_checker, style_reviewer, rewriter
 - **Three-Level Meta Analysis**: Object (agent behavior), Meta (agent self-tracking), Meta-Meta (feedback loop process).
 
 ---
@@ -92,18 +106,19 @@ packages/
         ├── throttle.py         # Rate limiting (concurrency + interval)
         └── trace.py            # Trace logging, color-coded console display
 src/
-└── lup_template/               # Template application (depends on lup)
-    ├── agent/                  # Domain-specific code (feedback loop improves this)
+└── inkwell/               # Writing agent application (depends on lup)
+    ├── agent/                  # Pipeline orchestration and tools
     │   ├── core.py             # Main orchestration
-    │   ├── config.py           # Settings via pydantic-settings
-    │   ├── models.py           # Output models (customize for your domain)
-    │   ├── prompts.py          # System prompt templates
-    │   ├── subagents.py        # Subagent definitions
+    │   ├── config.py           # Settings (Google OAuth, API keys, etc.)
+    │   ├── models.py           # ArticlePlan, WritingOutput, ReviewFinding, etc.
+    │   ├── prompts.py          # System prompt for the writing agent
+    │   ├── subagents.py        # 8 subagents (planner, researcher, writers, reviewers, etc.)
     │   ├── tool_policy.py      # Conditional tool availability
     │   └── tools/
-    │       ├── example.py      # Example MCP tools (customize)
-    │       ├── realtime.py     # Real-time tools template (sleep, context, reply)
-    │       └── reflect.py      # Forced self-review tool (reviewer sub-agent)
+    │       ├── google_docs.py  # Google Docs tools (create, write, comment, tabs)
+    │       ├── extract.py      # Claude conversation extractor
+    │       ├── realtime.py     # Real-time tools (sleep, context, reply)
+    │       └── reflect.py      # Writing-specific self-review tool
     ├── devtools/               # Development CLI (lup-devtools entry point)
     │   ├── main.py             # Root Typer app composing sub-apps
     │   ├── trace/              # Trace display, search, and analysis
@@ -119,14 +134,14 @@ src/
 
 See [PATTERNS.md](PATTERNS.md) for detailed architecture patterns: Persistent Agent, Reflection, Nested Agent, Background Agent, and Data Augmentation.
 
-### lup (library) vs lup_template (application) Boundary
+### lup (library) vs inkwell (application) Boundary
 
-Code in `packages/lup/` must be **complete-as-is and configurable through function arguments** — never by modifying the source. Domain-specific code belongs in `src/lup_template/`.
+Code in `packages/lup/` must be **complete-as-is and configurable through function arguments** — never by modifying the source. Domain-specific code belongs in `src/inkwell/`.
 
 - Use function parameters for customization (callbacks, config objects, path overrides)
 - Use `configure()`-style functions for module-level state that needs overriding
-- **No imports from `lup_template`** in `lup` code — the dependency arrow points one way
-- **Placement test:** Can this module be used as-is in a different project without modification? If yes → `packages/lup/`. Does it import from `lup_template`? If yes → `src/lup_template/`.
+- **No imports from `inkwell`** in `lup` code — the dependency arrow points one way
+- **Placement test:** Can this module be used as-is in a different project without modification? If yes → `packages/lup/`. Does it import from `inkwell`? If yes → `src/inkwell/`.
 
 ---
 
@@ -149,19 +164,22 @@ uv run pyright
 # Run tests
 uv run pytest
 
-# Run a single agent session
-uv run python -m lup_template.environment.cli run "your task here"
-uv run python -m lup_template.environment.cli run --session-id my-session "task"
+# Write an article from a Claude conversation
+inkwell write "https://claude.ai/share/abc123"
+inkwell write "https://claude.ai/share/abc123" --ref "paper.pdf" -f twitter
 
-# Run multiple sessions with auto-commit
-uv run python -m lup_template.environment.cli loop "task1" "task2" "task3"
-uv run python -m lup_template.environment.cli loop --no-commit "task1" "task2"
+# Manage style corpus (voice matching references)
+inkwell style add "https://lesswrong.com/posts/my-best-post"
+inkwell style add ~/writing/my-essay.md
+inkwell style list
 
-# Commit uncommitted session results
-uv run lup-devtools feedback commit
-uv run lup-devtools feedback commit --dry-run
+# Run with freeform task (advanced)
+inkwell run "write a blog post about X"
 
-uv run python -m lup_template.environment.cli --help
+# Batch mode
+inkwell loop "task1" "task2" "task3"
+
+inkwell --help
 ```
 
 ### Testing
@@ -373,8 +391,8 @@ The codebase should read as a **monolithic source of truth** — understandable 
 ### DRY: Don't Repeat Yourself
 
 - If logic exists in `lup` (the library), import it. Don't copy-paste.
-- Reusable utilities belong in `packages/lup/`, not `src/lup_template/`.
-- See [lup vs lup_template Boundary](#lup-library-vs-lup_template-application-boundary) for the placement test.
+- Reusable utilities belong in `packages/lup/`, not `src/inkwell/`.
+- See [lup vs inkwell Boundary](#lup-library-vs-inkwell-application-boundary) for the placement test.
 
 ### Imports: No Barrel Files
 
@@ -420,9 +438,9 @@ def build_display(usage, stats):
 
 ### lup-devtools
 
-All development tooling lives in `src/lup_template/devtools/` and is exposed as the `lup-devtools` CLI entry point. **Always use `lup-devtools` instead of ad-hoc commands.** Never use `uv run python -c "..."` or bare `python`/`python3` — these are denied by the Bash permission hook.
+All development tooling lives in `src/inkwell/devtools/` and is exposed as the `lup-devtools` CLI entry point. **Always use `lup-devtools` instead of ad-hoc commands.** Never use `uv run python -c "..."` or bare `python`/`python3` — these are denied by the Bash permission hook.
 
-If you find yourself running the same command repeatedly, **add a command** to `src/lup_template/devtools/`. Use `tmp/*.py` for one-off scripts.
+If you find yourself running the same command repeatedly, **add a command** to `src/inkwell/devtools/`. Use `tmp/*.py` for one-off scripts.
 
 **Write scripts in Python using [typer](https://typer.tiangolo.com/)** for CLIs. Use **[sh](https://sh.readthedocs.io/)** for shell commands instead of `subprocess`.
 
@@ -485,7 +503,7 @@ The `.env` file contains template configuration. Create `.env.local` for secrets
 # AGENT_MAX_BUDGET_USD=5.00
 ```
 
-Settings in `.env.local` override `.env`. Configuration is loaded via pydantic-settings — see `src/lup_template/agent/config.py`.
+Settings in `.env.local` override `.env`. Configuration is loaded via pydantic-settings — see `src/inkwell/agent/config.py`.
 
 All Claude Code settings modifications should be **project-level** (in `.claude/settings.json`), not user-level.
 

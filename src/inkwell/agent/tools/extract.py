@@ -1,8 +1,10 @@
-"""Conversation extraction tool — extracts Claude conversations from share links.
+"""Conversation and content extraction tools.
 
-Ported from /home/pfftz/kernel/extractors/claude.py. Converts Claude.ai
-share link conversations into structured markdown with speaker tags.
+Extracts source material from Claude conversations, URLs, and local files
+into structured text for the writing pipeline.
 """
+
+# claude: ignore
 
 import logging
 
@@ -155,4 +157,113 @@ async def extract_conversation(
     )
 
 
-EXTRACT_TOOLS = [extract_conversation]
+class ExtractUrlInput(BaseModel):
+    url: str = Field(description="URL of an article, blog post, or web page to extract")
+
+
+class ExtractUrlOutput(BaseModel):
+    url: str = Field(description="Source URL")
+    title: str = Field(default="", description="Page title if available")
+    content: str = Field(description="Extracted text as markdown")
+    word_count: int = Field(description="Approximate word count")
+
+
+class ExtractFileInput(BaseModel):
+    path: str = Field(
+        description="Local file path (markdown, text, or PDF)"
+    )
+
+
+class ExtractFileOutput(BaseModel):
+    path: str = Field(description="Source file path")
+    content: str = Field(description="Extracted text content")
+    word_count: int = Field(description="Approximate word count")
+
+
+@lup_tool(
+    "Extract article text from a URL. Use this to ingest reference "
+    "articles, blog posts, or any web page as source material for "
+    "the writing pipeline. Better than fetch_url for source extraction "
+    "because it focuses on clean, readable article text. Use for --ref "
+    "URLs and style corpus URLs."
+)
+async def extract_url(params: ExtractUrlInput) -> ExtractUrlOutput:
+    import trafilatura
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            follow_redirects=True,
+            headers={"User-Agent": CLAUDE_HEADERS["User-Agent"]},
+        ) as client:
+            resp = await client.get(params.url)
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
+        raise ToolError(f"Failed to fetch {params.url}: {e}") from e
+
+    text = trafilatura.extract(
+        resp.text,
+        include_comments=False,
+        include_tables=True,
+        no_fallback=False,
+        include_links=True,
+        output_format="txt",
+    )
+    if not text:
+        raise ToolError(f"Could not extract text from {params.url}")
+
+    title = ""
+    title_json = trafilatura.extract(
+        resp.text, output_format="json", include_links=False
+    )
+    if title_json:
+        import json
+
+        try:
+            title = json.loads(title_json).get("title", "")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    return ExtractUrlOutput(
+        url=params.url,
+        title=title,
+        content=text[:50000],
+        word_count=len(text.split()),
+    )
+
+
+@lup_tool(
+    "Extract text from a local file. Supports markdown (.md), plain "
+    "text (.txt), and PDF files. Use this to ingest local reference "
+    "documents provided by the author via --ref file paths."
+)
+async def extract_file(params: ExtractFileInput) -> ExtractFileOutput:
+    from pathlib import Path
+
+    file_path = Path(params.path).expanduser().resolve()
+    if not file_path.exists():
+        raise ToolError(f"File not found: {file_path}")
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".pdf":
+        raise ToolError(
+            f"PDF file detected: {file_path}. Use the Read tool to read PDFs directly."
+        )
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise ToolError(
+            f"Could not read {file_path} as text. "
+            "Supported formats: .md, .txt, .text"
+        )
+
+    return ExtractFileOutput(
+        path=str(file_path),
+        content=content[:50000],
+        word_count=len(content.split()),
+    )
+
+
+EXTRACT_TOOLS = [extract_conversation, extract_url, extract_file]

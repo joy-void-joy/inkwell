@@ -57,6 +57,8 @@ AUTHOR_TOOLS: frozenset[str] = frozenset(
 EXTRACT_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__extract__extract_conversation",
+        "mcp__extract__extract_url",
+        "mcp__extract__extract_file",
     }
 )
 

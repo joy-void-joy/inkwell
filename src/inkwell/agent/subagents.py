@@ -360,6 +360,13 @@ You receive:
 4. Don't over-edit — if reviewers found nothing wrong in a section, leave it alone
 5. After applying fixes, do one final read-through for flow
 
+## Format Adapters
+
+After applying fixes, call the format adapter matching the target_format:
+- **format_lesswrong**: Adds epistemic status, footnotes, cross-references
+- **format_twitter**: Splits into a numbered tweet thread
+- **format_blog**: Adds SEO meta description, optimizes structure
+
 ## Output
 
 Write the complete, polished article to the Final tab using write_tab.
@@ -369,7 +376,7 @@ rewriter = AgentDefinition(
     description=(
         "Produces the final article by incorporating all reviewer feedback "
         "and author comments. Reads the Draft tab and comments, applies "
-        "fixes, and writes to the Final tab."
+        "fixes, writes to the Final tab, and applies format adapters."
     ),
     prompt=REWRITER_PROMPT,
     tools=[
@@ -378,6 +385,9 @@ rewriter = AgentDefinition(
         "mcp__docs__read_tab",
         "mcp__docs__write_tab",
         "mcp__docs__read_comments",
+        "mcp__docs__format_lesswrong",
+        "mcp__docs__format_twitter",
+        "mcp__docs__format_blog",
     ],
     model="opus",
 )

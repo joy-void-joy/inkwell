@@ -57,6 +57,7 @@ from inkwell.agent.tools.research.fetch import FETCH_TOOLS
 from inkwell.agent.tools.research.fred import FRED_TOOLS
 from inkwell.agent.tools.research.markets import MARKET_TOOLS
 from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
+from inkwell.agent.tools.formats import FORMAT_TOOLS
 from inkwell.agent.tools.voice import VOICE_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,7 @@ def build_agent_servers(
     session_state: WritingSessionState | None = None,
 ) -> dict[str, McpServerConfig]:
     """Create the agent's MCP servers."""
-    all_doc_tools = [*GOOGLE_DOCS_TOOLS, *AUTHOR_TOOLS, *VOICE_TOOLS]
+    all_doc_tools = [*GOOGLE_DOCS_TOOLS, *AUTHOR_TOOLS, *VOICE_TOOLS, *FORMAT_TOOLS]
     docs_server = create_mcp_server(
         name="docs",
         version="1.0.0",

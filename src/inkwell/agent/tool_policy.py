@@ -48,6 +48,9 @@ AUTHOR_TOOLS: frozenset[str] = frozenset(
         "mcp__docs__check_author_feedback",
         "mcp__docs__update_progress",
         "mcp__docs__load_corpus",
+        "mcp__docs__format_lesswrong",
+        "mcp__docs__format_twitter",
+        "mcp__docs__format_blog",
     }
 )
 

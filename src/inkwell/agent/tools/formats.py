@@ -10,7 +10,7 @@ import textwrap
 
 from pydantic import BaseModel, Field
 
-from lup.mcp import ToolError, lup_tool
+from lup.mcp import lup_tool
 
 logger = logging.getLogger(__name__)
 

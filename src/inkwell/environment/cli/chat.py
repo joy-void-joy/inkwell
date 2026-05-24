@@ -27,7 +27,7 @@ from rich.panel import Panel
 from lup.metrics import log_metrics_summary, reset_metrics
 from lup.paths import project_root
 
-from inkwell.agent.core import run_batch
+from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.models import WritingOutput
 from inkwell.agent.pipeline import PipelineError, PipelineListener
 from inkwell.agent.session import WritingSessionState
@@ -283,6 +283,7 @@ async def chat_session(
     *,
     initial_task: str | None = None,
     session_id: str | None = None,
+    resume_session_id: str | None = None,
     target_format: str = "lesswrong",
     refs: list[str] | None = None,
     existing_doc_id: str | None = None,
@@ -298,7 +299,7 @@ async def chat_session(
         logging.basicConfig(level=logging.DEBUG)
 
     if session_id is None:
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_id = resume_session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 
     console = Console(highlight=False)
     show_welcome(console)
@@ -309,7 +310,7 @@ async def chat_session(
     input_queue: asyncio.Queue[str] = asyncio.Queue()
 
     source = initial_task
-    if source is None:
+    if source is None and resume_session_id is None:
         try:
             source = await pt_session.prompt_async()
         except (EOFError, KeyboardInterrupt):
@@ -319,26 +320,33 @@ async def chat_session(
         if not source or source in ("/quit", "/exit", "/q"):
             return
 
-    console.print(
-        f"  [dim]Source: {source[:80]}...[/dim]"
-        if len(source) > 80
-        else f"  [dim]Source: {source}[/dim]"
-    )
+    if source:
+        console.print(
+            f"  [dim]Source: {source[:80]}...[/dim]"
+            if len(source) > 80
+            else f"  [dim]Source: {source}[/dim]"
+        )
+    elif resume_session_id:
+        console.print(f"  [dim]Resuming session: {resume_session_id}[/dim]")
 
     listener = InteractiveListener(console, input_queue)
+    trace_holder: list[SessionTrace] = []
 
     input_task = asyncio.create_task(
         read_terminal_input(pt_session, input_queue, console, listener)
     )
 
     try:
-        result = await run_batch(
-            source,
+        result = await run_session(
+            source=source,
+            resume_session_id=resume_session_id,
             target_format=target_format,
             existing_doc_id=existing_doc_id,
             session_id=session_id,
             refs=refs,
             listener=listener,
+            persistent=False,
+            trace_holder=trace_holder,
         )
 
         if result.cost_usd is not None:
@@ -356,6 +364,9 @@ async def chat_session(
             await input_task
         except asyncio.CancelledError:
             pass
+        if trace_holder:
+            trace_path = trace_holder[0].save()
+            console.print(f"\n  [dim]Trace saved to: {trace_path}[/dim]")
 
     log_metrics_summary()
     console.print("\n[dim]Session ended.[/dim]")

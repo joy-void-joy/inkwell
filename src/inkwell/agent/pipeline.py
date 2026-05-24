@@ -247,7 +247,7 @@ def format_feedback(feedback: list[str]) -> str:
     if not feedback:
         return ""
     lines = "\n".join(f"- {f}" for f in feedback)
-    return f"\n\n## Author Feedback\n\n{lines}\n"
+    return f"\n\n## Author Feedback (priority)\n\n{lines}\n"
 
 
 def format_voice_profile(profile: VoiceProfile) -> str:
@@ -330,10 +330,10 @@ async def research_plan(
     task = (
         f'Research the following questions for an article titled "{plan.title}".\n\n'
         f"Thesis: {plan.thesis}\n\n"
+        f"{format_feedback(feedback or [])}"
         f"## Research Questions\n{questions_text}\n\n"
         f"## Source Quotes (for awareness)\n{quotes_text}\n\n"
         f"Be thorough. Cross-reference claims. Prefer primary sources."
-        f"{format_feedback(feedback or [])}"
     )
 
     research = await query(
@@ -408,12 +408,12 @@ async def write_section(
         f"## Section Plan\n"
         f"Summary: {section_plan.summary}\n"
         f"Key points: {', '.join(section_plan.key_points)}\n\n"
+        f"{format_feedback(feedback or [])}"
         f"## Research Findings\n{findings_text}\n\n"
         f"## Quotes to Weave In\n{quotes_text or '(none)'}\n\n"
         f"{voice_section}\n\n"
         f"## Author Direction\n{plan.author_direction}\n\n"
         f"Return the section content as markdown in the 'content' field."
-        f"{format_feedback(feedback or [])}"
     )
 
     draft = await query(
@@ -517,12 +517,12 @@ async def merge_sections(
         f"Merge these independently-written sections into a coherent draft "
         f'for the article "{plan.title}".\n\n'
         f"Thesis: {plan.thesis}\n\n"
+        f"{format_feedback(feedback or [])}"
         f"## Sections (in order)\n\n{sections_text}\n\n"
         f"Fix transitions, remove redundancy, normalize depth. "
         f"The draft should read as if one person wrote it in one sitting. "
         f"Return the complete merged text in the 'content' field."
         f"{voice_section}"
-        f"{format_feedback(feedback or [])}"
     )
 
     merged = await query(
@@ -736,6 +736,7 @@ async def rewrite_final(
     task = (
         f'Produce the final version of "{plan.title}".\n\n'
         f"Target format: {target_format}\n\n"
+        f"{format_feedback(feedback or [])}"
         f"## Draft\n\n{draft}\n\n"
         f"## Review Findings\n{findings_text or '(no findings)'}\n\n"
         f"## Author Direction\n{plan.author_direction}\n\n"
@@ -743,7 +744,6 @@ async def rewrite_final(
         f"Return the full article text in the 'content' field "
         f"and a brief 1-2 sentence editorial summary in the 'summary' field."
         f"{voice_section}"
-        f"{format_feedback(feedback or [])}"
     )
 
     output = await query(
@@ -975,6 +975,13 @@ class PipelineRunner:
 
         self.watcher: BackgroundAgent | None = None
 
+    async def save_snapshot(self) -> None:
+        """Persist the current snapshot for resume support."""
+        if self.notes is None:
+            return
+        path = self.notes.base_dir / "snapshot.json"
+        path.write_text(self.snapshot.model_dump_json(), encoding="utf-8")
+
     async def run(self) -> WritingOutput:
         """Execute the full pipeline with restart support."""
         configure_session_state(self.state)
@@ -1000,18 +1007,63 @@ class PipelineRunner:
 
             await self.stage_rewrite()
             await self.stage_format()
+
+            output = self.snapshot.output
+            if output is None:
+                raise PipelineError("Pipeline completed without producing output")
+
+            await self.update_overview_complete()
+            await self.hooks.on_complete(output)
+
+            await self.standby_loop()
         finally:
             await self.stop_watcher()
 
         output = self.snapshot.output
         if output is None:
             raise PipelineError("Pipeline completed without producing output")
+        return output
 
-        await self.update_overview_complete()
-        await self.hooks.on_complete(output)
+    async def run_from(self, snapshot: PipelineSnapshot) -> WritingOutput:
+        """Resume pipeline execution from a saved snapshot."""
+        self.snapshot = snapshot
+        configure_session_state(self.state)
 
-        await self.standby_loop()
+        if snapshot.output and snapshot.output.google_doc_id:
+            self.existing_doc_id = snapshot.output.google_doc_id
 
+        await self.setup_doc()
+
+        stages = [
+            "extract", "voice", "plan", "assumptions",
+            "research", "write", "merge", "review", "rewrite", "format",
+        ]
+        last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
+        remaining = stages[last_idx + 1:]
+
+        if snapshot.plan:
+            self.start_watcher()
+
+        try:
+            for stage_name in remaining:
+                method = getattr(self, f"stage_{stage_name}")
+                await method()
+                if stage_name in ("research", "write", "review"):
+                    await self.check_and_maybe_restart()
+
+            output = self.snapshot.output
+            if output is None:
+                raise PipelineError("Pipeline completed without producing output")
+
+            await self.update_overview_complete()
+            await self.hooks.on_complete(output)
+            await self.standby_loop()
+        finally:
+            await self.stop_watcher()
+
+        output = self.snapshot.output
+        if output is None:
+            raise PipelineError("Pipeline completed without producing output")
         return output
 
     def start_watcher(self) -> None:
@@ -1100,6 +1152,7 @@ class PipelineRunner:
 
         self.snapshot.conversation = conversation
         self.snapshot.stage = "extract"
+        await self.save_snapshot()
 
         source_tab_id = self.known_tabs["Source"]
         await do_write_tab(
@@ -1112,15 +1165,33 @@ class PipelineRunner:
         """Analyze the author's writing voice."""
         await self.hooks.on_stage("voice", "Analyzing author's writing voice")
         corpus_samples, _ = load_style_corpus(max_samples=3)
-        voice_profile = await do_analyze_voice(
-            self.snapshot.conversation,
-            corpus_samples,
-            trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
-            cost_accumulator=self.cost_accumulator,
-        )
+
+        voice_profile: VoiceProfile | None = None
+        for attempt in range(3):
+            try:
+                voice_profile = await do_analyze_voice(
+                    self.snapshot.conversation,
+                    corpus_samples,
+                    trace_logger=self.trace_logger,
+                    max_budget_usd=self.budget.remaining(),
+                    cost_accumulator=self.cost_accumulator,
+                )
+            except (RuntimeError, ValueError):
+                logger.warning("Voice analysis attempt %d failed", attempt + 1, exc_info=True)
+                voice_profile = None
+            if voice_profile is not None:
+                break
+            if attempt < 2:
+                await self.hooks.on_progress(
+                    f"Voice analysis failed (attempt {attempt + 1}/3), retrying..."
+                )
+
+        if voice_profile is None:
+            raise PipelineError("Voice analysis failed after 3 attempts")
+
         self.snapshot.voice_profile = voice_profile
         self.snapshot.stage = "voice"
+        await self.save_snapshot()
 
         if voice_profile:
             summary = voice_profile.voice[:80].rsplit(" ", 1)[0]
@@ -1154,6 +1225,7 @@ class PipelineRunner:
         )
         self.snapshot.plan = plan
         self.snapshot.stage = "plan"
+        await self.save_snapshot()
 
         await self.hooks.on_progress(
             f"Plan: '{plan.title}' — {len(plan.sections)} sections, "
@@ -1177,6 +1249,7 @@ class PipelineRunner:
             cost_accumulator=self.cost_accumulator,
         )
         self.snapshot.stage = "assumptions"
+        await self.save_snapshot()
         if assumptions.items:
             await self.hooks.on_progress(
                 f"Posted {len(assumptions.items)} questions/assumptions as GDoc comments"
@@ -1206,6 +1279,7 @@ class PipelineRunner:
         )
         self.snapshot.research = research
         self.snapshot.stage = "research"
+        await self.save_snapshot()
 
         await self.hooks.on_progress(
             f"Research complete: {len(research.findings)} findings"
@@ -1261,6 +1335,7 @@ class PipelineRunner:
                 self.state.add_question(question)
 
         self.snapshot.stage = "write"
+        await self.save_snapshot()
 
     async def stage_merge(self) -> None:
         """Merge sections into a coherent draft."""
@@ -1285,6 +1360,7 @@ class PipelineRunner:
         )
         self.snapshot.merged = merged
         self.snapshot.stage = "merge"
+        await self.save_snapshot()
 
         if "Draft" not in self.known_tabs:
             self.known_tabs["Draft"] = await do_create_tab(
@@ -1318,6 +1394,7 @@ class PipelineRunner:
         )
         self.snapshot.findings = findings
         self.snapshot.stage = "review"
+        await self.save_snapshot()
 
         await self.hooks.on_progress(
             f"Review complete: {len(findings)} findings "
@@ -1352,6 +1429,7 @@ class PipelineRunner:
         output.open_questions = list(self.state.pending_questions)
         self.snapshot.output = output
         self.snapshot.stage = "rewrite"
+        await self.save_snapshot()
 
     async def stage_format(self) -> None:
         """Apply format-specific transformations and write to Final tab."""
@@ -1377,12 +1455,10 @@ class PipelineRunner:
 
         output.google_doc_id = self.doc_id
         output.google_doc_url = self.doc_url
-        output.sections_completed = sum(
-            1 for d in self.snapshot.section_drafts.values()
-            if not d.content.startswith("[Section failed")
-        )
         output.word_count = len(final_content.split())  # claude: ignore
+        self.snapshot.stage = "format"
         self.state.set_stage("complete")
+        await self.save_snapshot()
 
     # -- Restart logic ---------------------------------------------------
 
@@ -1556,6 +1632,10 @@ class PipelineRunner:
 
         This prevents revising after every single comment — instead, the
         author's burst of comments is collected and handled as one revision.
+
+        Plan-breaking comments (classified by the watcher, which is still
+        running) route through the orchestrator for section-level decisions.
+        Stage-local feedback takes the lightweight rewrite path.
         """
         while True:
             revision = await self.hooks.collect_revision(self.state)
@@ -1575,17 +1655,7 @@ class PipelineRunner:
             await self.hooks.on_stage("revise", f"Revising: {combined[:60]}")
             self.state.set_stage("revising")
 
-            current_content = ""
-            if self.final_tab_id:
-                try:
-                    current_content = await do_read_tab(
-                        self.doc_id, self.final_tab_id
-                    )
-                except (RuntimeError, OSError):
-                    logger.warning("Could not read Final tab; using last known")
-
-            if not current_content and self.snapshot.output:
-                current_content = self.snapshot.output.content or self.snapshot.output.summary
+            await self.update_overview_revising()
 
             all_feedback = await self.hooks.collect_feedback(self.state)
             all_feedback.extend(batch)
@@ -1595,33 +1665,62 @@ class PipelineRunner:
             if plan is None:
                 break
 
-            output = await rewrite_final(
-                current_content,
-                self.snapshot.findings,
-                plan,
-                voice_profile=self.snapshot.voice_profile,
-                feedback=all_feedback,
-                target_format=self.target_format,
-                trace_logger=self.trace_logger,
-                max_budget_usd=self.budget.remaining(),
-                cost_accumulator=self.cost_accumulator,
+            has_plan_breaking = (
+                self.notes is not None and await self.notes.has_plan_breaking()
             )
+            if has_plan_breaking and self.restart_count < self.max_restarts:
+                await self.check_and_maybe_restart()
+                if self.notes is not None:
+                    await self.notes.clear_plan_breaking()
 
-            article_text = output.content or output.summary
-            final_content = await apply_format(
-                article_text, plan.title, self.target_format
-            )
-            if self.final_tab_id:
-                await do_write_tab(
-                    self.doc_id, self.final_tab_id, final_content,
-                    session_state=self.state,
+            await self.do_standby_rewrite(all_feedback)
+
+    async def do_standby_rewrite(self, feedback: list[str]) -> None:
+        """Execute a lightweight rewrite from standby feedback."""
+        plan = self.snapshot.plan
+        if plan is None:
+            return
+
+        current_content = ""
+        if self.final_tab_id:
+            try:
+                current_content = await do_read_tab(
+                    self.doc_id, self.final_tab_id
                 )
-            output.google_doc_id = self.doc_id
-            output.google_doc_url = self.doc_url
-            output.voice_profile = self.snapshot.voice_profile
-            output.word_count = len(final_content.split())  # claude: ignore
-            self.snapshot.output = output
-            await self.hooks.on_complete(output)
+            except (RuntimeError, OSError):
+                logger.warning("Could not read Final tab; using last known")
+
+        if not current_content and self.snapshot.output:
+            current_content = self.snapshot.output.content or self.snapshot.output.summary
+
+        output = await rewrite_final(
+            current_content,
+            self.snapshot.findings,
+            plan,
+            voice_profile=self.snapshot.voice_profile,
+            feedback=feedback,
+            target_format=self.target_format,
+            trace_logger=self.trace_logger,
+            max_budget_usd=self.budget.remaining(),
+            cost_accumulator=self.cost_accumulator,
+        )
+
+        article_text = output.content or output.summary
+        final_content = await apply_format(
+            article_text, plan.title, self.target_format
+        )
+        if self.final_tab_id:
+            await do_write_tab(
+                self.doc_id, self.final_tab_id, final_content,
+                session_state=self.state,
+            )
+        output.google_doc_id = self.doc_id
+        output.google_doc_url = self.doc_url
+        output.voice_profile = self.snapshot.voice_profile
+        output.word_count = len(final_content.split())  # claude: ignore
+        self.snapshot.output = output
+        await self.update_overview_complete()
+        await self.hooks.on_complete(output)
 
     async def drain_feedback_batch(
         self, batch: list[str], quiet_seconds: float
@@ -1808,6 +1907,22 @@ class PipelineRunner:
                 f"**Stage:** {stage}\n\n"
                 f"## Sections\n\n"
                 + "\n".join(f"- {marker} {s.title}" for s in plan.sections)
+            ),
+            session_state=self.state,
+        )
+
+    async def update_overview_revising(self) -> None:
+        """Update overview to show revision in progress."""
+        plan = self.snapshot.plan
+        if plan is None:
+            return
+        await do_write_tab(
+            self.doc_id,
+            self.overview_tab_id,
+            (
+                f"# {plan.title}\n\n"
+                f"**Stage:** revising\n\n"
+                f"*Processing your feedback...*"
             ),
             session_state=self.state,
         )

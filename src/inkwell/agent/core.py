@@ -34,7 +34,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk import McpServerConfig
 from claude_agent_sdk.types import HookContext, HookEvent, SyncHookJSONOutput
 
-from lup.client import CostAccumulator, ResponseCollector, TokenUsage, query
+from lup.client import CostAccumulator, ResponseCollector, TokenUsage
 from lup.history import save_session
 from lup.hooks import (
     HooksConfig,
@@ -56,9 +56,9 @@ from lup.sandbox import Sandbox
 from lup.trace import TraceLogger
 
 from inkwell.agent.config import settings
-from inkwell.agent.models import AgentSessionResult, WritingOutput
+from inkwell.agent.models import AgentSessionResult, PipelineSnapshot, WritingOutput
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.pipeline import PipelineListener, run_pipeline
+from inkwell.agent.pipeline import PipelineError, PipelineListener, PipelineRunner, run_pipeline
 from inkwell.agent.prompts import get_system_prompt
 from inkwell.agent.session import WritingContext, WritingSessionState
 from inkwell.agent.tool_policy import ToolPolicy
@@ -196,7 +196,6 @@ def build_agent_servers(
     scheduler: Scheduler | None = None,
     trace_logger: TraceLogger | None = None,
     session_state: WritingSessionState | None = None,
-    policy: ToolPolicy | None = None,
 ) -> dict[str, McpServerConfig]:
     """Create the agent's MCP servers."""
     if session_state is not None:
@@ -227,12 +226,12 @@ def build_agent_servers(
         tools=extract_sdk_tools(FORMAT_TOOLS),
     )
 
-    all_servers: list[McpServerConfig] = [
-        docs_server,
-        extract_server,
-        research_server,
-        format_server,
-    ]
+    servers: dict[str, McpServerConfig] = {
+        "docs": docs_server,
+        "extract": extract_server,
+        "research": research_server,
+        "format": format_server,
+    }
 
     if scheduler is not None:
         state = session_state or WritingSessionState()
@@ -248,13 +247,12 @@ def build_agent_servers(
             version="1.0.0",
             tools=extract_sdk_tools(realtime_tools),
         )
-        all_servers.append(session_server)
+        servers["session"] = session_server
 
     if sandbox is not None:
-        all_servers.append(sandbox.create_mcp_server())
+        servers["sandbox"] = sandbox.create_mcp_server()
 
-    resolved_policy = policy or ToolPolicy.from_settings(settings)
-    return resolved_policy.get_mcp_servers(*all_servers)
+    return servers
 
 
 def build_options(
@@ -267,7 +265,7 @@ def build_options(
     persistent: bool = True,
 ) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions for the writing agent."""
-    policy = ToolPolicy.from_settings(settings)
+    policy = ToolPolicy(settings)
 
     servers = build_agent_servers(
         session_dir=notes_config.session,
@@ -275,7 +273,6 @@ def build_options(
         scheduler=scheduler,
         trace_logger=trace_logger,
         session_state=session_state,
-        policy=policy,
     )
 
     hooks = create_permission_hooks(notes_config.rw, notes_config.ro)
@@ -315,10 +312,6 @@ def build_options(
         mcp_servers=servers,
         add_dirs=[str(d) for d in notes_config.all_dirs],
         allowed_tools=policy.get_allowed_tools(),
-        output_format={
-            "type": "json_schema",
-            "schema": WritingOutput.model_json_schema(),
-        },
     )
 
 
@@ -350,10 +343,6 @@ def build_result(
 
     output = WritingOutput(
         title="Untitled",
-        content="",
-        google_doc_url="",
-        word_count=0,
-        sections_completed=0,
         summary="No output produced",
     )
     if result.structured_output:
@@ -374,9 +363,33 @@ def build_result(
     )
 
 
-async def run_batch(
-    source: str,
+def load_snapshot(session_id: str) -> PipelineSnapshot | None:
+    """Load a saved pipeline snapshot for resumption."""
+    from lup.paths import sessions_dir
+
+    snapshot_path = sessions_dir() / session_id / "pipeline_notes" / "snapshot.json"
+    if not snapshot_path.exists():
+        return None
+    return PipelineSnapshot.model_validate_json(
+        snapshot_path.read_text(encoding="utf-8")
+    )
+
+
+class SessionTrace:
+    """Holds trace state so callers can save on interrupt."""
+
+    def __init__(self, trace_logger: TraceLogger) -> None:
+        self.trace_logger = trace_logger
+
+    def save(self) -> Path:
+        return self.trace_logger.save()
+
+
+async def run_session(
     *,
+    source: str | None = None,
+    task: str | None = None,
+    resume_session_id: str | None = None,
     target_format: str = "lesswrong",
     existing_doc_id: str | None = None,
     session_id: str | None = None,
@@ -384,48 +397,71 @@ async def run_batch(
     refs: list[str] | None = None,
     listener: PipelineListener | None = None,
     on_action: ActionCallback | None = None,
+    persistent: bool = True,
+    trace_holder: list[SessionTrace] | None = None,
 ) -> AgentSessionResult:
-    """Run the writing pipeline.
+    """Unified entry point for all writing sessions.
 
-    This is the primary entry point for both batch and interactive modes.
-    The listener controls progress display and feedback collection.
-
-    Args:
-        source: Claude share link, URL, or file path.
-        target_format: Output format (lesswrong, twitter, blog).
-        session_id: Optional session identifier.
-        task_id: Optional task identifier.
-        refs: Additional reference URLs or file paths.
-        listener: Pipeline event listener (default logs to stdout).
-        on_action: Callback for agent actions (used by CLI for terminal output).
+    Exactly one of source, task, or resume_session_id must be provided:
+    - source: Run the full pipeline from source material (URL, file, share link)
+    - task: Run the pipeline using freeform text as source material
+    - resume_session_id: Resume from a saved pipeline snapshot
     """
     if session_id is None:
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_id = resume_session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    logger.info("Starting pipeline session %s", session_id)
+    logger.info("Starting session %s", session_id)
     reset_metrics()
 
     setup = setup_session(
         session_id,
-        persistent=False,
+        persistent=persistent,
         on_action=on_action,
     )
+
+    if trace_holder is not None:
+        trace_holder.append(SessionTrace(setup.trace_logger))
 
     cost_acc = CostAccumulator()
     pipeline_notes = PipelineNotes(setup.notes.session / "pipeline_notes")
 
-    output = await run_pipeline(
-        source,
-        target_format=target_format,
-        existing_doc_id=existing_doc_id,
-        session_state=setup.session_state,
-        notes=pipeline_notes,
-        trace_logger=setup.trace_logger,
-        refs=refs,
-        listener=listener,
-        max_budget_usd=settings.max_budget_usd,
-        cost_accumulator=cost_acc,
-    )
+    if resume_session_id:
+        snapshot = load_snapshot(resume_session_id)
+        if snapshot is None:
+            raise PipelineError(
+                f"No snapshot found for session '{resume_session_id}'. "
+                "Cannot resume without saved pipeline state."
+            )
+        if snapshot.output and snapshot.output.google_doc_id:
+            existing_doc_id = snapshot.output.google_doc_id
+
+        runner = PipelineRunner(
+            source or "",
+            target_format=target_format,
+            existing_doc_id=existing_doc_id,
+            session_state=setup.session_state,
+            notes=pipeline_notes,
+            trace_logger=setup.trace_logger,
+            refs=refs,
+            listener=listener,
+            max_budget_usd=settings.max_budget_usd,
+            cost_accumulator=cost_acc,
+        )
+        output = await runner.run_from(snapshot)
+    else:
+        pipeline_source = source or task or ""
+        output = await run_pipeline(
+            pipeline_source,
+            target_format=target_format,
+            existing_doc_id=existing_doc_id,
+            session_state=setup.session_state,
+            notes=pipeline_notes,
+            trace_logger=setup.trace_logger,
+            refs=refs,
+            listener=listener,
+            max_budget_usd=settings.max_budget_usd,
+            cost_accumulator=cost_acc,
+        )
 
     setup.trace_logger.save()
     log_metrics_summary()
@@ -453,6 +489,31 @@ async def run_batch(
     return result
 
 
+async def run_batch(
+    source: str,
+    *,
+    target_format: str = "lesswrong",
+    existing_doc_id: str | None = None,
+    session_id: str | None = None,
+    task_id: str | None = None,
+    refs: list[str] | None = None,
+    listener: PipelineListener | None = None,
+    on_action: ActionCallback | None = None,
+) -> AgentSessionResult:
+    """Backward-compatible wrapper around run_session for pipeline mode."""
+    return await run_session(
+        source=source,
+        target_format=target_format,
+        existing_doc_id=existing_doc_id,
+        session_id=session_id,
+        task_id=task_id,
+        refs=refs,
+        listener=listener,
+        on_action=on_action,
+        persistent=False,
+    )
+
+
 async def run_agent(
     task: str,
     *,
@@ -462,52 +523,12 @@ async def run_agent(
     persistent: bool = True,
     on_action: ActionCallback | None = None,
 ) -> AgentSessionResult:
-    """Run the writing agent as a freeform LLM session.
-
-    For the structured pipeline, use run_batch() instead.
-    This mode gives the agent all tools and a system prompt, then
-    lets it work freely — useful for open-ended tasks that don't
-    follow the extract-plan-research-write pipeline.
-
-    Args:
-        task: The writing task — a brief, revision request, or freeform instruction.
-        session_id: Optional session identifier.
-        task_id: Optional task identifier.
-        persistent: Whether to use sleep/wake persistent mode.
-        on_action: Callback for agent actions (used by CLI for terminal output).
-    """
-    if session_id is None:
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    logger.info("Starting freeform session %s (persistent=%s)", session_id, persistent)
-    reset_metrics()
-
-    setup = setup_session(
-        session_id,
-        persistent=persistent,
-        on_action=on_action,
-    )
-
-    if existing_doc_id:
-        doc_url = f"https://docs.google.com/document/d/{existing_doc_id}/edit"
-        setup.session_state.set_doc(existing_doc_id, doc_url)
-
-    with setup.sandbox:
-        collector = await query(
-            task,
-            options=setup.options,
-            trace_logger=setup.trace_logger,
-        )
-
-    setup.trace_logger.save()
-    log_metrics_summary()
-
-    session_result = build_result(
+    """Backward-compatible wrapper around run_session for freeform mode."""
+    return await run_session(
+        task=task,
+        existing_doc_id=existing_doc_id,
         session_id=session_id,
         task_id=task_id,
-        collector=collector,
+        on_action=on_action,
+        persistent=persistent,
     )
-
-    save_session(session_result, session_id=session_result.session_id)
-
-    return session_result

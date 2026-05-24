@@ -106,9 +106,9 @@ def create_watcher_tools(
         classified = await query(
             task,
             output_type=ClassifiedComment,
-            model="claude-haiku-4-5-20251001",
+            model="claude-opus-4-6",
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
-            max_turns=1,
+            max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
             prefix="[classify] ",
         )
@@ -219,7 +219,7 @@ def create_comment_watcher(
         tools=extract_sdk_tools(tools),
         build_message=build_message,
         start_message="[Comment watcher started — monitoring Google Doc for author feedback]",
-        model="claude-haiku-4-5-20251001",
+        model="claude-opus-4-6",
         debounce_seconds=5.0,
         allowed_tools=[
             "mcp__watcher__poll_and_classify",

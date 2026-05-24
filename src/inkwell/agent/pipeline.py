@@ -69,9 +69,11 @@ from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import do_extract_source
 from inkwell.agent.tools.formats import (
     FormatBlogInput,
+    FormatDialogInput,
     FormatLesswrongInput,
     FormatTwitterInput,
     do_format_blog,
+    do_format_dialog,
     do_format_lesswrong,
     do_format_twitter,
 )
@@ -99,21 +101,6 @@ logger = logging.getLogger(__name__)
 class PipelineError(Exception):
     """Raised when a pipeline stage fails to produce valid output."""
 
-
-class BudgetTracker:
-    """Tracks cumulative pipeline spend and computes remaining budget."""
-
-    def __init__(
-        self, max_budget_usd: float | None, accumulator: CostAccumulator
-    ) -> None:
-        self.max_budget_usd = max_budget_usd
-        self.accumulator = accumulator
-
-    def remaining(self) -> float | None:
-        if self.max_budget_usd is None:
-            return None
-        left = self.max_budget_usd - self.accumulator.total_cost_usd
-        return max(left, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +254,7 @@ async def plan_article(
     target_format: str = "lesswrong",
     voice_profile: VoiceProfile | None = None,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> ArticlePlan:
     """Stage 1: Extract a structured article plan from source material."""
@@ -281,9 +268,15 @@ async def plan_article(
     if voice_profile:
         voice_section += format_voice_profile(voice_profile)
 
+    format_hint = (
+        f"Suggested format: {target_format} (override if the content is better "
+        f"suited to another format: lesswrong, twitter, blog, dialog)"
+        if target_format
+        else "Choose the best output format: lesswrong, twitter, blog, or dialog"
+    )
     task = (
         f"Extract a structured article plan from this conversation.\n"
-        f"Target format: {target_format}\n\n"
+        f"{format_hint}\n\n"
         f"<conversation>\n{conversation}\n</conversation>"
         f"{voice_section}"
     )
@@ -295,10 +288,8 @@ async def plan_article(
         system_prompt=PLANNER_SYSTEM,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        max_turns=1,
         prefix="[plan] ",
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
         cost_accumulator=cost_accumulator,
     )
     if plan is None:
@@ -312,7 +303,7 @@ async def research_plan(
     feedback: list[str] | None = None,
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> ResearchCompilation:
     """Stage 2: Deep research on all questions from the article plan."""
@@ -347,7 +338,7 @@ async def research_plan(
         allowed_tools=research_tool_names(),
         trace_logger=trace_logger,
         prefix="[research] ",
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if research is None:
@@ -364,7 +355,7 @@ async def write_section(
     feedback: list[str] | None = None,
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> SectionDraft:
     """Write a single section. Called in parallel for all sections."""
@@ -427,7 +418,7 @@ async def write_section(
         allowed_tools=research_tool_names(),
         trace_logger=trace_logger,
         prefix=f"[write:{section_plan.title}] ",
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if draft is None:
@@ -445,7 +436,7 @@ async def write_all_sections(
     feedback: list[str] | None = None,
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
     listener: PipelineListener | None = None,
 ) -> list[SectionDraft]:
@@ -462,7 +453,7 @@ async def write_all_sections(
             feedback=feedback,
             servers=servers,
             trace_logger=trace_logger,
-            max_budget_usd=max_budget_usd,
+    
             cost_accumulator=cost_accumulator,
         )
         for section in plan.sections
@@ -497,7 +488,7 @@ async def merge_sections(
     voice_profile: VoiceProfile | None = None,
     feedback: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> MergedDraft:
     """Stage 4: Merge independently-written sections into a coherent draft."""
@@ -532,10 +523,10 @@ async def merge_sections(
         system_prompt=COHERENCE_EDITOR_PROMPT,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        max_turns=1,
+
         trace_logger=trace_logger,
         prefix="[merge] ",
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if merged is None:
@@ -548,7 +539,7 @@ async def review_narrative(
     plan: ArticlePlan,
     *,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
     """Review for narrative coherence (tool-free)."""
@@ -564,10 +555,10 @@ async def review_narrative(
         system_prompt=NARRATIVE_REVIEWER_PROMPT,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        max_turns=1,
+
         trace_logger=trace_logger,
         prefix="[review:narrative] ",
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if result is None:
@@ -583,7 +574,7 @@ async def review_facts(
     *,
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
     """Review for factual accuracy (needs research tools to verify)."""
@@ -605,7 +596,7 @@ async def review_facts(
         allowed_tools=review_tool_names(),
         trace_logger=trace_logger,
         prefix="[review:facts] ",
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if result is None:
@@ -620,7 +611,7 @@ async def review_style(
     plan: ArticlePlan,
     *,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
     """Review for writing quality and voice consistency (tool-free)."""
@@ -636,10 +627,10 @@ async def review_style(
         system_prompt=STYLE_REVIEWER_PROMPT,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        max_turns=1,
+
         trace_logger=trace_logger,
         prefix="[review:style] ",
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if result is None:
@@ -655,7 +646,7 @@ async def review_all(
     *,
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> list[ReviewFinding]:
     """Stage 5: Run all three reviewers in parallel."""
@@ -663,7 +654,7 @@ async def review_all(
         draft,
         plan,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     facts_task = review_facts(
@@ -671,14 +662,14 @@ async def review_all(
         plan,
         servers=servers,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     style_task = review_style(
         draft,
         plan,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
 
@@ -708,7 +699,7 @@ async def rewrite_final(
     feedback: list[str] | None = None,
     target_format: str = "lesswrong",
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
@@ -753,10 +744,10 @@ async def rewrite_final(
         system_prompt=REWRITER_SYSTEM,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        max_turns=1,
+
         trace_logger=trace_logger,
         prefix="[rewrite] ",
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if output is None:
@@ -797,6 +788,11 @@ async def apply_format(
                 )
             )
             return result.content
+        case "dialog":
+            result = await do_format_dialog(
+                FormatDialogInput(content=content)
+            )
+            return result.compiled
         case _:
             return content
 
@@ -812,7 +808,7 @@ async def surface_assumptions(
     *,
     session_state: WritingSessionState,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> AssumptionsList:
     """Surface uncertainties and questions from the plan as GDoc comments."""
@@ -831,13 +827,13 @@ async def surface_assumptions(
     result = await query(
         task,
         output_type=AssumptionsList,
-        model="claude-sonnet-4-20250514",
+        model="claude-opus-4-6",
         system_prompt=ASSUMPTIONS_PROMPT,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        max_turns=1,
         prefix="[assumptions] ",
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if result is None:
@@ -866,7 +862,7 @@ async def plan_restart(
     notes: PipelineNotes,
     *,
     trace_logger: TraceLogger | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> RestartStrategy:
     """Run the orchestrator to produce a fine-grained restart strategy."""
@@ -904,10 +900,10 @@ async def plan_restart(
         system_prompt=ORCHESTRATOR_PROMPT,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        max_turns=1,
+
         prefix="[orchestrator] ",
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     if strategy is None:
@@ -939,7 +935,7 @@ class PipelineRunner:
         trace_logger: TraceLogger | None = None,
         refs: list[str] | None = None,
         listener: PipelineListener | None = None,
-        max_budget_usd: float | None = None,
+    
         cost_accumulator: CostAccumulator | None = None,
     ) -> None:
         self.source = source
@@ -954,7 +950,6 @@ class PipelineRunner:
         if cost_accumulator is None:
             cost_accumulator = CostAccumulator()
         self.cost_accumulator = cost_accumulator
-        self.budget = BudgetTracker(max_budget_usd, cost_accumulator)
 
         self.snapshot = PipelineSnapshot()
         self.plan_breaking = asyncio.Event()
@@ -1165,30 +1160,14 @@ class PipelineRunner:
         """Analyze the author's writing voice."""
         await self.hooks.on_stage("voice", "Analyzing author's writing voice")
         corpus_samples, _ = load_style_corpus(max_samples=3)
-
-        voice_profile: VoiceProfile | None = None
-        for attempt in range(3):
-            try:
-                voice_profile = await do_analyze_voice(
-                    self.snapshot.conversation,
-                    corpus_samples,
-                    trace_logger=self.trace_logger,
-                    max_budget_usd=self.budget.remaining(),
-                    cost_accumulator=self.cost_accumulator,
-                )
-            except (RuntimeError, ValueError):
-                logger.warning("Voice analysis attempt %d failed", attempt + 1, exc_info=True)
-                voice_profile = None
-            if voice_profile is not None:
-                break
-            if attempt < 2:
-                await self.hooks.on_progress(
-                    f"Voice analysis failed (attempt {attempt + 1}/3), retrying..."
-                )
-
+        voice_profile = await do_analyze_voice(
+            self.snapshot.conversation,
+            corpus_samples,
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
         if voice_profile is None:
-            raise PipelineError("Voice analysis failed after 3 attempts")
-
+            raise PipelineError("Voice analysis produced no structured output")
         self.snapshot.voice_profile = voice_profile
         self.snapshot.stage = "voice"
         await self.save_snapshot()
@@ -1220,7 +1199,7 @@ class PipelineRunner:
             target_format=self.target_format,
             voice_profile=self.snapshot.voice_profile,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
         self.snapshot.plan = plan
@@ -1245,7 +1224,7 @@ class PipelineRunner:
             self.doc_id,
             session_state=self.state,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
         self.snapshot.stage = "assumptions"
@@ -1274,7 +1253,7 @@ class PipelineRunner:
             feedback=feedback_with_notes,
             servers=self.research_servers,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
         self.snapshot.research = research
@@ -1310,7 +1289,7 @@ class PipelineRunner:
             feedback=feedback_with_notes,
             servers=self.research_servers,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
             listener=self.hooks,
         )
@@ -1355,7 +1334,7 @@ class PipelineRunner:
             voice_profile=self.snapshot.voice_profile,
             feedback=feedback_with_notes,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
         self.snapshot.merged = merged
@@ -1389,7 +1368,7 @@ class PipelineRunner:
             plan,
             servers=self.research_servers,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
         self.snapshot.findings = findings
@@ -1422,7 +1401,7 @@ class PipelineRunner:
             feedback=feedback_with_notes,
             target_format=self.target_format,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
         output.voice_profile = self.snapshot.voice_profile
@@ -1438,10 +1417,11 @@ class PipelineRunner:
         if output is None or plan is None:
             raise PipelineError("Cannot format without output and plan")
 
-        await self.hooks.on_stage("format", f"Applying {self.target_format} formatting")
+        chosen_format = plan.target_format or self.target_format
+        await self.hooks.on_stage("format", f"Applying {chosen_format} formatting")
         article_text = output.content or output.summary
         final_content = await apply_format(
-            article_text, plan.title, self.target_format
+            article_text, plan.title, chosen_format
         )
 
         if "Final" not in self.known_tabs:
@@ -1492,7 +1472,7 @@ class PipelineRunner:
             self.snapshot,
             notes,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
         self.restart_count += 1
@@ -1550,13 +1530,13 @@ class PipelineRunner:
         patched = await query(
             task,
             output_type=SectionDraft,
-            model="claude-sonnet-4-20250514",
+            model="claude-opus-4-6",
             system_prompt=SECTION_WRITER_PROMPT,
+            max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
-            max_turns=1,
             prefix=f"[patch:{section}] ",
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
         if patched:
@@ -1583,7 +1563,7 @@ class PipelineRunner:
                     voice_profile=self.snapshot.voice_profile,
                     servers=self.research_servers,
                     trace_logger=self.trace_logger,
-                    max_budget_usd=self.budget.remaining(),
+        
                     cost_accumulator=self.cost_accumulator,
                 )
             )
@@ -1596,7 +1576,7 @@ class PipelineRunner:
                     voice_profile=self.snapshot.voice_profile,
                     servers=self.research_servers,
                     trace_logger=self.trace_logger,
-                    max_budget_usd=self.budget.remaining(),
+        
                     cost_accumulator=self.cost_accumulator,
                 )
             )
@@ -1701,7 +1681,7 @@ class PipelineRunner:
             feedback=feedback,
             target_format=self.target_format,
             trace_logger=self.trace_logger,
-            max_budget_usd=self.budget.remaining(),
+
             cost_accumulator=self.cost_accumulator,
         )
 
@@ -1972,7 +1952,7 @@ async def run_pipeline(
     trace_logger: TraceLogger | None = None,
     refs: list[str] | None = None,
     listener: PipelineListener | None = None,
-    max_budget_usd: float | None = None,
+
     cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Run the complete writing pipeline.
@@ -1988,7 +1968,7 @@ async def run_pipeline(
         trace_logger=trace_logger,
         refs=refs,
         listener=listener,
-        max_budget_usd=max_budget_usd,
+
         cost_accumulator=cost_accumulator,
     )
     return await runner.run()

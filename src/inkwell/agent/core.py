@@ -444,7 +444,6 @@ async def run_session(
             trace_logger=setup.trace_logger,
             refs=refs,
             listener=listener,
-            max_budget_usd=settings.max_budget_usd,
             cost_accumulator=cost_acc,
         )
         output = await runner.run_from(snapshot)
@@ -459,7 +458,6 @@ async def run_session(
             trace_logger=setup.trace_logger,
             refs=refs,
             listener=listener,
-            max_budget_usd=settings.max_budget_usd,
             cost_accumulator=cost_acc,
         )
 

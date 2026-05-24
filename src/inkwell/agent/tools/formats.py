@@ -44,6 +44,29 @@ class FormatTwitterOutput(BaseModel):
     thread_count: int = Field(description="Number of tweets in thread")
 
 
+class DialogTurn(BaseModel):
+    speaker: str = Field(description="Name or role of the speaker (e.g. 'Alice', 'Skeptic')")
+    text: str = Field(description="What the speaker says in this turn")
+
+
+class FormatDialogInput(BaseModel):
+    content: str = Field(description="Full article content to restructure as dialog")
+    speakers: list[str] | None = Field(
+        default=None,
+        description="Named participants (e.g. ['Alice', 'Bob'] or ['Advocate', 'Skeptic']). If omitted, the agent chooses names fitting the content.",
+    )
+    preamble: str = Field(
+        default="",
+        description="Optional brief introduction before the dialog begins",
+    )
+
+
+class FormatDialogOutput(BaseModel):
+    preamble: str = Field(description="Introduction before the dialog")
+    turns: list[DialogTurn] = Field(description="The dialog as structured turns")
+    compiled: str = Field(description="Rendered dialog as markdown text")
+
+
 class FormatBlogInput(BaseModel):
     content: str = Field(description="Full article markdown content")
     title: str = Field(description="Article title")
@@ -161,6 +184,57 @@ def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
     )
 
 
+async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
+    """Structure content as a dialog between named speakers via LLM query."""
+    from lup.client import query
+
+    class DialogTurns(BaseModel):
+        turns: list[DialogTurn] = Field(description="Dialog turns in order")
+
+    speaker_directive = (
+        f"Use these speakers: {', '.join(params.speakers)}"
+        if params.speakers
+        else "Choose 2-3 speaker names that fit the content (e.g. named characters, roles like 'Skeptic'/'Advocate', or domain-appropriate labels)"
+    )
+    result = await query(
+        (
+            f"Rewrite this content as a natural dialog.\n"
+            f"{speaker_directive}\n\n"
+            f"Each speaker should have a distinct perspective. Distribute the "
+            f"content's arguments and insights across speakers naturally — one "
+            f"might raise objections, another might provide evidence, etc.\n\n"
+            f"<content>\n{params.content}\n</content>"
+        ),
+        output_type=DialogTurns,
+        model="claude-opus-4-6",
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        system_prompt=(
+            "You restructure articles into dialogs. Each turn should feel natural "
+            "and conversational while preserving the substance of the original. "
+            "Vary turn length — some responses are a sentence, others a paragraph."
+        ),
+    )
+    turns = result.turns if result else []
+
+    lines: list[str] = []
+    if params.preamble:
+        lines.append(f"*{params.preamble}*")
+        lines.append("")
+
+    for turn in turns:
+        lines.append(f"**{turn.speaker}:** {turn.text}")
+        lines.append("")
+
+    compiled = "\n".join(lines).strip()
+
+    return FormatDialogOutput(
+        preamble=params.preamble,
+        turns=turns,
+        compiled=compiled,
+    )
+
+
 def do_format_blog(params: FormatBlogInput) -> FormatBlogOutput:
     lines: list[str] = []
     lines.append(f"# {params.title}")
@@ -250,4 +324,15 @@ async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
     return do_format_blog(params)
 
 
-FORMAT_TOOLS = [format_lesswrong, format_twitter, format_blog]
+@lup_tool(
+    "Restructure an article as a dialog between named speakers. Each speaker "
+    "gets a distinct perspective — one might advocate, another might push back. "
+    "Produces structured turns (speaker + text) and a compiled markdown rendering. "
+    "Use this when the content is naturally dialectical (opposing views, Q&A, "
+    "interview format, Socratic exploration). Call after the final draft is complete."
+)
+async def format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
+    return await do_format_dialog(params)
+
+
+FORMAT_TOOLS = [format_lesswrong, format_twitter, format_blog, format_dialog]

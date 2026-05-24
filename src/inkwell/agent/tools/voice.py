@@ -12,40 +12,43 @@ import trafilatura
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import settings
-from lup.client import query
+from lup.client import CostAccumulator, query
+from lup.trace import TraceLogger
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
 
 
 class VoiceProfile(BaseModel):
-    """Structured profile of an author's writing voice."""
+    """Freeform profile of an author's writing voice."""
 
-    formality: str = Field(
-        description="Level: 'casual', 'conversational', 'professional', 'academic'"
+    voice: str = Field(
+        description=(
+            "Extensive freeform voice analysis. Write several paragraphs covering "
+            "everything distinctive about this author's writing: tone, rhythm, "
+            "sentence structure, formality, humor, hedging patterns, argumentation "
+            "style, paragraph construction, technical depth, how they open and close "
+            "pieces, how they handle uncertainty, what makes them sound like *them* "
+            "and not a generic writer. Be specific and evocative — a writer should "
+            "be able to read this and produce convincing imitation."
+        )
     )
-    sentence_rhythm: str = Field(
-        description="Mix of short/medium/long sentences and variation patterns"
-    )
-    hedging_style: str = Field(
-        description="How the author handles uncertainty (e.g. 'I think', 'probably', 'it seems')"
-    )
-    humor: str = Field(
-        description="Humor style or 'none'. E.g. 'dry asides', 'self-deprecating', 'wordplay'"
-    )
-    technical_depth: str = Field(
-        description="How deep they go technically: 'accessible', 'moderate', 'expert-level'"
-    )
-    characteristic_phrases: list[str] = Field(
+    phrases: list[str] = Field(
         default_factory=list,
-        description="Recurring phrases, verbal tics, or signature expressions",
+        description=(
+            "Exact phrases, constructions, and verbal tics to preserve or reuse. "
+            "Include recurring expressions, signature sentence starters, "
+            "characteristic transitions, and any phrases the author has explicitly "
+            "requested be used."
+        ),
     )
-    paragraph_style: str = Field(description="Typical paragraph length and structure")
-    argumentation: str = Field(
-        description="How they build arguments: 'bottom-up evidence', 'top-down thesis', 'exploratory', 'dialectical'"
-    )
-    summary: str = Field(
-        description="2-3 sentence overall voice description a writer could use to imitate"
+    avoid: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Anti-patterns — things this author never does or would reject. "
+            "E.g. 'never uses exclamation marks', 'avoids listicle format', "
+            "'no corporate jargon', 'doesn't hedge with \"I think\"'."
+        ),
     )
 
 
@@ -149,9 +152,24 @@ async def load_corpus(params: LoadCorpusInput) -> LoadCorpusOutput:
 
 
 VOICE_ANALYSIS_PROMPT = """\
-Analyze the writing samples below and produce a structured voice profile. \
+Analyze the writing samples below and produce a voice profile.
+
 Focus on what makes this author's voice distinctive — not generic writing \
-observations. Be specific enough that a writer could imitate this voice.
+observations. A ghostwriter should be able to read your analysis and produce \
+convincing imitation.
+
+In the `voice` field, write several detailed paragraphs. Cover tone, rhythm, \
+sentence structure, formality, humor, hedging patterns, argumentation style, \
+paragraph construction, technical depth — everything that makes this person \
+sound like *them*. Use specific examples from the samples. Be evocative, not \
+taxonomic — "writes like a confident insider explaining to smart friends" is \
+better than "formality: conversational."
+
+In `phrases`, extract exact recurring expressions, constructions, and verbal \
+tics. Include signature sentence starters, characteristic transitions, and any \
+phrases that feel load-bearing for the voice.
+
+In `avoid`, note things this author clearly never does or would reject.
 
 ## Samples
 
@@ -162,6 +180,8 @@ observations. Be specific enough that a writer could imitate this voice.
 async def do_analyze_voice(
     text: str,
     corpus_samples: list[str] | None = None,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> VoiceProfile | None:
     """Analyze writing samples and return a structured voice profile.
 
@@ -174,12 +194,14 @@ async def do_analyze_voice(
 
     result = await query(
         VOICE_ANALYSIS_PROMPT.format(samples_text=samples_text[:8000]),
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-6",
         system_prompt="You are a writing style analyst.",
-        max_thinking_tokens=4000,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         output_type=VoiceProfile,
-        max_turns=1,
+        prefix="[voice] ",
+        trace_logger=trace_logger,
+        cost_accumulator=cost_accumulator,
     )
     return result
 
@@ -194,12 +216,13 @@ class AnalyzeVoiceInput(BaseModel):
 
 
 @lup_tool(
-    "Analyze writing samples and produce a structured voice profile. "
+    "Analyze writing samples and produce a freeform voice profile. "
     "Call this after loading the style corpus and extracting the source "
     "conversation. Pass the author's text (conversation excerpts, past "
-    "writing) and get back a structured profile: formality, sentence "
-    "rhythm, hedging style, humor, argumentation patterns, and "
-    "characteristic phrases. Section writers use this to match voice."
+    "writing) and get back a detailed voice analysis: extensive freeform "
+    "notes on what makes this author distinctive, extracted phrases and "
+    "verbal tics to preserve, and anti-patterns to avoid. Section writers "
+    "use this to match voice."
 )
 async def analyze_voice(params: AnalyzeVoiceInput) -> VoiceProfile:
     corpus_samples, _ = load_style_corpus(max_samples=3)

@@ -26,15 +26,11 @@ compile factual, well-sourced findings.
 6. Flag contradictions between sources rather than picking a winner
 7. Record specific data points (numbers, dates, statistics) separately
 
-## Tools
+## Capabilities
 
-- **exa_search**: Semantic web search — your primary tool for finding sources
-- **search_arxiv** / **fetch_arxiv**: Academic papers for scientific claims
-- **fetch_url**: Read the full text of any URL you find
-- **WebSearch**: Broad keyword search for topics Exa misses
-- **fred_search** / **fred_series**: US economic data (GDP, unemployment, CPI, etc.)
-- **polymarket_search** / **manifold_search** / **search_markets**: Prediction market consensus
-- **wiki_search** / **fetch_wikipedia**: Wikipedia for background context and definitions
+You have access to semantic web search, academic paper search (arXiv), \
+URL fetching, US economic data (FRED), prediction markets, and Wikipedia. \
+Use whatever combination of tools is needed to answer each question thoroughly.
 
 ## Output
 
@@ -119,6 +115,7 @@ Return structured findings with:
 - location: which section or paragraph
 - issue: what you found
 - suggestion: how to fix it
+- text_excerpt: quote the exact passage from the draft that this finding refers to, verbatim
 
 Be specific. "The transition between sections 2 and 3 is abrupt" is useful. \
 "Could be better" is not.
@@ -151,6 +148,7 @@ Return structured findings with:
 - location: which section and claim
 - issue: what you found (or couldn't verify)
 - suggestion: correction or source to add
+- text_excerpt: quote the exact passage from the draft that contains the claim, verbatim
 
 Don't flag subjective opinions or analysis as factual errors — only verifiable claims.
 """
@@ -177,8 +175,7 @@ Return structured findings with:
 - location: which section or paragraph
 - issue: what you noticed
 - suggestion: specific rewrite or approach
-
-Quote the problematic text when flagging issues.
+- text_excerpt: quote the exact passage from the draft that this finding refers to, verbatim
 """
 
 
@@ -193,6 +190,100 @@ Focus on what makes the author's perspective unique. Don't over-structure \
 
 REWRITER_SYSTEM = """\
 You produce the final version of an article by incorporating review feedback. \
+Return the full article text in the 'content' field and a brief 1-2 sentence \
+editorial summary in the 'summary' field. \
 Prioritize critical findings over suggestions. Author preferences override \
 reviewer suggestions. Don't over-edit — leave sections alone if reviewers \
 found nothing wrong."""
+
+
+ASSUMPTIONS_PROMPT = """\
+You surface uncertainties, assumptions, and points of confusion from an \
+article plan. Your job is NOT to validate the plan — it's to make the \
+implicit explicit so the author can correct course early.
+
+## What to Surface
+
+- **direction_check**: The plan could go in different directions. \
+"Should this focus on X or Y?" "Is the audience technical or general?"
+- **assumption**: Something the plan takes for granted. \
+"I'm assuming the reader already knows Z." "I'm treating A and B as equivalent."
+- **question**: A gap in the source material. \
+"The conversation mentions X but doesn't explain how." "No data given for this claim."
+- **confusion**: Contradictory or unclear information. \
+"The author says both X and Y, which seem to conflict." \
+"This quote could support either interpretation."
+
+## Output
+
+Return a list of items, each tagged with its type, containing the \
+uncertainty and your best guess (what you'll proceed with if the author \
+doesn't respond). Link each to a specific section in the plan.
+
+Be thorough — surface everything you'd want clarified if you were the \
+writer starting this piece. Better to ask too many questions than to \
+proceed with wrong assumptions."""
+
+
+ORCHESTRATOR_PROMPT = """\
+You are a pipeline orchestrator deciding how to handle author feedback \
+that may require reworking parts of an article.
+
+You receive:
+1. The current article plan
+2. The current section drafts (if any exist)
+3. All author feedback (comments, replies, terminal input)
+
+Your job is to produce a RestartStrategy — a precise plan for which \
+sections to preserve, patch, rewrite, add, or drop.
+
+## Decision Framework
+
+For each existing section, decide:
+- **preserve**: The feedback doesn't affect this section. Keep the draft as-is.
+- **patch**: Minor changes needed — a paragraph reframe, emphasis shift, or \
+factual correction. Specify the target text and instruction.
+- **rewrite**: The section's angle, thesis, or structure is invalidated. \
+Needs full re-research and re-writing. List new research questions.
+- **drop**: The section is no longer relevant to the revised plan.
+
+For new sections the feedback implies:
+- **add**: Specify a full SectionPlan and where to insert it.
+
+## Guidelines
+
+- Preserve aggressively. Most comments affect 1-2 sections, not the whole article.
+- A comment about tone or emphasis is usually a patch, not a rewrite.
+- A comment about the thesis or core argument is usually plan-breaking \
+and may require a new plan + multiple rewrites.
+- If you produce a new_plan, make sure the actions are consistent with it.
+- Consider cross-section dependencies: if section 3 references section 1's \
+argument, and section 1 is rewritten, section 3 may need at least a patch.
+- set needs_remerge=true whenever any section is patched, rewritten, or added."""
+
+
+COMMENT_CLASSIFIER_PROMPT = """\
+Classify this author comment by its impact on the writing pipeline.
+
+## Impact Levels
+
+- **plan_breaking**: This comment invalidates the article's thesis, \
+overall structure, or core argument. The plan needs revision. \
+Examples: "That's not what I meant at all", "Wrong angle entirely", \
+"The thesis should be about X not Y", "Scrap this and start over."
+- **stage_local**: This comment affects the current or next stage but \
+doesn't invalidate the plan. Examples: "Emphasize this more", \
+"Add a section on X", "The tone is too formal", "Move this paragraph."
+- **clarification**: A factual correction, scope note, or answer to a \
+question. Examples: "I meant the 2024 version", "That's the wrong date", \
+"Yes, include that quote."
+
+## Tags
+
+Also tag the comment with semantic categories (zero or more): \
+tone, structure, fact, scope, emphasis, style, question_answer, \
+formatting, research.
+
+Classify based on the comment's actual content, not its phrasing. \
+A polite suggestion can be plan-breaking; a strong opinion can be \
+stage-local."""

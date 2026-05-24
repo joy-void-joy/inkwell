@@ -320,6 +320,15 @@ async def do_create_doc(
     return doc_id, url
 
 
+async def do_rename_doc(doc_id: str, title: str) -> None:
+    """Rename a Google Doc via Drive API."""
+    svc = services()
+    drive = svc.drive_service()
+    await execute_with_retry(
+        drive.files().update(fileId=doc_id, body={"name": title})
+    )
+
+
 async def do_create_tab(
     doc_id: str,
     name: str,
@@ -408,17 +417,45 @@ async def do_insert_comment(
     return comment_id
 
 
-async def do_read_tab(doc_id: str, tab_id: str) -> str:
-    """Read the text content of a tab. Returns plain text."""
+async def do_reply_to_comment(
+    doc_id: str,
+    comment_id: str,
+    reply_text: str,
+) -> str:
+    """Post a reply to an existing comment. Returns reply ID."""
+    svc = services()
+    drive = svc.drive_service()
+    result = await execute_with_retry(
+        drive.replies().create(
+            fileId=doc_id,
+            commentId=comment_id,
+            body={"content": reply_text},
+            fields="replyId",
+        )
+    )
+    return str(result.get("replyId", ""))
+
+
+async def do_read_tab(
+    doc_id: str, tab_id: str, *, accept_suggestions: bool = False
+) -> str:
+    """Read the text content of a tab. Returns plain text.
+
+    With accept_suggestions=True, reads the doc as if all pending
+    suggestions were accepted — detects both direct edits and
+    suggestion-mode changes in one read.
+    """
     svc = services()
     docs = svc.docs_service()
 
-    doc = await execute_with_retry(
-        docs.documents().get(
-            documentId=doc_id,
-            includeTabsContent=True,
-        )
-    )
+    kwargs: dict[str, object] = {
+        "documentId": doc_id,
+        "includeTabsContent": True,
+    }
+    if accept_suggestions:
+        kwargs["suggestionsViewMode"] = "PREVIEW_SUGGESTIONS_ACCEPTED"
+
+    doc = await execute_with_retry(docs.documents().get(**kwargs))
 
     _, tab = find_tab_by_id(doc, tab_id)
     return extract_tab_text(tab)

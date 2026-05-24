@@ -57,6 +57,7 @@ from lup.trace import TraceLogger
 
 from inkwell.agent.config import settings
 from inkwell.agent.models import AgentSessionResult, WritingOutput
+from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import PipelineListener, run_pipeline
 from inkwell.agent.prompts import get_system_prompt
 from inkwell.agent.session import WritingContext, WritingSessionState
@@ -411,12 +412,14 @@ async def run_batch(
     )
 
     cost_acc = CostAccumulator()
+    pipeline_notes = PipelineNotes(setup.notes.session / "pipeline_notes")
 
     output = await run_pipeline(
         source,
         target_format=target_format,
         existing_doc_id=existing_doc_id,
         session_state=setup.session_state,
+        notes=pipeline_notes,
         trace_logger=setup.trace_logger,
         refs=refs,
         listener=listener,

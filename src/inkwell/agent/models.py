@@ -2,18 +2,20 @@
 
 Defines the structured data flowing through the writing pipeline:
 conversation extraction -> planning -> research -> writing -> review -> rewrite.
+
+Also defines models for the interaction-robust pipeline: comment classification,
+restart strategies, assumptions, and pipeline snapshot state.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field
 
 from lup.history import SessionResult
 
-if TYPE_CHECKING:
-    from inkwell.agent.tools.voice import VoiceProfile
+from inkwell.agent.tools.voice import VoiceProfile
 
 
 class SourceQuote(BaseModel):
@@ -154,6 +156,178 @@ class MergedDraft(BaseModel):
     changes_made: list[str] = Field(
         description="Summary of edits made during merging (transitions, deduplication, etc.)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Comment classification (used by Comment Watcher)
+# ---------------------------------------------------------------------------
+
+
+class ClassifiedComment(BaseModel):
+    """A GDoc comment classified by impact on the pipeline."""
+
+    comment_id: str = Field(description="Google Drive comment ID")
+    content: str = Field(description="Comment text")
+    anchor_text: str = Field(default="", description="Quoted text the comment is anchored to")
+    reply: str = Field(default="", description="Author's reply text, if replying to an agent comment")
+    impact: Literal["plan_breaking", "stage_local", "clarification"] = Field(
+        description=(
+            "plan_breaking: invalidates thesis/structure, requires re-planning. "
+            "stage_local: affects current/next stage only. "
+            "clarification: factual correction or scope note."
+        )
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="Semantic tags: 'tone', 'structure', 'fact', 'scope', etc.",
+    )
+    timestamp: str = Field(default="", description="ISO timestamp when classified")
+
+
+# ---------------------------------------------------------------------------
+# Assumptions stage output
+# ---------------------------------------------------------------------------
+
+
+class Assumption(BaseModel):
+    """A single uncertainty surfaced by the assumptions stage."""
+
+    tag: Literal["direction_check", "assumption", "question", "confusion"] = Field(
+        description=(
+            "direction_check: which way should this go? "
+            "assumption: something the agent is assuming without confirmation. "
+            "question: a gap in the source material. "
+            "confusion: contradictory or unclear information."
+        )
+    )
+    content: str = Field(description="The uncertainty, question, or assumption")
+    best_guess: str = Field(
+        description="What the agent will proceed with if the author doesn't respond"
+    )
+    anchor_section: str = Field(description="Which plan section this relates to")
+
+
+class AssumptionsList(BaseModel):
+    """Output of the assumptions stage — all uncertainties surfaced at once."""
+
+    items: list[Assumption] = Field(description="All assumptions and questions to surface")
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator: restart strategy
+# ---------------------------------------------------------------------------
+
+
+class PatchAction(BaseModel):
+    """Rewrite a specific passage within a section."""
+
+    kind: Literal["patch"] = "patch"
+    section: str = Field(description="Section title to patch")
+    target_text: str = Field(description="The paragraph or passage to replace")
+    instruction: str = Field(description="What to change and why")
+
+
+class RewriteAction(BaseModel):
+    """Full re-research and re-write of a section."""
+
+    kind: Literal["rewrite"] = "rewrite"
+    section: str = Field(description="Section title to rewrite from scratch")
+    reason: str = Field(description="Why this section needs a full rewrite")
+    new_research_questions: list[str] = Field(
+        default_factory=list,
+        description="Additional research questions for the rewritten section",
+    )
+
+
+class AddAction(BaseModel):
+    """Add a new section to the article."""
+
+    kind: Literal["add"] = "add"
+    section_plan: SectionPlan = Field(description="Plan for the new section")
+    insert_after: str = Field(description="Title of the section to insert after")
+
+
+class DropAction(BaseModel):
+    """Remove a section from the article."""
+
+    kind: Literal["drop"] = "drop"
+    section: str = Field(description="Section title to remove")
+    reason: str = Field(description="Why this section should be dropped")
+
+
+class PreserveAction(BaseModel):
+    """Keep a section as-is — no changes needed."""
+
+    kind: Literal["preserve"] = "preserve"
+    section: str = Field(description="Section title to keep unchanged")
+
+
+RestartAction = Annotated[
+    Union[PatchAction, RewriteAction, AddAction, DropAction, PreserveAction],
+    Field(discriminator="kind"),
+]
+
+
+class RestartStrategy(BaseModel):
+    """The orchestrator's plan for rework after plan-breaking feedback."""
+
+    new_plan: ArticlePlan | None = Field(
+        default=None,
+        description="Revised article plan, or None to keep current plan",
+    )
+    actions: list[RestartAction] = Field(
+        description="Action for each section: preserve, patch, rewrite, add, or drop"
+    )
+    needs_remerge: bool = Field(
+        description="Whether the merge step should re-run after executing actions"
+    )
+    rationale: str = Field(description="Why this strategy was chosen")
+
+
+# ---------------------------------------------------------------------------
+# Pipeline snapshot (accumulated artifacts for state machine)
+# ---------------------------------------------------------------------------
+
+
+class PipelineSnapshot(BaseModel):
+    """Accumulated artifacts from the pipeline, used for restarts and state tracking."""
+
+    generation: int = Field(default=0, description="Incremented on each restart")
+    stage: str = Field(default="init", description="Current pipeline stage")
+    conversation: str = Field(default="", description="Extracted source text")
+    voice_profile: VoiceProfile | None = Field(default=None)
+    plan: ArticlePlan | None = Field(default=None)
+    research: ResearchCompilation | None = Field(default=None)
+    section_drafts: dict[str, SectionDraft] = Field(
+        default_factory=dict, description="Section title -> draft"
+    )
+    merged: MergedDraft | None = Field(default=None)
+    findings: list[ReviewFinding] = Field(default_factory=list)
+    output: WritingOutput | None = Field(default=None)
+
+    def clear_downstream(self, from_stage: str) -> None:
+        """Discard artifacts produced after the given stage."""
+        stages = ["init", "extract", "voice", "plan", "assumptions",
+                  "research", "write", "merge", "review", "rewrite", "format"]
+        try:
+            idx = stages.index(from_stage)
+        except ValueError:
+            return
+        if idx <= stages.index("plan"):
+            self.research = None
+        if idx <= stages.index("research"):
+            self.section_drafts = {}
+        if idx <= stages.index("write"):
+            self.merged = None
+        if idx <= stages.index("merge"):
+            self.findings = []
+        if idx <= stages.index("review"):
+            self.output = None
+
+
+# ---------------------------------------------------------------------------
+# Final output
+# ---------------------------------------------------------------------------
 
 
 class WritingOutput(BaseModel):

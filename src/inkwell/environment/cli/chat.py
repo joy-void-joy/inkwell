@@ -37,16 +37,18 @@ logger = logging.getLogger(__name__)
 
 
 STAGE_LABELS: dict[str, str] = {
-    "extract": "Extracting source material",
-    "voice": "Analyzing author's voice",
-    "plan": "Planning article structure",
-    "research": "Researching claims",
-    "write": "Writing sections",
-    "merge": "Merging into draft",
-    "review": "Reviewing draft",
-    "rewrite": "Final rewrite",
-    "format": "Formatting output",
-    "revise": "Revising",
+    "extract": "📄 Extracting source material",
+    "voice": "🎙️ Analyzing author's voice",
+    "plan": "🗺️ Planning article structure",
+    "assumptions": "❓ Surfacing questions for author",
+    "research": "🔍 Researching claims",
+    "write": "✍️ Writing sections",
+    "merge": "🧩 Merging into draft",
+    "review": "🔎 Reviewing draft",
+    "rewrite": "✨ Final rewrite",
+    "format": "📐 Formatting output",
+    "restart": "🔁 Replanning from author feedback",
+    "revise": "🔄 Revising",
 }
 
 
@@ -74,7 +76,7 @@ class InteractiveListener(PipelineListener):
         )
 
     async def on_progress(self, message: str) -> None:
-        self.console.print(f"  [dim]{message}[/dim]")
+        self.console.print(f"  💭 [dim]{message}[/dim]")
 
     async def on_complete(self, output: WritingOutput) -> None:
         self.console.print()
@@ -91,7 +93,7 @@ class InteractiveListener(PipelineListener):
         )
 
     async def on_message(self, source: str, message: str) -> None:
-        self.console.print(f"  [dim][{source}] {message}[/dim]")
+        self.console.print(f"  💬 [dim]{message}[/dim]")
 
     async def collect_feedback(self, state: WritingSessionState) -> list[str]:
         feedback = await super().collect_feedback(state)
@@ -294,8 +296,6 @@ async def chat_session(
     """
     if verbose:
         logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
 
     if session_id is None:
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")

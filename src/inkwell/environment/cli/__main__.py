@@ -1,30 +1,35 @@
 """Inkwell CLI — interactive writing agent.
 
 Usage:
-    inkwell write "https://claude.ai/share/abc123"
-    inkwell write "https://claude.ai/share/abc123" --ref "https://arxiv.org/..."
-    inkwell style add "https://lesswrong.com/posts/my-best-post"
-    inkwell style list
+    inkwell                                          # open interactive chat
+    inkwell write "https://claude.ai/share/abc123"   # run the pipeline
+    inkwell style add "https://lesswrong.com/..."     # manage voice corpus
 """
 
 import asyncio
 import logging
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Annotated
+from urllib.parse import urlparse
 
-import sh
 import typer
 
-from inkwell.agent.config import settings
-from inkwell.agent.core import run_agent
-from inkwell.agent.models import AgentSessionResult
-
 logger = logging.getLogger(__name__)
+
+
+def extract_doc_id_from_url(url: str) -> str:
+    """Extract a Google Doc ID from a URL like docs.google.com/document/d/{id}/edit."""
+    path = PurePosixPath(urlparse(url).path)
+    parts = path.parts
+    for i, part in enumerate(parts):
+        if part == "d" and i + 1 < len(parts):
+            return parts[i + 1]
+    return ""
 
 app = typer.Typer(
     name="inkwell",
     help="AI writing agent — transforms conversations into polished articles",
-    no_args_is_help=True,
+    no_args_is_help=False,
     add_completion=False,
 )
 
@@ -38,68 +43,14 @@ app.add_typer(style_app, name="style")
 
 @app.callback(invoke_without_command=True)
 def callback(ctx: typer.Context) -> None:
-    """AI writing agent."""
+    """AI writing agent — opens interactive chat when run with no arguments."""
     if ctx.invoked_subcommand is None:
-        raise typer.Exit()
+        from inkwell.environment.cli.chat import chat_session
 
-
-async def run_session(
-    task: str,
-    *,
-    session_id: str | None = None,
-    persistent: bool = True,
-) -> AgentSessionResult:
-    logger.info("Starting session with model: %s", settings.model)
-
-    async def on_action(content: str) -> None:
-        typer.echo(f"\n[inkwell] {content}")
-
-    result = await run_agent(
-        task,
-        session_id=session_id,
-        persistent=persistent,
-        on_action=on_action if persistent else None,
-    )
-
-    logger.info(
-        "Session %s completed (cost: $%.4f, duration: %.1fs)",
-        result.session_id,
-        result.cost_usd or 0,
-        result.duration_seconds or 0,
-    )
-
-    return result
-
-
-def commit_results() -> None:
-    git = sh.Command("git")
-    status = str(git.status("--porcelain", "--", "notes/", _ok_code=[0])).strip()
-    if not status:
-        return
-
-    try:
-        git.add("notes/")
-        diff = str(git.diff("--cached", "--stat", _ok_code=[0, 1])).strip()
-        if diff:
-            git.commit("-m", "data(writing): auto-commit session results")
-            typer.echo("Committed session results.")
-    except sh.ErrorReturnCode as e:
-        logger.warning("Auto-commit failed: %s", e)
-
-
-def print_result(result: AgentSessionResult) -> None:
-    typer.echo(f"\nSession: {result.session_id}")
-    typer.echo(f"Title: {result.output.title}")
-    if result.output.google_doc_url:
-        typer.echo(f"Google Doc: {result.output.google_doc_url}")
-    typer.echo(f"Sections: {result.output.sections_completed}")
-    typer.echo(f"Word count: {result.output.word_count}")
-    if result.output.open_questions:
-        typer.echo(f"Open questions: {len(result.output.open_questions)}")
-    if result.cost_usd:
-        typer.echo(f"Cost: ${result.cost_usd:.4f}")
-    if result.duration_seconds:
-        typer.echo(f"Duration: {result.duration_seconds:.1f}s")
+        try:
+            asyncio.run(chat_session())
+        except KeyboardInterrupt:
+            pass
 
 
 @app.command()
@@ -116,14 +67,14 @@ def write(
         str,
         typer.Option("--format", "-f", help="Target format: lesswrong, twitter, blog"),
     ] = "lesswrong",
+    doc: Annotated[
+        str | None,
+        typer.Option("--doc", "-d", help="Existing Google Doc URL or ID to write into"),
+    ] = None,
     session_id: Annotated[
         str | None,
         typer.Option("--session-id", "-s", help="Session identifier"),
     ] = None,
-    no_persist: Annotated[
-        bool,
-        typer.Option("--no-persist", help="Run as one-shot (no sleep/wake loop)"),
-    ] = False,
     verbose: Annotated[
         bool,
         typer.Option("--verbose", "-v", help="Enable verbose logging"),
@@ -134,124 +85,262 @@ def write(
     SOURCE can be:
     - A Claude.ai share link (https://claude.ai/share/...)
     - A URL to extract content from
-    - A direct writing brief as text
+    - A local file path
 
-    The agent writes into a Google Doc you can follow in real time.
-    It sleeps at checkpoints so you can leave comments, then continues.
+    Runs the full pipeline (plan, research, write, review, rewrite)
+    with live progress in the terminal and a Google Doc for collaboration.
 
     Examples:
         inkwell write "https://claude.ai/share/abc123"
         inkwell write "https://claude.ai/share/abc123" --ref "paper.pdf" -f twitter
+        inkwell write "https://claude.ai/share/abc123" --doc "https://docs.google.com/document/d/..."
     """
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
+    from inkwell.environment.cli.chat import chat_session
 
-    task_parts = [f"Write a {target_format} article from this source: {source}"]
+    doc_id: str | None = None
+    if doc:
+        if doc.startswith("http"):
+            doc_id = extract_doc_id_from_url(doc)
+        else:
+            doc_id = doc
 
-    if ref:
-        task_parts.append("\nAdditional references:")
-        for r in ref:
-            task_parts.append(f"- {r}")
-
-    style_dir = Path(settings.style_corpus_path)
-    if style_dir.exists():
-        style_files = list(style_dir.glob("*.md")) + list(style_dir.glob("*.txt"))
-        if style_files:
-            task_parts.append(
-                f"\nStyle corpus available at {style_dir} ({len(style_files)} references)"
+    try:
+        asyncio.run(
+            chat_session(
+                initial_task=source,
+                session_id=session_id,
+                target_format=target_format,
+                refs=ref,
+                existing_doc_id=doc_id,
+                verbose=verbose,
             )
-
-    task = "\n".join(task_parts)
-
-    result = asyncio.run(
-        run_session(task, session_id=session_id, persistent=not no_persist)
-    )
-    print_result(result)
+        )
+    except KeyboardInterrupt:
+        pass
 
 
 @app.command()
 def run(
-    task: Annotated[str, typer.Argument(help="Task for the agent")],
+    task: Annotated[str, typer.Argument(help="Freeform task for the agent")],
     session_id: Annotated[
         str | None,
         typer.Option("--session-id", "-s", help="Session identifier"),
     ] = None,
-    no_persist: Annotated[
-        bool,
-        typer.Option("--no-persist", help="Run as one-shot (no sleep/wake loop)"),
-    ] = False,
     verbose: Annotated[
         bool,
         typer.Option("--verbose", "-v", help="Enable verbose logging"),
     ] = False,
 ) -> None:
-    """Run the agent with a freeform task (advanced)."""
+    """Run the agent with a freeform task (no pipeline).
+
+    For structured article writing, use `inkwell write` instead.
+    This mode gives the agent all tools and lets it work freely.
+    """
+    from rich.console import Console
+
+    from inkwell.agent.core import run_agent
+
     if verbose:
         logging.basicConfig(level=logging.DEBUG)
     else:
         logging.basicConfig(level=logging.INFO)
 
-    result = asyncio.run(
-        run_session(task, session_id=session_id, persistent=not no_persist)
-    )
-    print_result(result)
+    console = Console(highlight=False)
+    console.print("[dim]Running agent...[/dim]")
+
+    async def on_action(content: str) -> None:
+        console.print(f"  [dim]{content[:120]}[/dim]")
+
+    try:
+        result = asyncio.run(
+            run_agent(
+                task,
+                session_id=session_id,
+                persistent=False,
+                on_action=on_action,
+            )
+        )
+        console.print(f"\n[bold]Title:[/bold] {result.output.title}")
+        if result.output.google_doc_url:
+            console.print(f"[bold]Doc:[/bold]   {result.output.google_doc_url}")
+        console.print(f"[bold]Words:[/bold] {result.output.word_count}")
+        if result.cost_usd is not None:
+            console.print(f"[bold]Cost:[/bold]  ${result.cost_usd:.2f}")
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/dim]")
+    except (RuntimeError, OSError, ConnectionError) as exc:
+        console.print(f"\n[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command()
-def loop(
-    tasks: Annotated[list[str], typer.Argument(help="Tasks to process")],
+def sessions(
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", help="Max sessions to show"),
+    ] = 20,
+) -> None:
+    """List past writing sessions."""
+    from lup.history import get_latest_session_json, list_all_sessions
+
+    session_ids = list_all_sessions()
+    if not session_ids:
+        typer.echo("No sessions found.")
+        return
+
+    for sid in session_ids[-limit:]:
+        data = get_latest_session_json(sid)
+        if data is None:
+            typer.echo(f"  {sid}  (no data)")
+            continue
+
+        title = ""
+        doc_url = ""
+        output = data.get("output")
+        if isinstance(output, dict):
+            t = output.get("title")
+            if isinstance(t, str):
+                title = t
+            u = output.get("google_doc_url")
+            if isinstance(u, str):
+                doc_url = u
+
+        cost = data.get("cost_usd")
+
+        parts = [f"  {sid}"]
+        if title:
+            parts.append(f"  {title}")
+        if isinstance(cost, (int, float)):
+            parts.append(f"  ${cost:.2f}")
+        typer.echo("".join(parts))
+        if doc_url:
+            typer.echo(f"    {doc_url}")
+
+
+@app.command()
+def resume(
+    session_id: Annotated[
+        str,
+        typer.Argument(help="Session ID to resume (see `inkwell sessions`)"),
+    ],
     verbose: Annotated[
         bool,
         typer.Option("--verbose", "-v", help="Enable verbose logging"),
     ] = False,
-    auto_commit: Annotated[
-        bool,
-        typer.Option("--commit/--no-commit", help="Auto-commit results"),
-    ] = True,
 ) -> None:
-    """Run multiple writing sessions in sequence."""
+    """Resume a previous writing session.
+
+    Loads the session's Google Doc and pipeline state, then continues
+    the agent with context about what was already done.
+
+    Examples:
+        inkwell sessions                      # find the session ID
+        inkwell resume 20260523_143022        # resume it
+    """
+    from lup.history import get_latest_session_json
+
+    data = get_latest_session_json(session_id)
+    if data is None:
+        typer.echo(f"Session '{session_id}' not found. Use `inkwell sessions` to list.")
+        raise typer.Exit(1)
+
+    output = data.get("output")
+    doc_id = ""
+    doc_url = ""
+    title = ""
+    summary = ""
+    review_findings: list[object] = []
+    open_questions: list[str] = []
+    voice_summary = ""
+    if isinstance(output, dict):
+        d = output.get("google_doc_id")
+        if isinstance(d, str):
+            doc_id = d
+        u = output.get("google_doc_url")
+        if isinstance(u, str):
+            doc_url = u
+            if not doc_id:
+                doc_id = extract_doc_id_from_url(u)
+        t = output.get("title")
+        if isinstance(t, str):
+            title = t
+        s = output.get("summary")
+        if isinstance(s, str):
+            summary = s
+        rf = output.get("review_findings")
+        if isinstance(rf, list):
+            review_findings = rf
+        oq = output.get("open_questions")
+        if isinstance(oq, list):
+            open_questions = [str(q) for q in oq]
+        vp = output.get("voice_profile")
+        if isinstance(vp, dict):
+            vs = vp.get("summary")
+            if isinstance(vs, str):
+                voice_summary = vs
+
+    task_parts = [f"Resume the writing session for: {title or session_id}"]
+    if doc_url:
+        task_parts.append(f"\nGoogle Doc: {doc_url}")
+    if summary:
+        task_parts.append(f"\nPrevious session summary: {summary}")
+    if voice_summary:
+        task_parts.append(f"\nVoice profile: {voice_summary}")
+    if open_questions:
+        task_parts.append(
+            "\nOpen questions from previous session:\n"
+            + "\n".join(f"- {q}" for q in open_questions)
+        )
+    if review_findings:
+        critical = [
+            f
+            for f in review_findings
+            if isinstance(f, dict) and f.get("severity") == "critical"
+        ]
+        if critical:
+            task_parts.append(f"\n{len(critical)} unresolved critical review findings.")
+    task_parts.append(
+        "\nRead the Google Doc to understand current state. "
+        "Check for author comments and continue where the session left off."
+    )
+
+    from rich.console import Console
+
+    from inkwell.agent.core import run_agent
+
     if verbose:
         logging.basicConfig(level=logging.DEBUG)
     else:
         logging.basicConfig(level=logging.INFO)
 
-    results: list[AgentSessionResult] = []
-    total_cost = 0.0
+    console = Console(highlight=False)
 
-    for i, task in enumerate(tasks, 1):
-        typer.echo(f"\n{'=' * 60}")
-        typer.echo(f"Task {i}/{len(tasks)}: {task[:80]}")
-        typer.echo(f"{'=' * 60}")
+    async def on_action(content: str) -> None:
+        console.print(f"  [dim]{content[:120]}[/dim]")
 
-        try:
-            result = asyncio.run(run_session(task))
-            results.append(result)
-            total_cost += result.cost_usd or 0
-            print_result(result)
-        except RuntimeError as e:
-            typer.echo(f"Error: {e}", err=True)
-            continue
-        except Exception as e:
-            typer.echo(f"Unexpected error: {e}", err=True)
-            logger.exception("Unexpected error on task %d/%d", i, len(tasks))
-            continue
-
-        if auto_commit:
-            commit_results()
-
-    typer.echo(f"\n{'=' * 60}")
-    typer.echo(f"Completed {len(results)}/{len(tasks)} sessions")
-    typer.echo(f"Total cost: ${total_cost:.4f}")
+    try:
+        result = asyncio.run(
+            run_agent(
+                "\n".join(task_parts),
+                existing_doc_id=doc_id or None,
+                session_id=session_id,
+                persistent=True,
+                on_action=on_action,
+            )
+        )
+        console.print(f"\n[bold]Title:[/bold] {result.output.title}")
+        if result.output.google_doc_url:
+            console.print(f"[bold]Doc:[/bold]   {result.output.google_doc_url}")
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/dim]")
+    except (RuntimeError, OSError, ConnectionError) as exc:
+        console.print(f"\n[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command()
 def setup() -> None:
-    """Run the setup wizard to configure integrations.
-
-    Shortcut for `lup-devtools setup`.
-    """
+    """Run the setup wizard to configure integrations."""
     from inkwell.devtools.setup import main as setup_main
 
     ctx = typer.Context(typer.main.get_command(app))
@@ -273,49 +362,27 @@ def style_add(
         inkwell style add "https://lesswrong.com/posts/my-post"
         inkwell style add ~/writing/my-essay.md
     """
-    style_dir = Path(settings.style_corpus_path)
-    style_dir.mkdir(parents=True, exist_ok=True)
+    from inkwell.agent.tools.voice import add_style_reference
 
-    source_path = Path(source).expanduser()
-    if source_path.exists():
-        content = source_path.read_text(encoding="utf-8")
-        dest = style_dir / source_path.name
-        dest.write_text(content, encoding="utf-8")
-        typer.echo(f"Added {source_path.name} to style corpus ({len(content)} chars)")
-    else:
-        refs_file = style_dir / "urls.txt"
-        existing = refs_file.read_text(encoding="utf-8") if refs_file.exists() else ""
-        if source not in existing:
-            with refs_file.open("a", encoding="utf-8") as f:
-                f.write(source + "\n")
-            typer.echo(f"Added URL to style corpus: {source}")
-        else:
-            typer.echo(f"URL already in style corpus: {source}")
+    typer.echo(add_style_reference(source))
 
 
 @style_app.command("list")
 def style_list() -> None:
     """List the current style corpus."""
-    style_dir = Path(settings.style_corpus_path)
-    if not style_dir.exists():
+    from inkwell.agent.tools.voice import list_style_references
+
+    entries = list_style_references()
+    if not entries:
         typer.echo("No style corpus configured. Use `inkwell style add` to start.")
         return
 
-    files = list(style_dir.glob("*.md")) + list(style_dir.glob("*.txt"))
-    if not files:
-        typer.echo("Style corpus is empty.")
-        return
-
     typer.echo("Style corpus:")
-    for f in sorted(files):
-        if f.name == "urls.txt":
-            urls = f.read_text(encoding="utf-8").strip().split("\n")
-            for url in urls:
-                if url.strip():
-                    typer.echo(f"  [url] {url.strip()}")
+    for entry in entries:
+        if entry.kind == "url":
+            typer.echo(f"  [url]  {entry.name}")
         else:
-            size = f.stat().st_size
-            typer.echo(f"  [file] {f.name} ({size:,} bytes)")
+            typer.echo(f"  [file] {entry.name} ({entry.size:,} bytes)")
 
 
 if __name__ == "__main__":

@@ -4,9 +4,16 @@ Defines the structured data flowing through the writing pipeline:
 conversation extraction -> planning -> research -> writing -> review -> rewrite.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Literal
+
 from pydantic import BaseModel, Field
 
 from lup.history import SessionResult
+
+if TYPE_CHECKING:
+    from inkwell.agent.tools.voice import VoiceProfile
 
 
 class SourceQuote(BaseModel):
@@ -122,16 +129,39 @@ class ReviewFinding(BaseModel):
     reviewer: str = Field(
         description="Which reviewer: 'narrative', 'factcheck', or 'style'"
     )
-    severity: str = Field(description="'critical', 'suggestion', or 'praise'")
+    severity: Literal["critical", "suggestion", "praise"] = Field(
+        description="'critical', 'suggestion', or 'praise'"
+    )
     location: str = Field(description="Section or paragraph reference")
     issue: str = Field(description="What the reviewer found")
     suggestion: str = Field(description="Suggested fix or improvement")
+    text_excerpt: str = Field(
+        default="",
+        description="Exact verbatim text excerpt from the draft that this finding refers to, for anchoring comments",
+    )
+
+
+class ReviewOutput(BaseModel):
+    """Structured output from a reviewer agent."""
+
+    findings: list[ReviewFinding] = Field(description="All findings from this reviewer")
+
+
+class MergedDraft(BaseModel):
+    """Output of the coherence editor — a unified draft from independent sections."""
+
+    content: str = Field(description="The complete merged draft in markdown")
+    changes_made: list[str] = Field(
+        description="Summary of edits made during merging (transitions, deduplication, etc.)"
+    )
 
 
 class WritingOutput(BaseModel):
     """Final structured output from the writing pipeline."""
 
     title: str = Field(description="Final article title")
+    content: str = Field(default="", description="Full article content in markdown")
+    google_doc_id: str = Field(default="", description="Google Doc ID")
     google_doc_url: str = Field(description="URL of the Google Doc with the article")
     word_count: int = Field(description="Total word count")
     sections_completed: int = Field(description="Number of sections written")
@@ -142,7 +172,11 @@ class WritingOutput(BaseModel):
         default_factory=list,
         description="Questions for the author left as Google Doc comments",
     )
-    summary: str = Field(description="Brief summary of what was written")
+    voice_profile: VoiceProfile | None = Field(
+        default=None,
+        description="Author voice profile used during writing",
+    )
+    summary: str = Field(description="Brief 1-2 sentence editorial summary")
 
 
 AgentSessionResult = SessionResult[WritingOutput]

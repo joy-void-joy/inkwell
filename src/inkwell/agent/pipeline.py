@@ -17,8 +17,8 @@ import logging
 
 from claude_agent_sdk import McpServerConfig
 
-from lup.client import query
-from lup.mcp import create_mcp_server, extract_sdk_tools
+from lup.client import CostAccumulator, query
+from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
 from lup.trace import TraceLogger
 
 from inkwell.agent.config import settings
@@ -58,6 +58,8 @@ from inkwell.agent.tools.google_docs import (
     do_create_doc,
     do_create_tab,
     do_insert_comment,
+    do_list_tabs,
+    do_read_tab,
     do_write_tab,
 )
 from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
@@ -73,6 +75,22 @@ logger = logging.getLogger(__name__)
 
 class PipelineError(Exception):
     """Raised when a pipeline stage fails to produce valid output."""
+
+
+class BudgetTracker:
+    """Tracks cumulative pipeline spend and computes remaining budget."""
+
+    def __init__(
+        self, max_budget_usd: float | None, accumulator: CostAccumulator
+    ) -> None:
+        self.max_budget_usd = max_budget_usd
+        self.accumulator = accumulator
+
+    def remaining(self) -> float | None:
+        if self.max_budget_usd is None:
+            return None
+        left = self.max_budget_usd - self.accumulator.total_cost_usd
+        return max(left, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -99,20 +117,25 @@ class PipelineListener:
         """Called when the pipeline finishes."""
         logger.info("Pipeline complete: '%s'", output.title)
 
+    async def on_message(self, source: str, message: str) -> None:
+        """Informational message from a pipeline stage."""
+        logger.info("[%s] %s", source, message)
+
     async def collect_feedback(self, state: WritingSessionState) -> list[str]:
         """Gather author feedback from all channels at a stage boundary.
 
-        Returns a list of context strings to pass to the next stage.
+        Returns a list of tagged context strings to pass to the next stage.
         The default implementation checks Google Doc comments.
         """
         comments = state.get_new_author_comments()
         feedback: list[str] = []
         for c in comments:
-            line = c["content"]
-            if c["anchor_text"]:
-                line += f' (on: "{c["anchor_text"]}")'
             if c["reply"]:
-                line = f'Author reply to "{c["content"]}": {c["reply"]}'
+                line = f'[GDoc Reply] Author reply to "{c["content"]}": {c["reply"]}'
+            else:
+                line = f"[GDoc Comment] {c['content']}"
+                if c["anchor_text"]:
+                    line += f' (on: "{c["anchor_text"]}")'
             feedback.append(line)
         return feedback
 
@@ -130,9 +153,9 @@ class PipelineListener:
 # ---------------------------------------------------------------------------
 
 
-def build_research_servers() -> dict[str, McpServerConfig]:
-    """MCP servers for research-capable stages."""
-    research_tool_list = [
+def build_research_tools() -> list[LupMcpTool]:
+    """Flat list of all research MCP tools."""
+    return [
         *EXA_TOOLS,
         *ARXIV_TOOLS,
         *FETCH_TOOLS,
@@ -140,10 +163,14 @@ def build_research_servers() -> dict[str, McpServerConfig]:
         *MARKET_TOOLS,
         *WIKIPEDIA_TOOLS,
     ]
+
+
+def build_research_servers() -> dict[str, McpServerConfig]:
+    """MCP servers for research-capable stages."""
     research_server = create_mcp_server(
         name="research",
         version="1.0.0",
-        tools=extract_sdk_tools(research_tool_list),
+        tools=extract_sdk_tools(build_research_tools()),
     )
     return {"research": research_server}
 
@@ -168,6 +195,7 @@ async def plan_article(
     voice_profile: VoiceProfile | None = None,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> ArticlePlan:
     """Stage 1: Extract a structured article plan from source material."""
     voice_section = ""
@@ -207,6 +235,7 @@ async def plan_article(
         max_turns=1,
         trace_logger=trace_logger,
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     if plan is None:
         raise PipelineError("Planner produced no structured output")
@@ -220,6 +249,7 @@ async def research_plan(
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> ResearchCompilation:
     """Stage 2: Deep research on all questions from the article plan."""
     if servers is None:
@@ -254,6 +284,7 @@ async def research_plan(
         trace_logger=trace_logger,
         prefix="[research] ",
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     if research is None:
         raise PipelineError("Researcher produced no structured output")
@@ -270,6 +301,7 @@ async def write_section(
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> SectionDraft:
     """Write a single section. Called in parallel for all sections."""
     if servers is None:
@@ -337,6 +369,7 @@ async def write_section(
         trace_logger=trace_logger,
         prefix=f"[write:{section_plan.title}] ",
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     if draft is None:
         raise PipelineError(
@@ -354,6 +387,8 @@ async def write_all_sections(
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+    listener: PipelineListener | None = None,
 ) -> list[SectionDraft]:
     """Stage 3: Write all sections in parallel."""
     if servers is None:
@@ -369,6 +404,7 @@ async def write_all_sections(
             servers=servers,
             trace_logger=trace_logger,
             max_budget_usd=max_budget_usd,
+            cost_accumulator=cost_accumulator,
         )
         for section in plan.sections
     ]
@@ -387,6 +423,11 @@ async def write_all_sections(
             )
         else:
             drafts.append(result)
+            if listener:
+                await listener.on_message(
+                    "write",
+                    f"Section '{result.title}' complete ({result.word_count} words)",
+                )
     return drafts
 
 
@@ -394,12 +435,30 @@ async def merge_sections(
     drafts: list[SectionDraft],
     plan: ArticlePlan,
     *,
+    voice_profile: VoiceProfile | None = None,
     feedback: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> MergedDraft:
     """Stage 4: Merge independently-written sections into a coherent draft."""
-    sections_text = "\n\n---\n\n".join(f"## {d.title}\n\n{d.content}" for d in drafts)
+    valid_drafts = [d for d in drafts if not d.content.startswith("[Section failed")]
+    if not valid_drafts:
+        raise PipelineError("All sections failed — nothing to merge")
+
+    sections_text = "\n\n---\n\n".join(
+        f"## {d.title}\n\n{d.content}" for d in valid_drafts
+    )
+
+    voice_section = ""
+    if voice_profile:
+        voice_section = (
+            f"\n\n## Voice Profile\n"
+            f"Summary: {voice_profile.summary}\n"
+            f"Formality: {voice_profile.formality}, "
+            f"humor: {voice_profile.humor}, "
+            f"depth: {voice_profile.technical_depth}\n"
+        )
 
     task = (
         f"Merge these independently-written sections into a coherent draft "
@@ -409,6 +468,7 @@ async def merge_sections(
         f"Fix transitions, remove redundancy, normalize depth. "
         f"The draft should read as if one person wrote it in one sitting. "
         f"Return the complete merged text in the 'content' field."
+        f"{voice_section}"
         f"{format_feedback(feedback or [])}"
     )
 
@@ -423,6 +483,7 @@ async def merge_sections(
         trace_logger=trace_logger,
         prefix="[merge] ",
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     if merged is None:
         raise PipelineError("Coherence editor produced no structured output")
@@ -435,6 +496,7 @@ async def review_narrative(
     *,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
     """Review for narrative coherence (tool-free)."""
     task = (
@@ -453,6 +515,7 @@ async def review_narrative(
         trace_logger=trace_logger,
         prefix="[review:narrative] ",
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     if result is None:
         return ReviewOutput(findings=[])
@@ -468,6 +531,7 @@ async def review_facts(
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
     """Review for factual accuracy (needs research tools to verify)."""
     if servers is None:
@@ -489,6 +553,7 @@ async def review_facts(
         trace_logger=trace_logger,
         prefix="[review:facts] ",
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     if result is None:
         return ReviewOutput(findings=[])
@@ -503,6 +568,7 @@ async def review_style(
     *,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
     """Review for writing quality and voice consistency (tool-free)."""
     task = (
@@ -521,6 +587,7 @@ async def review_style(
         trace_logger=trace_logger,
         prefix="[review:style] ",
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     if result is None:
         return ReviewOutput(findings=[])
@@ -536,10 +603,15 @@ async def review_all(
     servers: dict[str, McpServerConfig] | None = None,
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> list[ReviewFinding]:
     """Stage 5: Run all three reviewers in parallel."""
     narrative_task = review_narrative(
-        draft, plan, trace_logger=trace_logger, max_budget_usd=max_budget_usd
+        draft,
+        plan,
+        trace_logger=trace_logger,
+        max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     facts_task = review_facts(
         draft,
@@ -547,9 +619,14 @@ async def review_all(
         servers=servers,
         trace_logger=trace_logger,
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     style_task = review_style(
-        draft, plan, trace_logger=trace_logger, max_budget_usd=max_budget_usd
+        draft,
+        plan,
+        trace_logger=trace_logger,
+        max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
 
     results = await asyncio.gather(
@@ -574,10 +651,12 @@ async def rewrite_final(
     findings: list[ReviewFinding],
     plan: ArticlePlan,
     *,
+    voice_profile: VoiceProfile | None = None,
     feedback: list[str] | None = None,
     target_format: str = "lesswrong",
     trace_logger: TraceLogger | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
     findings_by_severity = {
@@ -597,6 +676,16 @@ async def rewrite_final(
                     f"  Suggestion: {f.suggestion}\n"
                 )
 
+    voice_section = ""
+    if voice_profile:
+        voice_section = (
+            f"\n\n## Voice Profile\n"
+            f"Summary: {voice_profile.summary}\n"
+            f"Formality: {voice_profile.formality}, "
+            f"humor: {voice_profile.humor}, "
+            f"depth: {voice_profile.technical_depth}\n"
+        )
+
     task = (
         f'Produce the final version of "{plan.title}".\n\n'
         f"Target format: {target_format}\n\n"
@@ -604,8 +693,9 @@ async def rewrite_final(
         f"## Review Findings\n{findings_text or '(no findings)'}\n\n"
         f"## Author Direction\n{plan.author_direction}\n\n"
         f"Apply all critical fixes. Consider suggestions. "
-        f"Return the final article content in the 'summary' field "
-        f"and populate all WritingOutput fields."
+        f"Return the full article text in the 'content' field "
+        f"and a brief 1-2 sentence editorial summary in the 'summary' field."
+        f"{voice_section}"
         f"{format_feedback(feedback or [])}"
     )
 
@@ -620,6 +710,7 @@ async def rewrite_final(
         trace_logger=trace_logger,
         prefix="[rewrite] ",
         max_budget_usd=max_budget_usd,
+        cost_accumulator=cost_accumulator,
     )
     if output is None:
         raise PipelineError("Rewriter produced no structured output")
@@ -672,11 +763,13 @@ async def run_pipeline(
     source: str,
     *,
     target_format: str = "lesswrong",
+    existing_doc_id: str | None = None,
     session_state: WritingSessionState | None = None,
     trace_logger: TraceLogger | None = None,
     refs: list[str] | None = None,
     listener: PipelineListener | None = None,
     max_budget_usd: float | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Run the complete writing pipeline.
 
@@ -687,6 +780,10 @@ async def run_pipeline(
     state = session_state or WritingSessionState()
     configure_session_state(state)
     hooks = listener or PipelineListener()
+
+    if cost_accumulator is None:
+        cost_accumulator = CostAccumulator()
+    budget = BudgetTracker(max_budget_usd, cost_accumulator)
 
     research_servers = build_research_servers()
 
@@ -718,27 +815,52 @@ async def run_pipeline(
         target_format=target_format,
         voice_profile=voice_profile,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+        max_budget_usd=budget.remaining(),
+        cost_accumulator=cost_accumulator,
     )
     await hooks.on_progress(
         f"Plan: '{plan.title}' — {len(plan.sections)} sections, "
         f"{len(plan.research_questions)} research questions"
     )
 
-    # ── Create Google Doc ─────────────────────────────────────────────
-    doc_id, doc_url = await do_create_doc(
-        plan.title,
-        share_with=settings.author_email,
-        session_state=state,
-    )
-    await hooks.on_progress(f"Google Doc: {doc_url}")
+    # ── Create or reuse Google Doc ───────────────────────────────────
+    known_tabs: dict[str, str] = {}
+    if existing_doc_id:
+        doc_id = existing_doc_id
+        doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+        state.set_doc(doc_id, doc_url)
+        await hooks.on_progress(f"Reusing Google Doc: {doc_url}")
 
-    overview_tab_id = await do_create_tab(doc_id, "Overview", session_state=state)
-    tab_ids: dict[str, str] = {}
-    for section in plan.sections:
-        tab_name = f"§{len(tab_ids) + 1} {section.title}"
-        tid = await do_create_tab(doc_id, tab_name, session_state=state)
-        tab_ids[section.title] = tid
+        existing_tabs = await do_list_tabs(doc_id)
+        known_tabs = {t.title: t.tab_id for t in existing_tabs}
+
+        overview_tab_id = known_tabs.get("Overview", "")
+        if not overview_tab_id:
+            overview_tab_id = await do_create_tab(doc_id, "Overview", session_state=state)
+
+        tab_ids: dict[str, str] = {}
+        for section in plan.sections:
+            tab_name = f"§{len(tab_ids) + 1} {section.title}"
+            if tab_name in known_tabs:
+                tab_ids[section.title] = known_tabs[tab_name]
+                state.add_section(tab_name, known_tabs[tab_name])
+            else:
+                tid = await do_create_tab(doc_id, tab_name, session_state=state)
+                tab_ids[section.title] = tid
+    else:
+        doc_id, doc_url = await do_create_doc(
+            plan.title,
+            share_with=settings.author_email,
+            session_state=state,
+        )
+        await hooks.on_progress(f"Google Doc: {doc_url}")
+
+        overview_tab_id = await do_create_tab(doc_id, "Overview", session_state=state)
+        tab_ids = {}
+        for section in plan.sections:
+            tab_name = f"§{len(tab_ids) + 1} {section.title}"
+            tid = await do_create_tab(doc_id, tab_name, session_state=state)
+            tab_ids[section.title] = tid
 
     await do_write_tab(
         doc_id,
@@ -766,7 +888,8 @@ async def run_pipeline(
         feedback=feedback,
         servers=research_servers,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+        max_budget_usd=budget.remaining(),
+        cost_accumulator=cost_accumulator,
     )
     await hooks.on_progress(f"Research complete: {len(research.findings)} findings")
 
@@ -797,7 +920,9 @@ async def run_pipeline(
         feedback=feedback,
         servers=research_servers,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+        max_budget_usd=budget.remaining(),
+        cost_accumulator=cost_accumulator,
+        listener=hooks,
     )
 
     for draft in drafts:
@@ -805,6 +930,14 @@ async def run_pipeline(
         if tid and draft.content and not draft.content.startswith("[Section failed"):
             await do_write_tab(doc_id, tid, draft.content, session_state=state)
             state.update_section_status(draft.title, "drafted")
+
+        for question in draft.questions_for_author:
+            await do_insert_comment(
+                doc_id,
+                f"[QUESTION] {question}",
+                session_state=state,
+            )
+            state.add_question(question)
 
     # ── Feedback checkpoint: after writing ────────────────────────────
     feedback = await hooks.collect_feedback(state)
@@ -815,12 +948,16 @@ async def run_pipeline(
     merged = await merge_sections(
         drafts,
         plan,
+        voice_profile=voice_profile,
         feedback=feedback,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+        max_budget_usd=budget.remaining(),
+        cost_accumulator=cost_accumulator,
     )
 
-    draft_tab_id = await do_create_tab(doc_id, "Draft", session_state=state)
+    draft_tab_id = known_tabs.get("Draft", "")
+    if not draft_tab_id:
+        draft_tab_id = await do_create_tab(doc_id, "Draft", session_state=state)
     await do_write_tab(doc_id, draft_tab_id, merged.content, session_state=state)
 
     # ── Feedback checkpoint: after merge ──────────────────────────────
@@ -845,7 +982,8 @@ async def run_pipeline(
         plan,
         servers=research_servers,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+        max_budget_usd=budget.remaining(),
+        cost_accumulator=cost_accumulator,
     )
     await hooks.on_progress(
         f"Review complete: {len(findings)} findings "
@@ -854,11 +992,12 @@ async def run_pipeline(
 
     for finding in findings:
         if finding.severity == "critical":
+            anchor = finding.text_excerpt if finding.text_excerpt else None
             await do_insert_comment(
                 doc_id,
                 f"[{finding.reviewer.upper()}] {finding.issue}\n\n"
                 f"Suggestion: {finding.suggestion}",
-                anchor_text=finding.location if len(finding.location) > 10 else None,
+                anchor_text=anchor,
                 session_state=state,
             )
 
@@ -872,19 +1011,28 @@ async def run_pipeline(
         merged.content,
         findings,
         plan,
+        voice_profile=voice_profile,
         feedback=feedback,
         target_format=target_format,
         trace_logger=trace_logger,
-        max_budget_usd=max_budget_usd,
+        max_budget_usd=budget.remaining(),
+        cost_accumulator=cost_accumulator,
     )
+
+    output.voice_profile = voice_profile
+    output.open_questions = list(state.pending_questions)
 
     # ── Stage 8: Format ───────────────────────────────────────────────
     await hooks.on_stage("format", f"Applying {target_format} formatting")
-    final_content = await apply_format(output.summary, plan.title, target_format)
+    article_text = output.content or output.summary
+    final_content = await apply_format(article_text, plan.title, target_format)
 
-    final_tab_id = await do_create_tab(doc_id, "Final", session_state=state)
+    final_tab_id = known_tabs.get("Final", "")
+    if not final_tab_id:
+        final_tab_id = await do_create_tab(doc_id, "Final", session_state=state)
     await do_write_tab(doc_id, final_tab_id, final_content, session_state=state)
 
+    output.google_doc_id = doc_id
     output.google_doc_url = doc_url
     output.sections_completed = sum(
         1 for d in drafts if not d.content.startswith("[Section failed")
@@ -919,20 +1067,32 @@ async def run_pipeline(
             break
         await hooks.on_stage("revise", f"Revising: {revision[:60]}")
         state.set_stage("revising")
+
+        current_content = final_content
+        try:
+            current_content = await do_read_tab(doc_id, final_tab_id)
+        except (RuntimeError, OSError):
+            logger.warning("Could not read Final tab; using last known content")
+
         all_feedback = await hooks.collect_feedback(state)
         all_feedback.insert(0, revision)
         output = await rewrite_final(
-            merged.content,
+            current_content,
             findings,
             plan,
+            voice_profile=voice_profile,
             feedback=all_feedback,
             target_format=target_format,
             trace_logger=trace_logger,
-            max_budget_usd=max_budget_usd,
+            max_budget_usd=budget.remaining(),
+            cost_accumulator=cost_accumulator,
         )
-        final_content = await apply_format(output.summary, plan.title, target_format)
+        article_text = output.content or output.summary
+        final_content = await apply_format(article_text, plan.title, target_format)
         await do_write_tab(doc_id, final_tab_id, final_content, session_state=state)
+        output.google_doc_id = doc_id
         output.google_doc_url = doc_url
+        output.voice_profile = voice_profile
         output.word_count = len(final_content.split())  # claude: ignore
         await hooks.on_complete(output)
 

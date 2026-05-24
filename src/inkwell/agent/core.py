@@ -34,7 +34,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk import McpServerConfig
 from claude_agent_sdk.types import HookContext, HookEvent, SyncHookJSONOutput
 
-from lup.client import ResponseCollector, TokenUsage, query
+from lup.client import CostAccumulator, ResponseCollector, TokenUsage, query
 from lup.history import save_session
 from lup.hooks import (
     HooksConfig,
@@ -65,12 +65,7 @@ from inkwell.agent.tools.author import AUTHOR_TOOLS
 from inkwell.agent.tools.extract import EXTRACT_TOOLS
 from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS, configure_session_state
 from inkwell.agent.tools.realtime import create_realtime_tools
-from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
-from inkwell.agent.tools.research.exa import EXA_TOOLS
-from inkwell.agent.tools.research.fetch import FETCH_TOOLS
-from inkwell.agent.tools.research.fred import FRED_TOOLS
-from inkwell.agent.tools.research.markets import MARKET_TOOLS
-from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
+from inkwell.agent.pipeline import build_research_tools
 from inkwell.agent.tools.formats import FORMAT_TOOLS
 from inkwell.agent.tools.voice import VOICE_TOOLS
 
@@ -218,14 +213,7 @@ def build_agent_servers(
         tools=extract_sdk_tools(EXTRACT_TOOLS),
     )
 
-    research_tools = [
-        *EXA_TOOLS,
-        *ARXIV_TOOLS,
-        *FETCH_TOOLS,
-        *FRED_TOOLS,
-        *MARKET_TOOLS,
-        *WIKIPEDIA_TOOLS,
-    ]
+    research_tools = build_research_tools()
     research_server = create_mcp_server(
         name="research",
         version="1.0.0",
@@ -361,6 +349,7 @@ def build_result(
 
     output = WritingOutput(
         title="Untitled",
+        content="",
         google_doc_url="",
         word_count=0,
         sections_completed=0,
@@ -388,10 +377,12 @@ async def run_batch(
     source: str,
     *,
     target_format: str = "lesswrong",
+    existing_doc_id: str | None = None,
     session_id: str | None = None,
     task_id: str | None = None,
     refs: list[str] | None = None,
     listener: PipelineListener | None = None,
+    on_action: ActionCallback | None = None,
 ) -> AgentSessionResult:
     """Run the writing pipeline.
 
@@ -405,6 +396,7 @@ async def run_batch(
         task_id: Optional task identifier.
         refs: Additional reference URLs or file paths.
         listener: Pipeline event listener (default logs to stdout).
+        on_action: Callback for agent actions (used by CLI for terminal output).
     """
     if session_id is None:
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -412,23 +404,27 @@ async def run_batch(
     logger.info("Starting pipeline session %s", session_id)
     reset_metrics()
 
-    setup_notes(session_id, "0")
-    trace_path = TRACES_PATH / session_id / f"{datetime.now().strftime('%H%M%S')}.md"
-    trace_logger = TraceLogger(trace_path=trace_path, title=f"Pipeline {session_id}")
+    setup = setup_session(
+        session_id,
+        persistent=False,
+        on_action=on_action,
+    )
 
-    session_state = WritingSessionState()
+    cost_acc = CostAccumulator()
 
     output = await run_pipeline(
         source,
         target_format=target_format,
-        session_state=session_state,
-        trace_logger=trace_logger,
+        existing_doc_id=existing_doc_id,
+        session_state=setup.session_state,
+        trace_logger=setup.trace_logger,
         refs=refs,
         listener=listener,
         max_budget_usd=settings.max_budget_usd,
+        cost_accumulator=cost_acc,
     )
 
-    trace_logger.save()
+    setup.trace_logger.save()
     log_metrics_summary()
 
     result = AgentSessionResult(
@@ -439,9 +435,14 @@ async def run_batch(
         output=output,
         reasoning="",
         sources_consulted=[],
-        duration_seconds=None,
-        cost_usd=None,
-        token_usage=None,
+        duration_seconds=cost_acc.duration_seconds if cost_acc.call_count else None,
+        cost_usd=cost_acc.total_cost_usd if cost_acc.call_count else None,
+        token_usage=TokenUsage(
+            input_tokens=cost_acc.total_input_tokens,
+            output_tokens=cost_acc.total_output_tokens,
+        )
+        if cost_acc.call_count
+        else None,
         tool_metrics=get_metrics_summary(),
     )
 
@@ -452,6 +453,7 @@ async def run_batch(
 async def run_agent(
     task: str,
     *,
+    existing_doc_id: str | None = None,
     session_id: str | None = None,
     task_id: str | None = None,
     persistent: bool = True,
@@ -482,6 +484,10 @@ async def run_agent(
         persistent=persistent,
         on_action=on_action,
     )
+
+    if existing_doc_id:
+        doc_url = f"https://docs.google.com/document/d/{existing_doc_id}/edit"
+        setup.session_state.set_doc(existing_doc_id, doc_url)
 
     with setup.sandbox:
         collector = await query(

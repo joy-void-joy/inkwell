@@ -31,6 +31,7 @@ from inkwell.agent.core import run_batch
 from inkwell.agent.models import WritingOutput
 from inkwell.agent.pipeline import PipelineError, PipelineListener
 from inkwell.agent.session import WritingSessionState
+from inkwell.agent.tools.google_docs import do_insert_comment
 
 logger = logging.getLogger(__name__)
 
@@ -89,15 +90,37 @@ class InteractiveListener(PipelineListener):
             )
         )
 
+    async def on_message(self, source: str, message: str) -> None:
+        self.console.print(f"  [dim][{source}] {message}[/dim]")
+
     async def collect_feedback(self, state: WritingSessionState) -> list[str]:
         feedback = await super().collect_feedback(state)
 
+        for item in feedback:
+            if item.startswith("Author reply"):
+                self.console.print(f"  [cyan][GDoc Reply] {item}[/cyan]")
+            else:
+                self.console.print(f"  [cyan][GDoc Comment] {item}[/cyan]")
+
+        terminal_items: list[str] = []
         while not self.input_queue.empty():
             try:
                 msg = self.input_queue.get_nowait()
-                feedback.append(f"Author direction: {msg}")
+                terminal_items.append(msg)
             except asyncio.QueueEmpty:
                 break
+
+        for msg in terminal_items:
+            feedback.append(f"[Terminal] Author direction: {msg}")
+            if state.doc_id:
+                try:
+                    await do_insert_comment(
+                        state.doc_id,
+                        f"[TERMINAL] {msg}",
+                        session_state=state,
+                    )
+                except (RuntimeError, OSError):
+                    logger.warning("Failed to mirror terminal input to GDoc")
 
         if feedback:
             self.console.print(
@@ -227,9 +250,10 @@ async def read_terminal_input(
             console.print(f"  [dim]Stage: {stage}[/dim]")
             continue
         if stripped == "/doc":
-            from inkwell.agent.tools.google_docs import SESSION_STATE
+            from inkwell.agent.tools.google_docs import get_session_state
 
-            url = SESSION_STATE.doc_url if SESSION_STATE else ""
+            state = get_session_state()
+            url = state.doc_url if state else ""
             if url:
                 console.print(f"  [dim]{url}[/dim]")
             else:
@@ -259,6 +283,7 @@ async def chat_session(
     session_id: str | None = None,
     target_format: str = "lesswrong",
     refs: list[str] | None = None,
+    existing_doc_id: str | None = None,
     verbose: bool = False,
 ) -> None:
     """Run the writing pipeline interactively.
@@ -310,6 +335,7 @@ async def chat_session(
         result = await run_batch(
             source,
             target_format=target_format,
+            existing_doc_id=existing_doc_id,
             session_id=session_id,
             refs=refs,
             listener=listener,

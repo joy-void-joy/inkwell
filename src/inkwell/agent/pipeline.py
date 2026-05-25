@@ -21,6 +21,7 @@ from inkwell.agent.models import (
     AddAction,
     ArticlePlan,
     AssumptionsList,
+    ClassifiedComment,
     DropAction,
     MergedDraft,
     PatchAction,
@@ -43,6 +44,7 @@ from inkwell.agent.session import WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
     COHERENCE_EDITOR_PROMPT,
+    COMMENT_CLASSIFIER_PROMPT,
     FACT_CHECKER_PROMPT,
     NARRATIVE_REVIEWER_PROMPT,
     ORCHESTRATOR_PROMPT,
@@ -112,42 +114,6 @@ def normalize_gdoc_text(text: str) -> str:
     for old, new in GDOC_CHAR_MAP:
         text = text.replace(old, new)
     return text
-
-
-STAGE_TAB_RELEVANCE: dict[str, set[str]] = {
-    "research": {"Source", "Plan"},
-    "refine": {"Source", "Plan", "Research"},
-    "write": {"Voice"},
-    "merge": set(),
-    "review": set(),
-    "rewrite": set(),
-    "revise": set(),
-}
-
-
-def filter_edits_for_stage(
-    stage: str, edits: list[TabEdit], section: str | None = None
-) -> list[TabEdit]:
-    """Return only the edits relevant to a given pipeline stage.
-
-    Each stage sees: its explicitly listed reference tabs + any section
-    edits. The merge/review/rewrite stages see all section edits but no
-    reference tabs (those are already incorporated in the plan/research).
-    """
-    allowed_tabs = STAGE_TAB_RELEVANCE.get(stage, set())
-    result: list[TabEdit] = []
-    for edit in edits:
-        is_section = edit.tab.startswith("Section:")
-        is_draft = edit.tab == "Draft"
-
-        if edit.tab in allowed_tabs:
-            result.append(edit)
-        elif is_section and stage in ("write", "merge", "review", "rewrite", "revise"):
-            if section is None or section in edit.tab:
-                result.append(edit)
-        elif is_draft and stage in ("review", "rewrite", "revise"):
-            result.append(edit)
-    return result
 
 
 def extract_edit_summary(original: str, current: str, context_lines: int = 2) -> str:
@@ -1290,8 +1256,18 @@ class PipelineRunner:
             session_state=self.state,
         )
 
-    async def gather_feedback(self) -> tuple[list[str], list[TabEdit]]:
-        """Collect feedback from GDoc comments and tab edits (separately)."""
+    async def gather_feedback(self) -> list[str]:
+        """Collect feedback from GDoc comments; classify tab edits into notes.
+
+        Tab edits are classified (plan_breaking / stage_local / clarification)
+        and written to PipelineNotes — the same path as watcher-classified
+        comments. Plan-breaking edits set self.plan_breaking so the
+        orchestrator handles them at the next checkpoint.
+
+        Returns only the comment strings (for immediate stage injection).
+        Classified edits are available to stages via format_stage_context()
+        which reads from PipelineNotes.
+        """
         assert self.tabs is not None
         comment_feedback = await self.hooks.collect_feedback(self.state)
         tab_edits = await self.tabs.detect_edits()
@@ -1299,12 +1275,43 @@ class PipelineRunner:
         if self.notes:
             for fb in comment_feedback:
                 await self.notes.add_terminal_input(fb)
-            for edit in tab_edits:
-                await self.notes.add_terminal_input(
-                    f"[GDoc Edit: {edit.tab}]\n{edit.diff}"
-                )
 
-        return comment_feedback, tab_edits
+        for edit in tab_edits:
+            await self.classify_and_record_edit(edit)
+
+        return comment_feedback
+
+    async def classify_and_record_edit(self, edit: TabEdit) -> None:
+        """Classify a tab edit's impact and write it to PipelineNotes."""
+        task = (
+            f"Classify this author edit on the '{edit.tab}' tab:\n\n"
+            f"Changes:\n{edit.diff}"
+        )
+        classified = await query(
+            task,
+            output_type=ClassifiedComment,
+            model="claude-opus-4-6",
+            system_prompt=COMMENT_CLASSIFIER_PROMPT,
+            max_thinking_tokens=128_000 - 1,
+            permission_mode="bypassPermissions",
+            prefix=f"[classify-edit:{edit.tab}] ",
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        if classified is None:
+            logger.warning("Failed to classify edit on tab '%s'", edit.tab)
+            return
+
+        classified.comment_id = f"tab-edit-{edit.tab}"
+        classified.content = f"[Edit on {edit.tab}] {edit.diff}"
+        classified.anchor_text = edit.tab
+
+        if self.notes:
+            await self.notes.add_comment(classified)
+
+        if classified.impact == "plan_breaking":
+            logger.info("Plan-breaking tab edit on '%s'", edit.tab)
+            self.plan_breaking.set()
 
     async def stage_extract(self) -> None:
         """Extract source material."""
@@ -1428,8 +1435,8 @@ class PipelineRunner:
         )
         self.state.set_stage("researching")
         await self.update_overview(active_stage="research")
-        comments, tab_edits = await self.gather_feedback()
-        feedback_with_notes = await self.format_stage_context("research", comments, tab_edits)
+        feedback = await self.gather_feedback()
+        feedback_with_notes = await self.format_stage_context("research", feedback)
 
         research = await research_plan(
             plan,
@@ -1461,8 +1468,8 @@ class PipelineRunner:
             f"Refining plan with {len(research.findings)} research findings",
         )
         await self.update_overview(active_stage="refine")
-        comments, tab_edits = await self.gather_feedback()
-        refine_feedback = await self.format_stage_context("refine", comments, tab_edits)
+        feedback = await self.gather_feedback()
+        refine_feedback = await self.format_stage_context("refine", feedback)
         initial_count = len(plan.sections)
         refined = await refine_plan(
             plan,
@@ -1498,8 +1505,8 @@ class PipelineRunner:
         self.state.set_stage("writing")
         await self.update_overview(active_stage="write")
 
-        comments, tab_edits = await self.gather_feedback()
-        feedback_with_notes = await self.format_stage_context("write", comments, tab_edits)
+        feedback = await self.gather_feedback()
+        feedback_with_notes = await self.format_stage_context("write", feedback)
 
         async def write_and_publish(section: SectionPlan) -> SectionDraft:
             draft = await write_section(
@@ -1567,8 +1574,8 @@ class PipelineRunner:
         await self.hooks.on_stage("merge", "Merging sections into coherent draft")
         self.state.set_stage("merging")
         await self.update_overview(active_stage="merge")
-        comments, tab_edits = await self.gather_feedback()
-        feedback_with_notes = await self.format_stage_context("merge", comments, tab_edits)
+        feedback = await self.gather_feedback()
+        feedback_with_notes = await self.format_stage_context("merge", feedback)
 
         async def merge_heartbeat(elapsed: float) -> None:
             mins, secs = divmod(int(elapsed), 60)
@@ -1640,8 +1647,8 @@ class PipelineRunner:
         await self.hooks.on_stage("rewrite", "Producing final version")
         self.state.set_stage("rewriting")
         await self.update_overview(active_stage="rewrite")
-        comments, tab_edits = await self.gather_feedback()
-        feedback_with_notes = await self.format_stage_context("rewrite", comments, tab_edits)
+        feedback = await self.gather_feedback()
+        feedback_with_notes = await self.format_stage_context("rewrite", feedback)
 
         output = await rewrite_final(
             merged.content,
@@ -1895,11 +1902,12 @@ class PipelineRunner:
             self.snapshot.stage = "revise"
             await self.update_overview(active_stage="revise")
 
-            all_comments = await self.hooks.collect_feedback(self.state)
-            all_comments.extend(batch)
+            all_feedback = await self.hooks.collect_feedback(self.state)
+            all_feedback.extend(batch)
             assert self.tabs is not None
-            tab_edits = await self.tabs.detect_edits()
-            all_feedback = await self.format_stage_context("revise", all_comments, tab_edits)
+            for edit in await self.tabs.detect_edits():
+                await self.classify_and_record_edit(edit)
+            all_feedback = await self.format_stage_context("revise", all_feedback)
 
             plan = self.snapshot.plan
             if plan is None:
@@ -1981,68 +1989,50 @@ class PipelineRunner:
     # -- Notes integration -----------------------------------------------
 
     async def format_stage_context(
-        self,
-        stage: str,
-        comments: list[str],
-        tab_edits: list[TabEdit] | None = None,
-        section: str | None = None,
+        self, stage: str, feedback: list[str], section: str | None = None
     ) -> list[str]:
         """Build context-aware feedback for a pipeline stage.
 
-        Tab edits are filtered by relevance: each stage only sees edits
-        to tabs it should act on. Edits contain diffs (not full content)
-        so agents see what changed, not the entire tab.
-
-        Routing:
-        - research: Source, Plan edits (affect what to research)
-        - write: Voice edits + section-specific edits
-        - merge: section edits (affect what to combine)
-        - review/rewrite: all edits
+        Tab edits are already classified and written to PipelineNotes
+        by gather_feedback() — they flow through the same path as
+        watcher-classified comments. This method reads from notes to
+        add context appropriate for each stage.
         """
-        feedback = list(comments)
-
-        if tab_edits:
-            relevant = filter_edits_for_stage(stage, tab_edits, section)
-            for edit in relevant:
-                feedback.append(
-                    f"[Author edited {edit.tab}]\n{edit.diff}"
-                )
-
         if self.notes is None:
             return feedback
 
         match stage:
             case "research":
-                notes_comments = await self.notes.list_comments(impact="plan_breaking")
-                notes_comments.extend(await self.notes.list_comments(impact="stage_local"))
-                if notes_comments:
+                comments = await self.notes.list_comments(impact="plan_breaking")
+                comments.extend(await self.notes.list_comments(impact="stage_local"))
+                if comments:
                     lines = ["## Author Direction (from comments)", ""]
-                    for c in notes_comments:
+                    for c in comments:
                         line = f"- [{c.impact}] {c.content}"
                         if c.anchor_text:
                             line += f' (on: "{c.anchor_text}")'
                         lines.append(line)
-                    feedback.append("\n".join(lines))
+                    feedback = [*feedback, "\n".join(lines)]
 
             case "write":
                 if section:
                     section_fb = await self.notes.get_section_feedback(section)
                     if section_fb:
-                        feedback.append(section_fb)
+                        feedback = [*feedback, section_fb]
                 else:
                     notes_text = await self.notes.get_all_feedback()
                     if notes_text:
-                        feedback.append(notes_text)
+                        feedback = [*feedback, notes_text]
 
             case "merge" | "review" | "rewrite" | "revise":
                 notes_text = await self.notes.get_all_feedback()
                 if notes_text:
-                    feedback.append(notes_text)
+                    feedback = [*feedback, notes_text]
 
             case _:
                 notes_text = await self.notes.get_all_feedback()
                 if notes_text:
-                    feedback.append(notes_text)
+                    feedback = [*feedback, notes_text]
 
         return feedback
 

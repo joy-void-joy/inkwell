@@ -1,25 +1,30 @@
-"""Tests for TabTracker diff detection and stage-based edit routing."""
-
-import pytest
+"""Tests for TabTracker diff detection and GDoc text normalization."""
 
 from inkwell.agent.pipeline import (
-    TabEdit,
     TabTracker,
     extract_edit_summary,
-    filter_edits_for_stage,
     normalize_gdoc_text,
 )
+
+# Smart quote constants (avoid encoding issues in source)
+LEFT_SINGLE = "‘"
+RIGHT_SINGLE = "’"
+LEFT_DOUBLE = "“"
+RIGHT_DOUBLE = "”"
+EM_DASH = "—"
 
 
 class TestNormalizeGdocText:
     def test_smart_quotes_normalized(self) -> None:
-        assert normalize_gdoc_text("it’s a “test”") == normalize_gdoc_text("it's a \"test\"")
+        smart = f"it{RIGHT_SINGLE}s a {LEFT_DOUBLE}test{RIGHT_DOUBLE}"
+        plain = 'it\'s a "test"'
+        assert normalize_gdoc_text(smart) == normalize_gdoc_text(plain)
 
     def test_whitespace_collapsed(self) -> None:
         assert normalize_gdoc_text("hello   world\n\nfoo") == normalize_gdoc_text("hello world foo")
 
     def test_em_dash_normalized(self) -> None:
-        assert normalize_gdoc_text("a — b") == normalize_gdoc_text("a -- b")
+        assert normalize_gdoc_text(f"a {EM_DASH} b") == normalize_gdoc_text("a -- b")
 
     def test_meaningful_diff_detected(self) -> None:
         assert normalize_gdoc_text("The cat sat") != normalize_gdoc_text("The dog sat")
@@ -67,9 +72,9 @@ class TestHasMeaningfulDiff:
         )
 
     def test_gdoc_smart_quotes_not_meaningful(self) -> None:
-        assert not TabTracker.has_meaningful_diff(
-            "it's a \"test\"", "it’s a “test”"
-        )
+        plain = 'it\'s a "test"'
+        smart = f"it{RIGHT_SINGLE}s a {LEFT_DOUBLE}test{RIGHT_DOUBLE}"
+        assert not TabTracker.has_meaningful_diff(plain, smart)
 
     def test_real_content_change_is_meaningful(self) -> None:
         assert TabTracker.has_meaningful_diff(
@@ -78,54 +83,3 @@ class TestHasMeaningfulDiff:
 
     def test_empty_current_not_meaningful(self) -> None:
         assert not TabTracker.has_meaningful_diff("some content", "   ")
-
-
-class TestFilterEditsForStage:
-    @pytest.fixture()
-    def all_edits(self) -> list[TabEdit]:
-        return [
-            TabEdit(tab="Source", diff="- old\n+ new"),
-            TabEdit(tab="Plan", diff="- section A\n+ section B"),
-            TabEdit(tab="Voice", diff="- formal\n+ casual"),
-            TabEdit(tab="Research", diff="- finding 1\n+ finding 2"),
-            TabEdit(tab="Section: Introduction", diff="- old intro\n+ new intro"),
-            TabEdit(tab="Section: Methods", diff="- old methods\n+ new methods"),
-            TabEdit(tab="Draft", diff="- old draft\n+ new draft"),
-        ]
-
-    def test_research_sees_source_and_plan(self, all_edits: list[TabEdit]) -> None:
-        result = filter_edits_for_stage("research", all_edits)
-        tabs = {e.tab for e in result}
-        assert tabs == {"Source", "Plan"}
-
-    def test_write_sees_voice_and_sections(self, all_edits: list[TabEdit]) -> None:
-        result = filter_edits_for_stage("write", all_edits)
-        tabs = {e.tab for e in result}
-        assert "Voice" in tabs
-        assert "Section: Introduction" in tabs
-        assert "Source" not in tabs
-
-    def test_write_section_filter(self, all_edits: list[TabEdit]) -> None:
-        result = filter_edits_for_stage("write", all_edits, section="Introduction")
-        tabs = {e.tab for e in result}
-        assert "Section: Introduction" in tabs
-        assert "Section: Methods" not in tabs
-
-    def test_merge_sees_sections_only(self, all_edits: list[TabEdit]) -> None:
-        result = filter_edits_for_stage("merge", all_edits)
-        tabs = {e.tab for e in result}
-        assert "Section: Introduction" in tabs
-        assert "Source" not in tabs
-        assert "Voice" not in tabs
-
-    def test_rewrite_sees_sections_and_draft(self, all_edits: list[TabEdit]) -> None:
-        result = filter_edits_for_stage("rewrite", all_edits)
-        tabs = {e.tab for e in result}
-        assert "Section: Introduction" in tabs
-        assert "Draft" in tabs
-        assert "Source" not in tabs
-
-    def test_refine_sees_source_plan_research(self, all_edits: list[TabEdit]) -> None:
-        result = filter_edits_for_stage("refine", all_edits)
-        tabs = {e.tab for e in result}
-        assert tabs == {"Source", "Plan", "Research"}

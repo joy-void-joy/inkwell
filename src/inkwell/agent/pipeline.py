@@ -1,31 +1,16 @@
-"""Unified writing pipeline with restartable state machine.
-
-Both interactive and batch modes use this pipeline. The only difference
-is the PipelineListener: batch mode logs to stdout, interactive mode
-shows Rich progress and accepts terminal input.
-
-Stages:
-  extract -> voice -> plan -> assumptions -> research -> write -> merge -> review -> rewrite -> format
-
-The PipelineRunner wraps stages in a state machine that:
-- Accumulates artifacts in PipelineSnapshot
-- Checks for plan-breaking author feedback between stages
-- Runs the orchestrator to produce fine-grained RestartStrategy
-- Executes restart actions (preserve/patch/rewrite/add/drop per section)
-"""
-
 # claude: ignore
 # pyright: reportAttributeAccessIssue=false, reportIndexIssue=false
-# Google API service objects are untyped.
+"""Unified writing pipeline with restartable state machine."""
 
 import asyncio
 import logging
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from claude_agent_sdk import McpServerConfig
 
-from lup.client import CostAccumulator, query
+from lup.client import CostAccumulator, HeartbeatCallback, query
 from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
 from lup.trace import TraceLogger
 
@@ -60,6 +45,7 @@ from inkwell.agent.stages import (
     NARRATIVE_REVIEWER_PROMPT,
     ORCHESTRATOR_PROMPT,
     PLANNER_SYSTEM,
+    REFINER_SYSTEM,
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
     SECTION_WRITER_PROMPT,
@@ -101,6 +87,22 @@ logger = logging.getLogger(__name__)
 class PipelineError(Exception):
     """Raised when a pipeline stage fails to produce valid output."""
 
+
+GDOC_CHAR_MAP = [
+    ("‘", "'"), ("’", "'"),
+    ("“", '"'), ("”", '"'),
+    ("—", "--"), ("–", "-"),
+    (" ", " "),
+]
+
+
+def normalize_gdoc_text(text: str) -> str:
+    """Normalize text for comparison, stripping GDoc formatting artifacts."""
+    text = unicodedata.normalize("NFC", text)
+    text = " ".join(text.split())
+    for old, new in GDOC_CHAR_MAP:
+        text = text.replace(old, new)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +190,20 @@ class TabTracker:
                 )
             except (RuntimeError, OSError):
                 continue
-            original_stripped = original.strip()
-            current_stripped = current.strip()
-            if current_stripped != original_stripped and current_stripped:
-                edits.append(
-                    f"[GDoc Edit: {label}] Author modified this tab. "
-                    f"Current content:\n{current_stripped}"
-                )
+            if not self.has_meaningful_diff(original, current):
+                continue
+            edits.append(
+                f"[GDoc Edit: {label}] Author modified this tab. "
+                f"Current content:\n{current.strip()}"
+            )
         return edits
+
+    @staticmethod
+    def has_meaningful_diff(original: str, current: str) -> bool:
+        """Compare ignoring GDoc formatting artifacts (whitespace, smart quotes)."""
+        if not current.strip():
+            return False
+        return normalize_gdoc_text(original) != normalize_gdoc_text(current)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +245,51 @@ def format_feedback(feedback: list[str]) -> str:
     return f"\n\n## Author Feedback (priority)\n\n{lines}\n"
 
 
+def annotate_draft_with_findings(
+    draft: str, findings: list[ReviewFinding]
+) -> str:
+    """Inject review findings inline at matching text_excerpt locations.
+
+    Findings with text_excerpt are anchored next to the passage they refer to.
+    Remaining findings are appended as an "Additional Findings" section.
+    """
+    annotated = draft
+
+    anchorable = [
+        f for f in findings
+        if f.text_excerpt and f.severity in ("critical", "suggestion")
+    ]
+    anchorable.sort(key=lambda f: len(f.text_excerpt), reverse=True)
+
+    anchored: set[int] = set()
+    for f in anchorable:
+        annotation = (
+            f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}"
+            f"\n  → {f.suggestion}\n"
+        )
+        if f.text_excerpt in annotated:
+            annotated = annotated.replace(  # claude: ignore
+                f.text_excerpt,
+                f"{f.text_excerpt}{annotation}",
+                1,
+            )
+            anchored.add(id(f))
+
+    remaining = [
+        f for f in findings
+        if f.severity in ("critical", "suggestion") and id(f) not in anchored
+    ]
+    if remaining:
+        annotated += "\n\n## Additional Review Findings\n"
+        for f in remaining:
+            annotated += (
+                f"- [{f.severity}:{f.reviewer}] {f.location}: {f.issue}\n"
+                f"  → {f.suggestion}\n"
+            )
+
+    return annotated
+
+
 def format_voice_profile(profile: VoiceProfile) -> str:
     parts = [f"\n\n## Voice Profile\n\n{profile.voice}"]
     if profile.phrases:
@@ -270,9 +323,9 @@ async def plan_article(
 
     format_hint = (
         f"Suggested format: {target_format} (override if the content is better "
-        f"suited to another format: lesswrong, twitter, blog, dialog)"
+        f"suited to another format: lesswrong, twitter, blog, dialog, memo)"
         if target_format
-        else "Choose the best output format: lesswrong, twitter, blog, or dialog"
+        else "Choose the best output format: lesswrong, twitter, blog, dialog, or memo"
     )
     task = (
         f"Extract a structured article plan from this conversation.\n"
@@ -295,6 +348,62 @@ async def plan_article(
     if plan is None:
         raise PipelineError("Planner produced no structured output")
     return plan
+
+
+async def refine_plan(
+    plan: ArticlePlan,
+    research: ResearchCompilation,
+    *,
+    voice_profile: VoiceProfile | None = None,
+    feedback: list[str] | None = None,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> ArticlePlan:
+    """Refine the initial plan using research findings."""
+    sections_text = "\n\n".join(
+        f"### {s.title}\n{s.summary}\nKey points: {', '.join(s.key_points)}"
+        for s in plan.sections
+    )
+    findings_text = "\n\n".join(
+        f"### {f.question}\n{f.answer}\nConfidence: {f.confidence}"
+        for f in research.findings
+    )
+    quotes_text = "\n".join(
+        f'- "{q.text}" — {q.speaker}: {q.context}' for q in plan.source_quotes
+    )
+
+    voice_section = ""
+    if voice_profile:
+        voice_section = format_voice_profile(voice_profile)
+
+    task = (
+        f"Refine this article plan using the research findings below.\n\n"
+        f"# Initial Plan: {plan.title}\n\n"
+        f"**Thesis:** {plan.thesis}\n\n"
+        f"**Target format:** {plan.target_format}\n\n"
+        f"**Author direction:** {plan.author_direction}\n\n"
+        f"{format_feedback(feedback or [])}"
+        f"## Sections\n\n{sections_text}\n\n"
+        f"## Source Quotes\n\n{quotes_text or '(none)'}\n\n"
+        f"## Research Findings\n\n{findings_text}\n\n"
+        f"Return the refined plan with detailed key_points per section."
+        f"{voice_section}"
+    )
+
+    refined = await query(
+        task,
+        output_type=ArticlePlan,
+        model="claude-opus-4-6",
+        system_prompt=REFINER_SYSTEM,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        prefix="[refine] ",
+        trace_logger=trace_logger,
+        cost_accumulator=cost_accumulator,
+    )
+    if refined is None:
+        return plan
+    return refined
 
 
 async def research_plan(
@@ -428,59 +537,6 @@ async def write_section(
     return draft
 
 
-async def write_all_sections(
-    plan: ArticlePlan,
-    research: ResearchCompilation,
-    *,
-    voice_profile: VoiceProfile | None = None,
-    feedback: list[str] | None = None,
-    servers: dict[str, McpServerConfig] | None = None,
-    trace_logger: TraceLogger | None = None,
-
-    cost_accumulator: CostAccumulator | None = None,
-    listener: PipelineListener | None = None,
-) -> list[SectionDraft]:
-    """Stage 3: Write all sections in parallel."""
-    if servers is None:
-        servers = build_research_servers()
-
-    tasks = [
-        write_section(
-            section,
-            research,
-            plan,
-            voice_profile=voice_profile,
-            feedback=feedback,
-            servers=servers,
-            trace_logger=trace_logger,
-    
-            cost_accumulator=cost_accumulator,
-        )
-        for section in plan.sections
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    drafts: list[SectionDraft] = []
-    for i, result in enumerate(results):
-        if isinstance(result, BaseException):
-            logger.error("Section '%s' failed: %s", plan.sections[i].title, result)
-            drafts.append(
-                SectionDraft(
-                    title=plan.sections[i].title,
-                    content=f"[Section failed: {result}]",
-                    word_count=0,
-                )
-            )
-        else:
-            drafts.append(result)
-            if listener:
-                await listener.on_message(
-                    "write",
-                    f"Section '{result.title}' complete ({result.word_count} words)",
-                )
-    return drafts
-
-
 async def merge_sections(
     drafts: list[SectionDraft],
     plan: ArticlePlan,
@@ -488,7 +544,7 @@ async def merge_sections(
     voice_profile: VoiceProfile | None = None,
     feedback: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
-
+    heartbeat: HeartbeatCallback | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> MergedDraft:
     """Stage 4: Merge independently-written sections into a coherent draft."""
@@ -505,14 +561,14 @@ async def merge_sections(
         voice_section = format_voice_profile(voice_profile)
 
     task = (
-        f"Merge these independently-written sections into a coherent draft "
-        f'for the article "{plan.title}".\n\n'
+        f'Rewrite these sections into a unified article: "{plan.title}"\n\n'
         f"Thesis: {plan.thesis}\n\n"
         f"{format_feedback(feedback or [])}"
-        f"## Sections (in order)\n\n{sections_text}\n\n"
-        f"Fix transitions, remove redundancy, normalize depth. "
-        f"The draft should read as if one person wrote it in one sitting. "
-        f"Return the complete merged text in the 'content' field."
+        f"## Source Sections\n\n{sections_text}\n\n"
+        f"These are raw material, not a starting draft. Write a new, "
+        f"unified piece that makes this thesis land. Cut freely, "
+        f"reorganize where the argument flows better, and ensure "
+        f"every paragraph earns its place."
         f"{voice_section}"
     )
 
@@ -523,10 +579,9 @@ async def merge_sections(
         system_prompt=COHERENCE_EDITOR_PROMPT,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-
         trace_logger=trace_logger,
         prefix="[merge] ",
-
+        heartbeat=heartbeat,
         cost_accumulator=cost_accumulator,
     )
     if merged is None:
@@ -703,22 +758,10 @@ async def rewrite_final(
     cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
-    findings_by_severity = {
-        "critical": [f for f in findings if f.severity == "critical"],
-        "suggestion": [f for f in findings if f.severity == "suggestion"],
-        "praise": [f for f in findings if f.severity == "praise"],
-    }
+    annotated_draft = annotate_draft_with_findings(draft, findings)
 
-    findings_text = ""
-    for severity in ("critical", "suggestion"):
-        items = findings_by_severity[severity]
-        if items:
-            findings_text += f"\n### {severity.title()} ({len(items)})\n"
-            for f in items:
-                findings_text += (
-                    f"- [{f.reviewer}] {f.location}: {f.issue}\n"
-                    f"  Suggestion: {f.suggestion}\n"
-                )
+    n_critical = sum(1 for f in findings if f.severity == "critical")
+    n_suggestion = sum(1 for f in findings if f.severity == "suggestion")
 
     voice_section = ""
     if voice_profile:
@@ -727,11 +770,12 @@ async def rewrite_final(
     task = (
         f'Produce the final version of "{plan.title}".\n\n'
         f"Target format: {target_format}\n\n"
+        f"Review summary: {n_critical} critical (mandatory), "
+        f"{n_suggestion} suggestions\n\n"
         f"{format_feedback(feedback or [])}"
-        f"## Draft\n\n{draft}\n\n"
-        f"## Review Findings\n{findings_text or '(no findings)'}\n\n"
+        f"## Annotated Draft\n\n{annotated_draft}\n\n"
         f"## Author Direction\n{plan.author_direction}\n\n"
-        f"Apply all critical fixes. Consider suggestions. "
+        f"Apply ALL critical findings — they are marked inline. "
         f"Return the full article text in the 'content' field "
         f"and a brief 1-2 sentence editorial summary in the 'summary' field."
         f"{voice_section}"
@@ -793,6 +837,25 @@ async def apply_format(
                 FormatDialogInput(content=content)
             )
             return result.compiled
+        case "memo":
+            from inkwell.agent.tools.formats import FormatMemoInput, do_format_memo
+
+            result = do_format_memo(
+                FormatMemoInput(content=content, title=title)
+            )
+            return result.content
+        case _ if target_format.startswith("custom:"):
+            from inkwell.agent.tools.formats import FormatCustomInput, do_format_custom
+
+            description = target_format.removeprefix("custom:").strip()
+            result = await do_format_custom(
+                FormatCustomInput(
+                    content=content,
+                    format_description=description,
+                    title=title,
+                )
+            )
+            return result.content
         case _:
             return content
 
@@ -806,6 +869,7 @@ async def surface_assumptions(
     plan: ArticlePlan,
     doc_id: str,
     *,
+    research: ResearchCompilation | None = None,
     session_state: WritingSessionState,
     trace_logger: TraceLogger | None = None,
 
@@ -823,6 +887,18 @@ async def surface_assumptions(
         f"**Author direction:** {plan.author_direction}\n\n"
         f"## Sections\n\n{sections_text}"
     )
+    if research:
+        findings_summary = "\n".join(
+            f"- **{f.question}** — confidence: {f.confidence:.0%}"
+            + (f" ({f.answer[:150]}...)" if f.confidence < 0.5 else "")
+            for f in research.findings
+        )
+        task += (
+            f"\n\n## Research Findings (for context)\n\n{findings_summary}"
+            f"\n\nResearch has been completed. Focus on questions that "
+            f"research could NOT answer, contradictions between sources, "
+            f"and directional choices the author needs to make."
+        )
 
     result = await query(
         task,
@@ -849,10 +925,13 @@ async def surface_assumptions(
         prefix = tag_prefix.get(item.tag, "[NOTE]")
         comment_text = (
             f"{prefix} {item.content}\n\n"
-            f"My best guess: {item.best_guess}\n\n"
-            f"(re: {item.anchor_section})"
+            f"My best guess: {item.best_guess}"
         )
-        await do_insert_comment(doc_id, comment_text, session_state=session_state)
+        await do_insert_comment(
+            doc_id, comment_text,
+            anchor_text=item.anchor_section,
+            session_state=session_state,
+        )
 
     return result
 
@@ -974,8 +1053,11 @@ class PipelineRunner:
         """Persist the current snapshot for resume support."""
         if self.notes is None:
             return
-        path = self.notes.base_dir / "snapshot.json"
-        path.write_text(self.snapshot.model_dump_json(), encoding="utf-8")
+        data = self.snapshot.model_dump_json()
+        base = self.notes.base_dir
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "snapshot.json").write_text(data, encoding="utf-8")
+        (base / f"snapshot_{self.snapshot.stage}.json").write_text(data, encoding="utf-8")
 
     async def run(self) -> WritingOutput:
         """Execute the full pipeline with restart support."""
@@ -985,13 +1067,16 @@ class PipelineRunner:
         await self.stage_extract()
         await self.stage_voice()
         await self.stage_plan()
+
+        await self.stage_research()
+        await self.check_and_maybe_restart()
+
         await self.stage_assumptions()
+        await self.stage_refine()
 
         self.start_watcher()
 
         try:
-            await self.stage_research()
-            await self.check_and_maybe_restart()
 
             await self.stage_write()
             await self.check_and_maybe_restart()
@@ -1007,7 +1092,7 @@ class PipelineRunner:
             if output is None:
                 raise PipelineError("Pipeline completed without producing output")
 
-            await self.update_overview_complete()
+            await self.update_overview()
             await self.hooks.on_complete(output)
 
             await self.standby_loop()
@@ -1030,8 +1115,9 @@ class PipelineRunner:
         await self.setup_doc()
 
         stages = [
-            "extract", "voice", "plan", "assumptions",
-            "research", "write", "merge", "review", "rewrite", "format",
+            "extract", "voice", "plan",
+            "research", "assumptions", "refine",
+            "write", "merge", "review", "rewrite", "format",
         ]
         last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
         remaining = stages[last_idx + 1:]
@@ -1050,7 +1136,7 @@ class PipelineRunner:
             if output is None:
                 raise PipelineError("Pipeline completed without producing output")
 
-            await self.update_overview_complete()
+            await self.update_overview()
             await self.hooks.on_complete(output)
             await self.standby_loop()
         finally:
@@ -1136,6 +1222,7 @@ class PipelineRunner:
     async def stage_extract(self) -> None:
         """Extract source material."""
         await self.hooks.on_stage("extract", "Extracting source material")
+        await self.update_overview(active_stage="extract")
         conversation = await do_extract_source(self.source)
 
         for ref in self.refs:
@@ -1154,11 +1241,16 @@ class PipelineRunner:
             self.doc_id, source_tab_id, conversation, session_state=self.state
         )
         assert self.tabs is not None
-        self.tabs.record(source_tab_id, "Source", conversation)
+        # Source tab is reference material — don't track for edit detection.
+        # TabTracker re-reads tracked tabs and any content difference (even
+        # from GDoc formatting) gets injected as "author feedback" into every
+        # downstream stage, causing section writers to anchor on the source.
+        await self.update_overview()
 
     async def stage_voice(self) -> None:
         """Analyze the author's writing voice."""
         await self.hooks.on_stage("voice", "Analyzing author's writing voice")
+        await self.update_overview(active_stage="voice")
         corpus_samples, _ = load_style_corpus(max_samples=3)
         voice_profile = await do_analyze_voice(
             self.snapshot.conversation,
@@ -1189,11 +1281,13 @@ class PipelineRunner:
                 self.doc_id, voice_tab_id, voice_text, session_state=self.state
             )
             assert self.tabs is not None
-            self.tabs.record(voice_tab_id, "Voice", voice_text)
+            # Voice tab is reference — don't track for edits
+        await self.update_overview()
 
     async def stage_plan(self) -> None:
         """Plan the article structure."""
         await self.hooks.on_stage("plan", "Planning article structure")
+        await self.update_overview(active_stage="plan")
         plan = await plan_article(
             self.snapshot.conversation,
             target_format=self.target_format,
@@ -1212,6 +1306,7 @@ class PipelineRunner:
         )
         await self.write_plan_tab(plan)
         await self.create_section_tabs(plan)
+        await self.update_overview()
 
     async def stage_assumptions(self) -> None:
         """Surface uncertainties as GDoc comments (non-blocking)."""
@@ -1219,9 +1314,11 @@ class PipelineRunner:
         if plan is None:
             return
         await self.hooks.on_stage("assumptions", "Surfacing questions for the author")
+        await self.update_overview(active_stage="assumptions")
         assumptions = await surface_assumptions(
             plan,
             self.doc_id,
+            research=self.snapshot.research,
             session_state=self.state,
             trace_logger=self.trace_logger,
 
@@ -1233,6 +1330,7 @@ class PipelineRunner:
             await self.hooks.on_progress(
                 f"Posted {len(assumptions.items)} questions/assumptions as GDoc comments"
             )
+        await self.update_overview()
 
     async def stage_research(self) -> None:
         """Research all questions from the plan."""
@@ -1245,6 +1343,7 @@ class PipelineRunner:
             f"Researching {len(plan.research_questions)} questions",
         )
         self.state.set_stage("researching")
+        await self.update_overview(active_stage="research")
         feedback = await self.gather_feedback()
         feedback_with_notes = await self.format_stage_context("research", feedback)
 
@@ -1264,9 +1363,44 @@ class PipelineRunner:
             f"Research complete: {len(research.findings)} findings"
         )
         await self.write_research_tab(research)
+        await self.update_overview()
+
+    async def stage_refine(self) -> None:
+        """Refine the plan using research findings and any early author feedback."""
+        plan = self.snapshot.plan
+        research = self.snapshot.research
+        if plan is None or research is None:
+            return
+
+        await self.hooks.on_stage(
+            "refine",
+            f"Refining plan with {len(research.findings)} research findings",
+        )
+        await self.update_overview(active_stage="refine")
+        feedback = await self.gather_feedback()
+        initial_count = len(plan.sections)
+        refined = await refine_plan(
+            plan,
+            research,
+            voice_profile=self.snapshot.voice_profile,
+            feedback=feedback or None,
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        self.snapshot.plan = refined
+        self.snapshot.stage = "refine"
+        await self.save_snapshot()
+
+        await self.hooks.on_progress(
+            f"Refined plan: {len(refined.sections)} sections "
+            f"(was {initial_count})"
+        )
+        await self.write_plan_tab(refined)
+        await self.create_section_tabs(refined)
+        await self.update_overview()
 
     async def stage_write(self) -> None:
-        """Write all sections in parallel."""
+        """Write all sections in parallel, updating overview as each completes."""
         plan = self.snapshot.plan
         research = self.snapshot.research
         if plan is None or research is None:
@@ -1277,33 +1411,33 @@ class PipelineRunner:
             f"Writing {len(plan.sections)} sections in parallel",
         )
         self.state.set_stage("writing")
-        await self.update_overview("writing", plan)
+        await self.update_overview(active_stage="write")
 
         feedback = await self.gather_feedback()
         feedback_with_notes = await self.format_stage_context("write", feedback)
 
-        drafts = await write_all_sections(
-            plan,
-            research,
-            voice_profile=self.snapshot.voice_profile,
-            feedback=feedback_with_notes,
-            servers=self.research_servers,
-            trace_logger=self.trace_logger,
+        async def write_and_publish(section: SectionPlan) -> SectionDraft:
+            draft = await write_section(
+                section,
+                research,
+                plan,
+                voice_profile=self.snapshot.voice_profile,
+                feedback=feedback_with_notes,
+                servers=self.research_servers,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
+            draft.title = section.title
+            self.snapshot.section_drafts[section.title] = draft
 
-            cost_accumulator=self.cost_accumulator,
-            listener=self.hooks,
-        )
-
-        assert self.tabs is not None
-        for draft in drafts:
-            self.snapshot.section_drafts[draft.title] = draft
-            tid = self.tab_ids.get(draft.title, "")
+            assert self.tabs is not None
+            tid = self.tab_ids.get(section.title, "")
             if tid and draft.content and not draft.content.startswith("[Section failed"):
                 await do_write_tab(
                     self.doc_id, tid, draft.content, session_state=self.state
                 )
-                self.tabs.record(tid, f"Section: {draft.title}", draft.content)
-                self.state.update_section_status(draft.title, "drafted")
+                self.tabs.record(tid, f"Section: {section.title}", draft.content)
+                self.state.update_section_status(section.title, "drafted")
 
             for question in draft.questions_for_author:
                 await do_insert_comment(
@@ -1313,8 +1447,31 @@ class PipelineRunner:
                 )
                 self.state.add_question(question)
 
+            await self.hooks.on_message(
+                "write",
+                f"Section '{draft.title}' complete ({draft.word_count} words)",
+            )
+            await self.update_overview(active_stage="write")
+            return draft
+
+        results = await asyncio.gather(
+            *(write_and_publish(s) for s in plan.sections),
+            return_exceptions=True,
+        )
+
+        for i, result in enumerate(results):
+            if isinstance(result, BaseException):
+                title = plan.sections[i].title
+                logger.error("Section '%s' failed: %s", title, result)
+                self.snapshot.section_drafts[title] = SectionDraft(
+                    title=title,
+                    content=f"[Section failed: {result}]",
+                    word_count=0,
+                )
+
         self.snapshot.stage = "write"
         await self.save_snapshot()
+        await self.update_overview()
 
     async def stage_merge(self) -> None:
         """Merge sections into a coherent draft."""
@@ -1324,8 +1481,13 @@ class PipelineRunner:
 
         await self.hooks.on_stage("merge", "Merging sections into coherent draft")
         self.state.set_stage("merging")
+        await self.update_overview(active_stage="merge")
         feedback = await self.gather_feedback()
         feedback_with_notes = await self.format_stage_context("merge", feedback)
+
+        async def merge_heartbeat(elapsed: float) -> None:
+            mins, secs = divmod(int(elapsed), 60)
+            await self.hooks.on_progress(f"Merging... ({mins}m{secs:02d}s elapsed)")
 
         drafts = list(self.snapshot.section_drafts.values())
         merged = await merge_sections(
@@ -1334,7 +1496,7 @@ class PipelineRunner:
             voice_profile=self.snapshot.voice_profile,
             feedback=feedback_with_notes,
             trace_logger=self.trace_logger,
-
+            heartbeat=merge_heartbeat,
             cost_accumulator=self.cost_accumulator,
         )
         self.snapshot.merged = merged
@@ -1351,6 +1513,7 @@ class PipelineRunner:
         )
         assert self.tabs is not None
         self.tabs.record(self.draft_tab_id, "Draft", merged.content)
+        await self.update_overview()
 
     async def stage_review(self) -> None:
         """Run parallel reviewers on the merged draft."""
@@ -1361,7 +1524,7 @@ class PipelineRunner:
 
         await self.hooks.on_stage("review", "Reviewing draft (3 reviewers in parallel)")
         self.state.set_stage("reviewing")
-        await self.update_overview("reviewing", plan)
+        await self.update_overview(active_stage="review")
 
         findings = await review_all(
             merged.content,
@@ -1380,6 +1543,7 @@ class PipelineRunner:
             f"({sum(1 for f in findings if f.severity == 'critical')} critical)"
         )
         await self.write_review_tab(findings)
+        await self.update_overview()
 
     async def stage_rewrite(self) -> None:
         """Produce the final version incorporating review feedback."""
@@ -1390,6 +1554,7 @@ class PipelineRunner:
 
         await self.hooks.on_stage("rewrite", "Producing final version")
         self.state.set_stage("rewriting")
+        await self.update_overview(active_stage="rewrite")
         feedback = await self.gather_feedback()
         feedback_with_notes = await self.format_stage_context("rewrite", feedback)
 
@@ -1409,6 +1574,7 @@ class PipelineRunner:
         self.snapshot.output = output
         self.snapshot.stage = "rewrite"
         await self.save_snapshot()
+        await self.update_overview()
 
     async def stage_format(self) -> None:
         """Apply format-specific transformations and write to Final tab."""
@@ -1419,6 +1585,7 @@ class PipelineRunner:
 
         chosen_format = plan.target_format or self.target_format
         await self.hooks.on_stage("format", f"Applying {chosen_format} formatting")
+        await self.update_overview(active_stage="format")
         article_text = output.content or output.summary
         final_content = await apply_format(
             article_text, plan.title, chosen_format
@@ -1439,6 +1606,7 @@ class PipelineRunner:
         self.snapshot.stage = "format"
         self.state.set_stage("complete")
         await self.save_snapshot()
+        await self.update_overview()
 
     # -- Restart logic ---------------------------------------------------
 
@@ -1553,8 +1721,10 @@ class PipelineRunner:
         if plan is None or research is None:
             return
 
+        all_plans: list[SectionPlan] = []
         all_coros = []
         for section_plan, _questions in rewrite_tasks:
+            all_plans.append(section_plan)
             all_coros.append(
                 write_section(
                     section_plan,
@@ -1563,11 +1733,12 @@ class PipelineRunner:
                     voice_profile=self.snapshot.voice_profile,
                     servers=self.research_servers,
                     trace_logger=self.trace_logger,
-        
+
                     cost_accumulator=self.cost_accumulator,
                 )
             )
         for section_plan in add_tasks:
+            all_plans.append(section_plan)
             all_coros.append(
                 write_section(
                     section_plan,
@@ -1576,17 +1747,18 @@ class PipelineRunner:
                     voice_profile=self.snapshot.voice_profile,
                     servers=self.research_servers,
                     trace_logger=self.trace_logger,
-        
+
                     cost_accumulator=self.cost_accumulator,
                 )
             )
 
         results = await asyncio.gather(*all_coros, return_exceptions=True)
-        for result in results:
+        for i, result in enumerate(results):
             if isinstance(result, BaseException):
                 logger.error("Rewrite/add failed: %s", result)
             else:
-                self.snapshot.section_drafts[result.title] = result
+                result.title = all_plans[i].title
+                self.snapshot.section_drafts[all_plans[i].title] = result
 
     def find_section_plan(self, section_title: str) -> SectionPlan | None:
         """Look up a SectionPlan by title from the current plan."""
@@ -1635,7 +1807,8 @@ class PipelineRunner:
             await self.hooks.on_stage("revise", f"Revising: {combined[:60]}")
             self.state.set_stage("revising")
 
-            await self.update_overview_revising()
+            self.snapshot.stage = "revise"
+            await self.update_overview(active_stage="revise")
 
             all_feedback = await self.hooks.collect_feedback(self.state)
             all_feedback.extend(batch)
@@ -1699,7 +1872,7 @@ class PipelineRunner:
         output.voice_profile = self.snapshot.voice_profile
         output.word_count = len(final_content.split())  # claude: ignore
         self.snapshot.output = output
-        await self.update_overview_complete()
+        await self.update_overview()
         await self.hooks.on_complete(output)
 
     async def drain_feedback_batch(
@@ -1798,27 +1971,43 @@ class PipelineRunner:
             self.doc_id, plan_tab_id, plan_text, session_state=self.state
         )
         assert self.tabs is not None
-        self.tabs.record(plan_tab_id, "Plan", plan_text)
+        # Plan tab is reference — don't track for edits
 
     async def create_section_tabs(self, plan: ArticlePlan) -> None:
-        """Create GDoc tabs for each section in the plan."""
+        """Create GDoc tabs for each section, nested under a Sections parent."""
         if not self.existing_doc_id:
             await do_rename_doc(self.doc_id, plan.title)
 
+        if "Sections" not in self.known_tabs:
+            sections_parent_id = await do_create_tab(
+                self.doc_id, "Sections", session_state=self.state
+            )
+            self.known_tabs["Sections"] = sections_parent_id
+        sections_parent_id = self.known_tabs["Sections"]
+
         self.tab_ids = {}
-        for section in plan.sections:
-            tab_name = f"§{len(self.tab_ids) + 1} {section.title}"
+        for i, section in enumerate(plan.sections):
+            tab_name = f"§{i + 1} {section.title}"
             if tab_name in self.known_tabs:
                 self.tab_ids[section.title] = self.known_tabs[tab_name]
                 self.state.add_section(tab_name, self.known_tabs[tab_name])
             else:
                 tid = await do_create_tab(
-                    self.doc_id, tab_name, session_state=self.state
+                    self.doc_id, tab_name,
+                    parent_tab_id=sections_parent_id,
+                    session_state=self.state,
                 )
                 self.tab_ids[section.title] = tid
                 self.known_tabs[tab_name] = tid
 
-        await self.update_overview("researching", plan)
+        sections_summary = "\n".join(
+            f"- §{i + 1} {s.title}" for i, s in enumerate(plan.sections)
+        )
+        await do_write_tab(
+            self.doc_id, sections_parent_id,
+            f"# Sections ({len(plan.sections)})\n\n{sections_summary}",
+            session_state=self.state,
+        )
 
     async def write_research_tab(self, research: ResearchCompilation) -> None:
         """Write research findings to the Research tab."""
@@ -1840,7 +2029,7 @@ class PipelineRunner:
             self.doc_id, research_tab_id, research_text, session_state=self.state
         )
         assert self.tabs is not None
-        self.tabs.record(research_tab_id, "Research", research_text)
+        # Research tab is reference — don't track for edits
 
     async def write_review_tab(self, findings: list[ReviewFinding]) -> None:
         """Write review findings to the Review tab and post critical as comments."""
@@ -1873,72 +2062,78 @@ class PipelineRunner:
             session_state=self.state,
         )
 
-    async def update_overview(self, stage: str, plan: ArticlePlan) -> None:
-        """Update the overview tab with current stage."""
-        marker = {"researching": "[ ]", "writing": "[>]", "reviewing": "[~]"}.get(
-            stage, "[ ]"
-        )
-        await do_write_tab(
-            self.doc_id,
-            self.overview_tab_id,
-            (
-                f"# {plan.title}\n\n"
-                f"**Thesis:** {plan.thesis}\n\n"
-                f"**Stage:** {stage}\n\n"
-                f"## Sections\n\n"
-                + "\n".join(f"- {marker} {s.title}" for s in plan.sections)
-            ),
-            session_state=self.state,
-        )
+    async def update_overview(self, active_stage: str | None = None) -> None:
+        """Write a stage-aware dashboard to the Overview tab.
 
-    async def update_overview_revising(self) -> None:
-        """Update overview to show revision in progress."""
-        plan = self.snapshot.plan
-        if plan is None:
-            return
-        await do_write_tab(
-            self.doc_id,
-            self.overview_tab_id,
-            (
-                f"# {plan.title}\n\n"
-                f"**Stage:** revising\n\n"
-                f"*Processing your feedback...*"
-            ),
-            session_state=self.state,
-        )
+        active_stage: if set, this stage is currently running (shown as [>]).
+            When None, snapshot.stage is treated as completed (shown as [x]).
+        """
+        snap = self.snapshot
+        plan = snap.plan
+        completed_stage = snap.stage
 
-    async def update_overview_complete(self) -> None:
-        """Write the final overview when pipeline completes."""
-        plan = self.snapshot.plan
-        findings = self.snapshot.findings
-        if plan is None:
-            return
+        parts: list[str] = [f"# {plan.title if plan else 'Inkwell Pipeline'}\n"]
 
-        await do_write_tab(
-            self.doc_id,
-            self.overview_tab_id,
-            (
-                f"# {plan.title}\n\n"
-                f"**Stage:** complete\n\n"
-                f"## Tabs\n\n"
-                f"- **Source** — extracted conversation\n"
-                f"- **Voice** — detected writing style\n"
-                f"- **Plan** — article structure\n"
-                f"- **Research** — findings and sources\n"
-                + "".join(
-                    f"- **§{i+1} {s.title}** — section draft\n"
-                    for i, s in enumerate(plan.sections)
+        all_stages = [
+            "extract", "voice", "plan", "research", "assumptions",
+            "refine", "write", "merge", "review", "rewrite", "format",
+        ]
+        completed_idx = all_stages.index(completed_stage) if completed_stage in all_stages else -1
+        active_idx = all_stages.index(active_stage) if active_stage and active_stage in all_stages else -1
+        progress: list[str] = []
+        for i, s in enumerate(all_stages):
+            if i == active_idx:
+                progress.append(f"[>] {s}")
+            elif i <= completed_idx:
+                progress.append(f"[x] {s}")
+            else:
+                progress.append(f"[ ] {s}")
+        parts.append(" ".join(progress) + "\n")
+
+        if plan:
+            parts.append(f"**Thesis:** {plan.thesis}\n")
+
+        if plan and snap.research:
+            answered = len(snap.research.findings)
+            total = len(plan.research_questions)
+            parts.append(f"**Research:** {answered}/{total} questions answered\n")
+        elif plan:
+            parts.append(f"**Research:** {len(plan.research_questions)} questions queued\n")
+
+        if plan:
+            parts.append("\n## Sections\n")
+            for i, s in enumerate(plan.sections):
+                draft = snap.section_drafts.get(s.title)
+                if draft and not draft.content.startswith("[Section failed"):
+                    parts.append(f"- [x] {s.title} ({draft.word_count} words)")
+                elif active_stage == "write" and s.title not in snap.section_drafts:
+                    parts.append(f"- [>] {s.title}")
+                else:
+                    parts.append(f"- [ ] {s.title}")
+            total_words = sum(d.word_count for d in snap.section_drafts.values())
+            if total_words:
+                parts.append(
+                    f"\n**Total:** {total_words} words "
+                    f"across {len(snap.section_drafts)} sections"
                 )
-                + f"- **Draft** — merged coherent draft\n"
-                f"- **Review** — all reviewer findings\n"
-                f"- **Final** — formatted output\n\n"
-                f"## Review Summary\n\n"
-                f"- {len(findings)} findings total\n"
-                f"- {sum(1 for f in findings if f.severity == 'critical')} critical\n"
-                f"- {sum(1 for f in findings if f.severity == 'suggestion')} suggestions\n\n"
-                f"*Comment on any tab or the Final to request revisions.*"
-            ),
-            session_state=self.state,
+
+        if snap.findings:
+            critical = sum(1 for f in snap.findings if f.severity == "critical")
+            suggestions = sum(1 for f in snap.findings if f.severity == "suggestion")
+            parts.append(f"\n## Review\n\n{critical} critical, {suggestions} suggestions")
+
+        if self.state.pending_questions:
+            n = len(self.state.pending_questions)
+            parts.append(f"\n**Questions for author:** {n} pending")
+
+        if active_stage == "revise":
+            parts.append("\n*Processing your feedback...*")
+        else:
+            parts.append("\n*Comment on any tab to give feedback.*")
+
+        await do_write_tab(
+            self.doc_id, self.overview_tab_id,
+            "\n".join(parts), session_state=self.state,
         )
 
 

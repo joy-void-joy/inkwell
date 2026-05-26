@@ -693,16 +693,19 @@ async def merge_sections(
         cost_accumulator=cost_accumulator,
     )
 
+    combined_path = notes.artifacts_dir / "merge_sections_combined.md"
+    parts: list[str] = []
+    for title, path in section_draft_paths.items():
+        section_text = path.read_text(encoding="utf-8")
+        parts.append(f"--- RAW MATERIAL: {title} ---\n\n{section_text}\n\n--- END ---")
+    combined_path.write_text("\n\n".join(parts), encoding="utf-8")
+
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("merge", note_collector)
 
-    drafts_list = "\n".join(
-        f"- {title}: {path}" for title, path in section_draft_paths.items()
-    )
-
     file_refs = (
         f"Merge plan (read this FIRST): {merge_plan_path}\n"
-        f"Section draft files:\n{drafts_list}\n"
+        f"Raw material (all sections in one file): {combined_path}\n"
     )
     if voice_profile:
         voice_path = notes.artifact_path("voice")
@@ -714,11 +717,12 @@ async def merge_sections(
     file_refs += f"Article plan: {plan_path}\n"
 
     task = (
-        f"Rewrite these sections into a unified article using the merge plan.\n\n"
+        f"Rewrite these sections into a unified article.\n\n"
         f"{file_refs}\n"
-        f"Read the merge plan FIRST — it tells you what to cut, how to "
-        f"connect sections, and where duplication exists. Then read the "
-        f"section drafts as raw material.\n\n"
+        f"Read the merge plan FIRST — it contains a target outline that "
+        f"defines your output's structure paragraph by paragraph. Then read "
+        f"the raw material file. Follow the outline, not the input section "
+        f"boundaries.\n\n"
         f"Write the complete merged draft to: {output_path}"
     )
 

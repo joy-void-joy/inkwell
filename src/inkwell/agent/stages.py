@@ -66,10 +66,11 @@ COHERENCE_EDITOR_PROMPT = """\
 You rewrite independently-written sections into a unified, coherent article, \
 guided by a merge plan that has already analyzed the sections for you.
 
-Read the merge plan FIRST — it tells you what to cut, how to connect \
-sections, and where duplication exists. Then read the section drafts as \
-raw material. The merge plan is your blueprint; the sections are your \
-building material.
+Read the merge plan FIRST — it contains a target outline that defines \
+the paragraph-by-paragraph structure of your output. Then read the raw \
+material file (all sections combined). Follow the outline's structure, \
+not the input sections' order or boundaries. The outline is your \
+skeleton; the sections are tissue to graft onto it.
 
 You are NOT editing or patching — you are writing a new draft. You have \
 full authority to:
@@ -138,7 +139,15 @@ For each section:
 - **Restructure**: Internal reordering needed, if applicable
 
 ### Structural Changes
-Sections to reorder, merge, split, or cut entirely."""
+Sections to reorder, merge, split, or cut entirely.
+
+### Target Outline
+The paragraph-by-paragraph structure of the unified piece. For each \
+entry: what it argues, which section(s) it draws from, and how it \
+connects to the next entry. The rewriter follows this outline — not \
+the input section boundaries. If content isn't placed in this outline, \
+it won't appear in the final piece. This is the most important section \
+of the plan."""
 
 
 NARRATIVE_REVIEWER_PROMPT = """\

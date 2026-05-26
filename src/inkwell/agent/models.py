@@ -9,12 +9,13 @@ restart strategies, assumptions, and pipeline snapshot state.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, TypedDict, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from lup.history import SessionResult
 
+from inkwell.agent.tools.stage_outputs import AuthorNote
 from inkwell.agent.tools.voice import VoiceProfile
 
 
@@ -54,7 +55,7 @@ class ArticlePlan(BaseModel):
     title: str = Field(description="Working title for the article")
     thesis: str = Field(description="Core argument or insight in one sentence")
     target_format: str = Field(
-        description="Output format: 'lesswrong', 'twitter_thread', 'blog', etc."
+        description="Output format: 'lesswrong', 'twitter', 'blog', 'dialog', 'memo', or 'custom:<description>'. Choose based on what best fits the content."
     )
     sections: list[SectionPlan] = Field(description="Ordered list of planned sections")
     research_questions: list[ResearchQuestion] = Field(
@@ -102,7 +103,8 @@ class ResearchCompilation(BaseModel):
 
     findings: list[ResearchFinding] = Field(description="Research findings")
     additional_context: str = Field(
-        description="Background context that doesn't fit a specific question"
+        default="",
+        description="Background context that doesn't fit a specific question",
     )
     suggested_additions: list[str] = Field(
         default_factory=list,
@@ -115,14 +117,20 @@ class SectionDraft(BaseModel):
 
     title: str = Field(description="Section heading")
     content: str = Field(description="Full markdown content of the section")
-    word_count: int = Field(description="Word count of the section")
+    word_count: int = Field(default=0, description="Word count of the section")
     sources_used: list[str] = Field(
         default_factory=list, description="URLs of sources referenced"
     )
-    questions_for_author: list[str] = Field(
+    questions_for_author: list[AuthorNote] = Field(
         default_factory=list,
         description="Questions the writer wants to ask the author about this section",
     )
+
+    @field_validator("questions_for_author", mode="before")
+    @classmethod
+    def coerce_strings_to_author_notes(cls, v: list[str | AuthorNote | dict[str, str]]) -> list[AuthorNote | dict[str, str]]:
+        """Accept plain strings from old snapshots."""
+        return [AuthorNote(note=item) if isinstance(item, str) else item for item in v]
 
 
 class ReviewFinding(BaseModel):
@@ -136,7 +144,7 @@ class ReviewFinding(BaseModel):
     )
     location: str = Field(description="Section or paragraph reference")
     issue: str = Field(description="What the reviewer found")
-    suggestion: str = Field(description="Suggested fix or improvement")
+    suggestion: str = Field(default="", description="Suggested fix or improvement")
     text_excerpt: str = Field(
         default="",
         description="Exact verbatim text excerpt from the draft that this finding refers to, for anchoring comments",
@@ -154,7 +162,8 @@ class MergedDraft(BaseModel):
 
     content: str = Field(description="The complete merged draft in markdown")
     changes_made: list[str] = Field(
-        description="Summary of edits made during merging (transitions, deduplication, etc.)"
+        default_factory=list,
+        description="Summary of edits made during merging (transitions, deduplication, etc.)",
     )
 
 
@@ -170,11 +179,15 @@ class ClassifiedComment(BaseModel):
     content: str = Field(description="Comment text")
     anchor_text: str = Field(default="", description="Quoted text the comment is anchored to")
     reply: str = Field(default="", description="Author's reply text, if replying to an agent comment")
-    impact: Literal["plan_breaking", "stage_local", "clarification"] = Field(
+    impact: Literal[
+        "plan_breaking", "stage_local", "clarification", "dismiss", "revert_suggested"
+    ] = Field(
         description=(
             "plan_breaking: invalidates thesis/structure, requires re-planning. "
             "stage_local: affects current/next stage only. "
-            "clarification: factual correction or scope note."
+            "clarification: factual correction or scope note. "
+            "dismiss: noise — accidental keystroke, formatting artifact, no semantic change. "
+            "revert_suggested: accidental damage — text was deleted or mangled unintentionally."
         )
     )
     tags: list[str] = Field(
@@ -305,24 +318,18 @@ class PipelineSnapshot(BaseModel):
     findings: list[ReviewFinding] = Field(default_factory=list)
     output: WritingOutput | None = Field(default=None)
 
-    def clear_downstream(self, from_stage: str) -> None:
-        """Discard artifacts produced after the given stage."""
-        stages = ["init", "extract", "voice", "plan", "assumptions",
-                  "research", "write", "merge", "review", "rewrite", "format"]
-        try:
-            idx = stages.index(from_stage)
-        except ValueError:
-            return
-        if idx <= stages.index("plan"):
-            self.research = None
-        if idx <= stages.index("research"):
-            self.section_drafts = {}
-        if idx <= stages.index("write"):
-            self.merged = None
-        if idx <= stages.index("merge"):
-            self.findings = []
-        if idx <= stages.index("review"):
-            self.output = None
+    doc_id: str = Field(default="", description="Google Doc ID (for resume)")
+    doc_url: str = Field(default="", description="Google Doc URL (for resume)")
+    seen_comment_ids: set[str] = Field(
+        default_factory=set, description="Comment IDs already processed"
+    )
+    agent_comment_ids: set[str] = Field(
+        default_factory=set, description="Comment IDs posted by the agent"
+    )
+    pending_questions: list[str] = Field(
+        default_factory=list, description="Unanswered questions for the author"
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -330,15 +337,24 @@ class PipelineSnapshot(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class StageCostBreakdown(TypedDict):
+    """Per-stage cost data populated after pipeline completion."""
+
+    cost_usd: float
+    duration_s: float
+    input_tokens: int
+    output_tokens: int
+    calls: int
+
+
 class WritingOutput(BaseModel):
-    """Final structured output from the writing pipeline."""
+    """Final structured output from any writing session."""
 
     title: str = Field(description="Final article title")
     content: str = Field(default="", description="Full article content in markdown")
     google_doc_id: str = Field(default="", description="Google Doc ID")
-    google_doc_url: str = Field(description="URL of the Google Doc with the article")
-    word_count: int = Field(description="Total word count")
-    sections_completed: int = Field(description="Number of sections written")
+    google_doc_url: str = Field(default="", description="URL of the Google Doc with the article")
+    word_count: int = Field(default=0, description="Total word count")
     review_findings: list[ReviewFinding] = Field(
         default_factory=list, description="Findings from all reviewers"
     )
@@ -350,7 +366,11 @@ class WritingOutput(BaseModel):
         default=None,
         description="Author voice profile used during writing",
     )
-    summary: str = Field(description="Brief 1-2 sentence editorial summary")
+    summary: str = Field(default="", description="Brief 1-2 sentence editorial summary")
+    stage_costs: dict[str, StageCostBreakdown] = Field(
+        default_factory=dict,
+        description="Per-stage cost breakdown populated after pipeline completion",
+    )
 
 
 AgentSessionResult = SessionResult[WritingOutput]

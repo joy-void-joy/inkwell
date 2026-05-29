@@ -20,12 +20,14 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 from rich.panel import Panel
 
 from lup.metrics import log_metrics_summary, reset_metrics
 from lup.paths import project_root
+from lup.trace import active_agents
 
 from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.models import WritingOutput
@@ -49,7 +51,37 @@ STAGE_LABELS: dict[str, str] = {
     "format": "📐 Formatting output",
     "restart": "🔁 Replanning from author feedback",
     "revise": "🔄 Revising",
+    "sync": "🔄 Syncing feedback",
 }
+
+
+SPINNER_FRAMES = "◇◈◆◈"
+
+
+def build_toolbar(listener: InteractiveListener | None = None):
+    """Return a callable for prompt-toolkit's bottom_toolbar.
+
+    Shows a spinner, the current pipeline stage, and active nested agents.
+    Refreshed automatically by prompt-toolkit's refresh_interval.
+    """
+    frame = 0
+
+    def get_toolbar():
+        nonlocal frame
+        parts: list[tuple[str, str]] = []
+        stage = listener.current_stage if listener else ""
+        label = STAGE_LABELS.get(stage, "")
+        if label or active_agents:
+            parts.append(("class:toolbar.spinner", f" {SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} "))
+            frame += 1
+        if label:
+            parts.append(("class:toolbar.stage", f"{label} "))
+        if active_agents:
+            agents_str = "  ".join(sorted(active_agents))
+            parts.append(("class:toolbar.agents", f" {agents_str} "))
+        return parts or None
+
+    return get_toolbar
 
 
 class InteractiveListener(PipelineListener):
@@ -64,6 +96,7 @@ class InteractiveListener(PipelineListener):
         console: Console,
         input_queue: asyncio.Queue[str],
     ) -> None:
+        super().__init__()
         self.console = console
         self.input_queue = input_queue
         self.current_stage = ""
@@ -154,7 +187,9 @@ class InteractiveListener(PipelineListener):
         return stripped or None
 
 
-def build_prompt_session() -> PromptSession[str]:
+def build_prompt_session(
+    listener: InteractiveListener | None = None,
+) -> PromptSession[str]:
     history_dir = project_root() / ".lup"
     history_dir.mkdir(parents=True, exist_ok=True)
 
@@ -180,12 +215,18 @@ def build_prompt_session() -> PromptSession[str]:
             {
                 "prompt": "fg:ansiblue bold",
                 "prompt-continuation": "fg:ansiblue",
+                "bottom-toolbar": "bg:#1a1a2e",
+                "toolbar.spinner": "bg:#1a1a2e #6c8cbf",
+                "toolbar.stage": "bg:#1a1a2e #e0e0ff bold",
+                "toolbar.agents": "bg:#1a1a2e #88ccff italic",
             }
         ),
         history=FileHistory(str(history_dir / "chat_history")),
         key_bindings=kb,
         multiline=True,
         prompt_continuation=FormattedText([("class:prompt-continuation", "  ")]),
+        bottom_toolbar=build_toolbar(listener),
+        refresh_interval=0.5,
     )
 
 
@@ -198,8 +239,8 @@ def show_welcome(console: Console) -> None:
         "Type feedback at any time — picked up between stages.",
         "",
         "[dim]/status  pipeline stage    /doc   open Google Doc[/dim]",
-        "[dim]/style   manage corpus     /help  show commands[/dim]",
-        "[dim]/done    finish revisions  /quit  exit[/dim]",
+        "[dim]/sync   poll edits+comments  /style manage corpus[/dim]",
+        "[dim]/done   finish revisions  /quit  exit  /help  commands[/dim]",
     ]
     console.print()
     console.print(Panel("\n".join(lines), border_style="blue", width=72))
@@ -209,6 +250,7 @@ def show_welcome(console: Console) -> None:
 def show_help(console: Console) -> None:
     console.print(
         "\n  [bold]Commands:[/bold]\n"
+        "  /sync     Poll GDoc comments + tab edits, trigger revision\n"
         "  /status   Show current pipeline stage\n"
         "  /doc      Show Google Doc URL\n"
         "  /style    Show style corpus entries\n"
@@ -223,6 +265,7 @@ async def read_terminal_input(
     input_queue: asyncio.Queue[str],
     console: Console,
     listener: InteractiveListener | None = None,
+    session_state: WritingSessionState | None = None,
 ) -> None:
     """Background task: read terminal input and push to the queue.
 
@@ -252,10 +295,7 @@ async def read_terminal_input(
             console.print(f"  [dim]Stage: {stage}[/dim]")
             continue
         if stripped == "/doc":
-            from inkwell.agent.tools.google_docs import get_session_state
-
-            state = get_session_state()
-            url = state.doc_url if state else ""
+            url = session_state.doc_url if session_state else ""
             if url:
                 console.print(f"  [dim]{url}[/dim]")
             else:
@@ -271,6 +311,13 @@ async def read_terminal_input(
                 for e in entries:
                     console.print(f"  [dim][{e.kind}] {e.name}[/dim]")
             continue
+        if stripped == "/sync":
+            if listener:
+                listener.request_sync()
+                console.print("  [yellow]Sync requested — polling comments + edits[/yellow]")
+            else:
+                console.print("  [dim]No active pipeline to sync.[/dim]")
+            continue
         if stripped.startswith("/") and stripped not in ("/done",):
             console.print(f"  [red]Unknown command: {stripped}[/red]")
             continue
@@ -284,6 +331,7 @@ async def chat_session(
     initial_task: str | None = None,
     session_id: str | None = None,
     resume_session_id: str | None = None,
+    resume_from_stage: str | None = None,
     target_format: str = "lesswrong",
     refs: list[str] | None = None,
     existing_doc_id: str | None = None,
@@ -306,67 +354,101 @@ async def chat_session(
 
     reset_metrics()
 
-    pt_session = build_prompt_session()
     input_queue: asyncio.Queue[str] = asyncio.Queue()
-
-    source = initial_task
-    if source is None and resume_session_id is None:
-        try:
-            source = await pt_session.prompt_async()
-        except (EOFError, KeyboardInterrupt):
-            return
-
-        source = source.strip()
-        if not source or source in ("/quit", "/exit", "/q"):
-            return
-
-    if source:
-        console.print(
-            f"  [dim]Source: {source[:80]}...[/dim]"
-            if len(source) > 80
-            else f"  [dim]Source: {source}[/dim]"
-        )
-    elif resume_session_id:
-        console.print(f"  [dim]Resuming session: {resume_session_id}[/dim]")
-
     listener = InteractiveListener(console, input_queue)
-    trace_holder: list[SessionTrace] = []
+    pt_session = build_prompt_session(listener)
 
-    input_task = asyncio.create_task(
-        read_terminal_input(pt_session, input_queue, console, listener)
-    )
+    with patch_stdout(raw=True):
+        source = initial_task
+        if source is None and resume_session_id is None:
+            try:
+                source = await pt_session.prompt_async()
+            except (EOFError, KeyboardInterrupt):
+                return
 
-    try:
-        result = await run_session(
-            source=source,
-            resume_session_id=resume_session_id,
-            target_format=target_format,
-            existing_doc_id=existing_doc_id,
-            session_id=session_id,
-            refs=refs,
-            listener=listener,
-            persistent=False,
-            trace_holder=trace_holder,
+            source = source.strip()
+            if not source or source in ("/quit", "/exit", "/q"):
+                return
+
+        if source:
+            console.print(
+                f"  [dim]Source: {source[:80]}...[/dim]"
+                if len(source) > 80
+                else f"  [dim]Source: {source}[/dim]"
+            )
+        elif resume_session_id:
+            console.print(f"  [dim]Resuming session: {resume_session_id}[/dim]")
+
+        trace_holder: list[SessionTrace] = []
+        session_state = WritingSessionState()
+
+        input_task = asyncio.create_task(
+            read_terminal_input(
+                pt_session, input_queue, console, listener, session_state
+            )
         )
 
-        if result.cost_usd is not None:
-            console.print(f"  [dim]Cost: ${result.cost_usd:.2f}[/dim]")
-
-    except PipelineError as exc:
-        console.print(f"\n  [red]Pipeline error: {exc}[/red]")
-    except KeyboardInterrupt:
-        console.print("\n  [dim]Interrupted.[/dim]")
-    except (RuntimeError, OSError, ConnectionError) as exc:
-        console.print(f"\n  [red]Error: {exc}[/red]")
-    finally:
-        input_task.cancel()
         try:
-            await input_task
-        except asyncio.CancelledError:
-            pass
-        if trace_holder:
-            trace_path = trace_holder[0].save()
-            console.print(f"\n  [dim]Trace saved to: {trace_path}[/dim]")
+            result = await run_session(
+                source=source,
+                resume_session_id=resume_session_id,
+                resume_from_stage=resume_from_stage,
+                target_format=target_format,
+                existing_doc_id=existing_doc_id,
+                session_id=session_id,
+                refs=refs,
+                listener=listener,
+                persistent=False,
+                trace_holder=trace_holder,
+                session_state=session_state,
+            )
+
+            if result.cost_usd is not None:
+                console.print(f"  [dim]Cost: ${result.cost_usd:.2f}[/dim]")
+                stage_costs = result.output.stage_costs if result.output else {}
+                if stage_costs:
+                    grouped: dict[str, list[float]] = {}
+                    for name, data in stage_costs.items():
+                        if name.startswith("write:"):
+                            group = "write"
+                        elif name.startswith("review:"):
+                            group = "review"
+                        elif name.startswith("patch:"):
+                            group = "patch"
+                        else:
+                            group = name
+                        if group not in grouped:
+                            grouped[group] = [0.0, 0.0, 0]
+                        grouped[group][0] += data.get("cost_usd", 0)
+                        grouped[group][1] += data.get("duration_s", 0)
+                        grouped[group][2] += data.get("calls", 0)
+                    for name, vals in sorted(
+                        grouped.items(), key=lambda kv: -kv[1][0]
+                    ):
+                        cost, dur, calls = vals[0], vals[1], int(vals[2])
+                        pct = (cost / result.cost_usd * 100) if result.cost_usd else 0
+                        label = f"{name} ({calls})" if calls > 1 else name
+                        console.print(
+                            f"    [dim]{label:.<30s} "
+                            f"${cost:>6.2f}  ({pct:4.1f}%)  "
+                            f"{dur:>5.0f}s[/dim]"
+                        )
+
+        except PipelineError as exc:
+            console.print(f"\n  [red]Pipeline error: {exc}[/red]")
+        except KeyboardInterrupt:
+            console.print("\n  [dim]Interrupted.[/dim]")
+        except (RuntimeError, OSError, ConnectionError) as exc:
+            console.print(f"\n  [red]Error: {exc}[/red]")
+        finally:
+            input_task.cancel()
+            try:
+                await input_task
+            except asyncio.CancelledError:
+                pass
+            if trace_holder:
+                trace_path = trace_holder[0].save()
+                console.print(f"\n  [dim]Trace saved to: {trace_path}[/dim]")
 
     log_metrics_summary()
     console.print("\n[dim]Session ended.[/dim]")

@@ -65,7 +65,7 @@ def write(
     ] = None,
     target_format: Annotated[
         str,
-        typer.Option("--format", "-f", help="Target format: lesswrong, twitter, blog"),
+        typer.Option("--format", "-f", help="Suggested format (agent may override): lesswrong, twitter, blog, dialog, memo, or custom:<description>"),
     ] = "lesswrong",
     doc: Annotated[
         str | None,
@@ -122,6 +122,10 @@ def write(
 @app.command()
 def run(
     task: Annotated[str, typer.Argument(help="Freeform task for the agent")],
+    target_format: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Suggested format (agent may override): lesswrong, twitter, blog, dialog, memo, or custom:<description>"),
+    ] = "lesswrong",
     session_id: Annotated[
         str | None,
         typer.Option("--session-id", "-s", help="Session identifier"),
@@ -131,46 +135,25 @@ def run(
         typer.Option("--verbose", "-v", help="Enable verbose logging"),
     ] = False,
 ) -> None:
-    """Run the agent with a freeform task (no pipeline).
+    """Run the pipeline with a freeform task as source material.
 
-    For structured article writing, use `inkwell write` instead.
-    This mode gives the agent all tools and lets it work freely.
+    The task text is used as source for the planner — it extracts a
+    structure and runs the full pipeline. For source links, use
+    `inkwell write` instead.
     """
-    from rich.console import Console
-
-    from inkwell.agent.core import run_agent
-
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
-
-    console = Console(highlight=False)
-    console.print("[dim]Running agent...[/dim]")
-
-    async def on_action(content: str) -> None:
-        console.print(f"  [dim]{content[:120]}[/dim]")
+    from inkwell.environment.cli.chat import chat_session
 
     try:
-        result = asyncio.run(
-            run_agent(
-                task,
+        asyncio.run(
+            chat_session(
+                initial_task=task,
                 session_id=session_id,
-                persistent=False,
-                on_action=on_action,
+                target_format=target_format,
+                verbose=verbose,
             )
         )
-        console.print(f"\n[bold]Title:[/bold] {result.output.title}")
-        if result.output.google_doc_url:
-            console.print(f"[bold]Doc:[/bold]   {result.output.google_doc_url}")
-        console.print(f"[bold]Words:[/bold] {result.output.word_count}")
-        if result.cost_usd is not None:
-            console.print(f"[bold]Cost:[/bold]  ${result.cost_usd:.2f}")
     except KeyboardInterrupt:
-        console.print("\n[dim]Interrupted.[/dim]")
-    except (RuntimeError, OSError, ConnectionError) as exc:
-        console.print(f"\n[red]Error: {exc}[/red]")
-        raise typer.Exit(1) from exc
+        pass
 
 
 @app.command()
@@ -187,6 +170,8 @@ def sessions(
     if not session_ids:
         typer.echo("No sessions found.")
         return
+
+    from lup.paths import sessions_dir
 
     for sid in session_ids[-limit:]:
         data = get_latest_session_json(sid)
@@ -216,6 +201,21 @@ def sessions(
         if doc_url:
             typer.echo(f"    {doc_url}")
 
+        notes_dir = sessions_dir() / sid / "pipeline_notes"
+        if notes_dir.exists():
+            checkpoints = sorted(
+                f.stem.removeprefix("snapshot_")
+                for f in notes_dir.glob("snapshot_*.json")
+            )
+            if checkpoints:
+                typer.echo(f"    checkpoints: {', '.join(checkpoints)}")
+
+
+VALID_STAGES = [
+    "extract", "voice", "plan", "research", "assumptions",
+    "refine", "write", "merge", "review", "rewrite", "format",
+]
+
 
 @app.command()
 def resume(
@@ -223,119 +223,48 @@ def resume(
         str,
         typer.Argument(help="Session ID to resume (see `inkwell sessions`)"),
     ],
+    from_stage: Annotated[
+        str | None,
+        typer.Option(
+            "--from", "-f",
+            help="Resume from after this stage (e.g. 'write' to re-run merge onward). "
+            "Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
+        ),
+    ] = None,
     verbose: Annotated[
         bool,
         typer.Option("--verbose", "-v", help="Enable verbose logging"),
     ] = False,
 ) -> None:
-    """Resume a previous writing session.
+    """Resume a previous writing session from its saved pipeline state.
 
-    Loads the session's Google Doc and pipeline state, then continues
-    the agent with context about what was already done.
+    By default, picks up from the last completed stage. Use --from to
+    resume from an earlier checkpoint.
 
     Examples:
-        inkwell sessions                      # find the session ID
-        inkwell resume 20260523_143022        # resume it
+        inkwell sessions                              # find the session ID
+        inkwell resume 20260523_143022                # resume from last stage
+        inkwell resume 20260523_143022 --from write   # re-run merge onward
     """
-    from lup.history import get_latest_session_json
-
-    data = get_latest_session_json(session_id)
-    if data is None:
-        typer.echo(f"Session '{session_id}' not found. Use `inkwell sessions` to list.")
+    if from_stage and from_stage not in VALID_STAGES:
+        typer.echo(
+            f"Invalid stage '{from_stage}'. "
+            f"Valid stages: {', '.join(VALID_STAGES)}"
+        )
         raise typer.Exit(1)
 
-    output = data.get("output")
-    doc_id = ""
-    doc_url = ""
-    title = ""
-    summary = ""
-    review_findings: list[object] = []
-    open_questions: list[str] = []
-    voice_summary = ""
-    if isinstance(output, dict):
-        d = output.get("google_doc_id")
-        if isinstance(d, str):
-            doc_id = d
-        u = output.get("google_doc_url")
-        if isinstance(u, str):
-            doc_url = u
-            if not doc_id:
-                doc_id = extract_doc_id_from_url(u)
-        t = output.get("title")
-        if isinstance(t, str):
-            title = t
-        s = output.get("summary")
-        if isinstance(s, str):
-            summary = s
-        rf = output.get("review_findings")
-        if isinstance(rf, list):
-            review_findings = rf
-        oq = output.get("open_questions")
-        if isinstance(oq, list):
-            open_questions = [str(q) for q in oq]
-        vp = output.get("voice_profile")
-        if isinstance(vp, dict):
-            vs = vp.get("summary")
-            if isinstance(vs, str):
-                voice_summary = vs
-
-    task_parts = [f"Resume the writing session for: {title or session_id}"]
-    if doc_url:
-        task_parts.append(f"\nGoogle Doc: {doc_url}")
-    if summary:
-        task_parts.append(f"\nPrevious session summary: {summary}")
-    if voice_summary:
-        task_parts.append(f"\nVoice profile: {voice_summary}")
-    if open_questions:
-        task_parts.append(
-            "\nOpen questions from previous session:\n"
-            + "\n".join(f"- {q}" for q in open_questions)
-        )
-    if review_findings:
-        critical = [
-            f
-            for f in review_findings
-            if isinstance(f, dict) and f.get("severity") == "critical"
-        ]
-        if critical:
-            task_parts.append(f"\n{len(critical)} unresolved critical review findings.")
-    task_parts.append(
-        "\nRead the Google Doc to understand current state. "
-        "Check for author comments and continue where the session left off."
-    )
-
-    from rich.console import Console
-
-    from inkwell.agent.core import run_agent
-
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
-
-    console = Console(highlight=False)
-
-    async def on_action(content: str) -> None:
-        console.print(f"  [dim]{content[:120]}[/dim]")
+    from inkwell.environment.cli.chat import chat_session
 
     try:
-        result = asyncio.run(
-            run_agent(
-                "\n".join(task_parts),
-                existing_doc_id=doc_id or None,
-                session_id=session_id,
-                persistent=True,
-                on_action=on_action,
+        asyncio.run(
+            chat_session(
+                resume_session_id=session_id,
+                resume_from_stage=from_stage,
+                verbose=verbose,
             )
         )
-        console.print(f"\n[bold]Title:[/bold] {result.output.title}")
-        if result.output.google_doc_url:
-            console.print(f"[bold]Doc:[/bold]   {result.output.google_doc_url}")
     except KeyboardInterrupt:
-        console.print("\n[dim]Interrupted.[/dim]")
-    except (RuntimeError, OSError, ConnectionError) as exc:
-        console.print(f"\n[red]Error: {exc}[/red]")
-        raise typer.Exit(1) from exc
+        pass
 
 
 @app.command()

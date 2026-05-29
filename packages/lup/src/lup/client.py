@@ -37,7 +37,7 @@ Examples:
         >>> collector.text
         'The code looks correct...'
 
-    Streaming with ``async for`` for per-message handling::
+    Per-message handling with ``async for``::
 
         >>> async with build_client(tools=["Read"], model="sonnet") as client:
         ...     await client.query("Analyze main.py")
@@ -61,8 +61,11 @@ Examples:
         >>> collector.result.usage          # token usage from the session
 """
 
+import asyncio
+import json
 import logging
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, TypedDict, overload
@@ -81,14 +84,17 @@ from claude_agent_sdk.types import (
     HookMatcher,
     McpServerConfig,
     ResultMessage,
+    StreamEvent,
     SystemMessage,
     SystemPromptPreset,
     ToolsPreset,
     UserMessage,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from lup.trace import TraceLogger, print_message
+from lup.trace import TraceLogger, active_agents, print_message
+
+type HeartbeatCallback = Callable[[float], Coroutine[None, None, None]]
 
 
 class TokenUsage(TypedDict, total=False):
@@ -145,6 +151,8 @@ class ResponseCollector:
         client: ClaudeSDKClient,
         trace_logger: TraceLogger | None = None,
         prefix: str = "",
+        heartbeat: HeartbeatCallback | None = None,
+        heartbeat_interval: float = 30.0,
     ) -> None:
         self.client = client
         self.blocks: list[ContentBlock] = []
@@ -153,6 +161,8 @@ class ResponseCollector:
         self.result: ResultMessage | None = None
         self.trace_logger = trace_logger
         self.prefix = prefix
+        self.heartbeat = heartbeat
+        self.heartbeat_interval = heartbeat_interval
 
     @property
     def text(self) -> str | None:
@@ -167,11 +177,19 @@ class ResponseCollector:
     def output[T: BaseModel](self, output_type: type[T]) -> T | None:
         """Extract structured output as a validated Pydantic model.
 
+        Handles the SDK wrapping bug where the agent produces
+        ``{"output": <actual_data>}`` instead of ``<actual_data>`` directly.
         Returns ``None`` when the agent produced no structured output.
         """
-        if self.result is not None and self.result.structured_output:
-            return output_type.model_validate(self.result.structured_output)
-        return None
+        if self.result is None or not self.result.structured_output:
+            return None
+        data = self.result.structured_output
+        try:
+            return output_type.model_validate(data)
+        except ValidationError:
+            if isinstance(data, dict) and "output" in data and len(data) == 1:
+                return output_type.model_validate(data["output"])
+            raise
 
     async def __aiter__(self) -> AsyncIterator[Message]:
         """Yield messages, accumulating state but not displaying.
@@ -180,6 +198,9 @@ class ResponseCollector:
         """
         async for message in self.client.receive_response():
             match message:
+                case StreamEvent():
+                    continue
+
                 case AssistantMessage():
                     self.messages.append(message)
                     for block in message.content:
@@ -204,15 +225,121 @@ class ResponseCollector:
     async def collect(self) -> ResultMessage:
         """Drain all messages, displaying and tracing each one.
 
+        When a heartbeat callback is set, it fires every
+        ``heartbeat_interval`` seconds with the elapsed time while
+        waiting for model output. Stops as soon as a message arrives.
+
         Raises:
             RuntimeError: If the agent returns an error or no result.
         """
-        async for message in self:
-            print_message(message, prefix=self.prefix, trace=self.trace_logger)
+        label = self.prefix.strip() if self.prefix else ""
+        if label:
+            active_agents.add(label)
+
+        heartbeat_task: asyncio.Task[None] | None = None
+        start = time.monotonic()
+
+        async def run_heartbeat() -> None:
+            assert self.heartbeat is not None
+            while True:
+                await asyncio.sleep(self.heartbeat_interval)
+                await self.heartbeat(time.monotonic() - start)
+
+        if self.heartbeat is not None:
+            heartbeat_task = asyncio.create_task(run_heartbeat())
+
+        try:
+            async for message in self:
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    heartbeat_task = None
+                if isinstance(message, StreamEvent):
+                    continue
+                print_message(
+                    message,
+                    prefix=self.prefix,
+                    trace=self.trace_logger,
+                )
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+            active_agents.discard(label)
 
         if self.result is None:
             raise RuntimeError("No result received from agent")
         return self.result
+
+
+# ---------------------------------------------------------------------------
+# Cost accumulator
+# ---------------------------------------------------------------------------
+
+
+class StageCost:
+    """Cost breakdown for a single pipeline stage."""
+
+    def __init__(self) -> None:
+        self.cost_usd: float = 0.0
+        self.duration_ms: float = 0.0
+        self.input_tokens: int = 0
+        self.output_tokens: int = 0
+        self.call_count: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.duration_ms / 1000
+
+
+class CostAccumulator:
+    """Tracks cumulative cost, duration, and token usage across multiple query() calls.
+
+    Thread-safe for sequential use. Create one per pipeline run and pass it
+    to each query() call via the ``cost_accumulator`` parameter.
+    """
+
+    def __init__(self) -> None:
+        self.total_cost_usd: float = 0.0
+        self.total_duration_ms: float = 0.0
+        self.total_input_tokens: int = 0
+        self.total_output_tokens: int = 0
+        self.call_count: int = 0
+        self.stages: dict[str, StageCost] = {}
+
+    def record(self, result: ResultMessage, *, stage: str | None = None) -> None:
+        """Record cost and usage from a completed query."""
+        self.call_count += 1
+        if result.total_cost_usd is not None:
+            self.total_cost_usd += result.total_cost_usd
+        if result.duration_ms is not None:
+            self.total_duration_ms += result.duration_ms
+        if result.usage:
+            self.total_input_tokens += result.usage.get("input_tokens", 0)
+            self.total_output_tokens += result.usage.get("output_tokens", 0)
+
+        if stage is not None:
+            if stage not in self.stages:
+                self.stages[stage] = StageCost()
+            sc = self.stages[stage]
+            sc.call_count += 1
+            if result.total_cost_usd is not None:
+                sc.cost_usd += result.total_cost_usd
+            if result.duration_ms is not None:
+                sc.duration_ms += result.duration_ms
+            if result.usage:
+                sc.input_tokens += result.usage.get("input_tokens", 0)
+                sc.output_tokens += result.usage.get("output_tokens", 0)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.total_input_tokens + self.total_output_tokens
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.total_duration_ms / 1000
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +392,10 @@ async def build_client(
             output_format=output_format,
             extra_args=merged_extra,
             hooks=hooks,
+            include_partial_messages=True,
         )
+
+    options.env.setdefault("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "128000")
 
     async with ClaudeSDKClient(options=options) as client:
         yield client
@@ -283,6 +413,7 @@ async def query(
     options: ClaudeAgentOptions | None = ...,
     prefix: str = ...,
     trace_logger: TraceLogger | None = ...,
+    cost_accumulator: CostAccumulator | None = ...,
     model: str | None = ...,
     system_prompt: str | SystemPromptPreset | None = ...,
     tools: list[str] | ToolsPreset | None = ...,
@@ -297,6 +428,8 @@ async def query(
     output_format: OutputFormat | None = ...,
     extra_args: dict[str, str | None] | None = ...,
     hooks: dict[HookEvent, list[HookMatcher]] | None = ...,
+    heartbeat: HeartbeatCallback | None = ...,
+    heartbeat_interval: float = ...,
 ) -> ResponseCollector: ...
 
 
@@ -308,6 +441,7 @@ async def query[T: BaseModel](
     options: ClaudeAgentOptions | None = ...,
     prefix: str = ...,
     trace_logger: TraceLogger | None = ...,
+    cost_accumulator: CostAccumulator | None = ...,
     model: str | None = ...,
     system_prompt: str | SystemPromptPreset | None = ...,
     tools: list[str] | ToolsPreset | None = ...,
@@ -322,6 +456,8 @@ async def query[T: BaseModel](
     output_format: OutputFormat | None = ...,
     extra_args: dict[str, str | None] | None = ...,
     hooks: dict[HookEvent, list[HookMatcher]] | None = ...,
+    heartbeat: HeartbeatCallback | None = ...,
+    heartbeat_interval: float = ...,
 ) -> T | None: ...
 
 
@@ -332,6 +468,7 @@ async def query(
     options: ClaudeAgentOptions | None = None,
     prefix: str = "",
     trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
     model: str | None = None,
     system_prompt: str | SystemPromptPreset | None = None,
     tools: list[str] | ToolsPreset | None = None,
@@ -346,6 +483,8 @@ async def query(
     output_format: OutputFormat | None = None,
     extra_args: dict[str, str | None] | None = None,
     hooks: dict[HookEvent, list[HookMatcher]] | None = None,
+    heartbeat: HeartbeatCallback | None = None,
+    heartbeat_interval: float = 30.0,
 ) -> ResponseCollector | BaseModel | None:
     """Query an SDK client and collect the full response.
 
@@ -359,10 +498,21 @@ async def query(
     construct ``ClaudeAgentOptions``.
     """
     if output_type is not None and output_format is None:
+        schema = output_type.model_json_schema()
         output_format = {
             "type": "json_schema",
-            "schema": output_type.model_json_schema(),
+            "schema": schema,
         }
+        schema_hint = (
+            f"\n\nYour StructuredOutput must conform to this JSON schema "
+            f"(output the data directly at the root level, do NOT wrap it "
+            f"in an `output` key):\n```json\n"
+            f"{json.dumps(schema, indent=2)}\n```"
+        )
+        if isinstance(system_prompt, str):
+            system_prompt = system_prompt + schema_hint
+        elif system_prompt is None:
+            system_prompt = schema_hint.lstrip()
 
     async with build_client(
         options=options,
@@ -381,8 +531,22 @@ async def query(
         hooks=hooks,
     ) as client:
         await client.query(prompt)
-        collector = ResponseCollector(client, prefix=prefix, trace_logger=trace_logger)
+        collector = ResponseCollector(
+            client,
+            prefix=prefix,
+            trace_logger=trace_logger,
+            heartbeat=heartbeat,
+            heartbeat_interval=heartbeat_interval,
+        )
         await collector.collect()
+
+    if cost_accumulator is not None and collector.result is not None:
+        stage_name: str | None = None
+        if prefix:
+            stripped = prefix.strip()
+            if stripped.startswith("[") and "]" in stripped:
+                stage_name = stripped[1 : stripped.index("]")]
+        cost_accumulator.record(collector.result, stage=stage_name)
 
     if output_type is not None:
         return collector.output(output_type)

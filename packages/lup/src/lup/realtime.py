@@ -60,20 +60,6 @@ ActionCallback = Callable[[str], Awaitable[None]]
 # =====================================================================
 
 
-class SleepFollowUp(BaseModel):
-    """A message to send at a scheduled interval during sleep.
-
-    Follow-ups fill silence: thread-pulls, different angles, check-ins.
-    Cancelled (saved as ideas) if the user speaks before they fire.
-    """
-
-    message: str = Field(description="Message to send during sleep")
-    delay_seconds: int = Field(
-        ge=1,
-        description="Seconds from sleep start to send this message",
-    )
-
-
 class SleepInput(BaseModel):
     """Input for the sleep tool."""
 
@@ -97,13 +83,6 @@ class SleepInput(BaseModel):
         description=(
             "Wake immediately if debounce_initial expires with no activity. "
             "When false, sleep continues for the full seconds duration."
-        ),
-    )
-    follow_ups: list[SleepFollowUp] = Field(
-        default_factory=list,
-        description=(
-            "Messages to send at intervals during sleep. "
-            "Cancelled (saved as ideas) if the user speaks before they fire."
         ),
     )
     force: bool = Field(
@@ -231,6 +210,9 @@ class Scheduler:
         # Delayed actions
         self._pending_actions: list[tuple[asyncio.Task[None], str]] = []
 
+        # Sleep tracking
+        self._sleeping = False
+
         # Meta-before-sleep gate (uses lib-level ReflectionGate)
         self.meta_gate = ReflectionGate()
 
@@ -238,6 +220,11 @@ class Scheduler:
     def ideas(self) -> list[str]:
         """Cancelled actions and agent-captured threads."""
         return self._ideas
+
+    @property
+    def is_sleeping(self) -> bool:
+        """Whether the agent is currently blocked in sleep()."""
+        return self._sleeping
 
     async def send_action(self, content: str) -> None:
         """Deliver an action to the environment via the registered callback."""
@@ -270,17 +257,21 @@ class Scheduler:
 
         Returns a context dict with ``reason`` and scheduling state.
         """
+        self._sleeping = True
         if self._on_sleep:
             self._on_sleep()
 
-        if self._wake.is_set():
-            pass  # Already have a pending wake — return immediately
-        else:
-            self._wake_reason = None
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=seconds)
-            except asyncio.TimeoutError:
-                self._wake_reason = "timer"
+        try:
+            if self._wake.is_set():
+                pass  # Already have a pending wake — return immediately
+            else:
+                self._wake_reason = None
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=seconds)
+                except asyncio.TimeoutError:
+                    self._wake_reason = "timer"
+        finally:
+            self._sleeping = False
 
         self._wake.clear()
         return self.build_sleep_result()
@@ -552,7 +543,7 @@ def create_stop_guard() -> HooksConfig:
 
 def create_pending_event_guard(
     *,
-    check_unread: Callable[[], int],
+    check_unread: Callable[[], int | Awaitable[int]],
     scheduler: Scheduler,
     guarded_tools: list[str],
 ) -> HooksConfig:
@@ -586,7 +577,8 @@ def create_pending_event_guard(
         if scheduler.wake_pending:
             return SyncHookJSONOutput()
 
-        unread = check_unread()
+        result = check_unread()
+        unread = await result if asyncio.iscoroutine(result) else result
         if not unread:
             return SyncHookJSONOutput()
 

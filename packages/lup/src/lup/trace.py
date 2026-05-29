@@ -8,8 +8,8 @@ using Rich console, making it easy to visually track which result
 belongs to which tool call.
 
 Two output channels:
-- **Console display** (``print_block`` / ``print_message``): real-time
-  color-coded output for interactive sessions.
+- **Console display** (``print_block`` / ``print_message``): prints
+  complete blocks as they arrive with color-coded tool pairing.
 - **Trace accumulation** (``TraceLogger``): markdown-formatted log for
   post-hoc feedback loop analysis.
 
@@ -84,6 +84,7 @@ TOOL_COLORS = [
 # reset state between runs.
 color_cycle = itertools.cycle(TOOL_COLORS)
 id_to_color: dict[str, str] = {}
+active_agents: set[str] = set()
 console = Console(highlight=False, markup=False)
 stream_log = logging.getLogger("lup.agent.stream")
 
@@ -216,35 +217,31 @@ def resolve_color_tag(block: ContentBlock) -> ColorTag | None:
 def print_block(
     block: ContentBlock, prefix: str = "", trace: TraceLogger | None = None
 ) -> None:
-    """Print a content block with color-coded tool use/result pairing.
+    """Print a complete content block (tool use/result, or non-streamed text).
 
-    ToolUseBlock and ToolResultBlock are linked by color: when a tool use
-    is printed, its ID is assigned a color from a rotating palette. When
-    the corresponding result arrives, the same color is used, making it
-    easy to visually pair them.
-
-    If *trace* is provided, the block is also logged to the trace.
+    For tool use/result blocks, acquires the streaming lock to avoid
+    interleaving with any active token stream. Thinking and text blocks
+    are printed here only when streaming is not active (fallback for
+    complete messages without prior StreamEvents).
     """
     info = extract_block_info(block)
     tag = resolve_color_tag(block)
 
-    # Tool results get special formatting (JSON pretty-print + truncation)
     display_content = (
         format_tool_result(block.content)
         if isinstance(block, ToolResultBlock)
         else info.content
     )
 
-    # Console output — tool blocks get a colored ID tag on the header line
     if tag:
-        print(f"{prefix}{info.emoji} {info.label} ", end="")
+        header = f"{prefix}{info.emoji} {info.label} "
+        print(header, end="", flush=True)
         console.print(f"[{tag.id}]", style=tag.color)
         if display_content:
-            print(display_content)
+            print(display_content, flush=True)
     else:
-        print(f"{prefix}{info.emoji} {display_content}")
+        print(f"{prefix}{info.emoji} {display_content}", flush=True)
 
-    # Stream log — format varies by block type (TOOL_USE includes tool name)
     match block:
         case ToolUseBlock():
             stream_log.info(
@@ -269,14 +266,11 @@ def print_block(
 
 
 def print_message(
-    message: Message, prefix: str = "", trace: TraceLogger | None = None
+    message: Message,
+    prefix: str = "",
+    trace: TraceLogger | None = None,
 ) -> None:
-    """Print all content blocks in a message.
-
-    Handles AssistantMessage and UserMessage (which carry content blocks).
-    Other message types (SystemMessage, ResultMessage, StreamEvent) are
-    silently ignored. If *trace* is provided, blocks are also logged to it.
-    """
+    """Print content blocks in a message."""
     match message:
         case AssistantMessage() | UserMessage():
             blocks = message.content if isinstance(message.content, list) else []

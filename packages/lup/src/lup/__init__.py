@@ -3,7 +3,14 @@
 Core utilities for building agents with hooks, MCP tools, tracing, and session management.
 """
 
-from lup.client import ResponseCollector, TokenUsage, build_client, query
+from lup.client import (
+    CostAccumulator,
+    ResponseCollector,
+    StageCost,
+    TokenUsage,
+    build_client,
+    query,
+)
 from lup.hooks import (
     HooksConfig,
     allow_hook_output,
@@ -31,7 +38,9 @@ from lup.reflect import ReflectionGate, create_reflection_gate
 from lup.trace import TraceLogger, print_message
 
 __all__ = [
+    "CostAccumulator",
     "HooksConfig",
+    "StageCost",
     "LupMcpTool",
     "MetricsSummary",
     "ReflectionGate",

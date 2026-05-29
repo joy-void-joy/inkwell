@@ -63,6 +63,8 @@ from claude_agent_sdk.types import (
     ResultMessage,
 )
 
+from lup.trace import print_message
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,7 +88,7 @@ class BackgroundAgent:
             Returns ``None`` to skip (no new data). Should read from
             shared state and advance its own read pointer.
         start_message: Initial user turn when the agent starts.
-        model: Model to use. Defaults to Sonnet for cost efficiency.
+        model: Model to use. Defaults to Opus.
         max_thinking_tokens: Thinking budget. Defaults to max.
         debounce_seconds: Batch rapid wakes — wait this long after
             a wake for more events before sending to the agent.
@@ -106,7 +108,7 @@ class BackgroundAgent:
         tools: list[Any],  # claude: ignore
         build_message: Callable[[], str | None],
         start_message: str = "",
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-opus-4-6",
         max_thinking_tokens: int | None = None,
         debounce_seconds: float = 3.0,
         builtin_tools: list[str] | None = None,
@@ -210,13 +212,17 @@ class BackgroundAgent:
                 await client.disconnect()
         except asyncio.CancelledError:
             pass
-        except Exception:
-            logger.exception("Background agent '%s' crashed", self.name)
+        except Exception as exc:  # claude: ignore — SDK raises generic Exception for exit codes
+            if "exit code -2" in str(exc):
+                logger.info("Background agent '%s' stopped (interrupted)", self.name)
+            else:
+                logger.exception("Background agent '%s' crashed", self.name)
 
     def _handle_response(self, msg: object) -> None:
         """Route response messages for logging."""
         match msg:
             case AssistantMessage():
+                print_message(msg, prefix=f"[{self.name}] ")
                 if self.on_response:
                     self.on_response(msg)
             case ResultMessage():

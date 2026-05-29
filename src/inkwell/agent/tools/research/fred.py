@@ -47,15 +47,9 @@ class FredSeriesInput(BaseModel):
     series_id: str = Field(
         description="FRED series ID (e.g. 'UNRATE', 'CPIAUCSL', 'GDP', 'FEDFUNDS')"
     )
-    start_date: str | None = Field(
-        default=None, description="Start date (YYYY-MM-DD)"
-    )
-    end_date: str | None = Field(
-        default=None, description="End date (YYYY-MM-DD)"
-    )
-    limit: int = Field(
-        default=100, ge=1, le=1000, description="Max observations"
-    )
+    start_date: str | None = Field(default=None, description="Start date (YYYY-MM-DD)")
+    end_date: str | None = Field(default=None, description="End date (YYYY-MM-DD)")
+    limit: int = Field(default=100, ge=1, le=1000, description="Max observations")
 
 
 class FredSeriesOutput(BaseModel):
@@ -180,9 +174,7 @@ async def fred_series(params: FredSeriesInput) -> FredSeriesOutput:
     for obs in obs_data.get("observations", []):
         value = obs.get("value", ".")
         if value != ".":
-            observations.append(
-                FredObservation(date=obs.get("date", ""), value=value)
-            )
+            observations.append(FredObservation(date=obs.get("date", ""), value=value))
 
     observations.reverse()
 

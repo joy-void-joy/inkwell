@@ -11,6 +11,16 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 
+def utf16_len(text: str) -> int:
+    """Length of *text* in UTF-16 code units (how Google Docs counts indices)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+class MarkdownBatch(TypedDict):
+    content: list[dict[str, object]]  # claude: ignore
+    formatting: list[dict[str, object]]  # claude: ignore
+
+
 class TextRange(TypedDict):
     startIndex: int
     endIndex: int
@@ -102,7 +112,7 @@ def walk_inline(
         match child.type:
             case "text" | "code_inline":
                 text_parts.append(child.content)
-                pos += len(child.content)
+                pos += utf16_len(child.content)
             case "softbreak":
                 text_parts.append("\n")
                 pos += 1
@@ -234,14 +244,14 @@ def markdown_to_requests(
 
             case "fence":
                 text_parts.append(token.content)
-                offset += len(token.content)
+                offset += utf16_len(token.content)
                 if not token.content.endswith("\n"):
                     text_parts.append("\n")
                     offset += 1
 
             case "code_block":
                 text_parts.append(token.content)
-                offset += len(token.content)
+                offset += utf16_len(token.content)
                 if not token.content.endswith("\n"):
                     text_parts.append("\n")
                     offset += 1
@@ -249,7 +259,7 @@ def markdown_to_requests(
             case "hr":
                 separator = "---\n"
                 text_parts.append(separator)
-                offset += len(separator)
+                offset += utf16_len(separator)
 
         i += 1
 
@@ -351,10 +361,74 @@ def markdown_to_requests(
     return requests
 
 
+RANGE_KEYS = ("updateTextStyle", "updateParagraphStyle", "createParagraphBullets")
+
+
+def clamp_ranges(
+    requests: list[dict[str, object]],  # claude: ignore
+    segment_end: int,
+) -> list[dict[str, object]]:  # claude: ignore
+    """Clamp all request ranges to fit within the actual segment.
+
+    Google Docs may count characters differently than Python len() (UTF-16
+    code units, stripped control characters, etc.), so the document segment
+    can be shorter than expected after insertText. This clamps formatting
+    ranges to the actual segment end, dropping any that fall entirely outside.
+    """
+    clamped: list[dict[str, object]] = []  # claude: ignore
+    for req in requests:
+        matched = False
+        for key in RANGE_KEYS:
+            if key not in req:
+                continue
+            body = req[key]
+            if not isinstance(body, dict):
+                continue
+            rng = body.get("range")
+            if not isinstance(rng, dict):
+                continue
+
+            start_idx = rng.get("startIndex", 0)
+            end_idx = rng.get("endIndex", 0)
+            if not isinstance(start_idx, int) or not isinstance(end_idx, int):
+                continue
+
+            matched = True
+            if start_idx >= segment_end:
+                break
+            if end_idx > segment_end:
+                rng = {**rng, "endIndex": segment_end}
+                req = {key: {**body, "range": rng}}
+
+            clamped.append(req)
+            break
+        if not matched:
+            clamped.append(req)
+    return clamped
+
+
+def split_markdown_batch(
+    requests: list[dict[str, object]],  # claude: ignore
+) -> MarkdownBatch:
+    """Split markdown_to_requests output into content and formatting batches."""
+    content: list[dict[str, object]] = []  # claude: ignore
+    formatting: list[dict[str, object]] = []  # claude: ignore
+    for req in requests:
+        if "insertText" in req:
+            content.append(req)
+        else:
+            formatting.append(req)
+    return MarkdownBatch(content=content, formatting=formatting)
+
+
 def clear_tab_request(end_index: int, tab_id: str | None = None) -> dict[str, object]:
-    """Request to delete all content from a tab (index 1 to end_index)."""
+    """Request to delete all content from a tab (index 1 to end_index).
+
+    Excludes the final newline character that terminates every segment —
+    the Docs API forbids deleting it.
+    """
     return {
         "deleteContentRange": {
-            "range": make_range(1, end_index, tab_id),
+            "range": make_range(1, end_index - 1, tab_id),
         }
     }

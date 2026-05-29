@@ -1,7 +1,8 @@
+# claude: ignore
 """Output format adapter tools.
 
 Transform a generic article draft into format-specific output:
-LessWrong, Twitter thread, or blog. Called by the rewriter after
+LessWrong, Twitter thread, memo, or custom. Called by the rewriter after
 producing the final draft.
 
 Each format has a plain function (do_format_*) for direct use by the
@@ -75,6 +76,41 @@ class FormatBlogInput(BaseModel):
 class FormatBlogOutput(BaseModel):
     content: str = Field(description="Blog-formatted article")
     meta_description: str = Field(description="SEO meta description (150-160 chars)")
+    word_count: int = Field(description="Word count")
+
+
+class FormatMemoInput(BaseModel):
+    content: str = Field(description="Full article markdown content")
+    title: str = Field(description="Memo subject line")
+    to: str = Field(
+        default="",
+        description="Recipient(s) of the memo (e.g. 'Senior Leadership', 'Policy Committee')",
+    )
+    from_field: str = Field(
+        default="",
+        description="Author/sender of the memo",
+    )
+    classification: str = Field(
+        default="",
+        description="Classification or sensitivity marking (e.g. 'CONFIDENTIAL', 'FOR INTERNAL USE')",
+    )
+
+
+class FormatMemoOutput(BaseModel):
+    content: str = Field(description="Memo-formatted document")
+    word_count: int = Field(description="Word count")
+
+
+class FormatCustomInput(BaseModel):
+    content: str = Field(description="Full article content to reformat")
+    format_description: str = Field(
+        description="Description of the desired output format — tone, structure, audience, conventions. Be specific: 'academic abstract with keywords' or 'diplomatic cable with numbered paragraphs and SUBJECT/REF headers'."
+    )
+    title: str = Field(default="", description="Title or subject line, if applicable")
+
+
+class FormatCustomOutput(BaseModel):
+    content: str = Field(description="Reformatted content")
     word_count: int = Field(description="Word count")
 
 
@@ -288,6 +324,84 @@ def do_format_blog(params: FormatBlogInput) -> FormatBlogOutput:
     )
 
 
+def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
+    import datetime
+
+    lines: list[str] = []
+
+    if params.classification:
+        lines.append(f"**{params.classification.upper()}**")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    if params.to:
+        lines.append(f"**TO:** {params.to}")
+    if params.from_field:
+        lines.append(f"**FROM:** {params.from_field}")
+    lines.append(f"**DATE:** {datetime.date.today().isoformat()}")
+    lines.append(f"**SUBJECT:** {params.title}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    for line in params.content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip().upper()
+            lines.append(f"**{heading}**")
+            lines.append("")
+        else:
+            lines.append(line)
+
+    if params.classification:
+        lines.append("---")
+        lines.append(f"**{params.classification.upper()}**")
+
+    result = "\n".join(lines)
+
+    return FormatMemoOutput(
+        content=result,
+        word_count=len(result.split()),
+    )
+
+
+async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
+    """Reformat content according to a freeform format description via LLM query."""
+    from lup.client import query
+
+    class FormattedContent(BaseModel):
+        content: str = Field(description="The reformatted content")
+
+    prompt = (
+        f"Reformat the following content according to these format instructions.\n\n"
+        f"**Format:** {params.format_description}\n"
+    )
+    if params.title:
+        prompt += f"**Title/Subject:** {params.title}\n"
+    prompt += f"\n<content>\n{params.content}\n</content>"
+
+    result = await query(
+        prompt,
+        output_type=FormattedContent,
+        model="claude-opus-4-6",
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        system_prompt=(
+            "You are a format adapter. Rewrite the content to match the requested "
+            "format exactly — adopt the conventions, structure, tone, and layout "
+            "described. Preserve all substantive content and arguments. Output only "
+            "the reformatted text, no meta-commentary."
+        ),
+    )
+    content = result.content if result else params.content
+
+    return FormatCustomOutput(
+        content=content,
+        word_count=len(content.split()),
+    )
+
+
 # ---------------------------------------------------------------------------
 # MCP tool wrappers (thin async wrappers for agent access)
 # ---------------------------------------------------------------------------
@@ -335,4 +449,35 @@ async def format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
     return await do_format_dialog(params)
 
 
-FORMAT_TOOLS = [format_lesswrong, format_twitter, format_blog, format_dialog]
+@lup_tool(
+    "Format an article as a formal memo with header block (TO/FROM/DATE/SUBJECT) "
+    "and section headings in caps. Optionally includes classification markings. "
+    "Use this for policy briefs, diplomatic notes, internal recommendations, "
+    "or any content that needs formal structure. Call this after the final "
+    "draft is complete."
+)
+async def format_memo(params: FormatMemoInput) -> FormatMemoOutput:
+    return do_format_memo(params)
+
+
+@lup_tool(
+    "Reformat an article into any format described in natural language. "
+    "Use this when none of the built-in formats (lesswrong, twitter, blog, "
+    "dialog, memo) fit the content. The format_description field controls "
+    "the output structure, tone, and conventions — be specific. Examples: "
+    "'academic abstract with keywords and JEL codes', 'diplomatic cable "
+    "with SUBJECT/REF headers', 'executive one-pager with bullet points'. "
+    "Call this after the final draft is complete."
+)
+async def format_custom(params: FormatCustomInput) -> FormatCustomOutput:
+    return await do_format_custom(params)
+
+
+FORMAT_TOOLS = [
+    format_lesswrong,
+    format_twitter,
+    format_blog,
+    format_dialog,
+    format_memo,
+    format_custom,
+]

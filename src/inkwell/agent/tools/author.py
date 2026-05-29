@@ -17,8 +17,10 @@ from pydantic import BaseModel, Field
 
 from inkwell.agent.markdown_to_docs import clear_tab_request, markdown_to_requests
 from inkwell.agent.tools.google_docs import (
+    execute_with_retry,
     find_tab_by_id,
     get_tab_end_index,
+    require_doc_id,
     services,
 )
 from lup.mcp import ToolError, lup_tool
@@ -27,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 class AskAuthorInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
     question: str = Field(description="The question to ask the author")
     question_type: str = Field(
         description="Type tag: 'question', 'direction_check', or 'fact_verify'"
@@ -55,7 +56,7 @@ class AuthorReply(TypedDict):
 
 
 class CheckFeedbackInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
+    pass
 
 
 class CheckFeedbackOutput(BaseModel):
@@ -74,7 +75,6 @@ class SectionStatus(TypedDict):
 
 
 class UpdateProgressInput(BaseModel):
-    doc_id: str = Field(description="Google Doc ID")
     stage: str = Field(
         description="Current pipeline stage (e.g., 'researching', 'writing', 'reviewing')"
     )
@@ -102,6 +102,7 @@ class UpdateProgressOutput(BaseModel):
     "Use this when you need author input but don't want to block the pipeline."
 )
 async def ask_author(params: AskAuthorInput) -> AskAuthorOutput:
+    doc_id = require_doc_id()
     svc = services()
     drive = svc.drive_service()
 
@@ -120,26 +121,25 @@ async def ask_author(params: AskAuthorInput) -> AskAuthorOutput:
             "value": params.anchor_text,
         }
 
-    result = (
-        drive.comments()
-        .create(
-            fileId=params.doc_id,
+    result = await execute_with_retry(
+        drive.comments().create(
+            fileId=doc_id,
             body=body,
-            fields="commentId",
+            fields="id",
         )
-        .execute()
     )
 
-    comment_id = str(result.get("commentId", ""))
+    comment_id = str(result.get("id", ""))
 
-    from inkwell.agent.tools.google_docs import SESSION_STATE
+    from inkwell.agent.tools.google_docs import get_session_state
 
-    if SESSION_STATE is not None:
-        SESSION_STATE.add_question(params.question)
-        SESSION_STATE.mark_agent_comment(comment_id)
+    state = get_session_state()
+    if state is not None:
+        state.add_question(params.question)
+        state.mark_agent_comment(comment_id)
 
     return AskAuthorOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         comment_id=comment_id,
         question_type=params.question_type,
     )
@@ -155,17 +155,16 @@ async def ask_author(params: AskAuthorInput) -> AskAuthorOutput:
 async def check_author_feedback(
     params: CheckFeedbackInput,
 ) -> CheckFeedbackOutput:
+    doc_id = require_doc_id()
     svc = services()
     drive = svc.drive_service()
 
-    result = (
-        drive.comments()
-        .list(
-            fileId=params.doc_id,
-            fields="comments(commentId,content,quotedFileContent/value,replies/content,resolved)",
+    result = await execute_with_retry(
+        drive.comments().list(
+            fileId=doc_id,
+            fields="comments(id,content,quotedFileContent/value,replies/content,resolved)",
             pageSize=100,
         )
-        .execute()
     )
 
     replies: list[AuthorReply] = []
@@ -178,7 +177,7 @@ async def check_author_feedback(
         if item.get("resolved", False):
             continue
 
-        comment_id = str(item.get("commentId", ""))
+        comment_id = str(item.get("id", ""))
         content = str(item.get("content", ""))
         anchor = ""
         quoted = item.get("quotedFileContent")
@@ -202,13 +201,14 @@ async def check_author_feedback(
         elif content.startswith("["):
             unanswered += 1
 
-    from inkwell.agent.tools.google_docs import SESSION_STATE
+    from inkwell.agent.tools.google_docs import get_session_state
 
-    if SESSION_STATE is not None and seen_ids:
-        SESSION_STATE.mark_comments_seen(seen_ids)
+    state = get_session_state()
+    if state is not None and seen_ids:
+        state.mark_comments_seen(seen_ids)
 
     return CheckFeedbackOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         replies=replies,
         unanswered_count=unanswered,
     )
@@ -221,6 +221,7 @@ async def check_author_feedback(
     "author has a clear picture of where things stand."
 )
 async def update_progress(params: UpdateProgressInput) -> UpdateProgressOutput:
+    doc_id = require_doc_id()
     svc = services()
     docs = svc.docs_service()
 
@@ -255,22 +256,21 @@ async def update_progress(params: UpdateProgressInput) -> UpdateProgressOutput:
     lines.append("")
     lines.append(f"**Next:** {params.next_steps}")
 
-    from inkwell.agent.tools.google_docs import SESSION_STATE
+    from inkwell.agent.tools.google_docs import get_session_state
 
-    if SESSION_STATE is not None:
-        SESSION_STATE.set_stage(params.stage)
+    state = get_session_state()
+    if state is not None:
+        state.set_stage(params.stage)
         for section in params.sections:
-            SESSION_STATE.update_section_status(section["title"], section["status"])
+            state.update_section_status(section["title"], section["status"])
 
     content = "\n".join(lines)
 
-    doc = (
-        docs.documents()
-        .get(
-            documentId=params.doc_id,
+    doc = await execute_with_retry(
+        docs.documents().get(
+            documentId=doc_id,
             includeTabsContent=True,
         )
-        .execute()
     )
 
     tabs = doc.get("tabs", [])
@@ -300,13 +300,15 @@ async def update_progress(params: UpdateProgressInput) -> UpdateProgressOutput:
     requests.extend(markdown_to_requests(content, tab_id=overview_tab_id))
 
     if requests:
-        docs.documents().batchUpdate(
-            documentId=params.doc_id,
-            body={"requests": requests},
-        ).execute()
+        await execute_with_retry(
+            docs.documents().batchUpdate(
+                documentId=doc_id,
+                body={"requests": requests},
+            )
+        )
 
     return UpdateProgressOutput(
-        doc_id=params.doc_id,
+        doc_id=doc_id,
         status="updated",
     )
 

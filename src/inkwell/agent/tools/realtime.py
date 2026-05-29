@@ -340,7 +340,9 @@ def create_realtime_tools(
                     del notes_store[inp.key]
                     return NotesOutput(message=f"Note '{inp.key}' deleted.")
                 return NotesOutput(message=f"No note with key '{inp.key}'.")
-        raise ToolError(f"Unknown action: {inp.action}. Use write, read, list, or delete.")
+        raise ToolError(
+            f"Unknown action: {inp.action}. Use write, read, list, or delete."
+        )
 
     @lup_tool(
         "Capture threads worth exploring later. Cancelled actions "
@@ -478,7 +480,7 @@ def create_observer(
     *,
     notes: list[str],
     transcript: list[object],
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "claude-opus-4-6",
 ) -> BackgroundAgent:
     """Create an observer background agent.
 

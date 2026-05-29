@@ -15,13 +15,20 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from googleapiclient.errors import HttpError
 from pydantic import BaseModel, Field
 
 from inkwell.agent.google_auth import ServiceFactory, get_service_factory
-from inkwell.agent.markdown_to_docs import clear_tab_request, markdown_to_requests
+from inkwell.agent.markdown_to_docs import (
+    clamp_ranges,
+    clear_tab_request,
+    markdown_to_requests,
+    split_markdown_batch,
+)
 from lup.mcp import ToolError, lup_tool
 
 if TYPE_CHECKING:
@@ -89,6 +96,20 @@ async def execute_with_retry(
             )
             await asyncio.sleep(delay)
     raise RuntimeError("Unreachable")
+
+
+@asynccontextmanager
+async def gdoc_nonfatal(operation: str) -> AsyncGenerator[None]:
+    """Wrap GDoc calls so failures log a warning instead of crashing the pipeline.
+
+    The Google Doc is a display surface — the pipeline snapshot holds the real
+    data.  If a write/comment/tab-create fails, the author sees a stale Doc
+    but the pipeline keeps running.
+    """
+    try:
+        yield
+    except (HttpError, OSError, TimeoutError) as exc:
+        logger.warning("GDoc %s failed (non-fatal): %s", operation, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +255,133 @@ def extract_tab_text(tab: object) -> str:
     return "".join(parts)
 
 
+HEADING_LEVEL: dict[str, int] = {
+    "HEADING_1": 1,
+    "HEADING_2": 2,
+    "HEADING_3": 3,
+    "HEADING_4": 4,
+    "HEADING_5": 5,
+    "HEADING_6": 6,
+}
+
+
+def extract_tab_markdown(tab: object) -> str:
+    """Reconstruct markdown from a tab's document content and formatting.
+
+    Reads paragraph styles (headings, bullets) and text styles (bold, italic,
+    links) from the Google Docs API response and emits markdown that
+    round-trips through markdown_to_requests faithfully.
+    """
+    if not isinstance(tab, dict):
+        return ""
+    body = tab.get("documentTab", {}).get("body", {})
+    if not isinstance(body, dict):
+        return ""
+    content = body.get("content", [])
+    if not isinstance(content, list):
+        return ""
+
+    paragraphs: list[str] = []
+
+    for element in content:
+        if not isinstance(element, dict):
+            continue
+        paragraph = element.get("paragraph")
+        if not isinstance(paragraph, dict):
+            continue
+
+        para_style = paragraph.get("paragraphStyle", {})
+        if not isinstance(para_style, dict):
+            para_style = {}
+        named_style = para_style.get("namedStyleType", "")
+
+        bullet = paragraph.get("bullet")
+        is_bullet = isinstance(bullet, dict)
+        is_ordered = False
+        if is_bullet and isinstance(bullet, dict):
+            list_id = bullet.get("listId", "")
+            nesting = bullet.get("nestingLevel", 0)
+            if not isinstance(nesting, int):
+                nesting = 0
+            is_ordered = _is_ordered_list(tab, str(list_id), nesting)
+
+        runs: list[str] = []
+        for pe in paragraph.get("elements", []):
+            if not isinstance(pe, dict):
+                continue
+            text_run = pe.get("textRun")
+            if not isinstance(text_run, dict):
+                continue
+            text = text_run.get("content", "")
+            if not isinstance(text, str):
+                continue
+
+            style = text_run.get("textStyle", {})
+            if not isinstance(style, dict):
+                style = {}
+
+            chunk = text.rstrip("\n")
+            if not chunk:
+                continue
+
+            bold = style.get("bold") is True
+            italic = style.get("italic") is True
+            link = style.get("link", {})
+            url = ""
+            if isinstance(link, dict):
+                url = str(link.get("url", ""))
+
+            if url:
+                chunk = f"[{chunk}]({url})"
+            if bold and italic:
+                chunk = f"***{chunk}***"
+            elif bold:
+                chunk = f"**{chunk}**"
+            elif italic:
+                chunk = f"*{chunk}*"
+
+            runs.append(chunk)
+
+        line = "".join(runs)
+        if not line:
+            paragraphs.append("")
+            continue
+
+        heading_level = HEADING_LEVEL.get(str(named_style))
+        if heading_level is not None:
+            paragraphs.append(f"{'#' * heading_level} {line}")
+        elif is_bullet:
+            prefix = "1. " if is_ordered else "- "
+            paragraphs.append(f"{prefix}{line}")
+        else:
+            paragraphs.append(line)
+
+    return "\n\n".join(p for p in paragraphs if p is not None).strip() + "\n"
+
+
+def _is_ordered_list(tab: object, list_id: str, nesting_level: int) -> bool:
+    """Check if a list at the given nesting level uses ordered numbering."""
+    if not isinstance(tab, dict):
+        return False
+    lists = tab.get("documentTab", {}).get("lists", {})
+    if not isinstance(lists, dict):
+        return False
+    list_def = lists.get(list_id, {})
+    if not isinstance(list_def, dict):
+        return False
+    props = list_def.get("listProperties", {})
+    if not isinstance(props, dict):
+        return False
+    levels = props.get("nestingLevels", [])
+    if not isinstance(levels, list) or nesting_level >= len(levels):
+        return False
+    level = levels[nesting_level]
+    if not isinstance(level, dict):
+        return False
+    glyph_type = level.get("glyphType", "")
+    return isinstance(glyph_type, str) and glyph_type not in ("", "GLYPH_TYPE_UNSPECIFIED")
+
+
 def get_tab_end_index(tab: object) -> int:
     """Get the end index of content in a tab (for clearing)."""
     if not isinstance(tab, dict):
@@ -254,8 +402,26 @@ def get_tab_end_index(tab: object) -> int:
     return end
 
 
+def search_tabs_recursive(
+    tabs: list[object], tab_id: str
+) -> tuple[str, object] | None:
+    """Recursively search tabs and their children for a tab ID."""
+    for tab in tabs:
+        if not isinstance(tab, dict):
+            continue
+        props = tab.get("tabProperties", {})
+        if isinstance(props, dict) and props.get("tabId") == tab_id:
+            return (tab_id, tab)
+        children = tab.get("childTabs", [])
+        if isinstance(children, list):
+            result = search_tabs_recursive(children, tab_id)
+            if result is not None:
+                return result
+    return None
+
+
 def find_tab_by_id(doc: object, tab_id: str | None) -> tuple[str, object]:
-    """Find a tab in a document by ID. Returns (tab_id, tab_dict)."""
+    """Find a tab in a document by ID, including nested tabs."""
     if not isinstance(doc, dict):
         raise ToolError("Invalid document response")
 
@@ -272,12 +438,9 @@ def find_tab_by_id(doc: object, tab_id: str | None) -> tuple[str, object]:
                 return (str(tid), first_tab)
         raise ToolError("Could not read first tab")
 
-    for tab in tabs:
-        if not isinstance(tab, dict):
-            continue
-        props = tab.get("tabProperties", {})
-        if isinstance(props, dict) and props.get("tabId") == tab_id:
-            return (tab_id, tab)
+    result = search_tabs_recursive(tabs, tab_id)
+    if result is not None:
+        return result
 
     raise ToolError(f"Tab '{tab_id}' not found in document")
 
@@ -329,26 +492,61 @@ async def do_rename_doc(doc_id: str, title: str) -> None:
     )
 
 
+def truncate_tab_title(name: str) -> str:
+    """Truncate a tab title to fit Google Docs' limit."""
+    MAX_TAB_TITLE = 50
+    if len(name) > MAX_TAB_TITLE:
+        return name[: MAX_TAB_TITLE - 1] + "…"
+    return name
+
+
+async def find_tab_by_title(doc_id: str, title: str) -> str | None:
+    """Find an existing tab by title, returning its ID or None."""
+    for tab in await do_list_tabs(doc_id):
+        if tab.title == title:
+            return tab.tab_id
+    return None
+
+
 async def do_create_tab(
     doc_id: str,
     name: str,
+    parent_tab_id: str | None = None,
     session_state: WritingSessionState | None = None,
 ) -> str:
-    """Create a tab in a Google Doc. Returns the tab ID."""
+    """Create a tab in a Google Doc. Returns the tab ID.
+
+    If parent_tab_id is provided, the tab is nested under the parent.
+    Idempotent: returns the existing tab ID if a tab with this title exists.
+    """
+    name = truncate_tab_title(name)
+    tab_props: dict[str, str] = {"title": name}
+    if parent_tab_id is not None:
+        tab_props["parentTabId"] = parent_tab_id
     svc = services()
     docs = svc.docs_service()
-    result = await execute_with_retry(
-        docs.documents().batchUpdate(
-            documentId=doc_id,
-            body={"requests": [{"addTab": {"tabProperties": {"title": name}}}]},
+    try:
+        result = await execute_with_retry(
+            docs.documents().batchUpdate(
+                documentId=doc_id,
+                body={"requests": [{"addDocumentTab": {"tabProperties": tab_props}}]},
+            )
         )
-    )
+    except HttpError as exc:
+        if exc.resp.status == 400 and "Tab title must be unique" in str(exc):
+            tab_id = await find_tab_by_title(doc_id, name)
+            if tab_id:
+                logger.info("Tab '%s' already exists (id=%s), reusing", name, tab_id)
+                if session_state is not None:
+                    session_state.add_section(name, tab_id)
+                return tab_id
+        raise
     tab_id = ""
     replies = result.get("replies", [])
     if replies:
         first = replies[0]
         if isinstance(first, dict):
-            props = first.get("addTab", {}).get("tabProperties", {})
+            props = first.get("addDocumentTab", {}).get("tabProperties", {})
             if isinstance(props, dict):
                 tab_id = str(props.get("tabId", ""))
 
@@ -374,15 +572,32 @@ async def do_write_tab(
     _, tab = find_tab_by_id(doc, tab_id)
     end_index = get_tab_end_index(tab)
 
-    requests: list[dict[str, object]] = []
-    if end_index > 1:
-        requests.append(clear_tab_request(end_index, tab_id=tab_id))
-    requests.extend(markdown_to_requests(markdown, tab_id=tab_id))
+    all_requests = markdown_to_requests(markdown, tab_id=tab_id)
+    batch = split_markdown_batch(all_requests)
 
-    if requests:
+    phase1: list[dict[str, object]] = []
+    if end_index > 2:
+        phase1.append(clear_tab_request(end_index, tab_id=tab_id))
+    phase1.extend(batch["content"])
+
+    if phase1:
         await execute_with_retry(
-            docs.documents().batchUpdate(documentId=doc_id, body={"requests": requests})
+            docs.documents().batchUpdate(documentId=doc_id, body={"requests": phase1})
         )
+
+    if batch["formatting"]:
+        doc = await execute_with_retry(
+            docs.documents().get(documentId=doc_id, includeTabsContent=True)
+        )
+        _, tab = find_tab_by_id(doc, tab_id)
+        actual_end = get_tab_end_index(tab)
+        clamped = clamp_ranges(batch["formatting"], actual_end)
+        if clamped:
+            await execute_with_retry(
+                docs.documents().batchUpdate(
+                    documentId=doc_id, body={"requests": clamped}
+                )
+            )
 
     if session_state is not None:
         for section in session_state.sections:
@@ -407,9 +622,9 @@ async def do_insert_comment(
     if anchor_text:
         body["quotedFileContent"] = {"mimeType": "text/plain", "value": anchor_text}
     result = await execute_with_retry(
-        drive.comments().create(fileId=doc_id, body=body, fields="commentId")
+        drive.comments().create(fileId=doc_id, body=body, fields="id")
     )
-    comment_id = str(result.get("commentId", ""))
+    comment_id = str(result.get("id", ""))
 
     if session_state is not None:
         session_state.mark_agent_comment(comment_id)
@@ -430,20 +645,27 @@ async def do_reply_to_comment(
             fileId=doc_id,
             commentId=comment_id,
             body={"content": reply_text},
-            fields="replyId",
+            fields="id",
         )
     )
-    return str(result.get("replyId", ""))
+    return str(result.get("id", ""))
 
 
 async def do_read_tab(
-    doc_id: str, tab_id: str, *, accept_suggestions: bool = False
+    doc_id: str,
+    tab_id: str,
+    *,
+    accept_suggestions: bool = False,
+    as_markdown: bool = False,
 ) -> str:
-    """Read the text content of a tab. Returns plain text.
+    """Read content of a tab. Returns plain text or reconstructed markdown.
 
     With accept_suggestions=True, reads the doc as if all pending
     suggestions were accepted — detects both direct edits and
     suggestion-mode changes in one read.
+
+    With as_markdown=True, reconstructs markdown from formatting (headings,
+    bold, italic, links, lists) instead of returning plain text.
     """
     svc = services()
     docs = svc.docs_service()
@@ -458,6 +680,8 @@ async def do_read_tab(
     doc = await execute_with_retry(docs.documents().get(**kwargs))
 
     _, tab = find_tab_by_id(doc, tab_id)
+    if as_markdown:
+        return extract_tab_markdown(tab)
     return extract_tab_text(tab)
 
 
@@ -578,7 +802,7 @@ async def read_comments(params: ReadCommentsInput) -> ReadCommentsOutput:
     while True:
         kwargs: dict[str, object] = {
             "fileId": doc_id,
-            "fields": "comments(commentId,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
+            "fields": "comments(id,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
             "pageSize": 100,
         }
         if page_token:
@@ -615,7 +839,7 @@ async def read_comments(params: ReadCommentsInput) -> ReadCommentsOutput:
 
             comments_list.append(
                 CommentEntry(
-                    comment_id=str(item.get("commentId", "")),
+                    comment_id=str(item.get("id", "")),
                     author=author_name,
                     content=str(item.get("content", "")),
                     anchor_text=anchor,
@@ -669,21 +893,43 @@ async def update_overview(params: UpdateOverviewInput) -> UpdateOverviewOutput:
                     _, matched_tab = find_tab_by_id(doc, overview_tab_id)
                     end_index = get_tab_end_index(matched_tab)
 
-                    requests: list[dict[str, object]] = []
-                    if end_index > 1:
-                        requests.append(
+                    all_reqs = markdown_to_requests(
+                        params.content, tab_id=overview_tab_id
+                    )
+                    ov_batch = split_markdown_batch(all_reqs)
+
+                    phase1: list[dict[str, object]] = []
+                    if end_index > 2:
+                        phase1.append(
                             clear_tab_request(end_index, tab_id=overview_tab_id)
                         )
-                    requests.extend(
-                        markdown_to_requests(params.content, tab_id=overview_tab_id)
-                    )
-                    if requests:
+                    phase1.extend(ov_batch["content"])
+                    if phase1:
                         await execute_with_retry(
                             docs.documents().batchUpdate(
                                 documentId=doc_id,
-                                body={"requests": requests},
+                                body={"requests": phase1},
                             )
                         )
+
+                    if ov_batch["formatting"]:
+                        doc = await execute_with_retry(
+                            docs.documents().get(
+                                documentId=doc_id, includeTabsContent=True
+                            )
+                        )
+                        _, matched_tab = find_tab_by_id(doc, overview_tab_id)
+                        actual_end = get_tab_end_index(matched_tab)
+                        clamped = clamp_ranges(
+                            ov_batch["formatting"], actual_end
+                        )
+                        if clamped:
+                            await execute_with_retry(
+                                docs.documents().batchUpdate(
+                                    documentId=doc_id,
+                                    body={"requests": clamped},
+                                )
+                            )
                     break
 
     if overview_tab_id is None:
@@ -696,58 +942,47 @@ async def update_overview(params: UpdateOverviewInput) -> UpdateOverviewOutput:
 
 
 @lup_tool(
-    "List all tabs in a Google Doc. Use this to discover available section "
-    "tabs, check what's been created, or find the tab IDs needed for "
-    "read/write operations."
+    "List all tabs in a Google Doc, including nested child tabs. Use this "
+    "to discover available section tabs, check what's been created, or "
+    "find the tab IDs needed for read/write operations."
 )
-async def list_tabs(params: ListTabsInput) -> ListTabsOutput:
+async def list_tabs(_params: ListTabsInput) -> ListTabsOutput:
     doc_id = require_doc_id()
-    svc = services()
-    docs = svc.docs_service()
+    tab_list = await do_list_tabs(doc_id)
+    return ListTabsOutput(doc_id=doc_id, tabs=tab_list)
 
-    doc = await execute_with_retry(docs.documents().get(documentId=doc_id))
-    tabs_raw = doc.get("tabs", [])
 
-    tab_list: list[TabInfo] = []
-    if isinstance(tabs_raw, list):
-        for tab in tabs_raw:
-            if not isinstance(tab, dict):
-                continue
-            props = tab.get("tabProperties", {})
-            if isinstance(props, dict):
-                tab_list.append(
-                    TabInfo(
-                        tab_id=str(props.get("tabId", "")),
-                        title=str(props.get("title", "")),
-                    )
+def collect_all_tabs(tabs: list[object]) -> list[TabInfo]:
+    """Recursively collect TabInfo from tabs and their children."""
+    result: list[TabInfo] = []
+    for tab in tabs:
+        if not isinstance(tab, dict):
+            continue
+        props = tab.get("tabProperties", {})
+        if isinstance(props, dict):
+            result.append(
+                TabInfo(
+                    tab_id=str(props.get("tabId", "")),
+                    title=str(props.get("title", "")),
                 )
-
-    return ListTabsOutput(
-        doc_id=doc_id,
-        tabs=tab_list,
-    )
+            )
+        children = tab.get("childTabs", [])
+        if isinstance(children, list):
+            result.extend(collect_all_tabs(children))
+    return result
 
 
 async def do_list_tabs(doc_id: str) -> list[TabInfo]:
-    """List all tabs in a document. Returns list of TabInfo."""
+    """List all tabs in a document, including nested children."""
     svc = services()
     docs = svc.docs_service()
-    doc = await execute_with_retry(docs.documents().get(documentId=doc_id))
+    doc = await execute_with_retry(
+        docs.documents().get(documentId=doc_id, includeTabsContent=True)
+    )
     tabs_raw = doc.get("tabs", [])
-    tab_list: list[TabInfo] = []
     if isinstance(tabs_raw, list):
-        for tab in tabs_raw:
-            if not isinstance(tab, dict):
-                continue
-            props = tab.get("tabProperties", {})
-            if isinstance(props, dict):
-                tab_list.append(
-                    TabInfo(
-                        tab_id=str(props.get("tabId", "")),
-                        title=str(props.get("title", "")),
-                    )
-                )
-    return tab_list
+        return collect_all_tabs(tabs_raw)
+    return []
 
 
 GOOGLE_DOCS_TOOLS = [

@@ -1,7 +1,7 @@
 """Voice analysis and style corpus tools.
 
 Analyzes the author's writing style from source conversations and
-reference pieces. Produces a structured VoiceProfile that section
+reference pieces. Produces a freeform markdown voice guide that section
 writers and the rewriter use to match the author's voice.
 """
 
@@ -17,39 +17,6 @@ from lup.trace import TraceLogger
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
-
-
-class VoiceProfile(BaseModel):
-    """Freeform profile of an author's writing voice."""
-
-    voice: str = Field(
-        description=(
-            "Extensive freeform voice analysis. Write several paragraphs covering "
-            "everything distinctive about this author's writing: tone, rhythm, "
-            "sentence structure, formality, humor, hedging patterns, argumentation "
-            "style, paragraph construction, technical depth, how they open and close "
-            "pieces, how they handle uncertainty, what makes them sound like *them* "
-            "and not a generic writer. Be specific and evocative — a writer should "
-            "be able to read this and produce convincing imitation."
-        )
-    )
-    phrases: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Exact phrases, constructions, and verbal tics to preserve or reuse. "
-            "Include recurring expressions, signature sentence starters, "
-            "characteristic transitions, and any phrases the author has explicitly "
-            "requested be used."
-        ),
-    )
-    avoid: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Anti-patterns — things this author never does or would reject. "
-            "E.g. 'never uses exclamation marks', 'avoids listicle format', "
-            "'no corporate jargon', 'doesn't hedge with \"I think\"'."
-        ),
-    )
 
 
 class LoadCorpusInput(BaseModel):
@@ -152,24 +119,49 @@ async def load_corpus(params: LoadCorpusInput) -> LoadCorpusOutput:
 
 
 VOICE_ANALYSIS_PROMPT = """\
-Analyze the writing samples below and produce a voice profile.
+Write a comprehensive voice and style guide for the author based on the \
+material below. This guide will be read by section writers, editors, and \
+reviewers who need to match the author's voice and follow their style rules.
 
-Focus on what makes this author's voice distinctive — not generic writing \
-observations. A ghostwriter should be able to read your analysis and produce \
-convincing imitation.
+Write it as a markdown document. Structure it however the input calls for — \
+the sections below are suggestions, not a template. If a section doesn't \
+apply, skip it. If the input warrants sections not listed here, add them.
 
-In the `voice` field, write several detailed paragraphs. Cover tone, rhythm, \
-sentence structure, formality, humor, hedging patterns, argumentation style, \
-paragraph construction, technical depth — everything that makes this person \
-sound like *them*. Use specific examples from the samples. Be evocative, not \
-taxonomic — "writes like a confident insider explaining to smart friends" is \
-better than "formality: conversational."
+## What to cover (when relevant)
 
-In `phrases`, extract exact recurring expressions, constructions, and verbal \
-tics. Include signature sentence starters, characteristic transitions, and any \
-phrases that feel load-bearing for the voice.
+**Voice.** What makes this author sound like *them*, not a generic writer. \
+Tone, rhythm, sentence structure, formality, humor, hedging patterns, \
+argumentation style, paragraph construction. Be evocative and use examples \
+from the samples — "writes like a confident insider explaining to smart \
+friends" beats "formality: conversational."
 
-In `avoid`, note things this author clearly never does or would reject.
+**Characteristic phrases.** Exact recurring expressions, constructions, \
+verbal tics, signature openers and transitions worth preserving.
+
+**Anti-patterns.** Things this author never does or would reject.
+
+**Hard editing rules.** Some samples may be prescriptive — editing \
+checklists, style guides, or "humanizer" rules with before/after examples \
+and concrete mechanical rules ("no em dashes," "replace not-X-but-Y"). \
+When you encounter prescriptive input, extract the rules at their stated \
+severity. If a reference says "hard constraint, not a preference," the \
+guide must say the same. These rules are enforced by the rewriter, so be \
+specific and unambiguous about what's banned and what to replace it with.
+
+## How to read the samples
+
+The samples may include a mix of the author's own writing, conversations, \
+and prescriptive references. Treat each on its own terms:
+
+- **Conversations** (with <user>/<claude> tags): analyze only the author's \
+voice (<user> blocks). Distinguish between their instruction voice (how \
+they direct the AI) and their target prose voice (what the finished piece \
+should sound like). When they provide correction pairs ("don't write X, \
+write Y"), those are direct evidence.
+- **Prose samples** (no tags): treat as the author's own writing.
+- **Prescriptive references** (contain before/after examples, "words to \
+watch" lists, explicit do/don't rules): extract the rules faithfully. \
+These aren't voice descriptions — they're editing instructions.
 
 ## Samples
 
@@ -177,33 +169,54 @@ In `avoid`, note things this author clearly never does or would reject.
 """
 
 
+def extract_author_text(conversation: str) -> str:
+    """Extract only the author's (<user>) blocks from a tagged conversation.
+
+    If the text has no <user>/<claude> tags, returns it unchanged.
+    """
+    if "<user>" not in conversation:
+        return conversation
+    blocks: list[str] = []
+    remaining = conversation
+    while "<user>" in remaining:
+        start = remaining.index("<user>") + len("<user>")
+        end_tag = "</user>"
+        end = remaining.index(end_tag, start) if end_tag in remaining[start:] else len(remaining)
+        block = remaining[start:end].strip()
+        if block:
+            blocks.append(block)
+        remaining = remaining[end + len(end_tag):] if end < len(remaining) else ""
+    return "\n\n---\n\n".join(blocks) if blocks else conversation
+
+
 async def do_analyze_voice(
     text: str,
     corpus_samples: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
-) -> VoiceProfile | None:
-    """Analyze writing samples and return a structured voice profile.
+) -> str | None:
+    """Analyze writing samples and return a freeform voice guide in markdown.
 
     Used by both the pipeline and the MCP tool wrapper.
+    Extracts only author (<user>) blocks from tagged conversations.
     """
-    all_text = [text]
+    author_text = extract_author_text(text)
+    all_text = [author_text]
     if corpus_samples:
         all_text.extend(corpus_samples)
     samples_text = "\n\n---\n\n".join(all_text)
 
-    result = await query(
+    collector = await query(
         VOICE_ANALYSIS_PROMPT.format(samples_text=samples_text[:8000]),
         model="claude-opus-4-6",
         system_prompt="You are a writing style analyst.",
-        max_thinking_tokens=128_000 - 1,
+        max_thinking_tokens=None,
         permission_mode="bypassPermissions",
-        output_type=VoiceProfile,
         prefix="[voice] ",
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
     )
-    return result
+    return collector.text.strip() if collector.text else None
 
 
 class AnalyzeVoiceInput(BaseModel):
@@ -215,21 +228,25 @@ class AnalyzeVoiceInput(BaseModel):
     )
 
 
+class VoiceAnalysisOutput(BaseModel):
+    guide: str = Field(description="Freeform voice and style guide in markdown")
+
+
 @lup_tool(
-    "Analyze writing samples and produce a freeform voice profile. "
+    "Analyze writing samples and produce a voice and style guide. "
     "Call this after loading the style corpus and extracting the source "
     "conversation. Pass the author's text (conversation excerpts, past "
-    "writing) and get back a detailed voice analysis: extensive freeform "
-    "notes on what makes this author distinctive, extracted phrases and "
-    "verbal tics to preserve, and anti-patterns to avoid. Section writers "
-    "use this to match voice."
+    "writing, editing checklists) and get back a markdown guide covering "
+    "what makes this author distinctive, phrases to preserve, anti-patterns "
+    "to avoid, and any hard editing rules from prescriptive references. "
+    "Section writers and the rewriter use this to match voice and enforce style."
 )
-async def analyze_voice(params: AnalyzeVoiceInput) -> VoiceProfile:
+async def analyze_voice(params: AnalyzeVoiceInput) -> VoiceAnalysisOutput:
     corpus_samples, _ = load_style_corpus(max_samples=3)
-    profile = await do_analyze_voice(params.text, corpus_samples)
-    if profile is None:
-        raise ToolError("Voice analysis failed to produce structured output")
-    return profile
+    guide = await do_analyze_voice(params.text, corpus_samples)
+    if guide is None:
+        raise ToolError("Voice analysis produced no output")
+    return VoiceAnalysisOutput(guide=guide)
 
 
 def add_style_reference(source: str) -> str:

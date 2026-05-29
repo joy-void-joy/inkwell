@@ -38,9 +38,9 @@ The agent writes into a Google Doc that the author follows in real time:
 ### Key Concepts
 
 - **Inkwell Package** (`src/inkwell/`): The writing agent application.
-  - **Agent** (`src/inkwell/agent/`): Pipeline orchestration, subagents, tools, models. Improved via the feedback loop.
+  - **Agent** (`src/inkwell/agent/`): Pipeline orchestration, nested agents, tools, models. Improved via the feedback loop.
   - **Environment** (`src/inkwell/environment/`): CLI interface for user interaction.
-- **Subagents**: planner, researcher, section_writer, coherence_editor, narrative_reviewer, fact_checker, style_reviewer, rewriter
+- **Pipeline stages**: planner, researcher, section_writer, coherence_editor, narrative_reviewer, fact_checker, style_reviewer, rewriter (defined in `stages.py`, executed by `pipeline.py`)
 - **Three-Level Meta Analysis**: Object (agent behavior), Meta (agent self-tracking), Meta-Meta (feedback loop process).
 
 ---
@@ -112,22 +112,29 @@ src/
     │   ├── config.py           # Settings (Google OAuth, API keys, etc.)
     │   ├── models.py           # ArticlePlan, WritingOutput, ReviewFinding, etc.
     │   ├── prompts.py          # System prompt for the writing agent
-    │   ├── subagents.py        # 8 subagents (planner, researcher, writers, reviewers, etc.)
+    │   ├── stages.py           # Stage prompts + tool lists for pipeline stages
+    │   ├── pipeline.py         # Unified pipeline (PipelineListener, all stages)
+    │   ├── session.py          # WritingSessionState, WritingContext
     │   ├── tool_policy.py      # Conditional tool availability
     │   └── tools/
     │       ├── google_docs.py  # Google Docs tools (create, write, comment, tabs)
-    │       ├── extract.py      # Claude conversation extractor
+    │       ├── author.py       # Author interaction (ask_author, check_feedback)
+    │       ├── voice.py        # Voice analysis and style corpus
+    │       ├── extract.py      # Source extraction (Claude conversations, URLs, files)
+    │       ├── formats.py      # Output format adapters (LessWrong, Twitter, blog)
     │       ├── realtime.py     # Real-time tools (sleep, context, reply)
-    │       └── reflect.py      # Writing-specific self-review tool
+    │       └── research/       # Research tools (exa, arxiv, fred, markets, wikipedia)
     ├── devtools/               # Development CLI (lup-devtools entry point)
     │   ├── main.py             # Root Typer app composing sub-apps
+    │   ├── setup.py            # Interactive setup wizard
     │   ├── trace/              # Trace display, search, and analysis
     │   ├── feedback/           # Feedback state, metrics, and session commits
     │   ├── dev/                # Worktrees, branches, and pre-flight checks
     │   └── version.py          # Version display, changelog, and bump
-    └── environment/            # Domain scaffolding (user interaction, game logic)
+    └── environment/            # User interaction layer
         └── cli/
-            └── __main__.py     # Typer CLI (run + loop with auto-commit)
+            ├── __main__.py     # Typer CLI (write, run, sessions, resume, setup, style)
+            └── chat.py         # Interactive session (pipeline + terminal + GDoc)
 ```
 
 ### Design Patterns
@@ -173,11 +180,8 @@ inkwell style add "https://lesswrong.com/posts/my-best-post"
 inkwell style add ~/writing/my-essay.md
 inkwell style list
 
-# Run with freeform task (advanced)
+# Run with freeform task (goes through pipeline with raw text as source)
 inkwell run "write a blog post about X"
-
-# Batch mode
-inkwell loop "task1" "task2" "task3"
 
 inkwell --help
 ```
@@ -234,7 +238,7 @@ uv run lup-devtools trace show <session_id>
 1. **Run `/lup:brainstorm`** (optional) — Explore architecture, MCP tools, and agent design before committing to scaffolding. Produces a `DESIGN.md` that init reads as context.
 2. **Run `/lup:init`** — Walks through domain customization (what the agent does, how outcomes are measured, what metrics matter)
 3. **Models** (`agent/models.py`) — `AgentOutput`, `Factor`, `SessionResult`
-4. **Subagents** (`agent/subagents.py`) — Specialized subagents, tool sets, model choices
+4. **Nested agents** (`agent/agents.py`) — Specialized agents, tool sets, model choices
 5. **Tools** (`agent/tool_policy.py`) — API key requirements, conditional availability, MCP configs
 6. **Reflection** (`agent/tools/reflect.py`) — Domain-specific `ReflectInput` fields, reviewer prompt
 7. **Version** (`[tool.lup] agent_version` in `pyproject.toml`) — Set initial version, bump on behavior changes

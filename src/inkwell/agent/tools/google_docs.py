@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -985,6 +986,180 @@ async def do_list_tabs(doc_id: str) -> list[TabInfo]:
     return []
 
 
+GDOC_URL_RE = re.compile(r"https://docs\.google\.com/document/d/([a-zA-Z0-9_-]+)")
+
+
+class AttachDocInput(BaseModel):
+    url: str = Field(
+        description="Google Doc URL (https://docs.google.com/document/d/<id>/...)"
+    )
+
+
+class AttachDocOutput(BaseModel):
+    doc_id: str = Field(description="Google Doc ID")
+    url: str = Field(description="Google Doc URL")
+    title: str = Field(description="Document title")
+    tabs: list[TabInfo] = Field(description="Existing tabs in the doc")
+    overview_tab_id: str = Field(
+        default="", description="Overview tab ID (created if missing)"
+    )
+    directions_tab_id: str = Field(
+        default="", description="Directions tab ID (created if missing)"
+    )
+
+
+@lup_tool(
+    "Attach to an existing Google Doc instead of creating a new one. Use when "
+    "the author provides a Google Doc URL as the starting seed. Creates an "
+    "Overview tab and Directions tab if they don't exist. Returns all tabs "
+    "so you can read their content with read_tab."
+)
+async def attach_doc(params: AttachDocInput) -> AttachDocOutput:
+    match = GDOC_URL_RE.search(params.url)
+    if not match:
+        raise ToolError(
+            f"Not a Google Doc URL: {params.url}. "
+            "Expected: https://docs.google.com/document/d/<doc_id>/..."
+        )
+    doc_id = match.group(1)
+
+    svc = services()
+    docs = svc.docs_service()
+
+    doc = await execute_with_retry(
+        docs.documents().get(documentId=doc_id, includeTabsContent=True)
+    )
+    doc_title = str(doc.get("title", "Untitled"))
+
+    tabs_raw = doc.get("tabs", [])
+    if not isinstance(tabs_raw, list):
+        raise ToolError("Could not read document tabs")
+
+    existing_tabs: list[TabInfo] = []
+    overview_tab_id = ""
+    directions_tab_id = ""
+
+    for tab in tabs_raw:
+        if not isinstance(tab, dict):
+            continue
+        props = tab.get("tabProperties", {})
+        if not isinstance(props, dict):
+            continue
+        tid = str(props.get("tabId", ""))
+        title = str(props.get("title", ""))
+        existing_tabs.append(TabInfo(tab_id=tid, title=title))
+        if title.lower() == "overview":
+            overview_tab_id = tid
+        elif title.lower() == "directions":
+            directions_tab_id = tid
+
+    for tab_name in ("Overview", "Directions"):
+        is_overview = tab_name == "Overview"
+        if is_overview and overview_tab_id:
+            continue
+        if not is_overview and directions_tab_id:
+            continue
+
+        result = await execute_with_retry(
+            docs.documents().batchUpdate(
+                documentId=doc_id,
+                body={"requests": [{"addTab": {"tabProperties": {"title": tab_name}}}]},
+            )
+        )
+        replies = result.get("replies", [])
+        if replies and isinstance(replies[0], dict):
+            add_tab = replies[0].get("addTab", {})
+            if isinstance(add_tab, dict):
+                tab_props = add_tab.get("tabProperties", {})
+                if isinstance(tab_props, dict):
+                    new_tid = str(tab_props.get("tabId", ""))
+                    existing_tabs.append(TabInfo(tab_id=new_tid, title=tab_name))
+                    if is_overview:
+                        overview_tab_id = new_tid
+                    else:
+                        directions_tab_id = new_tid
+
+    url = f"https://docs.google.com/document/d/{doc_id}/edit"
+
+    state = get_session_state()
+    if state is not None:
+        state.set_doc(doc_id, url)
+        state.directions_tab_id = directions_tab_id
+
+    return AttachDocOutput(
+        doc_id=doc_id,
+        url=url,
+        title=doc_title,
+        tabs=existing_tabs,
+        overview_tab_id=overview_tab_id,
+        directions_tab_id=directions_tab_id,
+    )
+
+
+class ReadDirectionsInput(BaseModel):
+    pass
+
+
+class ReadDirectionsOutput(BaseModel):
+    doc_id: str = Field(description="Google Doc ID")
+    content: str = Field(description="Current content of the Directions tab")
+    new_content: str = Field(
+        description="Content added since last read (empty if no changes)"
+    )
+    has_changes: bool = Field(description="Whether new content was found")
+
+
+@lup_tool(
+    "Read the Directions tab where the author types commands and guidance. "
+    "Returns new content since last read, so you can react to changes. "
+    "Use at stage boundaries alongside check_author_feedback for full "
+    "author input."
+)
+async def read_directions(_params: ReadDirectionsInput) -> ReadDirectionsOutput:
+    doc_id = require_doc_id()
+
+    state = get_session_state()
+    directions_tab_id = state.directions_tab_id if state else ""
+
+    if not directions_tab_id:
+        raise ToolError(
+            "No Directions tab found. Use attach_doc to set up the doc, "
+            "or create a 'Directions' tab with create_tab."
+        )
+
+    svc = services()
+    docs = svc.docs_service()
+
+    doc = await execute_with_retry(
+        docs.documents().get(documentId=doc_id, includeTabsContent=True)
+    )
+
+    _, tab = find_tab_by_id(doc, directions_tab_id)
+    content = extract_tab_text(tab)
+
+    new_content = ""
+    has_changes = False
+    if state is not None:
+        last = state.last_directions_content
+        if content != last:
+            has_changes = True
+            if last and content.startswith(last):
+                new_content = content[len(last):]
+            else:
+                new_content = content
+            state.last_directions_content = content
+    else:
+        new_content = content
+        has_changes = bool(content.strip())
+
+    return ReadDirectionsOutput(
+        doc_id=doc_id,
+        content=content,
+        new_content=new_content.strip(),
+        has_changes=has_changes,
+    )
+
+
 GOOGLE_DOCS_TOOLS = [
     create_doc,
     create_tab,
@@ -994,4 +1169,6 @@ GOOGLE_DOCS_TOOLS = [
     read_comments,
     update_overview,
     list_tabs,
+    attach_doc,
+    read_directions,
 ]

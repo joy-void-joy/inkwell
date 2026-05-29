@@ -49,6 +49,8 @@ class WritingSessionState:
         self.seen_comment_ids: set[str] = set()
         self.agent_comment_ids: set[str] = set()
         self.sleep_entered: asyncio.Event = asyncio.Event()
+        self.directions_tab_id: str = ""
+        self.last_directions_content: str = ""
 
     def set_doc(self, doc_id: str, doc_url: str) -> None:
         self.doc_id = doc_id

@@ -603,4 +603,306 @@ async def do_extract_source(source: str) -> str:
     return source
 
 
-EXTRACT_TOOLS = [extract_conversation, extract_url, extract_file]
+LESSWRONG_GRAPHQL_URL = "https://www.lesswrong.com/graphql"
+LESSWRONG_QUERY = """
+query GetPost($slug: String!) {
+  post(input: {selector: {slug: $slug}}) {
+    result {
+      title
+      htmlBody
+      user { displayName }
+      baseScore
+      commentCount
+      postedAt
+    }
+  }
+}
+"""
+
+
+class ExtractLessWrongInput(BaseModel):
+    url: str = Field(
+        description="LessWrong post URL (e.g., https://www.lesswrong.com/posts/.../slug)"
+    )
+
+
+class ExtractLessWrongOutput(BaseModel):
+    url: str = Field(description="Source URL")
+    title: str = Field(description="Post title")
+    author: str = Field(description="Author display name")
+    content: str = Field(description="Post body as markdown")
+    score: int = Field(description="Post karma score")
+    comment_count: int = Field(description="Number of comments")
+    posted_date: str = Field(description="Publication date (ISO format)")
+    word_count: int = Field(description="Word count of post body")
+
+
+def parse_lesswrong_slug(url: str) -> str:
+    parts = url.rstrip("/").split("/")
+    try:
+        posts_idx = parts.index("posts")
+    except ValueError:
+        raise ToolError(f"Not a valid LessWrong URL (no /posts/ segment): {url}")
+    if posts_idx + 2 >= len(parts):
+        raise ToolError(f"Not a valid LessWrong URL (missing slug): {url}")
+    return parts[posts_idx + 2]
+
+
+@lup_tool(
+    "Extract a LessWrong post with metadata via the GraphQL API. Returns "
+    "the post body as markdown plus author, karma score, and comment count. "
+    "Use for style references, source material, or cross-referencing LW posts."
+)
+async def extract_lesswrong(
+    params: ExtractLessWrongInput,
+) -> ExtractLessWrongOutput:
+    import markdownify
+
+    slug = parse_lesswrong_slug(params.url)
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                LESSWRONG_GRAPHQL_URL,
+                json={"query": LESSWRONG_QUERY, "variables": {"slug": slug}},
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.HTTPError as e:
+        raise ToolError(f"Failed to fetch LessWrong post: {e}") from e
+
+    if resp.status_code != 200:
+        raise ToolError(f"LessWrong API returned HTTP {resp.status_code}")
+
+    data = resp.json()
+    post = data.get("data", {}).get("post", {}).get("result")
+    if not post:
+        raise ToolError(f"Post not found for slug '{slug}'")
+
+    html_body: str = post.get("htmlBody", "")
+    content = markdownify.markdownify(html_body, strip=["img"]) if html_body else ""
+
+    user = post.get("user") or {}
+    return ExtractLessWrongOutput(
+        url=params.url,
+        title=post.get("title", ""),
+        author=user.get("displayName", "Unknown"),
+        content=content,
+        score=post.get("baseScore", 0),
+        comment_count=post.get("commentCount", 0),
+        posted_date=post.get("postedAt", ""),
+        word_count=len(content.split()),
+    )
+
+
+class ExtractBatchInput(BaseModel):
+    urls: list[str] = Field(description="URLs to extract text from (processed in parallel)")
+
+
+class BatchResult(BaseModel):
+    url: str
+    title: str = ""
+    content: str
+    word_count: int
+
+
+class ExtractBatchOutput(BaseModel):
+    results: list[BatchResult] = Field(description="Successfully extracted pages")
+    failed: list[str] = Field(default_factory=list, description="URLs that failed")
+
+
+@lup_tool(
+    "Extract text from multiple URLs in parallel. Use when ingesting "
+    "several reference pages at once — faster than calling extract_url "
+    "repeatedly. Returns extracted content for each URL and lists failures."
+)
+async def extract_webpage_batch(
+    params: ExtractBatchInput,
+) -> ExtractBatchOutput:
+    import asyncio
+    import json as json_mod
+
+    import trafilatura
+
+    if not params.urls:
+        raise ToolError("No URLs provided")
+
+    async def fetch_one(client: httpx.AsyncClient, url: str) -> BatchResult | None:
+        try:
+            resp = await client.get(url)
+            if resp.status_code >= 400:
+                return None
+        except httpx.HTTPError:
+            return None
+
+        text = trafilatura.extract(
+            resp.text,
+            include_comments=False,
+            include_tables=True,
+            no_fallback=False,
+            include_links=True,
+        )
+        if not text:
+            return None
+
+        title = ""
+        title_json = trafilatura.extract(resp.text, output_format="json", include_links=False)
+        if title_json:
+            try:
+                title = json_mod.loads(title_json).get("title", "")
+            except (json_mod.JSONDecodeError, AttributeError):
+                pass
+
+        return BatchResult(url=url, title=title, content=text[:50000], word_count=len(text.split()))
+
+    async with httpx.AsyncClient(
+        timeout=20.0,
+        follow_redirects=True,
+        headers={"User-Agent": CLAUDE_HEADERS["User-Agent"]},
+    ) as client:
+        tasks = [fetch_one(client, url) for url in params.urls]
+        outcomes = await asyncio.gather(*tasks)
+
+    results: list[BatchResult] = []
+    failed: list[str] = []
+    for url, outcome in zip(params.urls, outcomes):
+        if outcome is None:
+            failed.append(url)
+        else:
+            results.append(outcome)
+
+    return ExtractBatchOutput(results=results, failed=failed)
+
+
+GDOC_URL_PATTERN = re.compile(
+    r"https://docs\.google\.com/document/d/([a-zA-Z0-9_-]+)"
+)
+
+LINK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("claude_share", re.compile(r"https://claude\.ai/share/[a-zA-Z0-9_-]+")),
+    ("url", re.compile(r"https?://[^\s<>\")\]]+(?<![.,;:!?\"'])")),
+]
+
+
+def parse_gdoc_id(url: str) -> str:
+    match = GDOC_URL_PATTERN.search(url)
+    if not match:
+        raise ToolError(
+            f"Not a Google Doc URL: {url}. "
+            "Expected: https://docs.google.com/document/d/<doc_id>/..."
+        )
+    return match.group(1)
+
+
+class DiscoveredLink(BaseModel):
+    url: str = Field(description="Discovered URL")
+    link_type: str = Field(
+        description="Type: 'claude_share' for Claude conversations, 'url' for other links"
+    )
+
+
+def discover_links(text: str) -> list[DiscoveredLink]:
+    """Scan text for embedded links (Claude shares, article URLs)."""
+    seen: set[str] = set()
+    links: list[DiscoveredLink] = []
+    for link_type, pattern in LINK_PATTERNS:
+        for match in pattern.finditer(text):
+            url = match.group(0)
+            if url in seen:
+                continue
+            if GDOC_URL_PATTERN.match(url):
+                continue
+            seen.add(url)
+            links.append(DiscoveredLink(url=url, link_type=link_type))
+    return links
+
+
+class ExtractGdocInput(BaseModel):
+    url: str = Field(
+        description="Google Doc URL (https://docs.google.com/document/d/<id>/...)"
+    )
+
+
+class GdocTab(BaseModel):
+    tab_id: str = Field(description="Tab ID")
+    title: str = Field(description="Tab title")
+    content: str = Field(description="Tab content as plain text")
+    word_count: int = Field(description="Approximate word count")
+
+
+class ExtractGdocOutput(BaseModel):
+    doc_id: str = Field(description="Google Doc ID")
+    title: str = Field(description="Document title")
+    tabs: list[GdocTab] = Field(description="Content of each tab")
+    discovered_links: list[DiscoveredLink] = Field(
+        description="Links found in the document (Claude shares, article URLs)"
+    )
+    total_word_count: int = Field(description="Total word count across all tabs")
+
+
+@lup_tool(
+    "Extract content from a Google Doc. Reads all tabs and discovers embedded "
+    "links (Claude share links, article URLs). Use when the author provides a "
+    "Google Doc as seed — reads its content, finds Claude conversations or "
+    "reference URLs linked within, and returns structured source material. "
+    "Discovered links can be processed with extract_conversation or extract_url."
+)
+async def extract_gdoc(params: ExtractGdocInput) -> ExtractGdocOutput:
+    from inkwell.agent.tools.google_docs import (
+        execute_with_retry,
+        extract_tab_text,
+        services,
+    )
+
+    doc_id = parse_gdoc_id(params.url)
+    svc = services()
+    docs = svc.docs_service()
+
+    doc = await execute_with_retry(
+        docs.documents().get(documentId=doc_id, includeTabsContent=True)
+    )
+
+    doc_title = str(doc.get("title", "Untitled"))
+    tabs_raw = doc.get("tabs", [])
+    if not isinstance(tabs_raw, list):
+        raise ToolError("Could not read document tabs")
+
+    tabs: list[GdocTab] = []
+    all_text_parts: list[str] = []
+
+    for tab in tabs_raw:
+        if not isinstance(tab, dict):
+            continue
+        props = tab.get("tabProperties", {})
+        if not isinstance(props, dict):
+            continue
+
+        tab_id = str(props.get("tabId", ""))
+        tab_title = str(props.get("title", ""))
+        text = extract_tab_text(tab)
+        all_text_parts.append(text)
+
+        tabs.append(
+            GdocTab(
+                tab_id=tab_id,
+                title=tab_title,
+                content=text[:50000],
+                word_count=len(text.split()),
+            )
+        )
+
+    all_text = "\n".join(all_text_parts)
+    discovered = discover_links(all_text)
+
+    return ExtractGdocOutput(
+        doc_id=doc_id,
+        title=doc_title,
+        tabs=tabs,
+        discovered_links=discovered,
+        total_word_count=len(all_text.split()),
+    )
+
+
+EXTRACT_TOOLS = [
+    extract_conversation, extract_url, extract_file,
+    extract_lesswrong, extract_webpage_batch, extract_gdoc,
+]

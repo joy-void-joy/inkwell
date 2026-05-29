@@ -47,6 +47,8 @@ AUTHOR_TOOLS: frozenset[str] = frozenset(
         "mcp__docs__update_progress",
         "mcp__docs__load_corpus",
         "mcp__docs__analyze_voice",
+        "mcp__docs__attach_doc",
+        "mcp__docs__read_directions",
     }
 )
 
@@ -63,6 +65,9 @@ EXTRACT_TOOLS: frozenset[str] = frozenset(
         "mcp__extract__extract_conversation",
         "mcp__extract__extract_url",
         "mcp__extract__extract_file",
+        "mcp__extract__extract_lesswrong",
+        "mcp__extract__extract_webpage_batch",
+        "mcp__extract__extract_gdoc",
     }
 )
 
@@ -77,6 +82,7 @@ RESEARCH_TOOLS: frozenset[str] = frozenset(
         "mcp__research__polymarket_search",
         "mcp__research__manifold_search",
         "mcp__research__search_markets",
+        "mcp__research__polymarket_price",
         "mcp__research__wiki_search",
         "mcp__research__fetch_wikipedia",
     }

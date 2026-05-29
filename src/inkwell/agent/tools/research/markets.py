@@ -228,4 +228,116 @@ async def search_markets(params: SearchMarketsInput) -> SearchMarketsOutput:
     )
 
 
-MARKET_TOOLS = [polymarket_search, manifold_search, search_markets]
+class PolymarketPriceInput(BaseModel):
+    slug: str = Field(description="Polymarket event slug (from search results URL)")
+    include_history: bool = Field(
+        default=False, description="Include 7-day price history"
+    )
+
+
+class PriceHistoryPoint(TypedDict):
+    date: str
+    probability: float
+
+
+class PolymarketPriceOutput(BaseModel):
+    title: str = Field(description="Market title")
+    probability: float = Field(description="Current YES probability (0-1)")
+    url: str = Field(description="Market URL")
+    description: str = Field(default="", description="Market description")
+    history: list[PriceHistoryPoint] = Field(
+        default_factory=list, description="Recent price history"
+    )
+
+
+@lup_tool(
+    "Get detailed pricing for a specific Polymarket event by slug. Returns "
+    "current probability, description, and optional 7-day price history. "
+    "Use after search_markets to drill into a specific market's price trajectory."
+)
+async def polymarket_price(
+    params: PolymarketPriceInput,
+) -> PolymarketPriceOutput:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://gamma-api.polymarket.com/events",
+                params={"slug": params.slug},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        raise ToolError(f"Failed to fetch Polymarket event: {e}") from e
+
+    events = data if isinstance(data, list) else [data]
+    if not events:
+        raise ToolError(f"No event found for slug '{params.slug}'")
+
+    event = events[0]
+    if not isinstance(event, dict):
+        raise ToolError("Invalid event data from Polymarket")
+
+    title = str(event.get("title", ""))
+    description = str(event.get("description", ""))
+    markets = event.get("markets", [])
+
+    probability = 0.5
+    token_id: str | None = None
+    if isinstance(markets, list) and markets:
+        market = markets[0]
+        if isinstance(market, dict):
+            probability = parse_polymarket_probability(market) or 0.5
+
+            clob_ids = market.get("clobTokenIds")
+            if isinstance(clob_ids, str):
+                try:
+                    parsed = json.loads(clob_ids)
+                    if isinstance(parsed, list) and parsed:
+                        token_id = str(parsed[0])
+                except (json.JSONDecodeError, IndexError):
+                    pass
+            elif isinstance(clob_ids, list) and clob_ids:
+                token_id = str(clob_ids[0])
+
+    history: list[PriceHistoryPoint] = []
+    if params.include_history and token_id:
+        import time
+        from datetime import datetime, timezone
+
+        end_ts = int(time.time())
+        start_ts = end_ts - 7 * 86400
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    "https://clob.polymarket.com/prices-history",
+                    params={"market": token_id, "startTs": start_ts, "endTs": end_ts},
+                )
+                resp.raise_for_status()
+                hist_data = resp.json()
+
+            by_day: dict[str, float] = {}
+            for point in hist_data.get("history", []):
+                if isinstance(point, dict):
+                    ts = point.get("t", 0)
+                    price = point.get("p", 0)
+                    day = datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+                    by_day[day] = float(price)
+
+            history = [
+                PriceHistoryPoint(date=d, probability=p)
+                for d, p in sorted(by_day.items())
+            ]
+        except httpx.HTTPError:
+            logger.warning("Failed to fetch price history for %s", params.slug)
+
+    return PolymarketPriceOutput(
+        title=title,
+        probability=probability,
+        url=f"https://polymarket.com/event/{params.slug}",
+        description=description[:500],
+        history=history,
+    )
+
+
+MARKET_TOOLS = [polymarket_search, manifold_search, search_markets, polymarket_price]

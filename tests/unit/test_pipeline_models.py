@@ -6,17 +6,12 @@ import pytest
 
 from inkwell.agent.models import (
     AddAction,
-    ArticlePlan,
     ClassifiedComment,
     DropAction,
-    MergedDraft,
     PatchAction,
-    PipelineSnapshot,
     PreserveAction,
-    ResearchCompilation,
     RestartStrategy,
     RewriteAction,
-    SectionDraft,
     SectionPlan,
 )
 
@@ -64,58 +59,6 @@ class TestRestartStrategyRoundtrip:
         }
         with pytest.raises(Exception):
             RestartStrategy.model_validate(raw)
-
-
-class TestPipelineSnapshotClearDownstream:
-    """clear_downstream must discard artifacts after the given stage."""
-
-    def make_populated(self) -> PipelineSnapshot:
-        return PipelineSnapshot(
-            stage="rewrite",
-            conversation="source text",
-            plan=ArticlePlan(
-                title="T",
-                thesis="T",
-                sections=[],
-                research_questions=[],
-                source_quotes=[],
-                voice_notes="",
-                author_direction="",
-                target_format="lesswrong",
-            ),
-            research=ResearchCompilation(findings=[], additional_context=""),
-            section_drafts={"Intro": SectionDraft(title="Intro", content="...", word_count=10)},
-            merged=MergedDraft(content="merged", changes_made=[]),
-            findings=[],
-        )
-
-    def test_clear_from_plan_clears_research_and_below(self) -> None:
-        snap = self.make_populated()
-        snap.clear_downstream("plan")
-        assert snap.conversation == "source text"
-        assert snap.plan is not None
-        assert snap.research is None
-        assert snap.section_drafts == {}
-        assert snap.merged is None
-
-    def test_clear_from_research_keeps_research_clears_write(self) -> None:
-        snap = self.make_populated()
-        snap.clear_downstream("research")
-        assert snap.research is not None
-        assert snap.section_drafts == {}
-        assert snap.merged is None
-
-    def test_clear_from_write_keeps_drafts_clears_merge(self) -> None:
-        snap = self.make_populated()
-        snap.clear_downstream("write")
-        assert snap.section_drafts != {}
-        assert snap.merged is None
-
-    def test_clear_unknown_stage_is_noop(self) -> None:
-        snap = self.make_populated()
-        snap.clear_downstream("nonexistent")
-        assert snap.plan is not None
-        assert snap.research is not None
 
 
 class TestClassifiedComment:

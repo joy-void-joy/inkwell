@@ -8,6 +8,7 @@ class TestOutputSchema:
 
     def test_schema_has_required_fields(self) -> None:
         schema = WritingOutput.model_json_schema()
+        assert "voice_profile" in schema["properties"]
 
         assert "properties" in schema
         assert "title" in schema["properties"]

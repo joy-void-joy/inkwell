@@ -45,6 +45,12 @@ class Settings(BaseSettings):
         description="Path to stored Google OAuth token",
     )
 
+    author_email: str | None = Field(
+        default=None,
+        validation_alias="INKWELL_AUTHOR_EMAIL",
+        description="Author's email for Google Doc sharing (editor access)",
+    )
+
     # ==========================================================================
     # RESEARCH API KEYS
     # ==========================================================================

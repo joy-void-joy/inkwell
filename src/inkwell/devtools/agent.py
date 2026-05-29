@@ -45,12 +45,32 @@ import typer
 from inkwell.agent.config import settings
 from inkwell.agent.models import WritingOutput
 from inkwell.agent.prompts import get_system_prompt
-from inkwell.agent.subagents import get_subagents
+from inkwell.agent.stages import (
+    COHERENCE_EDITOR_PROMPT,
+    FACT_CHECKER_PROMPT,
+    NARRATIVE_REVIEWER_PROMPT,
+    PLANNER_SYSTEM,
+    RESEARCHER_PROMPT,
+    REWRITER_SYSTEM,
+    SECTION_WRITER_PROMPT,
+    STYLE_REVIEWER_PROMPT,
+)
 from inkwell.agent.tools.extract import EXTRACT_TOOLS
 from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS
 from lup.mcp import LupMcpTool
 
 logger = logging.getLogger(__name__)
+
+PIPELINE_STAGES: dict[str, str] = {
+    "planner": PLANNER_SYSTEM,
+    "researcher": RESEARCHER_PROMPT,
+    "section_writer": SECTION_WRITER_PROMPT,
+    "coherence_editor": COHERENCE_EDITOR_PROMPT,
+    "narrative_reviewer": NARRATIVE_REVIEWER_PROMPT,
+    "fact_checker": FACT_CHECKER_PROMPT,
+    "style_reviewer": STYLE_REVIEWER_PROMPT,
+    "rewriter": REWRITER_SYSTEM,
+}
 
 MIME_TO_EXT: dict[str, str] = {
     "image/png": ".png",
@@ -235,10 +255,10 @@ def inspect_cmd(
         typer.Option("--full", help="Show full details (tool schemas, full prompt)"),
     ] = False,
 ) -> None:
-    """Inspect the full agent configuration: tools, schemas, prompt, subagents."""
+    """Inspect the full agent configuration: tools, schemas, prompt, agents."""
     tools_by_server = collect_tools_by_server()
     all_tools = collect_all_tools()
-    subagents = get_subagents()
+    stages = PIPELINE_STAGES
     prompt = get_system_prompt()
 
     if as_json:
@@ -247,13 +267,8 @@ def inspect_cmd(
             "max_thinking_tokens": settings.max_thinking_tokens,
             "tools": [tool_to_dict(t) for t in all_tools],
             "output_schema": WritingOutput.model_json_schema(),
-            "subagents": {
-                name: {
-                    "description": agent.description,
-                    "model": agent.model,
-                    "tools": agent.tools,
-                }
-                for name, agent in subagents.items()
+            "pipeline_stages": {
+                name: {"prompt_length": len(p)} for name, p in stages.items()
             },
             "system_prompt": prompt,
         }
@@ -296,16 +311,14 @@ def inspect_cmd(
             type_name = getattr(ann, "__name__", None) if ann is not None else None
             out.write(f"    {name}: {type_name or '?'}\n")
 
-    # Subagents
+    # Pipeline stages
     out.write(f"\n{'─' * 60}\n")
-    out.write(f"  Subagents ({len(subagents)})\n")
+    out.write(f"  Pipeline Stages ({len(stages)})\n")
     out.write(f"{'─' * 60}\n")
-    for name, agent in subagents.items():
-        out.write(f"\n  {name} (model: {agent.model})\n")
+    for name, stage_prompt in stages.items():
+        out.write(f"\n  {name} ({len(stage_prompt)} chars)\n")
         if full:
-            out.write(f"    {agent.description}\n")
-        if agent.tools:
-            out.write(f"    Tools: {', '.join(agent.tools)}\n")
+            out.write(f"    {stage_prompt[:200]}...\n")
 
     # System prompt
     out.write(f"\n{'─' * 60}\n")
@@ -651,7 +664,6 @@ async def repl(
                 max_thinking_tokens=settings.max_thinking_tokens or (128_000 - 1),
                 permission_mode="bypassPermissions",
                 mcp_servers=mcp_servers if mcp_servers else None,
-                agents=get_subagents(),
             ) as client:
                 last_input_sigint = 0.0
 

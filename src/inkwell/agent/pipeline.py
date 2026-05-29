@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from lup.client import CostAccumulator, HeartbeatCallback, query
 from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
+from lup.sandbox import Sandbox
 from lup.trace import TraceLogger
 
 from inkwell.agent.config import settings
@@ -105,7 +106,8 @@ from inkwell.agent.tools.stage_outputs import (
     make_research_output_tools,
     make_review_output_tools,
 )
-from inkwell.agent.tools.voice import VoiceProfile, do_analyze_voice, load_style_corpus
+from inkwell.agent.tools.query_artifacts import make_query_tools
+from inkwell.agent.tools.voice import do_analyze_voice, load_style_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +202,12 @@ def extract_deleted_text(original: str, current: str) -> str:
 class PipelineListener:
     """Receives pipeline events and collects author feedback."""
 
+    def __init__(self) -> None:
+        self.sync_requested = asyncio.Event()
+
+    def request_sync(self) -> None:
+        self.sync_requested.set()
+
     async def on_stage(self, stage: str, description: str) -> None:
         logger.info("Pipeline: %s — %s", stage, description)
 
@@ -289,6 +297,24 @@ def build_research_tools() -> list[LupMcpTool]:
     ]
 
 
+def build_compute_server(
+    sandbox: Sandbox,
+    artifacts_dir: Path,
+) -> tuple[dict[str, McpServerConfig], list[str]]:
+    """MCP server with code execution (sandbox) and artifact query tools.
+
+    Returns (servers_dict, tool_name_list) ready to merge into any stage.
+    """
+    tools = [*sandbox.create_tools(), *make_query_tools(artifacts_dir)]
+    server = create_mcp_server(
+        name="compute",
+        version="1.0.0",
+        tools=extract_sdk_tools(tools),
+    )
+    tool_names = [f"mcp__compute__{t.sdk_tool.name}" for t in tools]
+    return {"compute": server}, tool_names
+
+
 def build_research_servers() -> dict[str, McpServerConfig]:
     """MCP servers for research-capable stages."""
     research_server = create_mcp_server(
@@ -372,8 +398,10 @@ async def plan_article(
     notes: PipelineNotes,
     *,
     target_format: str = "lesswrong",
-    voice_profile: VoiceProfile | None = None,
+    voice_profile: str | None = None,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ArticlePlan:
@@ -395,7 +423,7 @@ async def plan_article(
         corpus_path.write_text(corpus_text, encoding="utf-8")
         voice_hint += f"\nStyle corpus samples: {corpus_path}"
     if voice_profile:
-        voice_path = notes.save_artifact("voice", voice_profile)
+        voice_path = notes.save_text_artifact("voice", voice_profile)
         voice_hint += f"\nVoice profile: {voice_path}"
 
     format_hint = (
@@ -413,6 +441,9 @@ async def plan_article(
         f"add_section, add_research_question, and add_source_quote."
     )
 
+    all_servers = {**output_servers, **(compute_servers or {})}
+    all_tools = output_tool_names + (compute_tool_names or [])
+
     await query(
         task,
         model="claude-opus-4-6",
@@ -420,8 +451,8 @@ async def plan_article(
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=None,
         permission_mode="bypassPermissions",
-        mcp_servers=output_servers,
-        allowed_tools=output_tool_names,
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
         prefix="[plan] ",
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
@@ -434,9 +465,11 @@ async def plan_article(
 async def refine_plan(
     notes: PipelineNotes,
     *,
-    voice_profile: VoiceProfile | None = None,
+    voice_profile: str | None = None,
     feedback_path: Path | None = None,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ArticlePlan:
@@ -456,7 +489,7 @@ async def refine_plan(
         f"Research findings: {research_path}\n"
     )
     if voice_profile:
-        voice_path = notes.artifact_path("voice")
+        voice_path = notes.text_artifact_path("voice")
         file_refs += f"Voice profile: {voice_path}\n"
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
@@ -468,6 +501,9 @@ async def refine_plan(
         f"add_section, add_research_question, and add_source_quote."
     )
 
+    all_servers = {**output_servers, **(compute_servers or {})}
+    all_tools = output_tool_names + (compute_tool_names or [])
+
     await query(
         task,
         model="claude-opus-4-6",
@@ -475,8 +511,8 @@ async def refine_plan(
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=None,
         permission_mode="bypassPermissions",
-        mcp_servers=output_servers,
-        allowed_tools=output_tool_names,
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
         prefix="[refine] ",
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
@@ -498,6 +534,8 @@ async def research_plan(
     feedback_path: Path | None = None,
     servers: dict[str, McpServerConfig] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ResearchCompilation:
@@ -513,8 +551,8 @@ async def research_plan(
     )
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("research", note_collector)
-    all_servers = {**servers, **output_servers, **note_servers}
-    all_tools = research_tool_names() + output_tool_names + note_tool_names
+    all_servers = {**servers, **output_servers, **note_servers, **(compute_servers or {})}
+    all_tools = research_tool_names() + output_tool_names + note_tool_names + (compute_tool_names or [])
 
     file_refs = f"Article plan: {plan_path}\n"
     if feedback_path:
@@ -552,11 +590,13 @@ async def write_section(
     *,
     notes: PipelineNotes,
     draft_path: Path,
-    voice_profile: VoiceProfile | None = None,
+    voice_profile: str | None = None,
     feedback_path: Path | None = None,
     section_context: str = "",
     servers: dict[str, McpServerConfig] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> SectionDraft:
@@ -566,8 +606,8 @@ async def write_section(
 
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server(f"write:{section_title}", note_collector)
-    all_servers = {**servers, **note_servers}
-    all_tools = research_tool_names() + note_tool_names
+    all_servers = {**servers, **note_servers, **(compute_servers or {})}
+    all_tools = research_tool_names() + note_tool_names + (compute_tool_names or [])
 
     plan_path = notes.artifact_path("plan")
     research_path = notes.artifact_path("research")
@@ -577,7 +617,7 @@ async def write_section(
         f"Research findings: {research_path}\n"
     )
     if voice_profile:
-        voice_path = notes.artifact_path("voice")
+        voice_path = notes.text_artifact_path("voice")
         file_refs += f"Voice profile: {voice_path}\n"
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
@@ -672,9 +712,11 @@ async def merge_sections(
     *,
     notes: PipelineNotes,
     output_path: Path,
-    voice_profile: VoiceProfile | None = None,
+    voice_profile: str | None = None,
     feedback_path: Path | None = None,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     heartbeat: HeartbeatCallback | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -702,13 +744,15 @@ async def merge_sections(
 
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("merge", note_collector)
+    merge_servers = {**note_servers, **(compute_servers or {})}
+    merge_tools = note_tool_names + (compute_tool_names or [])
 
     file_refs = (
         f"Merge plan (read this FIRST): {merge_plan_path}\n"
         f"Raw material (all sections in one file): {combined_path}\n"
     )
     if voice_profile:
-        voice_path = notes.artifact_path("voice")
+        voice_path = notes.text_artifact_path("voice")
         file_refs += f"Voice profile: {voice_path}\n"
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
@@ -733,8 +777,8 @@ async def merge_sections(
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=None,
         permission_mode="bypassPermissions",
-        mcp_servers=note_servers,
-        allowed_tools=note_tool_names,
+        mcp_servers=merge_servers,
+        allowed_tools=merge_tools,
         trace_logger=trace_logger,
         prefix="[merge:rewrite] ",
         heartbeat=heartbeat,
@@ -754,6 +798,8 @@ async def review_narrative(
     draft_path: Path,
     *,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
@@ -766,8 +812,8 @@ async def review_narrative(
     )
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("review:narrative", note_collector)
-    output_servers = {**output_servers, **note_servers}
-    output_tool_names = output_tool_names + note_tool_names
+    all_servers = {**output_servers, **note_servers, **(compute_servers or {})}
+    all_tools = output_tool_names + note_tool_names + (compute_tool_names or [])
 
     task = (
         f"Review the article draft for narrative coherence.\n\n"
@@ -782,8 +828,8 @@ async def review_narrative(
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=None,
         permission_mode="bypassPermissions",
-        mcp_servers=output_servers,
-        allowed_tools=output_tool_names,
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
         trace_logger=trace_logger,
         prefix="[review:narrative] ",
         cost_accumulator=cost_accumulator,
@@ -802,6 +848,8 @@ async def review_facts(
     *,
     servers: dict[str, McpServerConfig] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
@@ -816,13 +864,16 @@ async def review_facts(
     )
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("review:facts", note_collector)
-    all_servers = {**servers, **output_servers, **note_servers}
-    all_tools = review_tool_names() + output_tool_names + note_tool_names
+    all_servers = {**servers, **output_servers, **note_servers, **(compute_servers or {})}
+    all_tools = review_tool_names() + output_tool_names + note_tool_names + (compute_tool_names or [])
 
+    research_path = notes.artifact_path("research")
     task = (
         f"Fact-check every verifiable claim in the article draft.\n\n"
-        f"Draft: {draft_path}\n\n"
-        f"Read the file, then verify claims using your research tools. "
+        f"Draft: {draft_path}\n"
+        f"Research findings: {research_path}\n\n"
+        f"Read both files. Cross-reference the draft against the research "
+        f"findings, then verify remaining claims with your research tools. "
         f"Call record_finding for each issue."
     )
     await query(
@@ -851,11 +902,13 @@ async def review_style(
     draft_path: Path,
     *,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
     """Review for writing quality and voice consistency (tool-free except output)."""
-    voice_path = notes.artifact_path("voice")
+    voice_path = notes.text_artifact_path("voice")
     review_path = notes.artifacts_dir / "review_style.json"
     collector = ReviewCollector(review_path, "style")
     output_servers, output_tool_names = build_output_server(
@@ -863,8 +916,8 @@ async def review_style(
     )
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("review:style", note_collector)
-    output_servers = {**output_servers, **note_servers}
-    output_tool_names = output_tool_names + note_tool_names
+    all_servers = {**output_servers, **note_servers, **(compute_servers or {})}
+    all_tools = output_tool_names + note_tool_names + (compute_tool_names or [])
 
     file_refs = f"Draft: {draft_path}\n"
     if voice_path.exists():
@@ -882,8 +935,8 @@ async def review_style(
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=None,
         permission_mode="bypassPermissions",
-        mcp_servers=output_servers,
-        allowed_tools=output_tool_names,
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
         trace_logger=trace_logger,
         prefix="[review:style] ",
         cost_accumulator=cost_accumulator,
@@ -902,6 +955,8 @@ async def review_all(
     *,
     servers: dict[str, McpServerConfig] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> list[ReviewFinding]:
@@ -909,6 +964,8 @@ async def review_all(
     narrative_task = review_narrative(
         notes, draft_path,
         author_notes=author_notes,
+        compute_servers=compute_servers,
+        compute_tool_names=compute_tool_names,
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
     )
@@ -916,12 +973,16 @@ async def review_all(
         notes, draft_path,
         servers=servers,
         author_notes=author_notes,
+        compute_servers=compute_servers,
+        compute_tool_names=compute_tool_names,
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
     )
     style_task = review_style(
         notes, draft_path,
         author_notes=author_notes,
+        compute_servers=compute_servers,
+        compute_tool_names=compute_tool_names,
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
     )
@@ -947,16 +1008,20 @@ async def rewrite_final(
     findings: list[ReviewFinding],
     *,
     output_path: Path,
-    voice_profile: VoiceProfile | None = None,
+    voice_profile: str | None = None,
     feedback_path: Path | None = None,
     target_format: str = "lesswrong",
     author_notes: list[AuthorNote] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("rewrite", note_collector)
+    rewrite_servers = {**note_servers, **(compute_servers or {})}
+    rewrite_tools = note_tool_names + (compute_tool_names or [])
     plan_path = notes.artifact_path("plan")
 
     # Write annotated draft with inline findings to a temp file
@@ -982,7 +1047,7 @@ async def rewrite_final(
         f"Review summary: {review_summary_path}\n"
     )
     if voice_profile:
-        voice_path = notes.artifact_path("voice")
+        voice_path = notes.text_artifact_path("voice")
         file_refs += f"Voice profile: {voice_path}\n"
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
@@ -1003,8 +1068,8 @@ async def rewrite_final(
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=None,
         permission_mode="bypassPermissions",
-        mcp_servers=note_servers,
-        allowed_tools=note_tool_names,
+        mcp_servers=rewrite_servers,
+        allowed_tools=rewrite_tools,
         trace_logger=trace_logger,
         prefix="[rewrite] ",
         cost_accumulator=cost_accumulator,
@@ -1100,6 +1165,8 @@ async def surface_assumptions(
     *,
     has_research: bool = False,
     session_state: WritingSessionState,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> AssumptionsList:
@@ -1122,6 +1189,9 @@ async def surface_assumptions(
         f"Read the files, then call record_assumption for each uncertainty."
     )
 
+    all_servers = {**output_servers, **(compute_servers or {})}
+    all_tools = output_tool_names + (compute_tool_names or [])
+
     await query(
         task,
         model="claude-opus-4-6",
@@ -1129,8 +1199,8 @@ async def surface_assumptions(
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=None,
         permission_mode="bypassPermissions",
-        mcp_servers=output_servers,
-        allowed_tools=output_tool_names,
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
         prefix="[assumptions] ",
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
@@ -1258,6 +1328,10 @@ class PipelineRunner:
         self.author_notes: list[AuthorNote] = []
         self.research_servers = build_research_servers()
 
+        self.sandbox: Sandbox | None = None
+        self.compute_servers: dict[str, McpServerConfig] = {}
+        self.compute_tool_names: list[str] = []
+
         self.doc_id = ""
         self.doc_url = ""
         self.known_tabs: dict[str, str] = {}
@@ -1275,6 +1349,39 @@ class PipelineRunner:
         if self.notes is None:
             self.notes = PipelineNotes(Path(tempfile.mkdtemp(prefix="inkwell-notes-")))
         return self.notes
+
+    def start_sandbox(self) -> None:
+        """Start the Docker sandbox and build compute MCP servers."""
+        notes = self.ensure_notes()
+        shared_dir = notes.artifacts_dir / "shared"
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        self.sandbox = Sandbox(
+            session_id=f"inkwell-{id(self)}",
+            shared_dir=shared_dir,
+        )
+        try:
+            self.sandbox.start()
+        except Exception:
+            logger.warning("Sandbox unavailable — running without code execution")
+            self.sandbox = None
+            self.compute_servers, self.compute_tool_names = (
+                build_output_server(
+                    "compute",
+                    make_query_tools(notes.artifacts_dir),
+                )
+            )
+            return
+
+        self.compute_servers, self.compute_tool_names = build_compute_server(
+            self.sandbox, notes.artifacts_dir
+        )
+        logger.info("Sandbox started with %d compute tools", len(self.compute_tool_names))
+
+    def stop_sandbox(self) -> None:
+        if self.sandbox is not None:
+            self.sandbox.stop()
+            self.sandbox = None
+            logger.info("Sandbox stopped")
 
     def get_draft_path(self, label: str) -> Path:
         slug = label.lower().replace(" ", "-")
@@ -1303,40 +1410,50 @@ class PipelineRunner:
         """Execute the full pipeline with restart support."""
         configure_session_state(self.state)
         await self.setup_doc()
-
-        await self.stage_extract()
-        await self.stage_voice()
-        await self.stage_plan()
-
-        await self.stage_research()
-        await self.check_and_maybe_restart()
-
-        await self.stage_assumptions()
-        await self.stage_refine()
-
-        self.start_watcher()
+        self.start_sandbox()
 
         try:
-            await self.stage_write()
+            await self.stage_extract()
+            await self.stage_voice()
+            await self.stage_plan()
+            await self.sync_if_requested()
+
+            await self.stage_research()
             await self.check_and_maybe_restart()
+            await self.sync_if_requested()
 
-            await self.stage_merge()
-            await self.stage_review()
-            await self.check_and_maybe_restart()
+            await self.stage_assumptions()
+            await self.stage_refine()
 
-            await self.stage_rewrite()
-            await self.stage_format()
+            self.start_watcher()
 
-            output = self.snapshot.output
-            if output is None:
-                raise PipelineError("Pipeline completed without producing output")
+            try:
+                await self.stage_write()
+                await self.check_and_maybe_restart()
+                await self.sync_if_requested()
 
-            await self.update_overview()
-            await self.hooks.on_complete(output)
+                await self.stage_merge()
+                await self.sync_if_requested()
+                await self.stage_review()
+                await self.check_and_maybe_restart()
+                await self.sync_if_requested()
 
-            await self.standby_loop()
+                await self.stage_rewrite()
+                await self.sync_if_requested()
+                await self.stage_format()
+
+                output = self.snapshot.output
+                if output is None:
+                    raise PipelineError("Pipeline completed without producing output")
+
+                await self.update_overview()
+                await self.hooks.on_complete(output)
+
+                await self.standby_loop()
+            finally:
+                await self.stop_watcher()
         finally:
-            await self.stop_watcher()
+            self.stop_sandbox()
 
         output = self.snapshot.output
         if output is None:
@@ -1358,34 +1475,39 @@ class PipelineRunner:
         self.state.pending_questions = list(snapshot.pending_questions)
 
         await self.setup_doc()
-
-        stages = [
-            "extract", "voice", "plan",
-            "research", "assumptions", "refine",
-            "write", "merge", "review", "rewrite", "format",
-        ]
-        last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
-        remaining = stages[last_idx + 1:]
-
-        if snapshot.plan:
-            self.start_watcher()
+        self.start_sandbox()
 
         try:
-            for stage_name in remaining:
-                method = getattr(self, f"stage_{stage_name}")
-                await method()
-                if stage_name in ("research", "write", "review"):
-                    await self.check_and_maybe_restart()
+            stages = [
+                "extract", "voice", "plan",
+                "research", "assumptions", "refine",
+                "write", "merge", "review", "rewrite", "format",
+            ]
+            last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
+            remaining = stages[last_idx + 1:]
 
-            output = self.snapshot.output
-            if output is None:
-                raise PipelineError("Pipeline completed without producing output")
+            if snapshot.plan:
+                self.start_watcher()
 
-            await self.update_overview()
-            await self.hooks.on_complete(output)
-            await self.standby_loop()
+            try:
+                for stage_name in remaining:
+                    method = getattr(self, f"stage_{stage_name}")
+                    await method()
+                    if stage_name in ("research", "write", "review"):
+                        await self.check_and_maybe_restart()
+                    await self.sync_if_requested()
+
+                output = self.snapshot.output
+                if output is None:
+                    raise PipelineError("Pipeline completed without producing output")
+
+                await self.update_overview()
+                await self.hooks.on_complete(output)
+                await self.standby_loop()
+            finally:
+                await self.stop_watcher()
         finally:
-            await self.stop_watcher()
+            self.stop_sandbox()
 
         output = self.snapshot.output
         if output is None:
@@ -1450,15 +1572,20 @@ class PipelineRunner:
             )
 
     async def gather_feedback(self) -> list[str]:
-        assert self.tabs is not None
         comment_feedback = await self.hooks.collect_feedback(self.state)
-        tab_edits = await self.tabs.detect_edits()
+
+        terminal = [fb for fb in comment_feedback if fb.startswith("[Terminal]")]
+        gdoc = [fb for fb in comment_feedback if not fb.startswith("[Terminal]")]
 
         notes = self.ensure_notes()
-        for fb in comment_feedback:
+        for fb in gdoc:
             await notes.add_terminal_input(fb)
-        for edit in tab_edits:
-            await self.classify_and_record_edit(edit)
+        for fb in terminal:
+            await self.classify_and_record_terminal(fb)
+
+        if self.tabs is not None:
+            for edit in await self.tabs.detect_edits():
+                await self.classify_and_record_edit(edit)
 
         return comment_feedback
 
@@ -1528,6 +1655,37 @@ class PipelineRunner:
             logger.info("Plan-breaking tab edit on '%s'", edit.tab)
             self.plan_breaking.set()
 
+    async def classify_and_record_terminal(self, text: str) -> None:
+        classified = await query(
+            f"Classify this terminal direction from the author:\n\n{text}",
+            output_type=ClassifiedComment,
+            model="claude-sonnet-4-20250514",
+            system_prompt=COMMENT_CLASSIFIER_PROMPT,
+            max_thinking_tokens=None,
+            permission_mode="bypassPermissions",
+            prefix="[classify-terminal] ",
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        if classified is None:
+            notes = self.ensure_notes()
+            await notes.add_terminal_input(text)
+            return
+
+        if classified.impact == "dismiss":
+            return
+
+        classified.comment_id = f"terminal-{id(text)}"
+        classified.content = text
+        classified.tags = [*(classified.tags or []), "terminal"]
+
+        notes = self.ensure_notes()
+        await notes.add_comment(classified)
+
+        if classified.impact == "plan_breaking":
+            logger.info("Plan-breaking terminal input")
+            self.plan_breaking.set()
+
     async def prepare_feedback(self, stage: str) -> Path | None:
         """Gather feedback and render to a file. Returns path or None."""
         feedback = await self.gather_feedback()
@@ -1575,33 +1733,23 @@ class PipelineRunner:
             cost_accumulator=self.cost_accumulator,
         )
         if voice_profile is None:
-            raise PipelineError("Voice analysis produced no structured output")
+            raise PipelineError("Voice analysis produced no output")
         self.snapshot.voice_profile = voice_profile
         self.snapshot.stage = "voice"
 
         notes = self.ensure_notes()
-        notes.save_artifact("voice", voice_profile)
+        notes.save_text_artifact("voice", voice_profile)
         await self.save_snapshot()
 
-        if voice_profile:
-            summary = voice_profile.voice[:80].rsplit(" ", 1)[0]
-            await self.hooks.on_progress(f"Voice: {summary}...")
-            voice_text = f"# Voice Profile\n\n{voice_profile.voice}"
-            if voice_profile.phrases:
-                voice_text += "\n\n## Characteristic Phrases\n\n" + "\n".join(
-                    f"- {p}" for p in voice_profile.phrases
-                )
-            if voice_profile.avoid:
-                voice_text += "\n\n## Avoid\n\n" + "\n".join(
-                    f"- {a}" for a in voice_profile.avoid
-                )
-            async with gdoc_nonfatal("write voice tab"):
-                voice_tab_id = self.known_tabs["Voice"]
-                await do_write_tab(
-                    self.doc_id, voice_tab_id, voice_text, session_state=self.state
-                )
-                assert self.tabs is not None
-                await self.tabs.record_from_doc(voice_tab_id, "Voice")
+        summary = voice_profile[:80].rsplit(" ", 1)[0]
+        await self.hooks.on_progress(f"Voice: {summary}...")
+        async with gdoc_nonfatal("write voice tab"):
+            voice_tab_id = self.known_tabs["Voice"]
+            await do_write_tab(
+                self.doc_id, voice_tab_id, voice_profile, session_state=self.state
+            )
+            assert self.tabs is not None
+            await self.tabs.record_from_doc(voice_tab_id, "Voice")
         await self.update_overview()
 
     async def stage_plan(self) -> None:
@@ -1614,6 +1762,8 @@ class PipelineRunner:
             target_format=self.target_format,
             voice_profile=self.snapshot.voice_profile,
             author_notes=self.author_notes,
+            compute_servers=self.compute_servers,
+            compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -1643,6 +1793,8 @@ class PipelineRunner:
             self.doc_id,
             has_research=self.snapshot.research is not None,
             session_state=self.state,
+            compute_servers=self.compute_servers,
+            compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -1673,6 +1825,8 @@ class PipelineRunner:
             feedback_path=feedback_path,
             servers=self.research_servers,
             author_notes=self.author_notes,
+            compute_servers=self.compute_servers,
+            compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -1707,6 +1861,8 @@ class PipelineRunner:
             voice_profile=self.snapshot.voice_profile,
             feedback_path=feedback_path,
             author_notes=self.author_notes,
+            compute_servers=self.compute_servers,
+            compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -1767,6 +1923,8 @@ class PipelineRunner:
                 section_context=build_neighbor_context(idx),
                 servers=self.research_servers,
                 author_notes=self.author_notes,
+                compute_servers=self.compute_servers,
+                compute_tool_names=self.compute_tool_names,
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
             )
@@ -1838,6 +1996,8 @@ class PipelineRunner:
             voice_profile=self.snapshot.voice_profile,
             feedback_path=feedback_path,
             author_notes=self.author_notes,
+            compute_servers=self.compute_servers,
+            compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             heartbeat=merge_heartbeat,
             cost_accumulator=self.cost_accumulator,
@@ -1877,6 +2037,8 @@ class PipelineRunner:
             notes, draft_path,
             servers=self.research_servers,
             author_notes=self.author_notes,
+            compute_servers=self.compute_servers,
+            compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -1916,6 +2078,8 @@ class PipelineRunner:
             feedback_path=feedback_path,
             target_format=self.target_format,
             author_notes=self.author_notes,
+            compute_servers=self.compute_servers,
+            compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -1959,7 +2123,21 @@ class PipelineRunner:
         await self.save_snapshot()
         await self.update_overview()
 
-    # -- Restart logic ---------------------------------------------------
+    # -- Sync / restart logic ----------------------------------------------
+
+    async def sync_if_requested(self) -> None:
+        if not self.hooks.sync_requested.is_set():
+            return
+        self.hooks.sync_requested.clear()
+        logger.info("Sync requested — gathering feedback")
+        await self.hooks.on_stage("sync", "Polling comments, edits, and terminal input")
+        feedback = await self.gather_feedback()
+        n = len(feedback)
+        if n:
+            await self.hooks.on_progress(f"Found {n} feedback item(s)")
+        else:
+            await self.hooks.on_progress("No pending feedback")
+        await self.check_and_maybe_restart()
 
     async def check_and_maybe_restart(self) -> None:
         has_signal = self.plan_breaking.is_set()
@@ -2089,6 +2267,8 @@ class PipelineRunner:
                     voice_profile=self.snapshot.voice_profile,
                     servers=self.research_servers,
                     author_notes=self.author_notes,
+                    compute_servers=self.compute_servers,
+                    compute_tool_names=self.compute_tool_names,
                     trace_logger=self.trace_logger,
                     cost_accumulator=self.cost_accumulator,
                 )
@@ -2103,6 +2283,8 @@ class PipelineRunner:
                     voice_profile=self.snapshot.voice_profile,
                     servers=self.research_servers,
                     author_notes=self.author_notes,
+                    compute_servers=self.compute_servers,
+                    compute_tool_names=self.compute_tool_names,
                     trace_logger=self.trace_logger,
                     cost_accumulator=self.cost_accumulator,
                 )
@@ -2127,35 +2309,64 @@ class PipelineRunner:
 
     # -- Standby loop ------------------------------------------
 
+    async def wait_for_revision_or_sync(
+        self, state: WritingSessionState
+    ) -> tuple[str | None, bool]:
+        revision_task = asyncio.ensure_future(self.hooks.collect_revision(state))
+        sync_task = asyncio.ensure_future(self.hooks.sync_requested.wait())
+        done, pending = await asyncio.wait(
+            {revision_task, sync_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        if revision_task in done:
+            return revision_task.result(), sync_task in done
+        self.hooks.sync_requested.clear()
+        return None, True
+
     async def standby_loop(
         self, initial_wait: float = 120.0, quiet_wait: float = 90.0
     ) -> None:
         while True:
-            revision = await self.hooks.collect_revision(self.state)
-            if revision is None:
+            revision, from_sync = await self.wait_for_revision_or_sync(self.state)
+            if revision is None and not from_sync:
                 break
 
-            batch = [revision]
-            try:
-                await asyncio.wait_for(
-                    self.drain_feedback_batch(batch, quiet_wait),
-                    timeout=initial_wait,
-                )
-            except asyncio.TimeoutError:
-                pass
+            batch = [revision] if revision else []
+            if not from_sync:
+                try:
+                    await asyncio.wait_for(
+                        self.drain_feedback_batch(batch, quiet_wait),
+                        timeout=initial_wait,
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
-            combined = " | ".join(batch)
-            await self.hooks.on_stage("revise", f"Revising: {combined[:60]}")
+            await self.hooks.on_stage(
+                "sync" if from_sync and not batch else "revise",
+                "Syncing feedback" if from_sync and not batch
+                else f"Revising: {' | '.join(batch)[:60]}",
+            )
             self.state.set_stage("revising")
 
             self.snapshot.stage = "revise"
             await self.update_overview(active_stage="revise")
 
-            all_feedback = await self.hooks.collect_feedback(self.state)
+            all_feedback = await self.gather_feedback()
+            n = len(all_feedback)
+            if n:
+                await self.hooks.on_progress(f"Found {n} feedback item(s)")
             all_feedback.extend(batch)
-            assert self.tabs is not None
-            for edit in await self.tabs.detect_edits():
-                await self.classify_and_record_edit(edit)
+
+            if not all_feedback:
+                await self.hooks.on_progress("Nothing to revise")
+                continue
+
             all_feedback = await self.format_stage_context("revise", all_feedback)
 
             plan = self.snapshot.plan
@@ -2205,6 +2416,8 @@ class PipelineRunner:
             feedback_path=feedback_path,
             target_format=self.target_format,
             author_notes=self.author_notes,
+            compute_servers=self.compute_servers,
+            compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -2232,13 +2445,28 @@ class PipelineRunner:
         self, batch: list[str], quiet_seconds: float
     ) -> None:
         while True:
-            try:
-                extra = await asyncio.wait_for(
-                    self.hooks.collect_revision(self.state),
-                    timeout=quiet_seconds,
-                )
-            except asyncio.TimeoutError:
+            if self.hooks.sync_requested.is_set():
                 return
+            revision_task = asyncio.ensure_future(
+                self.hooks.collect_revision(self.state)
+            )
+            sync_task = asyncio.ensure_future(self.hooks.sync_requested.wait())
+            done, pending = await asyncio.wait(
+                {revision_task, sync_task},
+                timeout=quiet_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if sync_task in done:
+                return
+            if revision_task not in done:
+                return
+            extra = revision_task.result()
             if extra is None:
                 return
             batch.append(extra)

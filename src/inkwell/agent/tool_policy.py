@@ -9,8 +9,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from claude_agent_sdk import McpServerConfig
-
     from inkwell.agent.config import Settings
 
 
@@ -98,6 +96,15 @@ REALTIME_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+COMPUTE_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp__compute__execute_code",
+        "mcp__compute__install_package",
+        "mcp__compute__query_research",
+        "mcp__compute__query_plan",
+    }
+)
+
 
 class ToolPolicy:
     """Centralized policy for tool availability."""
@@ -122,22 +129,6 @@ class ToolPolicy:
             excluded.add("mcp__research__fred_series")
 
         self.excluded_tools: frozenset[str] = frozenset(excluded)
-
-    @classmethod
-    def from_settings(
-        cls,
-        settings: Settings,
-    ) -> ToolPolicy:
-        return cls(settings)
-
-    def get_mcp_servers(
-        self, *additional_servers: McpServerConfig
-    ) -> dict[str, McpServerConfig]:
-        servers: dict[str, McpServerConfig] = {}
-        for server in additional_servers:
-            name = getattr(server, "name", str(server))
-            servers[name] = server
-        return servers
 
     def get_allowed_tools(self) -> list[str]:
         tools: set[str] = set()

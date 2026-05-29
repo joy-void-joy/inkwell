@@ -188,7 +188,7 @@ def create_comment_watcher(
             return None
         last_poll[0] = now
 
-        new_comments = session_state.get_new_author_comments()
+        new_comments = session_state.get_new_author_comments_sync()
         if not new_comments:
             return None
 

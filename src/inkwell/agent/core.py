@@ -83,7 +83,7 @@ def build_context(
     session_state: WritingSessionState,
 ) -> WritingContext:
     """Build context state for the realtime context tool."""
-    new_comments = session_state.get_new_author_comments()
+    new_comments = session_state.get_new_author_comments_sync()
 
     return WritingContext(
         stage=session_state.stage,
@@ -136,6 +136,7 @@ def setup_session(
     persistent: bool = True,
     on_action: ActionCallback | None = None,
     on_sleep: Callable[[], None] | None = None,
+    session_state: WritingSessionState | None = None,
 ) -> SessionSetup:
     """Create all infrastructure for a writing session.
 
@@ -153,7 +154,8 @@ def setup_session(
         timeout_seconds=settings.sandbox_timeout_seconds,
     )
 
-    session_state = WritingSessionState()
+    if session_state is None:
+        session_state = WritingSessionState()
 
     scheduler: Scheduler | None = None
     if persistent:
@@ -295,11 +297,7 @@ def build_options(
 
     return ClaudeAgentOptions(
         model=settings.model,
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": get_system_prompt(author_email=settings.author_email),
-        },
+        system_prompt=get_system_prompt(author_email=settings.author_email),
         max_thinking_tokens=settings.max_thinking_tokens or (128_000 - 1),
         permission_mode="bypassPermissions",
         extra_args={"no-session-persistence": None},
@@ -363,11 +361,35 @@ def build_result(
     )
 
 
-def load_snapshot(session_id: str) -> PipelineSnapshot | None:
-    """Load a saved pipeline snapshot for resumption."""
+def load_snapshot(
+    session_id: str, *, from_stage: str | None = None
+) -> PipelineSnapshot | None:
+    """Load a saved pipeline snapshot for resumption.
+
+    If from_stage is given, loads the stage-specific snapshot
+    (snapshot_{stage}.json) if it exists, otherwise loads the latest
+    snapshot and rewinds its stage field.
+    """
     from lup.paths import sessions_dir
 
-    snapshot_path = sessions_dir() / session_id / "pipeline_notes" / "snapshot.json"
+    base = sessions_dir() / session_id / "pipeline_notes"
+
+    if from_stage:
+        stage_path = base / f"snapshot_{from_stage}.json"
+        if stage_path.exists():
+            return PipelineSnapshot.model_validate_json(
+                stage_path.read_text(encoding="utf-8")
+            )
+        latest_path = base / "snapshot.json"
+        if not latest_path.exists():
+            return None
+        snapshot = PipelineSnapshot.model_validate_json(
+            latest_path.read_text(encoding="utf-8")
+        )
+        snapshot.stage = from_stage
+        return snapshot
+
+    snapshot_path = base / "snapshot.json"
     if not snapshot_path.exists():
         return None
     return PipelineSnapshot.model_validate_json(
@@ -390,6 +412,7 @@ async def run_session(
     source: str | None = None,
     task: str | None = None,
     resume_session_id: str | None = None,
+    resume_from_stage: str | None = None,
     target_format: str = "lesswrong",
     existing_doc_id: str | None = None,
     session_id: str | None = None,
@@ -399,6 +422,7 @@ async def run_session(
     on_action: ActionCallback | None = None,
     persistent: bool = True,
     trace_holder: list[SessionTrace] | None = None,
+    session_state: WritingSessionState | None = None,
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
@@ -417,6 +441,7 @@ async def run_session(
         session_id,
         persistent=persistent,
         on_action=on_action,
+        session_state=session_state,
     )
 
     if trace_holder is not None:
@@ -426,13 +451,15 @@ async def run_session(
     pipeline_notes = PipelineNotes(setup.notes.session / "pipeline_notes")
 
     if resume_session_id:
-        snapshot = load_snapshot(resume_session_id)
+        snapshot = load_snapshot(resume_session_id, from_stage=resume_from_stage)
         if snapshot is None:
             raise PipelineError(
                 f"No snapshot found for session '{resume_session_id}'. "
                 "Cannot resume without saved pipeline state."
             )
-        if snapshot.output and snapshot.output.google_doc_id:
+        if snapshot.doc_id:
+            existing_doc_id = snapshot.doc_id
+        elif snapshot.output and snapshot.output.google_doc_id:
             existing_doc_id = snapshot.output.google_doc_id
 
         runner = PipelineRunner(
@@ -460,6 +487,18 @@ async def run_session(
             listener=listener,
             cost_accumulator=cost_acc,
         )
+
+    if cost_acc.stages:
+        output.stage_costs = {
+            name: {
+                "cost_usd": sc.cost_usd,
+                "duration_s": sc.duration_seconds,
+                "input_tokens": sc.input_tokens,
+                "output_tokens": sc.output_tokens,
+                "calls": sc.call_count,
+            }
+            for name, sc in cost_acc.stages.items()
+        }
 
     setup.trace_logger.save()
     log_metrics_summary()

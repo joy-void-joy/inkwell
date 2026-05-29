@@ -267,6 +267,67 @@ def resume(
         pass
 
 
+@app.command("fetch-comments")
+def fetch_comments(
+    doc: Annotated[
+        str,
+        typer.Argument(help="Google Doc URL or document ID"),
+    ],
+    session_id: Annotated[
+        str | None,
+        typer.Option("--session", "-s", help="Session ID to merge comments into (queues as feedback)"),
+    ] = None,
+) -> None:
+    """Fetch and display comments from a Google Doc.
+
+    Without --session, prints all unresolved comments. With --session,
+    merges them into the session's feedback pipeline for the next stage.
+
+    Examples:
+        inkwell fetch-comments "https://docs.google.com/document/d/abc123/edit"
+        inkwell fetch-comments abc123 --session 20260523_143022
+    """
+    from inkwell.agent.tools.extract import GDOC_URL_PATTERN, parse_gdoc_id
+    from inkwell.agent.tools.google_docs import do_fetch_comments
+
+    if GDOC_URL_PATTERN.search(doc):
+        doc_id = parse_gdoc_id(doc)
+    else:
+        doc_id = doc
+
+    comments = asyncio.run(do_fetch_comments(doc_id))
+
+    if not comments:
+        typer.echo("No unresolved comments found.")
+        return
+
+    typer.echo(f"{len(comments)} comment(s):\n")
+    for c in comments:
+        anchor = f' (on: "{c.anchor_text}")' if c.anchor_text else ""
+        typer.echo(f"  [{c.author}] {c.content}{anchor}")
+        for reply in c.replies:
+            typer.echo(f"    → {reply}")
+        typer.echo()
+
+    if session_id:
+        from lup.paths import sessions_dir
+
+        notes_dir = sessions_dir() / session_id / "pipeline_notes"
+        if not notes_dir.exists():
+            typer.echo(f"Session '{session_id}' not found — comments printed but not merged.")
+            return
+
+        feedback_file = notes_dir / "fetched_comments.md"
+        lines: list[str] = [f"# Fetched Comments from {doc_id}\n"]
+        for c in comments:
+            anchor = f' (on: "{c.anchor_text}")' if c.anchor_text else ""
+            lines.append(f"- [{c.author}] {c.content}{anchor}")
+            for reply in c.replies:
+                lines.append(f"  - Reply: {reply}")
+        feedback_file.write_text("\n".join(lines), encoding="utf-8")
+        typer.echo(f"Merged {len(comments)} comment(s) into session {session_id}")
+
+
 @app.command()
 def setup() -> None:
     """Run the setup wizard to configure integrations."""
@@ -282,36 +343,56 @@ def style_add(
         str,
         typer.Argument(help="URL or file path of a style reference"),
     ],
+    target_format: Annotated[
+        str | None,
+        typer.Option("--format", "-f", help="Add as format-specific example (lesswrong, twitter, blog, dialog, memo)"),
+    ] = None,
 ) -> None:
     """Add a writing sample to the style corpus.
 
-    The agent uses the style corpus to match your voice.
+    Without --format, the sample is used as a general voice reference.
+    With --format, it's used as an example of good output in that format.
 
     Examples:
-        inkwell style add "https://lesswrong.com/posts/my-post"
         inkwell style add ~/writing/my-essay.md
+        inkwell style add "https://lesswrong.com/posts/my-post" --format lesswrong
+        inkwell style add ~/memos/good-memo.md -f memo
     """
     from inkwell.agent.tools.voice import add_style_reference
 
-    typer.echo(add_style_reference(source))
+    typer.echo(add_style_reference(source, target_format=target_format))
 
 
 @style_app.command("list")
 def style_list() -> None:
-    """List the current style corpus."""
-    from inkwell.agent.tools.voice import list_style_references
+    """List the current style corpus and format-specific examples."""
+    from inkwell.agent.tools.voice import list_format_examples, list_style_references
 
     entries = list_style_references()
-    if not entries:
+    format_entries = list_format_examples()
+
+    if not entries and not format_entries:
         typer.echo("No style corpus configured. Use `inkwell style add` to start.")
         return
 
-    typer.echo("Style corpus:")
-    for entry in entries:
-        if entry.kind == "url":
-            typer.echo(f"  [url]  {entry.name}")
-        else:
-            typer.echo(f"  [file] {entry.name} ({entry.size:,} bytes)")
+    if entries:
+        typer.echo("Voice references:")
+        for entry in entries:
+            if entry.kind == "url":
+                typer.echo(f"  [url]  {entry.name}")
+            else:
+                typer.echo(f"  [file] {entry.name} ({entry.size:,} bytes)")
+
+    if format_entries:
+        typer.echo("")
+        typer.echo("Format examples:")
+        for fmt, fmt_list in sorted(format_entries.items()):
+            typer.echo(f"  {fmt}:")
+            for entry in fmt_list:
+                if entry.kind == "url":
+                    typer.echo(f"    [url]  {entry.name}")
+                else:
+                    typer.echo(f"    [file] {entry.name} ({entry.size:,} bytes)")
 
 
 if __name__ == "__main__":

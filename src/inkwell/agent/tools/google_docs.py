@@ -633,6 +633,76 @@ async def do_insert_comment(
     return comment_id
 
 
+async def do_fetch_comments(
+    doc_id: str,
+    *,
+    exclude_ids: set[str] | None = None,
+) -> list[CommentEntry]:
+    """Fetch all unresolved comments from any Google Doc by ID."""
+    svc = services()
+    drive = svc.drive_service()
+    skip = exclude_ids or set()
+    entries: list[CommentEntry] = []
+    page_token: str | None = None
+
+    while True:
+        kwargs: dict[str, object] = {
+            "fileId": doc_id,
+            "fields": "comments(id,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
+            "pageSize": 100,
+        }
+        if page_token:
+            kwargs["pageToken"] = page_token
+
+        result = await execute_with_retry(drive.comments().list(**kwargs))
+        for item in result.get("comments", []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("resolved", False):
+                continue
+            comment_id = str(item.get("id", ""))
+            if comment_id in skip:
+                continue
+
+            author_dict = item.get("author", {})
+            author_name = ""
+            if isinstance(author_dict, dict):
+                author_name = str(author_dict.get("displayName", ""))
+
+            anchor = ""
+            quoted = item.get("quotedFileContent")
+            if isinstance(quoted, dict):
+                anchor = str(quoted.get("value", ""))
+
+            replies_raw = item.get("replies", [])
+            replies: list[str] = []
+            if isinstance(replies_raw, list):
+                for reply in replies_raw:
+                    if isinstance(reply, dict):
+                        rc = reply.get("content", "")
+                        if isinstance(rc, str) and rc:
+                            replies.append(rc)
+
+            entries.append(
+                CommentEntry(
+                    comment_id=comment_id,
+                    author=author_name,
+                    content=str(item.get("content", "")),
+                    anchor_text=anchor,
+                    replies=replies,
+                    resolved=False,
+                )
+            )
+
+        page_token_raw = result.get("nextPageToken")
+        if isinstance(page_token_raw, str) and page_token_raw:
+            page_token = page_token_raw
+        else:
+            break
+
+    return entries
+
+
 async def do_reply_to_comment(
     doc_id: str,
     comment_id: str,

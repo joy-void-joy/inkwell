@@ -33,7 +33,7 @@ from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.models import WritingOutput
 from inkwell.agent.pipeline import PipelineError, PipelineListener
 from inkwell.agent.session import WritingSessionState
-from inkwell.agent.tools.google_docs import do_insert_comment
+from inkwell.agent.tools.google_docs import do_fetch_comments, do_insert_comment
 
 logger = logging.getLogger(__name__)
 
@@ -238,9 +238,10 @@ def show_welcome(console: Console) -> None:
         "The pipeline runs through Google Docs.",
         "Type feedback at any time — picked up between stages.",
         "",
-        "[dim]/status  pipeline stage    /doc   open Google Doc[/dim]",
-        "[dim]/sync   poll edits+comments  /style manage corpus[/dim]",
-        "[dim]/done   finish revisions  /quit  exit  /help  commands[/dim]",
+        "[dim]/status  pipeline stage    /doc    open Google Doc[/dim]",
+        "[dim]/sync   poll edits+comments  /style  manage corpus[/dim]",
+        "[dim]/fetch <doc>  pull comments   /done   finish revisions[/dim]",
+        "[dim]/quit  exit  /help  commands[/dim]",
     ]
     console.print()
     console.print(Panel("\n".join(lines), border_style="blue", width=72))
@@ -250,13 +251,56 @@ def show_welcome(console: Console) -> None:
 def show_help(console: Console) -> None:
     console.print(
         "\n  [bold]Commands:[/bold]\n"
-        "  /sync     Poll GDoc comments + tab edits, trigger revision\n"
-        "  /status   Show current pipeline stage\n"
-        "  /doc      Show Google Doc URL\n"
-        "  /style    Show style corpus entries\n"
-        "  /done     Finish revision loop\n"
-        "  /quit     Exit session\n"
-        "  /help     Show this help\n"
+        "  /sync          Poll GDoc comments + tab edits, trigger revision\n"
+        "  /fetch <doc>   Fetch comments from a Google Doc and merge as feedback\n"
+        "  /status        Show current pipeline stage\n"
+        "  /doc           Show Google Doc URL\n"
+        "  /style         Show style corpus entries\n"
+        "  /done          Finish revision loop\n"
+        "  /quit          Exit session\n"
+        "  /help          Show this help\n"
+    )
+
+
+async def fetch_and_queue_comments(
+    doc_arg: str,
+    input_queue: asyncio.Queue[str],
+    console: Console,
+    session_state: WritingSessionState | None = None,
+) -> None:
+    """Fetch comments from a Google Doc and queue them as feedback."""
+    from inkwell.agent.tools.extract import GDOC_URL_PATTERN, parse_gdoc_id
+
+    try:
+        if GDOC_URL_PATTERN.search(doc_arg):
+            doc_id = parse_gdoc_id(doc_arg)
+        else:
+            doc_id = doc_arg
+
+        already_seen = set[str]()
+        if session_state:
+            already_seen = session_state.seen_comment_ids | session_state.agent_comment_ids
+
+        comments = await do_fetch_comments(doc_id, exclude_ids=already_seen)
+    except (RuntimeError, OSError, ValueError) as exc:
+        console.print(f"  [red]Failed to fetch comments: {exc}[/red]")
+        return
+
+    if not comments:
+        console.print("  [dim]No new comments found on that doc.[/dim]")
+        return
+
+    for c in comments:
+        line = f"[GDoc Comment from {doc_id}] {c.content}"
+        if c.anchor_text:
+            line += f' (on: "{c.anchor_text}")'
+        if c.replies:
+            line += f" | Replies: {' → '.join(c.replies)}"
+        input_queue.put_nowait(line)
+
+    console.print(
+        f"  [yellow]Fetched {len(comments)} comment(s) from doc — "
+        f"queued as feedback[/yellow]"
     )
 
 
@@ -317,6 +361,15 @@ async def read_terminal_input(
                 console.print("  [yellow]Sync requested — polling comments + edits[/yellow]")
             else:
                 console.print("  [dim]No active pipeline to sync.[/dim]")
+            continue
+        if stripped.startswith("/fetch "):
+            doc_arg = stripped.removeprefix("/fetch ").strip()
+            if not doc_arg:
+                console.print("  [red]Usage: /fetch <google_doc_url_or_id>[/red]")
+                continue
+            asyncio.create_task(
+                fetch_and_queue_comments(doc_arg, input_queue, console, session_state)
+            )
             continue
         if stripped.startswith("/") and stripped not in ("/done",):
             console.print(f"  [red]Unknown command: {stripped}[/red]")

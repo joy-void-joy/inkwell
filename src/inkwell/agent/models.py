@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field, field_validator
 from lup.history import SessionResult
 
 from inkwell.agent.tools.stage_outputs import AuthorNote
-from inkwell.agent.tools.voice import VoiceProfile
 
 
 class SourceQuote(BaseModel):
@@ -308,7 +307,7 @@ class PipelineSnapshot(BaseModel):
     generation: int = Field(default=0, description="Incremented on each restart")
     stage: str = Field(default="init", description="Current pipeline stage")
     conversation: str = Field(default="", description="Extracted source text")
-    voice_profile: VoiceProfile | None = Field(default=None)
+    voice_profile: str | None = Field(default=None)
     plan: ArticlePlan | None = Field(default=None)
     research: ResearchCompilation | None = Field(default=None)
     section_drafts: dict[str, SectionDraft] = Field(
@@ -362,7 +361,7 @@ class WritingOutput(BaseModel):
         default_factory=list,
         description="Questions for the author left as Google Doc comments",
     )
-    voice_profile: VoiceProfile | None = Field(
+    voice_profile: str | None = Field(
         default=None,
         description="Author voice profile used during writing",
     )

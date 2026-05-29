@@ -4,7 +4,10 @@ All pipeline components (Comment Watcher, Orchestrator, stage agents)
 read and write through PipelineNotes. Organized by category:
 
   notes/
+  ├── artifacts/      # Typed pipeline artifacts (plan, research, voice)
   ├── comments/       # Classified author comments
+  ├── drafts/         # Section drafts, merged article, final output
+  ├── feedback/       # Rendered feedback files for stage consumption
   ├── research/       # Research notes triggered by comments
   └── terminal/       # Terminal input from the author
 
@@ -17,9 +20,23 @@ import json
 import logging
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from inkwell.agent.models import ClassifiedComment
 
 logger = logging.getLogger(__name__)
+
+
+def max_file_index(directory: Path) -> int:
+    """Return the highest numeric stem among JSON files in a directory (0 if empty)."""
+    highest = 0
+    if directory.exists():
+        for path in directory.glob("*.json"):
+            try:
+                highest = max(highest, int(path.stem))
+            except ValueError:
+                pass
+    return highest
 
 
 class PipelineNotes:
@@ -31,15 +48,32 @@ class PipelineNotes:
 
     def __init__(self, base_dir: Path) -> None:
         self.base_dir = base_dir
+        self.artifacts_dir = base_dir / "artifacts"
         self.comments_dir = base_dir / "comments"
         self.research_dir = base_dir / "research"
         self.terminal_dir = base_dir / "terminal"
+        self.drafts_dir = base_dir / "drafts"
+        self.feedback_dir = base_dir / "feedback"
+        self.processed_dir = base_dir / "processed"
         self.lock = asyncio.Lock()
-        self.comment_counter = 0
-        self.terminal_counter = 0
 
-        for d in (self.comments_dir, self.research_dir, self.terminal_dir):
+        for d in (
+            self.artifacts_dir,
+            self.comments_dir,
+            self.drafts_dir,
+            self.feedback_dir,
+            self.research_dir,
+            self.terminal_dir,
+            self.processed_dir,
+        ):
             d.mkdir(parents=True, exist_ok=True)
+
+        self.comment_counter = max_file_index(self.comments_dir)
+        self.terminal_counter = max_file_index(self.terminal_dir)
+
+    def draft_path(self, slug: str) -> Path:
+        """Return path for a draft file: ``drafts/{slug}.md``."""
+        return self.drafts_dir / f"{slug}.md"
 
     async def add_comment(self, classified: ClassifiedComment) -> None:
         """Write a classified comment to notes/comments/."""
@@ -83,6 +117,19 @@ class PipelineNotes:
         """Check if any plan-breaking comments exist."""
         comments = await self.list_comments(impact="plan_breaking")
         return len(comments) > 0
+
+    async def clear_plan_breaking(self) -> None:
+        """Move plan-breaking comments to processed/ so they don't re-trigger."""
+        async with self.lock:
+            for path in sorted(self.comments_dir.glob("*.json")):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    comment = ClassifiedComment.model_validate(data)
+                    if comment.impact == "plan_breaking":
+                        dest = self.processed_dir / path.name
+                        path.rename(dest)
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning("Failed to read note during clear: %s", path)
 
     async def get_all_feedback(self) -> str:
         """Render all accumulated feedback as markdown for prompt injection."""
@@ -203,3 +250,47 @@ class PipelineNotes:
                 content = path.read_text(encoding="utf-8")
                 results.append((path.stem, content))
             return results
+
+    # -- Typed artifact I/O -----------------------------------------------
+
+    def artifact_path(self, name: str) -> Path:
+        """Return the path for a named artifact (e.g. 'plan' -> artifacts/plan.json)."""
+        return self.artifacts_dir / f"{name}.json"
+
+    def save_artifact(self, name: str, model: BaseModel) -> Path:
+        """Serialize a Pydantic model to artifacts/{name}.json. Returns the path."""
+        path = self.artifact_path(name)
+        path.write_text(model.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def load_artifact[T: BaseModel](self, name: str, model_type: type[T]) -> T | None:
+        """Load and validate an artifact. Returns None if the file doesn't exist."""
+        path = self.artifact_path(name)
+        if not path.exists():
+            return None
+        return model_type.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def save_text_artifact(self, name: str, content: str, ext: str = "md") -> Path:
+        """Save a plain text artifact (conversation, draft, etc.)."""
+        path = self.artifacts_dir / f"{name}.{ext}"
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def text_artifact_path(self, name: str, ext: str = "md") -> Path:
+        """Return the path for a text artifact."""
+        return self.artifacts_dir / f"{name}.{ext}"
+
+    async def render_feedback_file(self, stage: str, extra: list[str] | None = None) -> Path:
+        """Render accumulated feedback to a file agents can Read.
+
+        Writes feedback/{stage}.md with all accumulated comments,
+        terminal input, and any extra strings. Returns the path.
+        """
+        content = await self.get_all_feedback()
+        if extra:
+            extra_text = "\n".join(f"- {e}" for e in extra)
+            content += f"\n\n## Stage-Specific Notes\n\n{extra_text}\n"
+
+        path = self.feedback_dir / f"{stage}.md"
+        path.write_text(content or "(No feedback yet.)", encoding="utf-8")
+        return path

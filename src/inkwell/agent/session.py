@@ -48,8 +48,6 @@ class WritingSessionState:
         self.pending_questions: list[str] = []
         self.seen_comment_ids: set[str] = set()
         self.agent_comment_ids: set[str] = set()
-        self.notes: dict[str, str] = {}
-        self.terminal_messages: list[str] = []
         self.sleep_entered: asyncio.Event = asyncio.Event()
 
     def set_doc(self, doc_id: str, doc_url: str) -> None:
@@ -73,15 +71,7 @@ class WritingSessionState:
     def add_question(self, question: str) -> None:
         self.pending_questions.append(question)
 
-    def add_terminal_message(self, message: str) -> None:
-        self.terminal_messages.append(message)
-
-    def consume_terminal_messages(self) -> list[str]:
-        messages = list(self.terminal_messages)
-        self.terminal_messages.clear()
-        return messages
-
-    def check_unread_comments(self) -> int:
+    async def check_unread_comments(self) -> int:
         """Count unread author replies on the Google Doc.
 
         Returns 0 if no doc is set or if the API call fails.
@@ -90,19 +80,17 @@ class WritingSessionState:
             return 0
 
         try:
-            from inkwell.agent.tools.google_docs import services
+            from inkwell.agent.tools.google_docs import execute_with_retry, services
 
             svc = services()
             drive = svc.drive_service()
 
-            result = (
-                drive.comments()
-                .list(
+            result = await execute_with_retry(
+                drive.comments().list(
                     fileId=self.doc_id,
-                    fields="comments(commentId,replies/content,resolved)",
+                    fields="comments(id,replies/content,resolved)",
                     pageSize=100,
                 )
-                .execute()
             )
 
             unread = 0
@@ -111,7 +99,7 @@ class WritingSessionState:
                     continue
                 if item.get("resolved", False):
                     continue
-                comment_id = str(item.get("commentId", ""))
+                comment_id = str(item.get("id", ""))
                 if comment_id in self.seen_comment_ids:
                     continue
 
@@ -135,8 +123,32 @@ class WritingSessionState:
     def mark_comments_seen(self, comment_ids: list[str]) -> None:
         self.seen_comment_ids.update(comment_ids)
 
-    def get_new_author_comments(self) -> list[AuthorComment]:
-        """Fetch author replies not yet seen."""
+    async def get_new_author_comments(self) -> list[AuthorComment]:
+        """Fetch author replies not yet seen (async with retry)."""
+        if not self.doc_id:
+            return []
+
+        try:
+            from inkwell.agent.tools.google_docs import execute_with_retry, services
+
+            svc = services()
+            drive = svc.drive_service()
+
+            result = await execute_with_retry(
+                drive.comments().list(
+                    fileId=self.doc_id,
+                    fields="comments(id,content,quotedFileContent/value,replies/content,resolved)",
+                    pageSize=100,
+                )
+            )
+
+            return self.parse_comments(result)
+        except Exception:
+            logger.warning("Failed to fetch author comments", exc_info=True)
+            return []
+
+    def get_new_author_comments_sync(self) -> list[AuthorComment]:
+        """Synchronous fallback for contexts that can't await (e.g. watcher poll)."""
         if not self.doc_id:
             return []
 
@@ -150,57 +162,64 @@ class WritingSessionState:
                 drive.comments()
                 .list(
                     fileId=self.doc_id,
-                    fields="comments(commentId,content,quotedFileContent/value,replies/content,resolved)",
+                    fields="comments(id,content,quotedFileContent/value,replies/content,resolved)",
                     pageSize=100,
                 )
                 .execute()
             )
 
-            new_comments: list[AuthorComment] = []
-            for item in result.get("comments", []):
-                if not isinstance(item, dict):
-                    continue
-                if item.get("resolved", False):
-                    continue
-
-                comment_id = str(item.get("commentId", ""))
-                if comment_id in self.seen_comment_ids:
-                    continue
-
-                content = str(item.get("content", ""))
-                anchor = ""
-                quoted = item.get("quotedFileContent")
-                if isinstance(quoted, dict):
-                    anchor = str(quoted.get("value", ""))
-
-                is_agent_comment = comment_id in self.agent_comment_ids
-                reply_list = item.get("replies", [])
-                has_replies = isinstance(reply_list, list) and bool(reply_list)
-
-                if has_replies:
-                    last_reply = reply_list[-1]
-                    if not isinstance(last_reply, dict):
-                        continue
-                    reply_text = str(last_reply.get("content", ""))
-                elif not is_agent_comment:
-                    reply_text = ""
-                else:
-                    continue
-
-                new_comments.append(
-                    AuthorComment(
-                        comment_id=comment_id,
-                        content=content,
-                        anchor_text=anchor,
-                        reply=reply_text,
-                    )
-                )
-                self.seen_comment_ids.add(comment_id)
-
-            return new_comments
+            return self.parse_comments(result)
         except Exception:
-            logger.warning("Failed to fetch author comments", exc_info=True)
+            logger.warning("Failed to fetch author comments (sync)", exc_info=True)
             return []
+
+    def parse_comments(self, result: object) -> list[AuthorComment]:
+        """Parse comments API response into AuthorComment list, updating seen set."""
+        if not isinstance(result, dict):
+            return []
+
+        new_comments: list[AuthorComment] = []
+        for item in result.get("comments", []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("resolved", False):
+                continue
+
+            comment_id = str(item.get("id", ""))
+            if comment_id in self.seen_comment_ids:
+                continue
+
+            content = str(item.get("content", ""))
+            anchor = ""
+            quoted = item.get("quotedFileContent")
+            if isinstance(quoted, dict):
+                anchor = str(quoted.get("value", ""))
+
+            is_agent_comment = comment_id in self.agent_comment_ids
+            reply_list = item.get("replies", [])
+            has_replies = isinstance(reply_list, list) and bool(reply_list)
+
+            if has_replies:
+                last_reply = reply_list[-1]
+                if not isinstance(last_reply, dict):
+                    continue
+                reply_text = str(last_reply.get("content", ""))
+            elif not is_agent_comment:
+                reply_text = ""
+            else:
+                continue
+
+            new_comments.append(
+                AuthorComment(
+                    comment_id=comment_id,
+                    content=content,
+                    anchor_text=anchor,
+                    reply=reply_text,
+                )
+            )
+            self.seen_comment_ids.add(comment_id)
+
+        return new_comments
 
 
 class WritingContext(ContextOutput):
@@ -217,9 +236,6 @@ class WritingContext(ContextOutput):
     )
     new_author_comments: list[AuthorComment] = Field(
         default_factory=list, description="Author replies since last check"
-    )
-    terminal_messages: list[str] = Field(
-        default_factory=list, description="Messages from the terminal during sleep"
     )
     scheduler: dict[str, object] = Field(
         default_factory=dict, description="Scheduler timing state"

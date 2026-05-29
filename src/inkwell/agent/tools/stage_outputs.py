@@ -119,8 +119,13 @@ class AddSourceQuoteInput(BaseModel):
 class PlanCollector:
     """Accumulates incremental plan tool calls. Persists to JSON after each call."""
 
-    def __init__(self, output_path: Path) -> None:
+    def __init__(
+        self,
+        output_path: Path,
+        on_save: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.output_path = output_path
+        self.on_save = on_save
         self.header: dict[str, str] = {}
         self.sections: list[dict[str, object]] = []
         self.research_questions: list[dict[str, object]] = []
@@ -138,28 +143,36 @@ class PlanCollector:
             json.dumps(data, indent=2, default=str), encoding="utf-8"
         )
 
+    async def save_and_notify(self) -> None:
+        self.save()
+        if self.on_save is not None:
+            try:
+                await self.on_save()
+            except (OSError, RuntimeError):
+                logger.warning("PlanCollector on_save failed", exc_info=True)
+
 
 def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
     """Create MCP tools for incremental plan building."""
 
     async def handle_header(inp: SetPlanHeaderInput) -> ToolOk:
         collector.header = inp.model_dump()
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     async def handle_section(inp: AddSectionInput) -> ToolOk:
         collector.sections.append(inp.model_dump())
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     async def handle_question(inp: AddResearchQuestionInput) -> ToolOk:
         collector.research_questions.append(inp.model_dump())
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     async def handle_quote(inp: AddSourceQuoteInput) -> ToolOk:
         collector.source_quotes.append(inp.model_dump())
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     return [
@@ -243,8 +256,13 @@ class SetAdditionalContextInput(BaseModel):
 class ResearchCollector:
     """Accumulates research findings. Persists after each call."""
 
-    def __init__(self, output_path: Path) -> None:
+    def __init__(
+        self,
+        output_path: Path,
+        on_save: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.output_path = output_path
+        self.on_save = on_save
         self.findings: list[dict[str, object]] = []
         self.suggested_additions: list[str] = []
         self.additional_context: str = ""
@@ -260,23 +278,31 @@ class ResearchCollector:
             json.dumps(data, indent=2, default=str), encoding="utf-8"
         )
 
+    async def save_and_notify(self) -> None:
+        self.save()
+        if self.on_save is not None:
+            try:
+                await self.on_save()
+            except (OSError, RuntimeError):
+                logger.warning("ResearchCollector on_save failed", exc_info=True)
+
 
 def make_research_output_tools(collector: ResearchCollector) -> list[LupMcpTool]:
     """MCP tools for the researcher to record findings incrementally."""
 
     async def handle_finding(inp: RecordFindingInput) -> ToolOk:
         collector.findings.append(inp.model_dump())
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     async def handle_suggestion(inp: SuggestAdditionInput) -> ToolOk:
         collector.suggested_additions.append(inp.suggestion)
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     async def handle_context(inp: SetAdditionalContextInput) -> ToolOk:
         collector.additional_context = inp.context
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     return [
@@ -334,9 +360,15 @@ class RecordReviewFindingInput(BaseModel):
 class ReviewCollector:
     """Accumulates review findings for one reviewer."""
 
-    def __init__(self, output_path: Path, reviewer: str) -> None:
+    def __init__(
+        self,
+        output_path: Path,
+        reviewer: str,
+        on_save: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.output_path = output_path
         self.reviewer = reviewer
+        self.on_save = on_save
         self.findings: list[dict[str, object]] = []
 
     def save(self) -> None:
@@ -346,6 +378,14 @@ class ReviewCollector:
             json.dumps(data, indent=2, default=str), encoding="utf-8"
         )
 
+    async def save_and_notify(self) -> None:
+        self.save()
+        if self.on_save is not None:
+            try:
+                await self.on_save()
+            except (OSError, RuntimeError):
+                logger.warning("ReviewCollector on_save failed", exc_info=True)
+
 
 def make_review_output_tools(collector: ReviewCollector) -> list[LupMcpTool]:
     """MCP tools for a reviewer to record findings incrementally."""
@@ -354,7 +394,7 @@ def make_review_output_tools(collector: ReviewCollector) -> list[LupMcpTool]:
         finding = inp.model_dump()
         finding["reviewer"] = collector.reviewer
         collector.findings.append(finding)
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     return [
@@ -396,8 +436,13 @@ class RecordAssumptionInput(BaseModel):
 class AssumptionsCollector:
     """Accumulates surfaced assumptions."""
 
-    def __init__(self, output_path: Path) -> None:
+    def __init__(
+        self,
+        output_path: Path,
+        on_save: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.output_path = output_path
+        self.on_save = on_save
         self.items: list[dict[str, str]] = []
 
     def save(self) -> None:
@@ -407,13 +452,21 @@ class AssumptionsCollector:
             json.dumps(data, indent=2, default=str), encoding="utf-8"
         )
 
+    async def save_and_notify(self) -> None:
+        self.save()
+        if self.on_save is not None:
+            try:
+                await self.on_save()
+            except (OSError, RuntimeError):
+                logger.warning("AssumptionsCollector on_save failed", exc_info=True)
+
 
 def make_assumptions_tools(collector: AssumptionsCollector) -> list[LupMcpTool]:
     """MCP tools for surfacing assumptions incrementally."""
 
     async def handle_assumption(inp: RecordAssumptionInput) -> ToolOk:
         collector.items.append(inp.model_dump())
-        collector.save()
+        await collector.save_and_notify()
         return ToolOk()
 
     return [

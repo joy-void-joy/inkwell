@@ -14,6 +14,7 @@ import json
 import logging
 import tempfile
 import unicodedata
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from claude_agent_sdk import McpServerConfig
@@ -47,7 +48,7 @@ from inkwell.agent.models import (
 from lup.background import BackgroundAgent
 
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.watcher import create_comment_watcher
+from inkwell.agent.watcher import create_comment_watcher, create_source_watcher
 from inkwell.agent.session import WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
@@ -63,9 +64,10 @@ from inkwell.agent.stages import (
     REWRITER_SYSTEM,
     SECTION_WRITER_PROMPT,
     STYLE_REVIEWER_PROMPT,
+    get_format_guidance,
 )
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
-from inkwell.agent.tools.extract import do_extract_source
+from inkwell.agent.tools.extract import GDOC_URL_PATTERN, do_extract_source, parse_gdoc_id
 from inkwell.agent.tools.formats import (
     FormatBlogInput,
     FormatDialogInput,
@@ -107,7 +109,7 @@ from inkwell.agent.tools.stage_outputs import (
     make_review_output_tools,
 )
 from inkwell.agent.tools.query_artifacts import make_query_tools
-from inkwell.agent.tools.voice import do_analyze_voice, load_style_corpus
+from inkwell.agent.tools.voice import do_analyze_voice, load_format_examples, load_style_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +283,120 @@ class TabTracker:
 
 
 # ---------------------------------------------------------------------------
+# Real-time GDoc sync helpers
+# ---------------------------------------------------------------------------
+
+
+def render_plan_progress(plan_path: Path) -> str:
+    """Render the current plan JSON as markdown for the GDoc Plan tab."""
+    if not plan_path.exists():
+        return "# Planning...\n"
+    data = json.loads(plan_path.read_text(encoding="utf-8"))
+    parts: list[str] = []
+    parts.append(f"# {data.get('title', 'Planning...')}\n")
+    if thesis := data.get("thesis"):
+        parts.append(f"**Thesis:** {thesis}\n")
+    if direction := data.get("author_direction"):
+        parts.append(f"**Author direction:** {direction}\n")
+    sections = data.get("sections", [])
+    if sections:
+        parts.append("\n## Sections\n")
+        for s in sections:
+            parts.append(f"### {s.get('title', '???')}")
+            parts.append(f"{s.get('summary', '')}\n")
+            kp = s.get("key_points", [])
+            if kp:
+                parts.append("Key points: " + ", ".join(kp))
+    questions = data.get("research_questions", [])
+    if questions:
+        parts.append("\n## Research Questions\n")
+        for q in questions:
+            parts.append(
+                f"- [{q.get('priority', '?')}] {q.get('question', '')} "
+                f"(for: {q.get('section', '')})"
+            )
+    quotes = data.get("source_quotes", [])
+    if quotes:
+        parts.append("\n## Source Quotes\n")
+        for q in quotes:
+            parts.append(f'- "{q.get("text", "")}" — {q.get("speaker", "")}')
+    return "\n".join(parts)
+
+
+def render_research_progress(research_path: Path) -> str:
+    """Render the current research JSON as markdown for the GDoc Research tab."""
+    if not research_path.exists():
+        return "# Researching...\n"
+    data = json.loads(research_path.read_text(encoding="utf-8"))
+    findings = data.get("findings", [])
+    parts = [f"# Research Findings\n\n{len(findings)} findings\n"]
+    for f in findings:
+        parts.append(f"\n## {f.get('question', '???')}\n")
+        parts.append(f"{f.get('answer', '')}\n")
+        parts.append(f"**Confidence:** {f.get('confidence', '?')}")
+        sources = f.get("sources", [])
+        if sources:
+            urls = ", ".join(s.get("url", "") for s in sources if isinstance(s, dict))
+            if urls:
+                parts.append(f"\n**Sources:** {urls}")
+    return "\n".join(parts)
+
+
+class DraftSyncer:
+    """Polls a draft file and pushes changes to a GDoc tab in real time."""
+
+    def __init__(
+        self,
+        doc_id: str,
+        tab_id: str,
+        file_path: Path,
+        *,
+        session_state: WritingSessionState | None = None,
+        interval: float = 5.0,
+    ) -> None:
+        self.doc_id = doc_id
+        self.tab_id = tab_id
+        self.file_path = file_path
+        self.session_state = session_state
+        self.interval = interval
+        self.last_content = ""
+        self.task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        self.task = asyncio.create_task(self.poll_loop())
+
+    async def stop(self) -> None:
+        if self.task is not None:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+        await self.sync()
+
+    async def poll_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval)
+            await self.sync()
+
+    async def sync(self) -> None:
+        if not self.file_path.exists():
+            return
+        try:
+            content = self.file_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        if content == self.last_content or not content.strip():
+            return
+        self.last_content = content
+        async with gdoc_nonfatal(f"sync draft {self.file_path.name}"):
+            await do_write_tab(
+                self.doc_id, self.tab_id, content,
+                session_state=self.session_state,
+            )
+
+
+# ---------------------------------------------------------------------------
 # MCP server builders
 # ---------------------------------------------------------------------------
 
@@ -404,11 +520,12 @@ async def plan_article(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    on_plan_update: Callable[[], Awaitable[None]] | None = None,
 ) -> ArticlePlan:
     """Stage 1: Extract a structured article plan from source material."""
     conversation_path = notes.text_artifact_path("conversation")
     plan_path = notes.artifact_path("plan")
-    collector = PlanCollector(plan_path)
+    collector = PlanCollector(plan_path, on_save=on_plan_update)
     output_servers, output_tool_names = build_output_server("output", make_plan_tools(collector))
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("plan", note_collector)
@@ -416,12 +533,9 @@ async def plan_article(
     output_tool_names = output_tool_names + note_tool_names
 
     voice_hint = ""
-    corpus_samples, corpus_sources = load_style_corpus(max_samples=3)
-    if corpus_samples:
-        corpus_path = notes.artifacts_dir / "style_corpus.md"
-        corpus_text = "\n\n---\n\n".join(s[:1500] for s in corpus_samples)
-        corpus_path.write_text(corpus_text, encoding="utf-8")
-        voice_hint += f"\nStyle corpus samples: {corpus_path}"
+    style_rules_path = notes.text_artifact_path("style_rules")
+    if style_rules_path.exists():
+        voice_hint += f"\nStyle rules (read this for hard editing rules): {style_rules_path}"
     if voice_profile:
         voice_path = notes.save_text_artifact("voice", voice_profile)
         voice_hint += f"\nVoice profile: {voice_path}"
@@ -432,11 +546,17 @@ async def plan_article(
         if target_format
         else "Choose the best output format: lesswrong, twitter, blog, dialog, or memo"
     )
+
+    format_guidance = get_format_guidance(target_format)
     task = (
         f"Extract a structured article plan from the source conversation.\n"
         f"{format_hint}\n\n"
         f"Source conversation file: {conversation_path}\n"
         f"{voice_hint}\n\n"
+    )
+    if format_guidance:
+        task += f"{format_guidance}\n\n"
+    task += (
         f"Read the file, then build the plan using set_plan_header, "
         f"add_section, add_research_question, and add_source_quote."
     )
@@ -472,12 +592,13 @@ async def refine_plan(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    on_plan_update: Callable[[], Awaitable[None]] | None = None,
 ) -> ArticlePlan:
     """Refine the initial plan using research findings."""
     plan_path = notes.artifact_path("plan")
     research_path = notes.artifact_path("research")
     refined_path = notes.artifacts_dir / "plan_refined.json"
-    collector = PlanCollector(refined_path)
+    collector = PlanCollector(refined_path, on_save=on_plan_update)
     output_servers, output_tool_names = build_output_server("output", make_plan_tools(collector))
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("refine", note_collector)
@@ -538,6 +659,7 @@ async def research_plan(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    on_research_update: Callable[[], Awaitable[None]] | None = None,
 ) -> ResearchCompilation:
     """Stage 2: Deep research on all questions from the article plan."""
     if servers is None:
@@ -545,7 +667,7 @@ async def research_plan(
 
     plan_path = notes.artifact_path("plan")
     research_path = notes.artifact_path("research")
-    collector = ResearchCollector(research_path)
+    collector = ResearchCollector(research_path, on_save=on_research_update)
     output_servers, output_tool_names = build_output_server(
         "output", make_research_output_tools(collector)
     )
@@ -593,6 +715,7 @@ async def write_section(
     voice_profile: str | None = None,
     feedback_path: Path | None = None,
     section_context: str = "",
+    target_format: str = "lesswrong",
     servers: dict[str, McpServerConfig] | None = None,
     author_notes: list[AuthorNote] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
@@ -619,20 +742,31 @@ async def write_section(
     if voice_profile:
         voice_path = notes.text_artifact_path("voice")
         file_refs += f"Voice profile: {voice_path}\n"
+    style_rules_path = notes.text_artifact_path("style_rules")
+    if style_rules_path.exists():
+        file_refs += f"Style rules (read for hard editing rules): {style_rules_path}\n"
+    format_examples_path = notes.text_artifact_path("format_examples")
+    if format_examples_path.exists():
+        file_refs += f"Format examples (reference output in target format): {format_examples_path}\n"
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
 
+    format_guidance = get_format_guidance(target_format)
     task = (
         f'Write the section "{section_title}" for the article.\n\n'
         f"{file_refs}\n"
     )
+    if format_guidance:
+        task += f"{format_guidance}\n\n"
     if section_context:
         task += f"{section_context}\n\n"
     task += (
         f"Read the plan to find this section's details (summary, key points, "
         f"quotes to include), then read the research findings for relevant "
         f"context. If a voice profile is available, read it to match the "
-        f"author's style.\n\n"
+        f"author's style. If a style rules file is available, read it and "
+        f"apply all hard editing rules. If format examples are available, "
+        f"read them to understand the target format's conventions.\n\n"
         f"Write the complete section to: {draft_path}\n\n"
         f"Use the Write tool to write the file. Write the entire section "
         f"in one call. If you have questions for the author, call note_for_author."
@@ -714,6 +848,7 @@ async def merge_sections(
     output_path: Path,
     voice_profile: str | None = None,
     feedback_path: Path | None = None,
+    target_format: str = "lesswrong",
     author_notes: list[AuthorNote] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
@@ -754,19 +889,31 @@ async def merge_sections(
     if voice_profile:
         voice_path = notes.text_artifact_path("voice")
         file_refs += f"Voice profile: {voice_path}\n"
+    style_rules_path = notes.text_artifact_path("style_rules")
+    if style_rules_path.exists():
+        file_refs += f"Style rules (read for hard editing rules): {style_rules_path}\n"
+    format_examples_path = notes.text_artifact_path("format_examples")
+    if format_examples_path.exists():
+        file_refs += f"Format examples (reference output in target format): {format_examples_path}\n"
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
 
     plan_path = notes.artifact_path("plan")
     file_refs += f"Article plan: {plan_path}\n"
 
+    format_guidance = get_format_guidance(target_format)
     task = (
-        f"Rewrite these sections into a unified article.\n\n"
+        f"Rewrite these sections into a unified piece.\n\n"
         f"{file_refs}\n"
+    )
+    if format_guidance:
+        task += f"{format_guidance}\n\n"
+    task += (
         f"Read the merge plan FIRST — it contains a target outline that "
         f"defines your output's structure paragraph by paragraph. Then read "
         f"the raw material file. Follow the outline, not the input section "
-        f"boundaries.\n\n"
+        f"boundaries. If a style rules file is available, read it and apply "
+        f"all hard editing rules throughout the merged draft.\n\n"
         f"Write the complete merged draft to: {output_path}"
     )
 
@@ -1049,16 +1196,29 @@ async def rewrite_final(
     if voice_profile:
         voice_path = notes.text_artifact_path("voice")
         file_refs += f"Voice profile: {voice_path}\n"
+    style_rules_path = notes.text_artifact_path("style_rules")
+    if style_rules_path.exists():
+        file_refs += f"Style rules (read for hard editing rules — apply exhaustively): {style_rules_path}\n"
+    format_examples_path = notes.text_artifact_path("format_examples")
+    if format_examples_path.exists():
+        file_refs += f"Format examples (reference output in target format): {format_examples_path}\n"
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
 
+    format_guidance = get_format_guidance(target_format)
     task = (
-        f"Produce the final version of the article.\n\n"
+        f"Produce the final version of this piece.\n\n"
         f"Target format: {target_format}\n\n"
+    )
+    if format_guidance:
+        task += f"{format_guidance}\n\n"
+    task += (
         f"{file_refs}\n"
         f"Read the annotated draft — review findings are marked inline. "
-        f"Apply all critical findings and worthwhile suggestions.\n\n"
-        f"Write the final article to: {output_path}"
+        f"Apply all critical findings and worthwhile suggestions. "
+        f"If a style rules file is available, read it and enforce every "
+        f"hard editing rule with zero remaining violations.\n\n"
+        f"Write the final piece to: {output_path}"
     )
 
     collector = await query(
@@ -1133,7 +1293,7 @@ async def apply_format(
         case "memo":
             from inkwell.agent.tools.formats import FormatMemoInput, do_format_memo
 
-            result = do_format_memo(
+            result = await do_format_memo(
                 FormatMemoInput(content=content, title=title)
             )
             return result.content
@@ -1343,6 +1503,7 @@ class PipelineRunner:
         self.final_tab_id = ""
 
         self.watcher: BackgroundAgent | None = None
+        self.source_watcher: BackgroundAgent | None = None
 
     def ensure_notes(self) -> PipelineNotes:
         """Return notes, creating a temp dir if needed."""
@@ -1395,8 +1556,10 @@ class PipelineRunner:
     async def save_snapshot(self) -> None:
         self.snapshot.doc_id = self.state.doc_id
         self.snapshot.doc_url = self.state.doc_url
+        self.snapshot.source_doc_id = self.state.source_doc_id
         self.snapshot.seen_comment_ids = set(self.state.seen_comment_ids)
         self.snapshot.agent_comment_ids = set(self.state.agent_comment_ids)
+        self.snapshot.seen_source_comment_ids = set(self.state.seen_source_comment_ids)
         self.snapshot.pending_questions = list(self.state.pending_questions)
 
         notes = self.ensure_notes()
@@ -1472,6 +1635,8 @@ class PipelineRunner:
 
         self.state.seen_comment_ids = set(snapshot.seen_comment_ids)
         self.state.agent_comment_ids = set(snapshot.agent_comment_ids)
+        self.state.seen_source_comment_ids = set(snapshot.seen_source_comment_ids)
+        self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
 
         await self.setup_doc()
@@ -1525,7 +1690,20 @@ class PipelineRunner:
         self.watcher.start()
         logger.info("Comment watcher started")
 
+        if self.state.source_doc_id:
+            self.source_watcher = create_source_watcher(
+                session_state=self.state,
+                notes=self.notes,
+                plan_breaking_signal=self.plan_breaking,
+            )
+            self.source_watcher.start()
+            logger.info("Source document watcher started")
+
     async def stop_watcher(self) -> None:
+        if self.source_watcher is not None:
+            await self.source_watcher.stop()
+            self.source_watcher = None
+            logger.info("Source document watcher stopped")
         if self.watcher is not None:
             await self.watcher.stop()
             self.watcher = None
@@ -1698,6 +1876,10 @@ class PipelineRunner:
     async def stage_extract(self) -> None:
         await self.hooks.on_stage("extract", "Extracting source material")
         await self.update_overview(active_stage="extract")
+
+        if GDOC_URL_PATTERN.search(self.source):
+            self.state.source_doc_id = parse_gdoc_id(self.source)
+
         conversation = await do_extract_source(self.source)
 
         for ref in self.refs:
@@ -1725,10 +1907,26 @@ class PipelineRunner:
     async def stage_voice(self) -> None:
         await self.hooks.on_stage("voice", "Analyzing author's writing voice")
         await self.update_overview(active_stage="voice")
-        corpus_samples, _ = load_style_corpus(max_samples=3)
+        corpus_samples, corpus_sources = load_style_corpus()
+
+        notes = self.ensure_notes()
+        if corpus_samples:
+            full_corpus = "\n\n---\n\n".join(corpus_samples)
+            notes.save_text_artifact("style_rules", full_corpus)
+
+        fmt_samples, fmt_sources = load_format_examples(self.target_format)
+        if fmt_samples:
+            examples_text = "\n\n---\n\n".join(
+                f"## Example: {src}\n\n{sample}"
+                for sample, src in zip(fmt_samples, fmt_sources)
+            )
+            notes.save_text_artifact("format_examples", examples_text)
+
         voice_profile = await do_analyze_voice(
             self.snapshot.conversation,
             corpus_samples,
+            corpus_sources=corpus_sources,
+            target_format=self.target_format,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -1737,7 +1935,6 @@ class PipelineRunner:
         self.snapshot.voice_profile = voice_profile
         self.snapshot.stage = "voice"
 
-        notes = self.ensure_notes()
         notes.save_text_artifact("voice", voice_profile)
         await self.save_snapshot()
 
@@ -1756,6 +1953,15 @@ class PipelineRunner:
         await self.hooks.on_stage("plan", "Planning article structure")
         await self.update_overview(active_stage="plan")
         notes = self.ensure_notes()
+        plan_path = notes.artifact_path("plan")
+
+        async def sync_plan_tab() -> None:
+            text = render_plan_progress(plan_path)
+            async with gdoc_nonfatal("sync plan tab"):
+                await do_write_tab(
+                    self.doc_id, self.known_tabs["Plan"], text,
+                    session_state=self.state,
+                )
 
         plan = await plan_article(
             notes,
@@ -1766,6 +1972,7 @@ class PipelineRunner:
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
+            on_plan_update=sync_plan_tab,
         )
         await self.post_author_notes()
         self.snapshot.plan = plan
@@ -1819,6 +2026,15 @@ class PipelineRunner:
         await self.update_overview(active_stage="research")
         feedback_path = await self.prepare_feedback("research")
         notes = self.ensure_notes()
+        research_path = notes.artifact_path("research")
+
+        async def sync_research_tab() -> None:
+            text = render_research_progress(research_path)
+            async with gdoc_nonfatal("sync research tab"):
+                await do_write_tab(
+                    self.doc_id, self.known_tabs["Research"], text,
+                    session_state=self.state,
+                )
 
         research = await research_plan(
             notes,
@@ -1829,6 +2045,7 @@ class PipelineRunner:
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
+            on_research_update=sync_research_tab,
         )
         await self.post_author_notes()
         self.snapshot.research = research
@@ -1856,6 +2073,16 @@ class PipelineRunner:
         notes = self.ensure_notes()
         initial_count = len(plan.sections)
 
+        refined_path = notes.artifacts_dir / "plan_refined.json"
+
+        async def sync_refine_tab() -> None:
+            text = render_plan_progress(refined_path)
+            async with gdoc_nonfatal("sync plan tab (refine)"):
+                await do_write_tab(
+                    self.doc_id, self.known_tabs["Plan"], text,
+                    session_state=self.state,
+                )
+
         refined = await refine_plan(
             notes,
             voice_profile=self.snapshot.voice_profile,
@@ -1865,6 +2092,7 @@ class PipelineRunner:
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
+            on_plan_update=sync_refine_tab,
         )
         await self.post_author_notes()
         self.snapshot.plan = refined
@@ -1914,31 +2142,40 @@ class PipelineRunner:
             )
 
         async def write_and_publish(section: SectionPlan, idx: int) -> SectionDraft:
-            draft = await write_section(
-                section.title,
-                notes=notes,
-                draft_path=self.get_draft_path(section.title),
-                voice_profile=self.snapshot.voice_profile,
-                feedback_path=feedback_path,
-                section_context=build_neighbor_context(idx),
-                servers=self.research_servers,
-                author_notes=self.author_notes,
-                compute_servers=self.compute_servers,
-                compute_tool_names=self.compute_tool_names,
-                trace_logger=self.trace_logger,
-                cost_accumulator=self.cost_accumulator,
-            )
+            tid = self.tab_ids.get(section.title, "")
+            draft_path = self.get_draft_path(section.title)
+            syncer: DraftSyncer | None = None
+            if tid:
+                syncer = DraftSyncer(
+                    self.doc_id, tid, draft_path,
+                    session_state=self.state,
+                )
+                await syncer.start()
+            try:
+                draft = await write_section(
+                    section.title,
+                    notes=notes,
+                    draft_path=draft_path,
+                    voice_profile=self.snapshot.voice_profile,
+                    feedback_path=feedback_path,
+                    section_context=build_neighbor_context(idx),
+                    target_format=self.target_format,
+                    servers=self.research_servers,
+                    author_notes=self.author_notes,
+                    compute_servers=self.compute_servers,
+                    compute_tool_names=self.compute_tool_names,
+                    trace_logger=self.trace_logger,
+                    cost_accumulator=self.cost_accumulator,
+                )
+            finally:
+                if syncer is not None:
+                    await syncer.stop()
             self.snapshot.section_drafts[section.title] = draft
 
-            async with gdoc_nonfatal(f"write section '{section.title}'"):
+            if tid and draft.content and not draft.content.startswith("[Section failed"):
                 assert self.tabs is not None
-                tid = self.tab_ids.get(section.title, "")
-                if tid and draft.content and not draft.content.startswith("[Section failed"):
-                    await do_write_tab(
-                        self.doc_id, tid, draft.content, session_state=self.state
-                    )
-                    await self.tabs.record_from_doc(tid, f"Section: {section.title}")
-                    self.state.update_section_status(section.title, "drafted")
+                await self.tabs.record_from_doc(tid, f"Section: {section.title}")
+                self.state.update_section_status(section.title, "drafted")
 
             await self.hooks.on_message(
                 "write",
@@ -1989,35 +2226,41 @@ class PipelineRunner:
         }
         output_path = self.get_draft_path("merged")
 
-        merged = await merge_sections(
-            section_paths,
-            notes=notes,
-            output_path=output_path,
-            voice_profile=self.snapshot.voice_profile,
-            feedback_path=feedback_path,
-            author_notes=self.author_notes,
-            compute_servers=self.compute_servers,
-            compute_tool_names=self.compute_tool_names,
-            trace_logger=self.trace_logger,
-            heartbeat=merge_heartbeat,
-            cost_accumulator=self.cost_accumulator,
+        if "Draft" not in self.known_tabs:
+            self.known_tabs["Draft"] = await do_create_tab(
+                self.doc_id, "Draft", session_state=self.state
+            )
+        self.draft_tab_id = self.known_tabs["Draft"]
+
+        syncer = DraftSyncer(
+            self.doc_id, self.draft_tab_id, output_path,
+            session_state=self.state, interval=8.0,
         )
+        await syncer.start()
+        try:
+            merged = await merge_sections(
+                section_paths,
+                notes=notes,
+                output_path=output_path,
+                voice_profile=self.snapshot.voice_profile,
+                feedback_path=feedback_path,
+                target_format=self.target_format,
+                author_notes=self.author_notes,
+                compute_servers=self.compute_servers,
+                compute_tool_names=self.compute_tool_names,
+                trace_logger=self.trace_logger,
+                heartbeat=merge_heartbeat,
+                cost_accumulator=self.cost_accumulator,
+            )
+        finally:
+            await syncer.stop()
         await self.post_author_notes()
         self.snapshot.merged = merged
         self.snapshot.stage = "merge"
         await self.save_snapshot()
 
-        async with gdoc_nonfatal("write draft tab"):
-            if "Draft" not in self.known_tabs:
-                self.known_tabs["Draft"] = await do_create_tab(
-                    self.doc_id, "Draft", session_state=self.state
-                )
-            self.draft_tab_id = self.known_tabs["Draft"]
-            await do_write_tab(
-                self.doc_id, self.draft_tab_id, merged.content, session_state=self.state
-            )
-            assert self.tabs is not None
-            await self.tabs.record_from_doc(self.draft_tab_id, "Draft")
+        assert self.tabs is not None
+        await self.tabs.record_from_doc(self.draft_tab_id, "Draft")
         await self.update_overview()
 
     async def stage_review(self) -> None:
@@ -2069,20 +2312,28 @@ class PipelineRunner:
         draft_path = self.get_draft_path("merged")
         output_path = self.get_draft_path("final")
 
-        output = await rewrite_final(
-            notes,
-            draft_path,
-            self.snapshot.findings,
-            output_path=output_path,
-            voice_profile=self.snapshot.voice_profile,
-            feedback_path=feedback_path,
-            target_format=self.target_format,
-            author_notes=self.author_notes,
-            compute_servers=self.compute_servers,
-            compute_tool_names=self.compute_tool_names,
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
+        syncer = DraftSyncer(
+            self.doc_id, self.draft_tab_id, output_path,
+            session_state=self.state, interval=8.0,
         )
+        await syncer.start()
+        try:
+            output = await rewrite_final(
+                notes,
+                draft_path,
+                self.snapshot.findings,
+                output_path=output_path,
+                voice_profile=self.snapshot.voice_profile,
+                feedback_path=feedback_path,
+                target_format=self.target_format,
+                author_notes=self.author_notes,
+                compute_servers=self.compute_servers,
+                compute_tool_names=self.compute_tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
+        finally:
+            await syncer.stop()
         await self.post_author_notes()
         output.voice_profile = self.snapshot.voice_profile
         output.open_questions = list(self.state.pending_questions)
@@ -2265,6 +2516,7 @@ class PipelineRunner:
                     notes=notes,
                     draft_path=self.get_draft_path(section_plan.title),
                     voice_profile=self.snapshot.voice_profile,
+                    target_format=self.target_format,
                     servers=self.research_servers,
                     author_notes=self.author_notes,
                     compute_servers=self.compute_servers,
@@ -2281,6 +2533,7 @@ class PipelineRunner:
                     notes=notes,
                     draft_path=self.get_draft_path(section_plan.title),
                     voice_profile=self.snapshot.voice_profile,
+                    target_format=self.target_format,
                     servers=self.research_servers,
                     author_notes=self.author_notes,
                     compute_servers=self.compute_servers,

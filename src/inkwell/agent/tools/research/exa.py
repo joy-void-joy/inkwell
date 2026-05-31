@@ -121,7 +121,7 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
                 title=r.get("title"),
                 url=r.get("url"),
                 snippet=(r.get("text") or "")[:500] or None,
-                highlights=r.get("highlights", [])[:3] or None,
+                highlights=[h[:500] for h in r.get("highlights", [])[:3]] or None,
                 published_date=published_date,
                 score=r.get("score"),
             )

@@ -144,7 +144,7 @@ async def fetch_wikipedia(params: FetchWikipediaInput) -> FetchWikipediaOutput:
         if section_content:
             content = section_content
 
-    content = content[:30000]
+    content = content[:15000]
 
     return FetchWikipediaOutput(
         title=page.get("title", params.title),

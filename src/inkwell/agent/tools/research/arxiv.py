@@ -149,7 +149,7 @@ async def fetch_arxiv(params: FetchArxivInput) -> FetchArxivOutput:
                         paper_id=paper_id,
                         format="html",
                         url=html_url,
-                        content=text[:30000],
+                        content=text[:15000],
                     )
         except httpx.HTTPError:
             logger.debug("HTML fetch failed for %s, trying PDF", paper_id)

@@ -54,6 +54,12 @@ markets, Wikipedia, URL fetching. If a claim needs a number you don't \
 have, or the research findings don't cover your section's needs well \
 enough, look it up yourself. Never write around a gap you can fill.
 
+Integrate research as support for the author's existing claims, not \
+as new framing. If the author wrote "about 40%," verify it and use \
+the accurate number in their informal style. Don't add parenthetical \
+academic citations (Author Year) unless the source conversation used \
+that register.
+
 ## Output
 
 Write the complete section to the draft file path given in your task \
@@ -103,6 +109,12 @@ that the next paragraph resolves or complicates.
 
 Preserve the author's voice. Read the voice profile file. The piece \
 should sound like them, not like a committee.
+
+When a section has distinctive energy: informal asides, sentence \
+fragments for emphasis, untranslated phrases, half-finished thoughts \
+that trail off: that energy is the author's voice. Resolve tonal \
+inconsistency by matching the more energetic section up, not the \
+calmer one down.
 
 ## Output
 
@@ -308,6 +320,11 @@ not a constraint on reality.
 - **Flag remaining gaps** — only add research questions for things the \
 writers will actually need that research didn't cover
 
+Research grounds claims; it doesn't change the piece's register. If \
+the source used informal numbers ("roughly 80%"), verify them but \
+keep the informal framing. Don't add parenthetical academic \
+citations (Author Year) unless the source conversation used them.
+
 Preserve the author's voice notes unchanged. Preserve their direction \
 unless research directly contradicts it."""
 
@@ -448,3 +465,191 @@ A polite suggestion can be plan-breaking; a strong opinion can be \
 stage-local. A large deletion can be intentional (stage_local) or \
 accidental (revert_suggested) — look at whether the remaining text \
 still makes sense."""
+
+
+# ---------------------------------------------------------------------------
+# Format-specific structural guidance
+# ---------------------------------------------------------------------------
+
+FORMAT_GUIDANCE: dict[str, str] = {
+    "memo": """\
+## Format: Policy Memo
+
+This piece is a memo, not an article. Memos are structured for busy \
+decision-makers who skim. Every structural choice must serve \
+scannability and action.
+
+### Structure requirements
+
+1. **Executive summary first.** The opening section (2-3 paragraphs) \
+must state the problem, the recommendation, and why it matters — in \
+that order. A reader who stops after the executive summary should \
+understand the core argument and what you are asking them to do.
+
+2. **Numbered parts with descriptive headings.** After the executive \
+summary, organize into clearly labeled parts (I, II, III or \
+descriptive headings). Each part covers one topic. Headings should \
+tell the reader what the section concludes, not what it discusses. \
+"The Open-Weight Window Is Closing" is better than "Background."
+
+3. **Bold topic sentences.** The first sentence of every paragraph \
+should be in bold and should state the paragraph's main claim. A \
+reader skimming only the bold sentences should get the full argument.
+
+4. **Bullet points for lists and action items.** When you have 3+ \
+parallel items, use bullets. Never bury action items in prose.
+
+5. **Conclusion with specific actions.** End with a numbered list of \
+concrete next steps: who does what, by when.
+
+### Tone
+
+- **Diplomatic and professional.** This is addressed to decision-makers. \
+Be direct but not aggressive. No zingers, no "gotcha" constructions. \
+Write like Foreign Affairs, not an op-ed.
+- **Use softening constructions** where the claim is strong: "the \
+evidence suggests," "on current trajectories." Not because you are \
+uncertain — because you respect the reader's autonomy to weigh \
+the evidence.
+- **No dramatic escalation.** Do not build to a crescendo or use \
+emotional rhetoric. State the stakes plainly and let the facts carry \
+the weight. "Europe has no equivalent" is stronger than "Europe's \
+last shot."
+- **Avoid journalistic devices.** No scene-setting openings, no \
+anecdotal ledes, no narrative arcs. Lead with the finding, not the \
+story.
+
+### Length
+
+- Target 3,000-5,000 words for a substantive policy memo. Under 3,000 \
+if possible. Every paragraph must earn its place.
+- Cut any paragraph that repeats a point already made elsewhere.
+- If a section runs over 800 words, split it or cut.""",
+
+    "lesswrong": """\
+## Format: LessWrong
+
+This piece targets LessWrong — a technically literate audience that \
+values epistemic rigor, directness, and original reasoning. The \
+community is primed to detect and reject AI-generated prose, so \
+every structural choice must serve clarity and substance.
+
+### Structure: State-Explain-Summarize
+
+The core structural unit on LessWrong is the nested diamond. For \
+each major point:
+
+1. **State** the conclusion up front — don't build toward it
+2. **Explain** the reasoning and evidence
+3. **Summarize** to reinforce
+
+For multi-point posts: state all points at the top, dedicate a \
+section to each, then summarize everything at the end. A reader \
+who stops after the first three paragraphs should understand the \
+core argument.
+
+### Epistemic Status Header
+
+Include when it adds information the body doesn't already convey. \
+Derive it from the source conversation's actual stance. Be specific \
+about confidence level, methodology, limitations, and effort \
+invested. Not "fairly confident" — instead: "Field notes from two \
+years of direct experience. I erred on the side of strong claims."
+
+### Section Structure
+
+Each section must follow: **What are you saying? How do you know? \
+Why should the reader care?** If a section doesn't answer all three, \
+it's incomplete. Use clear headings that state conclusions, not \
+topics. "The Executive Dominates the Legislative" not "Background."
+
+### Tone and Voice
+
+- **Direct and confident.** Take clear stances. Hedge once per \
+claim, not three times. Excessive hedging ("may perhaps be \
+considered") signals intellectual timidity, not rigor.
+- **Describe your actual reasoning process,** not a post-hoc \
+justification. Show what led to the conclusion, including where \
+you changed your mind.
+- **Acknowledge uncertainty explicitly.** Use numerical credences \
+only when the source conversation used them. One or two credences \
+per piece models calibration; four or more reads as performance.
+- **Identify cruxes.** Stating what would change your mind once, \
+for the piece's central claim, models intellectual honesty. \
+Repeating it for every sub-point creates a template.
+- **No fence-sitting.** Never "on the one hand / on the other" \
+without committing to a position.
+- **Define terms before deploying them.** If you introduce a \
+concept (insider game, KPI, useful-assistant mode), define it \
+intensionally in 1-2 sentences immediately. Extensional examples \
+alone leave the reader "riffing on a vibe."
+
+### What to Avoid
+
+- **Burying the lede.** State the main point immediately.
+- **High-context writing.** Don't assume the reader has your \
+background. Every claim needs enough context to stand alone. \
+"Why does France matter?" must be answered before the France \
+example, not assumed.
+- **Motte-and-bailey.** The introduction and conclusion must \
+not overstate what the body actually argues. If the body is \
+nuanced, the framing must be too.
+- **Performative declarations of inner state.** "I'm not \
+defensive" points at defensiveness. Show epistemic honesty \
+through the reasoning itself, don't announce it.
+- **Phrases that scan as LLM output.** No "it's worth noting," \
+"in many ways," "this is crucial," or empty even-handedness. \
+The community explicitly flags these.
+- **Unreferenced prior work.** Cite relevant LessWrong posts, \
+Sequences, and existing discussion. Show awareness of what's \
+been said.
+
+### Formatting
+
+- **Paragraphs:** 2-4 sentences max. Break long paragraphs.
+- **Headings:** Use H2/H3 to create a scannable sidebar outline.
+- **Footnotes:** Use for tangents, caveats, and supplementary \
+detail that would break flow.
+- **TL;DR:** Include for posts over 2,000 words, after the \
+epistemic status.
+- **Bold:** Use sparingly for key claims and data points, never \
+for emphasis on filler phrases.
+- **Links:** Reference prior LessWrong discussion, link to \
+sources for verifiable claims.
+
+### Length
+
+- Most well-received posts are 2,000-5,000 words. Every paragraph \
+must earn its place.
+- Cut aggressively: target 20-50% reduction from first draft. \
+Remove any paragraph that repeats a point made elsewhere.
+- Dense supplementary material goes in footnotes or collapsible \
+sections, not the main body.""",
+
+    "blog": """\
+## Format: Blog Post
+
+Write for a general audience. Hook the reader in the first paragraph. \
+Use subheadings every 300-400 words for scannability. Paragraphs \
+should be short (3-5 sentences). Conversational but substantive.""",
+
+    "twitter": """\
+## Format: Twitter Thread
+
+Each point must be self-contained within ~260 characters. The first \
+tweet is the hook — it must grab attention without context. Build \
+a thread that rewards sequential reading but where each tweet \
+also works standalone.""",
+
+    "dialog": """\
+## Format: Dialog
+
+Structure as a conversation between 2-3 speakers with distinct \
+perspectives. Each speaker should have a recognizable voice. \
+Distribute arguments naturally across speakers. Vary turn length.""",
+}
+
+
+def get_format_guidance(target_format: str) -> str:
+    """Return structural guidance for a target format, or empty string."""
+    return FORMAT_GUIDANCE.get(target_format, "")

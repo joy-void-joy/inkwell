@@ -94,7 +94,7 @@ async def fetch_url(params: FetchUrlInput) -> FetchUrlOutput:
         return FetchUrlOutput(
             url=params.url,
             format="json" if "json" in ct else "text",
-            content=resp.text[:30000],
+            content=resp.text[:15000],
         )
 
     extracted = trafilatura.extract(
@@ -120,7 +120,7 @@ async def fetch_url(params: FetchUrlInput) -> FetchUrlOutput:
             url=params.url,
             format="text",
             title=title_str,
-            content=extracted[:30000],
+            content=extracted[:15000],
         )
 
     raise ToolError(

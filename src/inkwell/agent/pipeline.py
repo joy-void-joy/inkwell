@@ -37,6 +37,7 @@ from inkwell.agent.models import (
     PipelineSnapshot,
     PreserveAction,
     ResearchCompilation,
+    ResearchFinding,
     RestartStrategy,
     ReviewFinding,
     ReviewOutput,
@@ -67,7 +68,7 @@ from inkwell.agent.stages import (
     get_format_guidance,
 )
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
-from inkwell.agent.tools.extract import GDOC_URL_PATTERN, do_extract_source, parse_gdoc_id
+from inkwell.agent.tools.extract import GDOC_URL_PATTERN, do_extract_source, fetch_gdoc_comments, parse_gdoc_id
 from inkwell.agent.tools.formats import (
     FormatBlogInput,
     FormatDialogInput,
@@ -79,10 +80,12 @@ from inkwell.agent.tools.formats import (
     do_format_twitter,
 )
 from inkwell.agent.tools.google_docs import (
+    CommentSpec,
     configure_session_state,
     do_create_doc,
     do_create_tab,
     do_insert_comment,
+    do_insert_comments_batch,
     do_list_tabs,
     do_read_tab,
     do_rename_doc,
@@ -109,7 +112,13 @@ from inkwell.agent.tools.stage_outputs import (
     make_review_output_tools,
 )
 from inkwell.agent.tools.query_artifacts import make_query_tools
-from inkwell.agent.tools.voice import do_analyze_voice, load_format_examples, load_style_corpus
+from inkwell.agent.tools.voice import (
+    analyze_voice_individually,
+    compute_voice_fingerprint,
+    invalidate_merged_cache,
+    load_style_corpus,
+    verify_voice_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +203,108 @@ def extract_deleted_text(original: str, current: str) -> str:
         if tag in ("delete", "replace"):
             deleted.extend(orig_lines[i1:i2])
     return "\n".join(deleted)
+
+
+# ---------------------------------------------------------------------------
+# Slugify + research splitting
+# ---------------------------------------------------------------------------
+
+
+def slugify(label: str) -> str:
+    """Turn a section title or label into a filesystem-safe slug."""
+    slug = label.lower().replace(" ", "-")
+    for ch in "/:.,;!?\"'()[]{}":
+        slug = slug.replace(ch, "")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-")[:80]
+
+
+def render_finding_markdown(f: ResearchFinding) -> str:
+    """Render a single research finding as readable markdown."""
+    parts = [f"### {f.question}\n", f"{f.answer}\n"]
+    if f.data_points:
+        parts.append("**Data points:** " + "; ".join(f.data_points))
+    parts.append(f"**Confidence:** {f.confidence:.0%}")
+    if f.sources:
+        urls = [s.url for s in f.sources if s.url]
+        if urls:
+            parts.append("**Sources:** " + ", ".join(urls))
+    return "\n".join(parts)
+
+
+def split_research_by_section(
+    research: ResearchCompilation,
+    plan: ArticlePlan,
+    notes: PipelineNotes,
+) -> dict[str, Path]:
+    """Split research findings into per-section markdown files.
+
+    Matches findings to sections via the plan's research questions.
+    Each section gets a readable markdown file small enough to Read
+    without truncation. Returns section_title -> file path.
+    """
+    section_questions: dict[str, list[str]] = {}
+    for q in plan.research_questions:
+        section_questions.setdefault(q.section, []).append(q.question.lower())
+
+    section_findings: dict[str, list[ResearchFinding]] = {}
+    unmatched: list[ResearchFinding] = []
+
+    for finding in research.findings:
+        q_lower = finding.question.lower()
+        matched = False
+        for section_title, questions in section_questions.items():
+            if any(q in q_lower or q_lower in q for q in questions):
+                section_findings.setdefault(section_title, []).append(finding)
+                matched = True
+                break
+        if not matched:
+            unmatched.append(finding)
+
+    paths: dict[str, Path] = {}
+    for section_title, findings in section_findings.items():
+        slug = slugify(section_title)
+        lines = [f"# Research: {section_title}\n"]
+        for f in findings:
+            lines.append(render_finding_markdown(f))
+            lines.append("")
+        content = "\n".join(lines)
+        path = notes.save_text_artifact(f"research_{slug}", content)
+        paths[section_title] = path
+
+    if unmatched:
+        lines = ["# Research: General / Cross-Section\n"]
+        for f in unmatched:
+            lines.append(render_finding_markdown(f))
+            lines.append("")
+        if research.additional_context:
+            lines.append(f"## Additional Context\n\n{research.additional_context}")
+        if research.suggested_additions:
+            lines.append("## Suggested Additions\n")
+            for s in research.suggested_additions:
+                lines.append(f"- {s}")
+        content = "\n".join(lines)
+        path = notes.save_text_artifact("research_general", content)
+        paths["_general"] = path
+
+    return paths
+
+
+def build_voice_file_refs(voice_file_paths: list[str]) -> str:
+    """Build task-prompt file references from a list of voice/corpus paths."""
+    if not voice_file_paths:
+        return ""
+    lines: list[str] = []
+    for p in voice_file_paths:
+        name = Path(p).stem
+        if name.startswith("corpus_"):
+            lines.append(f"Style reference (read for hard editing rules): {p}")
+        elif name.startswith("voice_"):
+            lines.append(f"Voice analysis: {p}")
+        else:
+            lines.append(f"Voice/style file: {p}")
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -477,16 +588,19 @@ def annotate_draft_with_findings(
 
     anchorable = [
         f for f in findings
-        if f.text_excerpt and f.severity in ("critical", "suggestion")
+        if f.text_excerpt and f.severity in ("critical", "suggestion", "praise")
     ]
     anchorable.sort(key=lambda f: len(f.text_excerpt), reverse=True)
 
     anchored: set[int] = set()
     for f in anchorable:
-        annotation = (
-            f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}"
-            f"\n  → {f.suggestion}\n"
-        )
+        if f.severity == "praise":
+            annotation = f"\n[PRESERVE:{f.reviewer}] {f.issue}\n"
+        else:
+            annotation = (
+                f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}"
+                f"\n  → {f.suggestion}\n"
+            )
         if f.text_excerpt in annotated:
             annotated = annotated.replace(  # claude: ignore
                 f.text_excerpt,
@@ -514,8 +628,9 @@ async def plan_article(
     notes: PipelineNotes,
     *,
     target_format: str = "lesswrong",
-    voice_profile: str | None = None,
+    voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    author_directions: str = "",
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -532,13 +647,7 @@ async def plan_article(
     output_servers = {**output_servers, **note_servers}
     output_tool_names = output_tool_names + note_tool_names
 
-    voice_hint = ""
-    style_rules_path = notes.text_artifact_path("style_rules")
-    if style_rules_path.exists():
-        voice_hint += f"\nStyle rules (read this for hard editing rules): {style_rules_path}"
-    if voice_profile:
-        voice_path = notes.save_text_artifact("voice", voice_profile)
-        voice_hint += f"\nVoice profile: {voice_path}"
+    voice_hint = build_voice_file_refs(voice_file_paths or [])
 
     format_hint = (
         f"Suggested format: {target_format} (override if content is better "
@@ -554,6 +663,12 @@ async def plan_article(
         f"Source conversation file: {conversation_path}\n"
         f"{voice_hint}\n\n"
     )
+    if author_directions:
+        task += (
+            f"The author left comments on the source document before this pipeline "
+            f"started. Treat these as directions that should guide the plan:\n\n"
+            f"{author_directions}\n\n"
+        )
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
@@ -585,8 +700,9 @@ async def plan_article(
 async def refine_plan(
     notes: PipelineNotes,
     *,
-    voice_profile: str | None = None,
+    voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
+    section_research_paths: dict[str, Path] | None = None,
     author_notes: list[AuthorNote] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
@@ -596,7 +712,6 @@ async def refine_plan(
 ) -> ArticlePlan:
     """Refine the initial plan using research findings."""
     plan_path = notes.artifact_path("plan")
-    research_path = notes.artifact_path("research")
     refined_path = notes.artifacts_dir / "plan_refined.json"
     collector = PlanCollector(refined_path, on_save=on_plan_update)
     output_servers, output_tool_names = build_output_server("output", make_plan_tools(collector))
@@ -605,21 +720,21 @@ async def refine_plan(
     output_servers = {**output_servers, **note_servers}
     output_tool_names = output_tool_names + note_tool_names
 
-    file_refs = (
-        f"Current plan: {plan_path}\n"
-        f"Research findings: {research_path}\n"
-    )
-    if voice_profile:
-        voice_path = notes.text_artifact_path("voice")
-        file_refs += f"Voice profile: {voice_path}\n"
+    file_refs = f"Current plan: {plan_path}\n"
+    if section_research_paths:
+        file_refs += "Research findings (per-section files):\n"
+        for title, path in section_research_paths.items():
+            file_refs += f"  - {title}: {path}\n"
+    file_refs += build_voice_file_refs(voice_file_paths or [])
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
+    file_refs += "Use the query_research tool for cross-section research lookups.\n"
 
     task = (
         f"Refine the article plan using the research findings.\n\n"
         f"{file_refs}\n"
-        f"Read both files, then build the refined plan using set_plan_header, "
-        f"add_section, add_research_question, and add_source_quote."
+        f"Read the plan and research files, then build the refined plan using "
+        f"set_plan_header, add_section, add_research_question, and add_source_quote."
     )
 
     all_servers = {**output_servers, **(compute_servers or {})}
@@ -712,7 +827,8 @@ async def write_section(
     *,
     notes: PipelineNotes,
     draft_path: Path,
-    voice_profile: str | None = None,
+    voice_file_paths: list[str] | None = None,
+    section_research_path: Path | None = None,
     feedback_path: Path | None = None,
     section_context: str = "",
     target_format: str = "lesswrong",
@@ -733,21 +849,12 @@ async def write_section(
     all_tools = research_tool_names() + note_tool_names + (compute_tool_names or [])
 
     plan_path = notes.artifact_path("plan")
-    research_path = notes.artifact_path("research")
 
-    file_refs = (
-        f"Article plan: {plan_path}\n"
-        f"Research findings: {research_path}\n"
-    )
-    if voice_profile:
-        voice_path = notes.text_artifact_path("voice")
-        file_refs += f"Voice profile: {voice_path}\n"
-    style_rules_path = notes.text_artifact_path("style_rules")
-    if style_rules_path.exists():
-        file_refs += f"Style rules (read for hard editing rules): {style_rules_path}\n"
-    format_examples_path = notes.text_artifact_path("format_examples")
-    if format_examples_path.exists():
-        file_refs += f"Format examples (reference output in target format): {format_examples_path}\n"
+    file_refs = f"Article plan: {plan_path}\n"
+    if section_research_path and section_research_path.exists():
+        file_refs += f"Research findings for this section: {section_research_path}\n"
+    file_refs += "Use the query_research tool for additional research lookups.\n"
+    file_refs += build_voice_file_refs(voice_file_paths or [])
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
 
@@ -762,11 +869,9 @@ async def write_section(
         task += f"{section_context}\n\n"
     task += (
         f"Read the plan to find this section's details (summary, key points, "
-        f"quotes to include), then read the research findings for relevant "
-        f"context. If a voice profile is available, read it to match the "
-        f"author's style. If a style rules file is available, read it and "
-        f"apply all hard editing rules. If format examples are available, "
-        f"read them to understand the target format's conventions.\n\n"
+        f"quotes to include), then read the research findings file for this "
+        f"section. Read each voice analysis and style reference file to match "
+        f"the author's style and apply all hard editing rules.\n\n"
         f"Write the complete section to: {draft_path}\n\n"
         f"Use the Write tool to write the file. Write the entire section "
         f"in one call. If you have questions for the author, call note_for_author."
@@ -806,6 +911,8 @@ async def plan_merge(
     *,
     notes: PipelineNotes,
     output_path: Path,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> Path:
@@ -820,9 +927,13 @@ async def plan_merge(
         f"Section draft files:\n{drafts_list}\n"
         f"Article plan: {plan_path}\n\n"
         f"Read each section draft and the article plan. Identify duplication, "
-        f"missing transitions, redundant openings, and structural issues.\n\n"
+        f"missing transitions, redundant openings, and structural issues.\n"
+        f"Use the query_research tool for research context on any section.\n\n"
         f"Write the merge plan to: {output_path}"
     )
+
+    all_servers = compute_servers or {}
+    all_tools = compute_tool_names or []
 
     await query(
         task,
@@ -831,6 +942,8 @@ async def plan_merge(
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=None,
         permission_mode="bypassPermissions",
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
         trace_logger=trace_logger,
         prefix="[merge:plan] ",
         cost_accumulator=cost_accumulator,
@@ -846,7 +959,7 @@ async def merge_sections(
     *,
     notes: PipelineNotes,
     output_path: Path,
-    voice_profile: str | None = None,
+    voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
     target_format: str = "lesswrong",
     author_notes: list[AuthorNote] | None = None,
@@ -866,35 +979,25 @@ async def merge_sections(
         section_draft_paths,
         notes=notes,
         output_path=merge_plan_path,
+        compute_servers=compute_servers,
+        compute_tool_names=compute_tool_names,
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
     )
-
-    combined_path = notes.artifacts_dir / "merge_sections_combined.md"
-    parts: list[str] = []
-    for title, path in section_draft_paths.items():
-        section_text = path.read_text(encoding="utf-8")
-        parts.append(f"--- RAW MATERIAL: {title} ---\n\n{section_text}\n\n--- END ---")
-    combined_path.write_text("\n\n".join(parts), encoding="utf-8")
 
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("merge", note_collector)
     merge_servers = {**note_servers, **(compute_servers or {})}
     merge_tools = note_tool_names + (compute_tool_names or [])
 
+    drafts_list = "\n".join(
+        f"  - {title}: {path}" for title, path in section_draft_paths.items()
+    )
     file_refs = (
         f"Merge plan (read this FIRST): {merge_plan_path}\n"
-        f"Raw material (all sections in one file): {combined_path}\n"
+        f"Section drafts (read each individually):\n{drafts_list}\n"
     )
-    if voice_profile:
-        voice_path = notes.text_artifact_path("voice")
-        file_refs += f"Voice profile: {voice_path}\n"
-    style_rules_path = notes.text_artifact_path("style_rules")
-    if style_rules_path.exists():
-        file_refs += f"Style rules (read for hard editing rules): {style_rules_path}\n"
-    format_examples_path = notes.text_artifact_path("format_examples")
-    if format_examples_path.exists():
-        file_refs += f"Format examples (reference output in target format): {format_examples_path}\n"
+    file_refs += build_voice_file_refs(voice_file_paths or [])
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
 
@@ -911,9 +1014,9 @@ async def merge_sections(
     task += (
         f"Read the merge plan FIRST — it contains a target outline that "
         f"defines your output's structure paragraph by paragraph. Then read "
-        f"the raw material file. Follow the outline, not the input section "
-        f"boundaries. If a style rules file is available, read it and apply "
-        f"all hard editing rules throughout the merged draft.\n\n"
+        f"each section draft file individually. Follow the outline, not the "
+        f"input section boundaries. Read each voice and style reference file "
+        f"to match the author's voice and apply hard editing rules.\n\n"
         f"Write the complete merged draft to: {output_path}"
     )
 
@@ -1014,12 +1117,12 @@ async def review_facts(
     all_servers = {**servers, **output_servers, **note_servers, **(compute_servers or {})}
     all_tools = review_tool_names() + output_tool_names + note_tool_names + (compute_tool_names or [])
 
-    research_path = notes.artifact_path("research")
     task = (
         f"Fact-check every verifiable claim in the article draft.\n\n"
-        f"Draft: {draft_path}\n"
-        f"Research findings: {research_path}\n\n"
-        f"Read both files. Cross-reference the draft against the research "
+        f"Draft: {draft_path}\n\n"
+        f"Read the draft. Use the query_research tool to look up research "
+        f"findings for specific claims or sections — it filters and returns "
+        f"structured results. Cross-reference the draft against research "
         f"findings, then verify remaining claims with your research tools. "
         f"Call record_finding for each issue."
     )
@@ -1048,6 +1151,7 @@ async def review_style(
     notes: PipelineNotes,
     draft_path: Path,
     *,
+    voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
@@ -1055,7 +1159,6 @@ async def review_style(
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
     """Review for writing quality and voice consistency (tool-free except output)."""
-    voice_path = notes.text_artifact_path("voice")
     review_path = notes.artifacts_dir / "review_style.json"
     collector = ReviewCollector(review_path, "style")
     output_servers, output_tool_names = build_output_server(
@@ -1067,13 +1170,13 @@ async def review_style(
     all_tools = output_tool_names + note_tool_names + (compute_tool_names or [])
 
     file_refs = f"Draft: {draft_path}\n"
-    if voice_path.exists():
-        file_refs += f"Voice profile: {voice_path}\n"
+    file_refs += build_voice_file_refs(voice_file_paths or [])
 
     task = (
         f"Review the article draft for writing quality and style.\n\n"
         f"{file_refs}\n"
-        f"Read the files, then call record_finding for each issue."
+        f"Read each voice and style reference file, then read the draft. "
+        f"Call record_finding for each issue."
     )
     await query(
         task,
@@ -1101,6 +1204,7 @@ async def review_all(
     draft_path: Path,
     *,
     servers: dict[str, McpServerConfig] | None = None,
+    voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
@@ -1127,6 +1231,7 @@ async def review_all(
     )
     style_task = review_style(
         notes, draft_path,
+        voice_file_paths=voice_file_paths,
         author_notes=author_notes,
         compute_servers=compute_servers,
         compute_tool_names=compute_tool_names,
@@ -1149,13 +1254,56 @@ async def review_all(
     return all_findings
 
 
+def consolidate_findings(
+    findings: list[ReviewFinding],
+    max_suggestions: int = 15,
+) -> list[ReviewFinding]:
+    """Deduplicate and budget review findings to prevent cumulative smoothing."""
+    critical: list[ReviewFinding] = []
+    praise: list[ReviewFinding] = []
+    suggestions: list[ReviewFinding] = []
+
+    seen_excerpts: dict[str, ReviewFinding] = {}
+
+    for f in findings:
+        if f.severity == "critical":
+            critical.append(f)
+            continue
+        if f.severity == "praise":
+            praise.append(f)
+            continue
+        if f.text_excerpt:
+            key = f.text_excerpt[:200]
+            if key in seen_excerpts:
+                existing = seen_excerpts[key]
+                existing.suggestion = (
+                    f"{existing.suggestion}\n"
+                    f"[Also from {f.reviewer}]: {f.suggestion}"
+                )
+                continue
+            seen_excerpts[key] = f
+        suggestions.append(f)
+
+    anchored = [s for s in suggestions if s.text_excerpt]
+    unanchored = [s for s in suggestions if not s.text_excerpt]
+    ranked = anchored + unanchored
+    capped = ranked[:max_suggestions]
+
+    if len(ranked) > max_suggestions:
+        logger.info(
+            "Capped suggestions from %d to %d", len(ranked), max_suggestions
+        )
+
+    return critical + capped + praise
+
+
 async def rewrite_final(
     notes: PipelineNotes,
     draft_path: Path,
     findings: list[ReviewFinding],
     *,
     output_path: Path,
-    voice_profile: str | None = None,
+    voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
     target_format: str = "lesswrong",
     author_notes: list[AuthorNote] | None = None,
@@ -1171,13 +1319,11 @@ async def rewrite_final(
     rewrite_tools = note_tool_names + (compute_tool_names or [])
     plan_path = notes.artifact_path("plan")
 
-    # Write annotated draft with inline findings to a temp file
     draft_content = draft_path.read_text(encoding="utf-8")
     annotated = annotate_draft_with_findings(draft_content, findings)
     annotated_path = notes.artifacts_dir / "draft_annotated.md"
     annotated_path.write_text(annotated, encoding="utf-8")
 
-    # Write review summary
     review_summary_path = notes.artifacts_dir / "review_summary.md"
     n_critical = sum(1 for f in findings if f.severity == "critical")
     n_suggestion = sum(1 for f in findings if f.severity == "suggestion")
@@ -1193,15 +1339,7 @@ async def rewrite_final(
         f"Article plan: {plan_path}\n"
         f"Review summary: {review_summary_path}\n"
     )
-    if voice_profile:
-        voice_path = notes.text_artifact_path("voice")
-        file_refs += f"Voice profile: {voice_path}\n"
-    style_rules_path = notes.text_artifact_path("style_rules")
-    if style_rules_path.exists():
-        file_refs += f"Style rules (read for hard editing rules — apply exhaustively): {style_rules_path}\n"
-    format_examples_path = notes.text_artifact_path("format_examples")
-    if format_examples_path.exists():
-        file_refs += f"Format examples (reference output in target format): {format_examples_path}\n"
+    file_refs += build_voice_file_refs(voice_file_paths or [])
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
 
@@ -1215,7 +1353,10 @@ async def rewrite_final(
     task += (
         f"{file_refs}\n"
         f"Read the annotated draft — review findings are marked inline. "
+        f"Passages marked [PRESERVE:] were praised by reviewers: protect "
+        f"their quality while editing around them. "
         f"Apply all critical findings and worthwhile suggestions. "
+        f"Use query_research to verify corrections against research findings. "
         f"If a style rules file is available, read it and enforce every "
         f"hard editing rule with zero remaining violations.\n\n"
         f"Write the final piece to: {output_path}"
@@ -1379,17 +1520,20 @@ async def surface_assumptions(
         "question": "[QUESTION]",
         "confusion": "[UNCLEAR]",
     }
-    for item in result.items:
-        async with gdoc_nonfatal("post assumption comment"):
-            prefix = tag_prefix.get(item.tag, "[NOTE]")
-            comment_text = (
-                f"{prefix} {item.content}\n\n"
-                f"My best guess: {item.best_guess}"
-            )
-            await do_insert_comment(
-                doc_id, comment_text,
+    if result.items:
+        specs = [
+            CommentSpec(
+                content=(
+                    f"{tag_prefix.get(item.tag, '[NOTE]')} {item.content}\n\n"
+                    f"My best guess: {item.best_guess}"
+                ),
                 anchor_text=item.anchor_section,
-                session_state=session_state,
+            )
+            for item in result.items
+        ]
+        async with gdoc_nonfatal("post assumption comments"):
+            await do_insert_comments_batch(
+                doc_id, specs, session_state=session_state,
             )
 
     return result
@@ -1504,6 +1648,8 @@ class PipelineRunner:
 
         self.watcher: BackgroundAgent | None = None
         self.source_watcher: BackgroundAgent | None = None
+        self.source_is_extracted_gdoc = False
+        self.section_research_paths: dict[str, Path] = {}
 
     def ensure_notes(self) -> PipelineNotes:
         """Return notes, creating a temp dir if needed."""
@@ -1642,6 +1788,12 @@ class PipelineRunner:
         await self.setup_doc()
         self.start_sandbox()
 
+        if snapshot.research and snapshot.plan:
+            notes = self.ensure_notes()
+            self.section_research_paths = split_research_by_section(
+                snapshot.research, snapshot.plan, notes
+            )
+
         try:
             stages = [
                 "extract", "voice", "plan",
@@ -1690,7 +1842,7 @@ class PipelineRunner:
         self.watcher.start()
         logger.info("Comment watcher started")
 
-        if self.state.source_doc_id:
+        if self.state.source_doc_id and not self.source_is_extracted_gdoc:
             self.source_watcher = create_source_watcher(
                 session_state=self.state,
                 notes=self.notes,
@@ -1769,17 +1921,23 @@ class PipelineRunner:
 
     async def post_author_notes(self) -> None:
         """Post any new author notes as GDoc comments, then clear the list."""
-        while self.author_notes:
-            note = self.author_notes.pop(0)
-            tag = f"[{note.stage.upper()}]" if note.stage else "[NOTE]"
-            async with gdoc_nonfatal("post author note"):
-                await do_insert_comment(
-                    self.doc_id,
-                    f"{tag} {note.note}",
-                    anchor_text=note.anchor or None,
-                    session_state=self.state,
-                )
-                self.state.add_question(note.note)
+        if not self.author_notes:
+            return
+        notes_to_post = list(self.author_notes)
+        self.author_notes.clear()
+        specs = [
+            CommentSpec(
+                content=f"[{note.stage.upper()}] {note.note}" if note.stage else f"[NOTE] {note.note}",
+                anchor_text=note.anchor or None,
+            )
+            for note in notes_to_post
+        ]
+        async with gdoc_nonfatal("post author notes"):
+            await do_insert_comments_batch(
+                self.doc_id, specs, session_state=self.state,
+            )
+        for note in notes_to_post:
+            self.state.add_question(note.note)
 
     async def classify_and_record_edit(self, edit: TabEdit) -> None:
         task = (
@@ -1873,12 +2031,56 @@ class PipelineRunner:
             return None
         return await notes.render_feedback_file(stage, feedback_with_notes)
 
+    async def collect_preexisting_directions(self, doc_id: str) -> int:
+        """Collect pre-existing comments from the source GDoc as author directions.
+
+        These comments predate the pipeline — they're input context (like the
+        conversation itself), not live feedback. Stored as a markdown file in
+        notes/directions/ and injected into the plan stage prompt. The source
+        GDoc is never modified.
+
+        Returns the number of comments collected.
+        """
+        try:
+            comments = await fetch_gdoc_comments(doc_id)
+        except (RuntimeError, OSError) as exc:
+            logger.warning("Could not fetch source doc comments: %s", exc)
+            return 0
+
+        if not comments:
+            return 0
+
+        lines: list[str] = ["# Author Directions", ""]
+        lines.append(
+            "Pre-existing comments from the source document. "
+            "Treat these as author directions that should guide "
+            "the article's structure, tone, and content.\n"
+        )
+
+        for comment in comments:
+            entry = f"- **{comment.author}**: {comment.content}"
+            if comment.anchor_text:
+                entry += f'  \n  *On: "{comment.anchor_text}"*'
+            if comment.replies:
+                for reply in comment.replies:
+                    entry += f"\n  - Reply: {reply}"
+            lines.append(entry)
+
+        notes = self.ensure_notes()
+        rendered = "\n".join(lines)
+        notes.save_directions(rendered)
+        logger.info("Saved %d pre-existing comments as author directions", len(comments))
+        return len(comments)
+
     async def stage_extract(self) -> None:
         await self.hooks.on_stage("extract", "Extracting source material")
         await self.update_overview(active_stage="extract")
 
+        source_doc_id = ""
         if GDOC_URL_PATTERN.search(self.source):
-            self.state.source_doc_id = parse_gdoc_id(self.source)
+            source_doc_id = parse_gdoc_id(self.source)
+            self.state.source_doc_id = source_doc_id
+            self.source_is_extracted_gdoc = True
 
         conversation = await do_extract_source(self.source)
 
@@ -1895,6 +2097,13 @@ class PipelineRunner:
         notes.save_text_artifact("conversation", conversation)
         await self.save_snapshot()
 
+        if source_doc_id:
+            n = await self.collect_preexisting_directions(source_doc_id)
+            if n:
+                await self.hooks.on_progress(
+                    f"Collected {n} pre-existing comments as author directions"
+                )
+
         async with gdoc_nonfatal("write source tab"):
             source_tab_id = self.known_tabs["Source"]
             await do_write_tab(
@@ -1908,42 +2117,71 @@ class PipelineRunner:
         await self.hooks.on_stage("voice", "Analyzing author's writing voice")
         await self.update_overview(active_stage="voice")
         corpus_samples, corpus_sources = load_style_corpus()
-
         notes = self.ensure_notes()
-        if corpus_samples:
-            full_corpus = "\n\n---\n\n".join(corpus_samples)
-            notes.save_text_artifact("style_rules", full_corpus)
 
-        fmt_samples, fmt_sources = load_format_examples(self.target_format)
-        if fmt_samples:
-            examples_text = "\n\n---\n\n".join(
-                f"## Example: {src}\n\n{sample}"
-                for sample, src in zip(fmt_samples, fmt_sources)
-            )
-            notes.save_text_artifact("format_examples", examples_text)
+        fingerprint = compute_voice_fingerprint(
+            self.snapshot.conversation, corpus_samples, self.target_format
+        )
+        if (
+            self.snapshot.voice_fingerprint == fingerprint
+            and self.snapshot.voice_file_paths
+        ):
+            await self.hooks.on_progress("Voice: inputs unchanged, reusing cached files")
+            self.snapshot.stage = "voice"
+            await self.save_snapshot()
+            await self.update_overview()
+            return
 
-        voice_profile = await do_analyze_voice(
+        if self.snapshot.voice_fingerprint and self.snapshot.voice_fingerprint != fingerprint:
+            invalidate_merged_cache()
+            logger.info("Voice inputs changed — re-analyzing")
+
+        all_servers = {**self.research_servers, **self.compute_servers}
+        all_tool_names = research_tool_names() + self.compute_tool_names
+
+        analyses = await analyze_voice_individually(
             self.snapshot.conversation,
             corpus_samples,
             corpus_sources=corpus_sources,
             target_format=self.target_format,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
+            mcp_servers=all_servers,
+            mcp_tool_names=all_tool_names,
         )
-        if voice_profile is None:
+        if not analyses:
             raise PipelineError("Voice analysis produced no output")
-        self.snapshot.voice_profile = voice_profile
-        self.snapshot.stage = "voice"
 
-        notes.save_text_artifact("voice", voice_profile)
+        voice_file_paths: list[str] = []
+        voice_tab_parts: list[str] = []
+
+        for i, (label, text) in enumerate(analyses):
+            slug = slugify(label)
+            path = notes.save_text_artifact(f"voice_{i}_{slug}", text)
+            voice_file_paths.append(str(path))
+            voice_tab_parts.append(f"## {label}\n\n{text}")
+
+        for i, (sample, source) in enumerate(zip(corpus_samples, corpus_sources)):
+            slug = slugify(source)
+            path = notes.save_text_artifact(f"corpus_{i}_{slug}", sample)
+            voice_file_paths.append(str(path))
+
+        self.snapshot.voice_file_paths = voice_file_paths
+        self.snapshot.voice_profile = "individual"
+        self.snapshot.voice_fingerprint = fingerprint
+        self.snapshot.stage = "voice"
         await self.save_snapshot()
 
-        summary = voice_profile[:80].rsplit(" ", 1)[0]
-        await self.hooks.on_progress(f"Voice: {summary}...")
+        n_analyses = len(analyses)
+        n_corpus = len(corpus_samples)
+        await self.hooks.on_progress(
+            f"Voice: {n_analyses} analyses + {n_corpus} corpus files saved individually"
+        )
         async with gdoc_nonfatal("write voice tab"):
             voice_tab_id = self.known_tabs["Voice"]
+            voice_tab_content = "\n\n---\n\n".join(voice_tab_parts)
             await do_write_tab(
-                self.doc_id, voice_tab_id, voice_profile, session_state=self.state
+                self.doc_id, voice_tab_id, voice_tab_content, session_state=self.state
             )
             assert self.tabs is not None
             await self.tabs.record_from_doc(voice_tab_id, "Voice")
@@ -1963,11 +2201,14 @@ class PipelineRunner:
                     session_state=self.state,
                 )
 
+        directions = notes.load_directions()
+
         plan = await plan_article(
             notes,
             target_format=self.target_format,
-            voice_profile=self.snapshot.voice_profile,
+            voice_file_paths=self.snapshot.voice_file_paths,
             author_notes=self.author_notes,
+            author_directions=directions,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
@@ -2052,8 +2293,12 @@ class PipelineRunner:
         self.snapshot.stage = "research"
         await self.save_snapshot()
 
+        self.section_research_paths = split_research_by_section(
+            research, plan, notes
+        )
         await self.hooks.on_progress(
-            f"Research complete: {len(research.findings)} findings"
+            f"Research complete: {len(research.findings)} findings, "
+            f"split into {len(self.section_research_paths)} section files"
         )
         await self.write_research_tab(research)
         await self.update_overview()
@@ -2085,8 +2330,9 @@ class PipelineRunner:
 
         refined = await refine_plan(
             notes,
-            voice_profile=self.snapshot.voice_profile,
+            voice_file_paths=self.snapshot.voice_file_paths,
             feedback_path=feedback_path,
+            section_research_paths=self.section_research_paths or None,
             author_notes=self.author_notes,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
@@ -2152,11 +2398,14 @@ class PipelineRunner:
                 )
                 await syncer.start()
             try:
+                section_rp = self.section_research_paths.get(section.title)
+                general_rp = self.section_research_paths.get("_general")
                 draft = await write_section(
                     section.title,
                     notes=notes,
                     draft_path=draft_path,
-                    voice_profile=self.snapshot.voice_profile,
+                    voice_file_paths=self.snapshot.voice_file_paths,
+                    section_research_path=section_rp or general_rp,
                     feedback_path=feedback_path,
                     section_context=build_neighbor_context(idx),
                     target_format=self.target_format,
@@ -2242,7 +2491,7 @@ class PipelineRunner:
                 section_paths,
                 notes=notes,
                 output_path=output_path,
-                voice_profile=self.snapshot.voice_profile,
+                voice_file_paths=self.snapshot.voice_file_paths,
                 feedback_path=feedback_path,
                 target_format=self.target_format,
                 author_notes=self.author_notes,
@@ -2279,6 +2528,7 @@ class PipelineRunner:
         findings = await review_all(
             notes, draft_path,
             servers=self.research_servers,
+            voice_file_paths=self.snapshot.voice_file_paths,
             author_notes=self.author_notes,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
@@ -2286,6 +2536,7 @@ class PipelineRunner:
             cost_accumulator=self.cost_accumulator,
         )
         await self.post_author_notes()
+        findings = consolidate_findings(findings)
         self.snapshot.findings = findings
         self.snapshot.stage = "review"
         await self.save_snapshot()
@@ -2323,7 +2574,7 @@ class PipelineRunner:
                 draft_path,
                 self.snapshot.findings,
                 output_path=output_path,
-                voice_profile=self.snapshot.voice_profile,
+                voice_file_paths=self.snapshot.voice_file_paths,
                 feedback_path=feedback_path,
                 target_format=self.target_format,
                 author_notes=self.author_notes,
@@ -2335,6 +2586,43 @@ class PipelineRunner:
         finally:
             await syncer.stop()
         await self.post_author_notes()
+
+        voice_texts = []
+        for p in (self.snapshot.voice_file_paths or []):
+            path = Path(p)
+            if path.exists():
+                voice_texts.append(path.read_text(encoding="utf-8"))
+        if voice_texts and output.content:
+            report = verify_voice_rules(output.content, voice_texts)
+            if not report.passed:
+                logger.info(
+                    "Voice verification found %d violations — fixing",
+                    len(report.violations),
+                )
+                violation_text = "\n".join(
+                    f"- Line {v.line}: {v.rule} — \"{v.text}\""
+                    for v in report.violations[:20]
+                )
+                fix_task = (
+                    f"Fix these voice-rule violations in the text:\n\n"
+                    f"{violation_text}\n\n"
+                    f"Draft file: {output_path}\n\n"
+                    f"Read the file, apply targeted fixes for each "
+                    f"violation, then write the corrected version back."
+                )
+                await query(
+                    fix_task,
+                    model="claude-sonnet-4-20250514",
+                    tools=["Read", "Write", "Edit", "Grep", "Glob"],
+                    max_thinking_tokens=None,
+                    permission_mode="bypassPermissions",
+                    prefix="[voice-fix] ",
+                    trace_logger=self.trace_logger,
+                    cost_accumulator=self.cost_accumulator,
+                )
+                if output_path.exists():
+                    output.content = output_path.read_text(encoding="utf-8")
+
         output.voice_profile = self.snapshot.voice_profile
         output.open_questions = list(self.state.pending_questions)
         self.snapshot.output = output
@@ -2515,7 +2803,7 @@ class PipelineRunner:
                     section_plan.title,
                     notes=notes,
                     draft_path=self.get_draft_path(section_plan.title),
-                    voice_profile=self.snapshot.voice_profile,
+                    voice_file_paths=self.snapshot.voice_file_paths,
                     target_format=self.target_format,
                     servers=self.research_servers,
                     author_notes=self.author_notes,
@@ -2532,7 +2820,7 @@ class PipelineRunner:
                     section_plan.title,
                     notes=notes,
                     draft_path=self.get_draft_path(section_plan.title),
-                    voice_profile=self.snapshot.voice_profile,
+                    voice_file_paths=self.snapshot.voice_file_paths,
                     target_format=self.target_format,
                     servers=self.research_servers,
                     author_notes=self.author_notes,
@@ -2665,7 +2953,7 @@ class PipelineRunner:
             standby_draft,
             self.snapshot.findings,
             output_path=standby_output,
-            voice_profile=self.snapshot.voice_profile,
+            voice_file_paths=self.snapshot.voice_file_paths,
             feedback_path=feedback_path,
             target_format=self.target_format,
             author_notes=self.author_notes,
@@ -2865,6 +3153,7 @@ class PipelineRunner:
                 )
 
             review_text = f"# Review Findings\n\n{len(findings)} total findings\n"
+            critical_specs: list[CommentSpec] = []
             for finding in findings:
                 review_text += (
                     f"\n## [{finding.reviewer}] {finding.location}\n\n"
@@ -2873,15 +3162,20 @@ class PipelineRunner:
                     f"**Suggestion:** {finding.suggestion}\n"
                 )
                 if finding.severity == "critical":
-                    anchor = finding.text_excerpt if finding.text_excerpt else None
-                    async with gdoc_nonfatal("post review comment"):
-                        await do_insert_comment(
-                            self.doc_id,
+                    critical_specs.append(CommentSpec(
+                        content=(
                             f"[{finding.reviewer.upper()}] {finding.issue}\n\n"
-                            f"Suggestion: {finding.suggestion}",
-                            anchor_text=anchor,
-                            session_state=self.state,
-                        )
+                            f"Suggestion: {finding.suggestion}"
+                        ),
+                        anchor_text=finding.text_excerpt or None,
+                    ))
+
+            if critical_specs:
+                async with gdoc_nonfatal("post review comments"):
+                    await do_insert_comments_batch(
+                        self.doc_id, critical_specs, session_state=self.state,
+                    )
+
             await do_write_tab(
                 self.doc_id,
                 self.known_tabs["Review"],

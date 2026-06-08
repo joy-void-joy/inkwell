@@ -35,7 +35,8 @@ class LoadCorpusInput(BaseModel):
 class LoadCorpusOutput(BaseModel):
     samples: list[str] = Field(description="Style corpus text samples")
     sources: list[str] = Field(description="Source file names or URLs")
-    count: int = Field(description="Total samples available")
+    count: int = Field(description="Number of samples returned")
+    total_available: int = Field(description="Total samples in the corpus")
 
 
 async def load_style_corpus() -> tuple[list[str], list[str], list[str]]:
@@ -105,12 +106,15 @@ async def fetch_cached_url(cache_parent: Path, url: str) -> str | None:
         return cache_path.read_text(encoding="utf-8")
 
     try:
+        from pathlib import Path
+
         from inkwell.agent.tools.research.fetch import do_fetch_source
 
         result = await do_fetch_source(url)
-        if result.content:
-            cache_path.write_text(result.content, encoding="utf-8")
-            return result.content
+        text = Path(result.content.path).read_text(encoding="utf-8")
+        if text:
+            cache_path.write_text(text, encoding="utf-8")
+            return text
     except Exception:
         logger.debug("Failed to fetch style corpus URL: %s", url)
 
@@ -182,14 +186,20 @@ def add_format_example(target_format: str, source: str) -> str:
     return f"Added URL as {base_format} format example: {source}"
 
 
-def list_format_examples(target_format: str | None = None) -> dict[str, list[StyleEntry]]:
+def list_format_examples(
+    target_format: str | None = None,
+) -> dict[str, list[StyleEntry]]:
     """List format-specific reference examples, optionally filtered to one format."""
     formats_dir = Path(settings.style_corpus_path) / "formats"
     if not formats_dir.exists():
         return {}
 
     result: dict[str, list[StyleEntry]] = {}
-    dirs = [formats_dir / target_format.split(":")[0]] if target_format else sorted(formats_dir.iterdir())
+    dirs = (
+        [formats_dir / target_format.split(":")[0]]
+        if target_format
+        else sorted(formats_dir.iterdir())
+    )
 
     for fmt_dir in dirs:
         if not fmt_dir.is_dir():
@@ -203,7 +213,9 @@ def list_format_examples(target_format: str | None = None) -> dict[str, list[Sty
                     if url:
                         entries.append(StyleEntry(kind="url", name=url))
             else:
-                entries.append(StyleEntry(kind="file", name=f.name, size=f.stat().st_size))
+                entries.append(
+                    StyleEntry(kind="file", name=f.name, size=f.stat().st_size)
+                )
         if entries:
             result[fmt_dir.name] = entries
 
@@ -232,6 +244,7 @@ async def load_corpus(params: LoadCorpusInput) -> LoadCorpusOutput:
         samples=samples,
         sources=sources,
         count=len(samples),
+        total_available=len(all_samples),
     )
 
 
@@ -251,7 +264,9 @@ async def compute_voice_fingerprint(
     for sample in corpus_samples:
         h.update(sample.encode())
     h.update(target_format.encode())
-    fmt_samples, _ = (await load_format_examples(target_format)) if target_format else ([], [])
+    fmt_samples, _ = (
+        (await load_format_examples(target_format)) if target_format else ([], [])
+    )
     for sample in fmt_samples:
         h.update(sample.encode())
     return h.hexdigest()[:24]
@@ -350,7 +365,7 @@ SOURCE_TYPE_HINTS = {
     "prescriptive": (
         "## Reading this sample\n\n"
         "This may contain prescriptive editing rules (before/after examples, "
-        'do/don\'t lists). Extract the rules faithfully — these aren\'t voice '
+        "do/don't lists). Extract the rules faithfully — these aren't voice "
         "descriptions, they're editing instructions."
     ),
     "format_reference": (
@@ -378,7 +393,7 @@ def parse_prescriptive_flag(text: str) -> tuple[str, bool]:
     if end == -1:
         return text, False
     frontmatter = stripped[3:end]
-    body = stripped[end + 3:].strip()
+    body = stripped[end + 3 :].strip()
     is_prescriptive = "prescriptive: true" in frontmatter.lower()
     return body or text, is_prescriptive
 
@@ -417,10 +432,7 @@ async def analyze_single_source(
         source_path=source_path,
     )
 
-    task = (
-        f"{prompt}\n\n"
-        f"Write your complete analysis to: {cache_path}"
-    )
+    task = f"{prompt}\n\nWrite your complete analysis to: {cache_path}"
 
     await query(
         task,
@@ -499,14 +511,16 @@ async def merge_voice_analyses(
             f"{examples_text}"
         )
 
-    prompt = MERGE_ANALYSES_PROMPT.format(
+    merge_input_path = voice_cache_dir() / "merge_input.md"
+    merge_content = MERGE_ANALYSES_PROMPT.format(
         count=len(analyses),
         analyses_text=analyses_text,
         format_section=format_section,
     )
+    merge_input_path.write_text(merge_content, encoding="utf-8")
 
     task = (
-        f"{prompt}\n\n"
+        f"Read the merge instructions and individual analyses from: {merge_input_path}\n\n"
         f"Write the unified voice guide to: {output_path}"
     )
 
@@ -529,62 +543,6 @@ async def merge_voice_analyses(
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Kept for backwards-compat prompt reference in the MCP tool's original
-# single-shot path (when there's exactly one source and no format examples).
-# ---------------------------------------------------------------------------
-
-VOICE_ANALYSIS_PROMPT = """\
-Write a comprehensive voice and style guide for the author based on the \
-material below. This guide will be read by section writers, editors, and \
-reviewers who need to match the author's voice and follow their style rules.
-
-Write it as a markdown document. Structure it however the input calls for — \
-the sections below are suggestions, not a template. If a section doesn't \
-apply, skip it. If the input warrants sections not listed here, add them.
-
-## What to cover (when relevant)
-
-**Voice.** What makes this author sound like *them*, not a generic writer. \
-Tone, rhythm, sentence structure, formality, humor, hedging patterns, \
-argumentation style, paragraph construction. Be evocative and use examples \
-from the samples — "writes like a confident insider explaining to smart \
-friends" beats "formality: conversational."
-
-**Characteristic phrases.** Exact recurring expressions, constructions, \
-verbal tics, signature openers and transitions worth preserving.
-
-**Anti-patterns.** Things this author never does or would reject.
-
-**Hard editing rules.** Some samples may be prescriptive — editing \
-checklists, style guides, or "humanizer" rules with before/after examples \
-and concrete mechanical rules ("no em dashes," "replace not-X-but-Y"). \
-When you encounter prescriptive input, extract the rules at their stated \
-severity. If a reference says "hard constraint, not a preference," the \
-guide must say the same. These rules are enforced by the rewriter, so be \
-specific and unambiguous about what's banned and what to replace it with.
-
-## How to read the samples
-
-The samples may include a mix of the author's own writing, conversations, \
-and prescriptive references. Treat each on its own terms:
-
-- **Conversations** (with <user>/<claude> tags): analyze only the author's \
-voice (<user> blocks). Distinguish between their instruction voice (how \
-they direct the AI) and their target prose voice (what the finished piece \
-should sound like). When they provide correction pairs ("don't write X, \
-write Y"), those are direct evidence.
-- **Prose samples** (no tags): treat as the author's own writing.
-- **Prescriptive references** (contain before/after examples, "words to \
-watch" lists, explicit do/don't rules): extract the rules faithfully. \
-These aren't voice descriptions — they're editing instructions.
-
-## Samples
-
-{samples_text}
-"""
-
-
 def extract_author_text(conversation: str) -> str:
     """Extract only the author's (<user>) blocks from a tagged conversation.
 
@@ -597,11 +555,15 @@ def extract_author_text(conversation: str) -> str:
     while "<user>" in remaining:
         start = remaining.index("<user>") + len("<user>")
         end_tag = "</user>"
-        end = remaining.index(end_tag, start) if end_tag in remaining[start:] else len(remaining)
+        end = (
+            remaining.index(end_tag, start)
+            if end_tag in remaining[start:]
+            else len(remaining)
+        )
         block = remaining[start:end].strip()
         if block:
             blocks.append(block)
-        remaining = remaining[end + len(end_tag):] if end < len(remaining) else ""
+        remaining = remaining[end + len(end_tag) :] if end < len(remaining) else ""
     return "\n\n---\n\n".join(blocks) if blocks else conversation
 
 
@@ -632,21 +594,23 @@ async def do_analyze_voice(
             source_type = "conversation" if "<user>" in sample else "prose"
             sources_to_analyze.append((label, sample, source_type))
 
-    results = await asyncio.gather(*(
-        analyze_single_source(
-            source_text, label, stype,
-            trace_logger=trace_logger,
-            cost_accumulator=cost_accumulator,
-            mcp_servers=mcp_servers,
-            mcp_tool_names=mcp_tool_names,
+    results = await asyncio.gather(
+        *(
+            analyze_single_source(
+                source_text,
+                label,
+                stype,
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+                mcp_servers=mcp_servers,
+                mcp_tool_names=mcp_tool_names,
+            )
+            for label, source_text, stype in sources_to_analyze
         )
-        for label, source_text, stype in sources_to_analyze
-    ))
+    )
 
     analyses = [
-        (label, analysis)
-        for label, analysis, _is_prescriptive in results
-        if analysis
+        (label, analysis) for label, analysis, _is_prescriptive in results if analysis
     ]
     if not analyses:
         return None
@@ -655,18 +619,20 @@ async def do_analyze_voice(
     if target_format:
         fmt_samples, fmt_sources = await load_format_examples(target_format)
         if fmt_samples:
-            fmt_results = await asyncio.gather(*(
-                analyze_single_source(
-                    sample,
-                    f"format:{target_format}/{source}",
-                    "format_reference",
-                    trace_logger=trace_logger,
-                    cost_accumulator=cost_accumulator,
-                    mcp_servers=mcp_servers,
-                    mcp_tool_names=mcp_tool_names,
+            fmt_results = await asyncio.gather(
+                *(
+                    analyze_single_source(
+                        sample,
+                        f"format:{target_format}/{source}",
+                        "format_reference",
+                        trace_logger=trace_logger,
+                        cost_accumulator=cost_accumulator,
+                        mcp_servers=mcp_servers,
+                        mcp_tool_names=mcp_tool_names,
+                    )
+                    for sample, source in zip(fmt_samples, fmt_sources)
                 )
-                for sample, source in zip(fmt_samples, fmt_sources)
-            ))
+            )
             format_analyses = [
                 (fmt_label, analysis)
                 for fmt_label, analysis, _is_prescriptive in fmt_results
@@ -715,16 +681,20 @@ async def analyze_voice_individually(
             source_type = "conversation" if "<user>" in sample else "prose"
             sources_to_analyze.append((label, sample, source_type))
 
-    results = await asyncio.gather(*(
-        analyze_single_source(
-            source_text, label, stype,
-            trace_logger=trace_logger,
-            cost_accumulator=cost_accumulator,
-            mcp_servers=mcp_servers,
-            mcp_tool_names=mcp_tool_names,
+    results = await asyncio.gather(
+        *(
+            analyze_single_source(
+                source_text,
+                label,
+                stype,
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+                mcp_servers=mcp_servers,
+                mcp_tool_names=mcp_tool_names,
+            )
+            for label, source_text, stype in sources_to_analyze
         )
-        for label, source_text, stype in sources_to_analyze
-    ))
+    )
 
     analyses: list[tuple[str, str, bool]] = [
         (label, analysis, is_prescriptive)
@@ -735,18 +705,20 @@ async def analyze_voice_individually(
     if target_format:
         fmt_samples, fmt_sources = await load_format_examples(target_format)
         if fmt_samples:
-            fmt_results = await asyncio.gather(*(
-                analyze_single_source(
-                    sample,
-                    f"format:{target_format}/{source}",
-                    "format_reference",
-                    trace_logger=trace_logger,
-                    cost_accumulator=cost_accumulator,
-                    mcp_servers=mcp_servers,
-                    mcp_tool_names=mcp_tool_names,
+            fmt_results = await asyncio.gather(
+                *(
+                    analyze_single_source(
+                        sample,
+                        f"format:{target_format}/{source}",
+                        "format_reference",
+                        trace_logger=trace_logger,
+                        cost_accumulator=cost_accumulator,
+                        mcp_servers=mcp_servers,
+                        mcp_tool_names=mcp_tool_names,
+                    )
+                    for sample, source in zip(fmt_samples, fmt_sources)
                 )
-                for sample, source in zip(fmt_samples, fmt_sources)
-            ))
+            )
             for fmt_label, analysis, _is_prescriptive in fmt_results:
                 if analysis:
                     analyses.append((fmt_label, analysis, False))
@@ -787,7 +759,9 @@ class VoiceAnalysisOutput(BaseModel):
 async def analyze_voice(params: AnalyzeVoiceInput) -> VoiceAnalysisOutput:
     corpus_samples, corpus_sources, _types = await load_style_corpus()
     guide = await do_analyze_voice(
-        params.text, corpus_samples, corpus_sources=corpus_sources,
+        params.text,
+        corpus_samples,
+        corpus_sources=corpus_sources,
         target_format=params.target_format or None,
     )
     if guide is None:

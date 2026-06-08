@@ -37,6 +37,8 @@ GOOGLE_DOCS_TOOLS: frozenset[str] = frozenset(
         "mcp__docs__read_comments",
         "mcp__docs__update_overview",
         "mcp__docs__list_tabs",
+        "mcp__docs__insert_image",
+        "mcp__docs__render_equation",
     }
 )
 
@@ -57,24 +59,26 @@ FORMAT_TOOLS: frozenset[str] = frozenset(
         "mcp__format__format_lesswrong",
         "mcp__format__format_twitter",
         "mcp__format__format_blog",
+        "mcp__format__format_academic",
+        "mcp__format__format_newsletter",
     }
 )
 
-EXTRACT_TOOLS: frozenset[str] = frozenset(
+SOURCE_TOOLS: frozenset[str] = frozenset(
     {
-        "mcp__extract__extract_conversation",
-        "mcp__extract__extract_url",
-        "mcp__extract__extract_file",
-        "mcp__extract__extract_lesswrong",
-        "mcp__extract__extract_webpage_batch",
-        "mcp__extract__extract_gdoc",
+        "mcp__source__fetch_source",
+        "mcp__source__fetch_and_extract",
+        "mcp__source__extract_conversation",
+        "mcp__source__extract_file",
+        "mcp__source__extract_lesswrong",
+        "mcp__source__extract_webpage_batch",
+        "mcp__source__extract_gdoc",
     }
 )
 
 RESEARCH_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__research__exa_search",
-        "mcp__research__fetch_url",
         "mcp__research__search_arxiv",
         "mcp__research__fetch_arxiv",
         "mcp__research__fred_search",
@@ -106,8 +110,11 @@ COMPUTE_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__compute__execute_code",
         "mcp__compute__install_package",
-        "mcp__compute__query_research",
+        "mcp__compute__list_research",
+        "mcp__compute__read_finding",
         "mcp__compute__query_plan",
+        "mcp__compute__format_bibliography",
+        "mcp__compute__list_sources",
     }
 )
 
@@ -129,6 +136,7 @@ class ToolPolicy:
 
         if not settings.exa_api_key:
             excluded.add("mcp__research__exa_search")
+            excluded.add("mcp__source__exa_search")
 
         if not settings.fred_api_key:
             excluded.add("mcp__research__fred_search")
@@ -142,7 +150,7 @@ class ToolPolicy:
         tools.update(GOOGLE_DOCS_TOOLS)
         tools.update(AUTHOR_TOOLS)
         tools.update(FORMAT_TOOLS)
-        tools.update(EXTRACT_TOOLS)
+        tools.update(SOURCE_TOOLS)
         tools.update(RESEARCH_TOOLS)
         tools.update(REALTIME_TOOLS)
         tools -= self.excluded_tools
@@ -150,6 +158,10 @@ class ToolPolicy:
 
     def is_tool_available(self, tool_name: str) -> bool:
         return tool_name not in self.excluded_tools
+
+
+def source_tool_names() -> list[str]:
+    return sorted(SOURCE_TOOLS)
 
 
 def research_tool_names() -> list[str]:
@@ -167,7 +179,6 @@ def review_tool_names() -> list[str]:
             "Glob",
             "Grep",
             "mcp__research__exa_search",
-            "mcp__research__fetch_url",
             "mcp__research__wiki_search",
             "mcp__research__fetch_wikipedia",
         }

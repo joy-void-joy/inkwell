@@ -221,25 +221,39 @@ def create_tool_allowlist_hook(
     )
 
 
-PERSISTED_OUTPUT_MARKER = "<persisted-output>"
 TOOL_RESULTS_SEGMENT = "/tool-results/"
 
 
 def create_large_read_hook() -> HooksConfig:
-    """Hooks that stop agents from chasing persisted-output redirects.
+    """Hooks that prevent oversized content from confusing agents.
 
-    When the SDK's Read tool truncates a large file, it returns a
-    ``<persisted-output>`` block pointing to a temp file under
-    ``tool-results/``. Without these hooks, agents read that temp file,
-    which is also too large, creating an infinite redirect loop.
-
-    Two-layer defense:
-    - **PreToolUse**: hard-denies Read calls targeting ``tool-results/``
-      paths, cutting the loop before it starts.
-    - **PostToolUse**: if a Read result contains the persisted-output
-      marker, injects a system message telling the agent to use
-      offset/limit on the original file instead.
+    - **PreToolUse (default limit)**: injects ``limit=2000`` on Read
+      calls that omit it, preventing accidental full-file reads.
+    - **PreToolUse (block redirect)**: hard-denies Read calls targeting
+      ``tool-results/`` temp files, cutting the redirect loop.
     """
+    from lup.content_safety import DEFAULT_READ_LIMIT
+
+    async def default_read_limit(
+        input_data: HookInput,
+        _tool_use_id: str | None,  # claude: ignore
+        _context: HookContext,  # claude: ignore
+    ) -> SyncHookJSONOutput:
+        if input_data["hook_event_name"] != "PreToolUse":
+            return SyncHookJSONOutput()
+        if input_data["tool_name"] != "Read":
+            return SyncHookJSONOutput()
+
+        tool_input = input_data["tool_input"]
+        if "limit" in tool_input:
+            return SyncHookJSONOutput()
+
+        return SyncHookJSONOutput(
+            hookSpecificOutput={
+                "hookEventName": "PreToolUse",
+                "updatedInput": {**tool_input, "limit": DEFAULT_READ_LIMIT},
+            },
+        )
 
     async def block_tool_results_read(
         input_data: HookInput,
@@ -262,99 +276,14 @@ def create_large_read_hook() -> HooksConfig:
             "already available in the pipeline notes directory."
         )
 
-    async def warn_persisted_output(
-        input_data: HookInput,
-        _tool_use_id: str | None,  # claude: ignore
-        _context: HookContext,  # claude: ignore
-    ) -> SyncHookJSONOutput:
-        if input_data["hook_event_name"] != "PostToolUse":
-            return SyncHookJSONOutput()
-        if input_data["tool_name"] != "Read":
-            return SyncHookJSONOutput()
-
-        response = input_data.get("tool_response", "")
-        if not isinstance(response, str) or PERSISTED_OUTPUT_MARKER not in response:
-            return SyncHookJSONOutput()
-
-        file_path = input_data["tool_input"].get("file_path", "the file")
-        return SyncHookJSONOutput(
-            systemMessage=(
-                f"The file {file_path} is too large to read at once. "
-                f"Do NOT read the persisted-output temp file — it will "
-                f"also be too large, causing an infinite loop. Instead, "
-                f"re-read the original file with offset and limit "
-                f"parameters to read it in chunks, or skip it if the "
-                f"information is available from other artifacts."
-            ),
-        )
-
     return cast(
         HooksConfig,
         {
-            "PreToolUse": [HookMatcher(hooks=[block_tool_results_read])],
-            "PostToolUse": [HookMatcher(hooks=[warn_persisted_output])],
-        },
-    )
-
-
-DEFAULT_READ_LIMIT = 2000
-TRUNCATION_MARKER = "[Truncated: PARTIAL view"
-
-
-def create_read_limit_hook(default_limit: int = DEFAULT_READ_LIMIT) -> HooksConfig:
-    """Hook that applies a default line limit to Read calls.
-
-    PreToolUse: when the agent calls Read without a ``limit`` parameter,
-    injects ``default_limit`` so large files don't flood the context.
-
-    PostToolUse: when the Read result contains the SDK's truncation
-    marker, appends a system message telling the agent the content was
-    shortened and how to read more.
-    """
-
-    async def inject_default_limit(
-        input_data: HookInput,
-        _tool_use_id: str | None,  # claude: ignore
-        _context: HookContext,  # claude: ignore
-    ) -> SyncHookJSONOutput:
-        if input_data["hook_event_name"] != "PreToolUse":
-            return SyncHookJSONOutput()
-        if input_data["tool_name"] != "Read":
-            return SyncHookJSONOutput()
-
-        tool_input = input_data["tool_input"]
-        if "limit" not in tool_input:
-            tool_input["limit"] = default_limit
-        return SyncHookJSONOutput()
-
-    async def note_truncation(
-        input_data: HookInput,
-        _tool_use_id: str | None,  # claude: ignore
-        _context: HookContext,  # claude: ignore
-    ) -> SyncHookJSONOutput:
-        if input_data["hook_event_name"] != "PostToolUse":
-            return SyncHookJSONOutput()
-        if input_data["tool_name"] != "Read":
-            return SyncHookJSONOutput()
-
-        response = input_data.get("tool_response", "")
-        if not isinstance(response, str) or TRUNCATION_MARKER not in response:
-            return SyncHookJSONOutput()
-
-        file_path = input_data["tool_input"].get("file_path", "the file")
-        return SyncHookJSONOutput(
-            systemMessage=(
-                f"The Read of {file_path} was truncated — you are seeing "
-                f"a partial view. To read more, call Read again with "
-                f"offset and limit parameters."
-            ),
-        )
-
-    return cast(
-        HooksConfig,
-        {
-            "PreToolUse": [HookMatcher(hooks=[inject_default_limit])],
-            "PostToolUse": [HookMatcher(hooks=[note_truncation])],
+            "PreToolUse": [
+                HookMatcher(
+                    hooks=[default_read_limit, block_tool_results_read],
+                ),
+            ],
         },
     )
 

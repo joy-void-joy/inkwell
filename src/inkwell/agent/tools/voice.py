@@ -12,7 +12,6 @@ import hashlib
 import logging
 from pathlib import Path
 
-import trafilatura
 from pydantic import BaseModel, Field
 
 from claude_agent_sdk import McpServerConfig
@@ -24,7 +23,7 @@ from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
 
-BUILTIN_WRITE_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob"]
+BUILTIN_WRITE_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Agent"]
 
 
 class LoadCorpusInput(BaseModel):
@@ -39,19 +38,23 @@ class LoadCorpusOutput(BaseModel):
     count: int = Field(description="Total samples available")
 
 
-def load_style_corpus() -> tuple[list[str], list[str]]:
+async def load_style_corpus() -> tuple[list[str], list[str], list[str]]:
     """Load all text samples from the style corpus directory.
 
-    Returns the complete text of every sample — no truncation, no cap.
-    Pipeline stages save the result as a file artifact and let agents
-    Read it with the built-in tool.
+    Returns (samples, sources, source_types). Source types are "prose"
+    for regular voice references and "prescriptive" for style guides,
+    editing checklists, and other rule documents that should be passed
+    through verbatim rather than analyzed for voice.
+
+    Prescriptive documents live in config/style/prescriptive/.
     """
     style_dir = Path(settings.style_corpus_path)
     if not style_dir.exists():
-        return [], []
+        return [], [], []
 
     samples: list[str] = []
     sources: list[str] = []
+    source_types: list[str] = []
 
     text_files = sorted(style_dir.glob("*.md")) + sorted(style_dir.glob("*.txt"))
     for f in text_files:
@@ -61,6 +64,7 @@ def load_style_corpus() -> tuple[list[str], list[str]]:
         if content:
             samples.append(content)
             sources.append(f.name)
+            source_types.append("prose")
 
     urls_file = style_dir / "urls.txt"
     if urls_file.exists():
@@ -68,15 +72,28 @@ def load_style_corpus() -> tuple[list[str], list[str]]:
             url = line.strip()
             if not url:
                 continue
-            cached = fetch_cached_url(style_dir, url)
+            cached = await fetch_cached_url(style_dir, url)
             if cached:
                 samples.append(cached)
                 sources.append(url)
+                source_types.append("prose")
 
-    return samples, sources
+    prescriptive_dir = style_dir / "prescriptive"
+    if prescriptive_dir.exists():
+        presc_files = sorted(prescriptive_dir.glob("*.md")) + sorted(
+            prescriptive_dir.glob("*.txt")
+        )
+        for f in presc_files:
+            content = f.read_text(encoding="utf-8").strip()
+            if content:
+                samples.append(content)
+                sources.append(f"prescriptive/{f.name}")
+                source_types.append("prescriptive")
+
+    return samples, sources, source_types
 
 
-def fetch_cached_url(cache_parent: Path, url: str) -> str | None:
+async def fetch_cached_url(cache_parent: Path, url: str) -> str | None:
     """Return cached text for a URL, or fetch and cache it."""
     cache_dir = cache_parent / ".cache"
     cache_dir.mkdir(exist_ok=True)
@@ -88,14 +105,12 @@ def fetch_cached_url(cache_parent: Path, url: str) -> str | None:
         return cache_path.read_text(encoding="utf-8")
 
     try:
-        import httpx
+        from inkwell.agent.tools.research.fetch import do_fetch_source
 
-        resp = httpx.get(url, timeout=15.0, follow_redirects=True)
-        resp.raise_for_status()
-        text = trafilatura.extract(resp.text) or resp.text.strip()
-        if text:
-            cache_path.write_text(text, encoding="utf-8")
-            return text
+        result = await do_fetch_source(url)
+        if result.content:
+            cache_path.write_text(result.content, encoding="utf-8")
+            return result.content
     except Exception:
         logger.debug("Failed to fetch style corpus URL: %s", url)
 
@@ -107,7 +122,7 @@ def fetch_cached_url(cache_parent: Path, url: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def load_format_examples(target_format: str) -> tuple[list[str], list[str]]:
+async def load_format_examples(target_format: str) -> tuple[list[str], list[str]]:
     """Load reference examples for a specific output format.
 
     Looks in config/style/formats/<format>/ for .md/.txt files and urls.txt.
@@ -136,7 +151,7 @@ def load_format_examples(target_format: str) -> tuple[list[str], list[str]]:
             url = line.strip()
             if not url:
                 continue
-            cached = fetch_cached_url(format_dir, url)
+            cached = await fetch_cached_url(format_dir, url)
             if cached:
                 samples.append(cached)
                 sources.append(url)
@@ -203,7 +218,7 @@ def list_format_examples(target_format: str | None = None) -> dict[str, list[Sty
     "Call this early in the pipeline before section writing begins."
 )
 async def load_corpus(params: LoadCorpusInput) -> LoadCorpusOutput:
-    all_samples, all_sources = load_style_corpus()
+    all_samples, all_sources, _types = await load_style_corpus()
     samples = all_samples[: params.max_samples]
     sources = all_sources[: params.max_samples]
 
@@ -225,7 +240,7 @@ async def load_corpus(params: LoadCorpusInput) -> LoadCorpusOutput:
 # ---------------------------------------------------------------------------
 
 
-def compute_voice_fingerprint(
+async def compute_voice_fingerprint(
     conversation: str,
     corpus_samples: list[str],
     target_format: str = "",
@@ -236,7 +251,7 @@ def compute_voice_fingerprint(
     for sample in corpus_samples:
         h.update(sample.encode())
     h.update(target_format.encode())
-    fmt_samples, _ = load_format_examples(target_format) if target_format else ([], [])
+    fmt_samples, _ = (await load_format_examples(target_format)) if target_format else ([], [])
     for sample in fmt_samples:
         h.update(sample.encode())
     return h.hexdigest()[:24]
@@ -267,6 +282,34 @@ Analyze this writing sample and produce a voice and style profile. This \
 profile will be merged with analyses of other samples to create a \
 comprehensive guide for writers matching the author's voice.
 
+## Classification
+
+First, determine whether this source is **prescriptive** — a style guide, \
+editing checklist, do/don't list, or rule document that should be passed \
+verbatim to writers as hard constraints. Begin your output file with YAML \
+frontmatter containing a `prescriptive` field:
+
+```
+---
+prescriptive: true
+---
+```
+
+or:
+
+```
+---
+prescriptive: false
+---
+```
+
+Set `prescriptive: true` when the source is primarily a set of rules, \
+instructions, or editing directives — not prose to be analyzed for voice. \
+When true, still write a brief summary of the rules for the voice tab, \
+but know that the raw source document will be passed directly to writers.
+
+## Analysis (when prescriptive: false)
+
 Focus on what makes this specific sample distinctive:
 
 **Voice.** Tone, rhythm, sentence structure, formality, humor, hedging \
@@ -288,7 +331,7 @@ extract them faithfully at their stated severity. If a reference says \
 
 ## Sample
 
-{text}
+Read the writing sample from: {source_path}
 """
 
 SOURCE_TYPE_HINTS = {
@@ -322,6 +365,24 @@ SOURCE_TYPE_HINTS = {
 }
 
 
+def parse_prescriptive_flag(text: str) -> tuple[str, bool]:
+    """Parse YAML frontmatter for the prescriptive classification flag.
+
+    Returns (body_text, is_prescriptive). Old cached analyses without
+    frontmatter return (original_text, False).
+    """
+    stripped = text.strip()
+    if not stripped.startswith("---"):
+        return text, False
+    end = stripped.find("---", 3)
+    if end == -1:
+        return text, False
+    frontmatter = stripped[3:end]
+    body = stripped[end + 3:].strip()
+    is_prescriptive = "prescriptive: true" in frontmatter.lower()
+    return body or text, is_prescriptive
+
+
 async def analyze_single_source(
     text: str,
     label: str,
@@ -330,18 +391,30 @@ async def analyze_single_source(
     cost_accumulator: CostAccumulator | None = None,
     mcp_servers: dict[str, McpServerConfig] | None = None,
     mcp_tool_names: list[str] | None = None,
-) -> str:
-    """Analyze a single source and return its voice profile. Uses cache."""
+) -> tuple[str, str, bool]:
+    """Analyze a single source and return (label, voice_profile, is_prescriptive).
+
+    The label is passed through so identity survives asyncio.gather and
+    filtering — callers never need positional indexing to match results
+    back to sources.
+    """
     key = voice_cache_key(text)
     cache_path = voice_cache_dir() / f"{key}.md"
     if cache_path.exists():
         logger.debug("Voice cache hit: %s", label)
-        return cache_path.read_text(encoding="utf-8")
+        cached = cache_path.read_text(encoding="utf-8")
+        analysis, is_prescriptive = parse_prescriptive_flag(cached)
+        return label, analysis, is_prescriptive
+
+    source_dir = voice_cache_dir() / "inputs"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_dir / f"{key}_input.md"
+    source_path.write_text(text, encoding="utf-8")
 
     hint = SOURCE_TYPE_HINTS.get(source_type, "")
     prompt = SINGLE_SOURCE_PROMPT.format(
         source_type_hint=hint,
-        text=text[:48000],
+        source_path=source_path,
     )
 
     task = (
@@ -351,10 +424,10 @@ async def analyze_single_source(
 
     await query(
         task,
-        model="claude-sonnet-4-20250514",
+        model="claude-opus-4-6",
         system_prompt="You are a writing style analyst.",
         tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=mcp_servers or {},
         allowed_tools=mcp_tool_names or [],
@@ -364,8 +437,10 @@ async def analyze_single_source(
     )
 
     if cache_path.exists():
-        return cache_path.read_text(encoding="utf-8")
-    return ""
+        raw = cache_path.read_text(encoding="utf-8")
+        analysis, is_prescriptive = parse_prescriptive_flag(raw)
+        return label, analysis, is_prescriptive
+    return label, "", False
 
 
 MERGE_ANALYSES_PROMPT = """\
@@ -440,7 +515,7 @@ async def merge_voice_analyses(
         model="claude-opus-4-6",
         system_prompt="You are a writing style analyst producing a unified voice guide.",
         tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=mcp_servers or {},
         allowed_tools=mcp_tool_names or [],
@@ -569,16 +644,16 @@ async def do_analyze_voice(
     ))
 
     analyses = [
-        (sources_to_analyze[i][0], result)
-        for i, result in enumerate(results)
-        if result
+        (label, analysis)
+        for label, analysis, _is_prescriptive in results
+        if analysis
     ]
     if not analyses:
         return None
 
     format_analyses: list[tuple[str, str]] | None = None
     if target_format:
-        fmt_samples, fmt_sources = load_format_examples(target_format)
+        fmt_samples, fmt_sources = await load_format_examples(target_format)
         if fmt_samples:
             fmt_results = await asyncio.gather(*(
                 analyze_single_source(
@@ -593,9 +668,9 @@ async def do_analyze_voice(
                 for sample, source in zip(fmt_samples, fmt_sources)
             ))
             format_analyses = [
-                (fmt_sources[i], result)
-                for i, result in enumerate(fmt_results)
-                if result
+                (fmt_label, analysis)
+                for fmt_label, analysis, _is_prescriptive in fmt_results
+                if analysis
             ]
 
     if len(analyses) == 1 and not format_analyses:
@@ -622,11 +697,12 @@ async def analyze_voice_individually(
     cost_accumulator: CostAccumulator | None = None,
     mcp_servers: dict[str, McpServerConfig] | None = None,
     mcp_tool_names: list[str] | None = None,
-) -> list[tuple[str, str]]:
-    """Analyze voice sources individually and return (label, analysis_text) pairs.
+) -> list[tuple[str, str, bool]]:
+    """Analyze voice sources individually.
 
-    Unlike do_analyze_voice, this skips the merge step. Downstream stages
-    receive individual analysis files they can each Read without truncation.
+    Returns (label, analysis_text, is_prescriptive) triples. When
+    is_prescriptive is True, the caller should save the raw source
+    verbatim instead of the analysis.
     """
     author_text = extract_author_text(text)
 
@@ -636,7 +712,7 @@ async def analyze_voice_individually(
     if corpus_samples:
         labels = corpus_sources or [f"sample-{i}" for i in range(len(corpus_samples))]
         for sample, label in zip(corpus_samples, labels):
-            source_type = "conversation" if "<user>" in sample else "prescriptive"
+            source_type = "conversation" if "<user>" in sample else "prose"
             sources_to_analyze.append((label, sample, source_type))
 
     results = await asyncio.gather(*(
@@ -650,14 +726,14 @@ async def analyze_voice_individually(
         for label, source_text, stype in sources_to_analyze
     ))
 
-    analyses: list[tuple[str, str]] = [
-        (sources_to_analyze[i][0], result)
-        for i, result in enumerate(results)
-        if result
+    analyses: list[tuple[str, str, bool]] = [
+        (label, analysis, is_prescriptive)
+        for label, analysis, is_prescriptive in results
+        if analysis
     ]
 
     if target_format:
-        fmt_samples, fmt_sources = load_format_examples(target_format)
+        fmt_samples, fmt_sources = await load_format_examples(target_format)
         if fmt_samples:
             fmt_results = await asyncio.gather(*(
                 analyze_single_source(
@@ -671,9 +747,9 @@ async def analyze_voice_individually(
                 )
                 for sample, source in zip(fmt_samples, fmt_sources)
             ))
-            for i, result in enumerate(fmt_results):
-                if result:
-                    analyses.append((f"format:{fmt_sources[i]}", result))
+            for fmt_label, analysis, _is_prescriptive in fmt_results:
+                if analysis:
+                    analyses.append((fmt_label, analysis, False))
 
     return analyses
 
@@ -709,7 +785,7 @@ class VoiceAnalysisOutput(BaseModel):
     "Section writers and the rewriter use this to match voice and enforce style."
 )
 async def analyze_voice(params: AnalyzeVoiceInput) -> VoiceAnalysisOutput:
-    corpus_samples, corpus_sources = load_style_corpus()
+    corpus_samples, corpus_sources, _types = await load_style_corpus()
     guide = await do_analyze_voice(
         params.text, corpus_samples, corpus_sources=corpus_sources,
         target_format=params.target_format or None,
@@ -719,24 +795,39 @@ async def analyze_voice(params: AnalyzeVoiceInput) -> VoiceAnalysisOutput:
     return VoiceAnalysisOutput(guide=guide)
 
 
-def add_style_reference(source: str, target_format: str | None = None) -> str:
+def add_style_reference(
+    source: str,
+    target_format: str | None = None,
+    prescriptive: bool = False,
+) -> str:
     """Add a file or URL to the style corpus. Returns a status message.
 
     When target_format is specified, the reference is added as a
     format-specific example instead of a general voice reference.
+
+    When prescriptive is True, the document is stored in the
+    prescriptive/ subdirectory and will be passed through verbatim
+    to writers rather than analyzed for voice characteristics.
     """
     if target_format:
         return add_format_example(target_format, source)
 
     style_dir = Path(settings.style_corpus_path)
+    if prescriptive:
+        style_dir = style_dir / "prescriptive"
     style_dir.mkdir(parents=True, exist_ok=True)
+
+    label = "prescriptive rules" if prescriptive else "style corpus"
 
     source_path = Path(source).expanduser()
     if source_path.exists():
         content = source_path.read_text(encoding="utf-8")
         dest = style_dir / source_path.name
         dest.write_text(content, encoding="utf-8")
-        return f"Added {source_path.name} to style corpus ({len(content)} chars)"
+        return f"Added {source_path.name} to {label} ({len(content)} chars)"
+
+    if prescriptive:
+        return "Prescriptive references must be local files, not URLs"
 
     refs_file = style_dir / "urls.txt"
     existing = refs_file.read_text(encoding="utf-8") if refs_file.exists() else ""
@@ -754,124 +845,39 @@ class StyleEntry(BaseModel):
     size: int = Field(default=0, description="Size in bytes (files only)")
 
 
-def list_style_references() -> list[StyleEntry]:
-    """List all entries in the style corpus."""
+def list_style_references() -> tuple[list[StyleEntry], list[StyleEntry]]:
+    """List all entries in the style corpus.
+
+    Returns (voice_entries, prescriptive_entries).
+    """
     style_dir = Path(settings.style_corpus_path)
-    if not style_dir.exists():
-        return []
 
-    entries: list[StyleEntry] = []
-    files = sorted(style_dir.glob("*.md")) + sorted(style_dir.glob("*.txt"))
-    for f in files:
-        if f.name == "urls.txt":
-            for line in f.read_text(encoding="utf-8").splitlines():
-                url = line.strip()
-                if url:
-                    entries.append(StyleEntry(kind="url", name=url))
-        else:
-            entries.append(StyleEntry(kind="file", name=f.name, size=f.stat().st_size))
-    return entries
+    voice_entries: list[StyleEntry] = []
+    if style_dir.exists():
+        files = sorted(style_dir.glob("*.md")) + sorted(style_dir.glob("*.txt"))
+        for f in files:
+            if f.name == "urls.txt":
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    url = line.strip()
+                    if url:
+                        voice_entries.append(StyleEntry(kind="url", name=url))
+            else:
+                voice_entries.append(
+                    StyleEntry(kind="file", name=f.name, size=f.stat().st_size)
+                )
 
+    prescriptive_entries: list[StyleEntry] = []
+    prescriptive_dir = style_dir / "prescriptive"
+    if prescriptive_dir.exists():
+        files = sorted(prescriptive_dir.glob("*.md")) + sorted(
+            prescriptive_dir.glob("*.txt")
+        )
+        for f in files:
+            prescriptive_entries.append(
+                StyleEntry(kind="file", name=f.name, size=f.stat().st_size)
+            )
 
-EM_DASH = "—"
-EN_DASH = "–"
-
-VAGUE_ATTRIBUTIONS = [
-    "experts say", "experts argue", "many believe", "some argue",
-    "it is widely acknowledged", "it is well known", "studies show",
-    "research shows", "according to experts",
-]
-
-DELIMITERS = set("*-•,\"'`()[]{}/ \t;:")
-
-
-class VoiceViolation(BaseModel):
-    rule: str = Field(description="Which rule was violated")
-    text: str = Field(description="The violating text")
-    line: int = Field(description="Line number (1-indexed)")
-
-
-class VoiceViolationReport(BaseModel):
-    violations: list[VoiceViolation] = Field(default_factory=list)
-    passed: bool = Field(default=True)
-
-
-def tokenize_words(line: str) -> list[str]:
-    """Split a line into words by common delimiters."""
-    buf: list[str] = []
-    current: list[str] = []
-    for ch in line:
-        if ch in DELIMITERS:
-            if current:
-                buf.append("".join(current))
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        buf.append("".join(current))
-    return buf
-
-
-def extract_banned_words(voice_text: str) -> list[str]:
-    """Parse banned vocabulary from voice analysis text."""
-    banned: list[str] = []
-    in_section = False
-    for line in voice_text.splitlines():
-        lower = line.lower().strip()
-        if "banned" in lower and ("vocabulary" in lower or "words" in lower):
-            in_section = True
-            continue
-        if in_section:
-            if line.strip().startswith("#") or (not line.strip() and banned):
-                break
-            words = tokenize_words(line)
-            banned.extend(w.lower() for w in words if len(w) > 2)
-    return banned
-
-
-def verify_voice_rules(
-    draft: str,
-    voice_texts: list[str],
-) -> VoiceViolationReport:
-    """Check a draft against hard voice rules. Pure Python, no LLM call."""
-    violations: list[VoiceViolation] = []
-    lines = draft.splitlines()
-
-    banned_words: list[str] = []
-    for vt in voice_texts:
-        banned_words.extend(extract_banned_words(vt))
-    banned_words = list(set(banned_words))
-
-    for i, line in enumerate(lines, 1):
-        if EM_DASH in line:
-            violations.append(VoiceViolation(
-                rule="no em dashes", text=line.strip()[:120], line=i,
-            ))
-        if EN_DASH in line and not any(c.isdigit() for c in line):
-            violations.append(VoiceViolation(
-                rule="no en dashes (except number ranges)", text=line.strip()[:120], line=i,
-            ))
-
-    for i, line in enumerate(lines, 1):
-        lower = line.lower()
-        for word in banned_words:
-            if word in lower:
-                violations.append(VoiceViolation(
-                    rule=f"banned vocabulary: {word}", text=line.strip()[:120], line=i,
-                ))
-
-    for i, line in enumerate(lines, 1):
-        lower = line.lower()
-        for phrase in VAGUE_ATTRIBUTIONS:
-            if phrase in lower:
-                violations.append(VoiceViolation(
-                    rule="vague attribution", text=line.strip()[:120], line=i,
-                ))
-
-    return VoiceViolationReport(
-        violations=violations,
-        passed=len(violations) == 0,
-    )
+    return voice_entries, prescriptive_entries
 
 
 VOICE_TOOLS = [load_corpus, analyze_voice]

@@ -680,6 +680,71 @@ async def do_write_tab(
                 break
 
 
+TAB_CONTINUATION_CHARS = 50_000
+MAX_CONTINUATION_TABS = 4
+
+
+async def write_with_continuation(
+    doc_id: str,
+    tab_name: str,
+    content: str,
+    parent_tab_id: str | None = None,
+    session_state: WritingSessionState | None = None,
+) -> list[str]:
+    """Write content to one or more tabs, splitting at heading boundaries when large.
+
+    Under TAB_CONTINUATION_CHARS: writes to a single tab (existing behavior).
+    Over: splits at ## heading boundaries into continuation tabs named
+    "{tab_name}", "{tab_name} (2/N)", etc.
+
+    Returns the list of tab IDs written to.
+    """
+    from inkwell.agent.tools.content_spill import split_on_headings
+
+    if len(content) <= TAB_CONTINUATION_CHARS:
+        tab_id = await find_tab_by_title(doc_id, tab_name)
+        if tab_id is None:
+            tab_id = await do_create_tab(doc_id, tab_name, parent_tab_id, session_state)
+        await do_write_tab(doc_id, tab_id, content, session_state)
+        return [tab_id]
+
+    chunks = split_on_headings(content)
+
+    merged: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for _heading, chunk_text in chunks:
+        if current_len + len(chunk_text) > TAB_CONTINUATION_CHARS and current:
+            merged.append("\n\n".join(current))
+            current = []
+            current_len = 0
+        current.append(chunk_text)
+        current_len += len(chunk_text)
+    if current:
+        merged.append("\n\n".join(current))
+
+    if len(merged) > MAX_CONTINUATION_TABS:
+        merged = merged[:MAX_CONTINUATION_TABS]
+        merged[-1] += "\n\n---\n*Full content available in local draft files.*"
+
+    total = len(merged)
+    tab_ids: list[str] = []
+
+    for i, chunk_content in enumerate(merged):
+        if i == 0:
+            name = tab_name
+        else:
+            name = f"{tab_name} ({i + 1}/{total})"
+
+        tab_id = await find_tab_by_title(doc_id, name)
+        if tab_id is None:
+            tab_id = await do_create_tab(doc_id, name, parent_tab_id, session_state)
+        await do_write_tab(doc_id, tab_id, chunk_content, session_state)
+        tab_ids.append(tab_id)
+
+    return tab_ids
+
+
 async def do_insert_comment(
     doc_id: str,
     content: str,

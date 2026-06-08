@@ -20,10 +20,10 @@ from pathlib import Path
 from claude_agent_sdk import McpServerConfig
 from pydantic import BaseModel, Field
 
-from lup.client import CostAccumulator, HeartbeatCallback, query
+from lup.client import CostAccumulator, HeartbeatCallback, active_block_callback, query
 from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
 from lup.sandbox import Sandbox
-from lup.trace import TraceLogger
+from lup.trace import TraceLogger, extract_block_info
 
 from inkwell.agent.config import settings
 from inkwell.agent.models import (
@@ -67,8 +67,20 @@ from inkwell.agent.stages import (
     STYLE_REVIEWER_PROMPT,
     get_format_guidance,
 )
+from inkwell.agent.stages import EXTRACTOR_PROMPT
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
-from inkwell.agent.tools.extract import GDOC_URL_PATTERN, do_extract_source, fetch_gdoc_comments, parse_gdoc_id
+from inkwell.agent.tools.extract import (
+    EXTRACT_TOOLS as EXTRACT_MCP_TOOLS,
+    GDOC_URL_PATTERN,
+    do_extract_conversation,
+    do_extract_file,
+    do_extract_gdoc,
+    do_extract_lesswrong,
+    extract_source_tab_only,
+    fetch_gdoc_comments,
+    parse_gdoc_id,
+)
+from inkwell.agent.tools.research.fetch import do_fetch_source
 from inkwell.agent.tools.formats import (
     FormatBlogInput,
     FormatDialogInput,
@@ -117,13 +129,12 @@ from inkwell.agent.tools.voice import (
     compute_voice_fingerprint,
     invalidate_merged_cache,
     load_style_corpus,
-    verify_voice_rules,
 )
 
 logger = logging.getLogger(__name__)
 
-BUILTIN_READ_TOOLS = ["Read", "Grep", "Glob"]
-BUILTIN_WRITE_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob"]
+BUILTIN_READ_TOOLS = ["Read", "Grep", "Glob", "Agent"]
+BUILTIN_WRITE_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Agent"]
 
 
 class PipelineError(Exception):
@@ -298,8 +309,12 @@ def build_voice_file_refs(voice_file_paths: list[str]) -> str:
     lines: list[str] = []
     for p in voice_file_paths:
         name = Path(p).stem
-        if name.startswith("corpus_"):
-            lines.append(f"Style reference (read for hard editing rules): {p}")
+        if name.startswith("prescriptive_"):
+            lines.append(
+                f"Prescriptive rules (apply verbatim — these are hard constraints, not voice suggestions): {p}"
+            )
+        elif name.startswith("corpus_"):
+            lines.append(f"Style reference: {p}")
         elif name.startswith("voice_"):
             lines.append(f"Voice analysis: {p}")
         else:
@@ -329,6 +344,9 @@ class PipelineListener:
 
     async def on_complete(self, output: WritingOutput) -> None:
         logger.info("Pipeline complete: '%s'", output.title)
+
+    async def on_block(self, _block_type: str, _content: str, _prefix: str) -> None:
+        pass
 
     async def on_message(self, source: str, message: str) -> None:
         logger.info("[%s] %s", source, message)
@@ -454,7 +472,11 @@ def render_research_progress(research_path: Path) -> str:
 
 
 class DraftSyncer:
-    """Polls a draft file and pushes changes to a GDoc tab in real time."""
+    """Polls a draft file and pushes changes to a GDoc tab in real time.
+
+    For small content, writes to a single tab. When content exceeds
+    TAB_CONTINUATION_CHARS, splits across continuation tabs.
+    """
 
     def __init__(
         self,
@@ -462,11 +484,13 @@ class DraftSyncer:
         tab_id: str,
         file_path: Path,
         *,
+        tab_name: str = "",
         session_state: WritingSessionState | None = None,
         interval: float = 5.0,
     ) -> None:
         self.doc_id = doc_id
         self.tab_id = tab_id
+        self.tab_name = tab_name
         self.file_path = file_path
         self.session_state = session_state
         self.interval = interval
@@ -501,10 +525,20 @@ class DraftSyncer:
             return
         self.last_content = content
         async with gdoc_nonfatal(f"sync draft {self.file_path.name}"):
-            await do_write_tab(
-                self.doc_id, self.tab_id, content,
-                session_state=self.session_state,
-            )
+            from inkwell.agent.tools.google_docs import TAB_CONTINUATION_CHARS
+
+            if self.tab_name and len(content) > TAB_CONTINUATION_CHARS:
+                from inkwell.agent.tools.google_docs import write_with_continuation
+
+                await write_with_continuation(
+                    self.doc_id, self.tab_name, content,
+                    session_state=self.session_state,
+                )
+            else:
+                await do_write_tab(
+                    self.doc_id, self.tab_id, content,
+                    session_state=self.session_state,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -513,15 +547,26 @@ class DraftSyncer:
 
 
 def build_research_tools() -> list[LupMcpTool]:
-    """Flat list of all research MCP tools."""
+    """Flat list of all research MCP tools (excludes fetch — now in source server)."""
     return [
         *EXA_TOOLS,
         *ARXIV_TOOLS,
-        *FETCH_TOOLS,
         *FRED_TOOLS,
         *MARKET_TOOLS,
         *WIKIPEDIA_TOOLS,
     ]
+
+
+def build_source_server() -> tuple[dict[str, McpServerConfig], list[str]]:
+    """MCP server for source fetching/extraction — available to ALL pipeline stages."""
+    tools = [*FETCH_TOOLS, *EXTRACT_MCP_TOOLS]
+    server = create_mcp_server(
+        name="source",
+        version="1.0.0",
+        tools=extract_sdk_tools(tools),
+    )
+    tool_names = [f"mcp__source__{t.sdk_tool.name}" for t in tools]
+    return {"source": server}, tool_names
 
 
 def build_compute_server(
@@ -532,7 +577,9 @@ def build_compute_server(
 
     Returns (servers_dict, tool_name_list) ready to merge into any stage.
     """
-    tools = [*sandbox.create_tools(), *make_query_tools(artifacts_dir)]
+    from inkwell.agent.tools.citations import CITATION_TOOLS
+
+    tools = [*sandbox.create_tools(), *make_query_tools(artifacts_dir), *CITATION_TOOLS]
     server = create_mcp_server(
         name="compute",
         version="1.0.0",
@@ -624,13 +671,80 @@ def annotate_draft_with_findings(
     return annotated
 
 
+async def extract_single_source(url: str, existing_doc_id: str | None) -> str:
+    """Dispatch a single URL to its deterministic extractor. Returns markdown text."""
+    if "claude.ai/share" in url:
+        result = await do_extract_conversation(url)
+        return result.markdown
+
+    if GDOC_URL_PATTERN.search(url):
+        doc_id = parse_gdoc_id(url)
+        if existing_doc_id and doc_id == existing_doc_id:
+            return await extract_source_tab_only(url)
+        result = await do_extract_gdoc(url)
+        return "\n\n".join(tab.content for tab in result.tabs)
+
+    if "lesswrong.com/posts" in url:
+        result = await do_extract_lesswrong(url)
+        return result.content
+
+    if url.startswith(("/", "~", "./")):
+        result = await do_extract_file(url)
+        return result.content
+
+    result = await do_fetch_source(url)
+    return result.content
+
+
+async def extract_with_agent_fallback(
+    failed_urls: list[str],
+    source_dir: Path,
+    *,
+    source_servers: dict[str, McpServerConfig],
+    source_tool_names: list[str],
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> list[str]:
+    """Fall back to an agent for URLs that failed deterministic extraction."""
+    source_list = "\n".join(f"- {url}" for url in failed_urls)
+    task = (
+        f"These sources failed automatic extraction. Try alternatives:\n"
+        f"1. Use exa_search to find the content elsewhere\n"
+        f"2. Try a different URL format (remove tracking params, try archive)\n"
+        f"3. Search for the page title\n\n"
+        f"Sources:\n{source_list}\n\n"
+        f"Write extracted content to: {source_dir / 'recovered.md'}\n"
+        f"Separate each with '--- Source: <url> ---' headers."
+    )
+    await query(
+        task,
+        model="claude-opus-4-6",
+        system_prompt=EXTRACTOR_PROMPT,
+        tools=BUILTIN_WRITE_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        mcp_servers=source_servers,
+        allowed_tools=source_tool_names,
+        prefix="[extract:fallback] ",
+        trace_logger=trace_logger,
+        cost_accumulator=cost_accumulator,
+    )
+    recovered_path = source_dir / "recovered.md"
+    if recovered_path.exists():
+        return [recovered_path.read_text(encoding="utf-8")]
+    return []
+
+
 async def plan_article(
     notes: PipelineNotes,
     *,
-    target_format: str = "lesswrong",
+    target_format: str = "auto",
     voice_file_paths: list[str] | None = None,
+    source_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
     author_directions: str = "",
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -638,7 +752,6 @@ async def plan_article(
     on_plan_update: Callable[[], Awaitable[None]] | None = None,
 ) -> ArticlePlan:
     """Stage 1: Extract a structured article plan from source material."""
-    conversation_path = notes.text_artifact_path("conversation")
     plan_path = notes.artifact_path("plan")
     collector = PlanCollector(plan_path, on_save=on_plan_update)
     output_servers, output_tool_names = build_output_server("output", make_plan_tools(collector))
@@ -649,18 +762,33 @@ async def plan_article(
 
     voice_hint = build_voice_file_refs(voice_file_paths or [])
 
+    from inkwell.agent.stages import FORMAT_KEYS
+
+    format_list = ", ".join(FORMAT_KEYS)
     format_hint = (
-        f"Suggested format: {target_format} (override if content is better "
-        f"suited to another format: lesswrong, twitter, blog, dialog, memo)"
-        if target_format
-        else "Choose the best output format: lesswrong, twitter, blog, dialog, or memo"
+        f"Choose the best output format for the content: {format_list}"
+        if target_format == "auto"
+        else f"Suggested format: {target_format} (override if content is better "
+        f"suited to another format: {format_list})"
     )
 
     format_guidance = get_format_guidance(target_format)
+    conversation_path = notes.text_artifact_path("conversation")
+
+    source_refs = f"Source material: {conversation_path}\n"
+    extra_sources = [
+        p for p in (source_file_paths or [])
+        if p != str(conversation_path)
+    ]
+    if extra_sources:
+        source_refs += "Additional source files (read these too):\n"
+        for p in extra_sources:
+            source_refs += f"  - {p}\n"
+
     task = (
-        f"Extract a structured article plan from the source conversation.\n"
+        f"Extract a structured article plan from the source material.\n"
         f"{format_hint}\n\n"
-        f"Source conversation file: {conversation_path}\n"
+        f"{source_refs}"
         f"{voice_hint}\n\n"
     )
     if author_directions:
@@ -676,15 +804,15 @@ async def plan_article(
         f"add_section, add_research_question, and add_source_quote."
     )
 
-    all_servers = {**output_servers, **(compute_servers or {})}
-    all_tools = output_tool_names + (compute_tool_names or [])
+    all_servers = {**output_servers, **(source_servers or {}), **(compute_servers or {})}
+    all_tools = output_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     await query(
         task,
         model="claude-opus-4-6",
         system_prompt=PLANNER_SYSTEM,
         tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -704,6 +832,8 @@ async def refine_plan(
     feedback_path: Path | None = None,
     section_research_paths: dict[str, Path] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -728,7 +858,7 @@ async def refine_plan(
     file_refs += build_voice_file_refs(voice_file_paths or [])
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
-    file_refs += "Use the query_research tool for cross-section research lookups.\n"
+    file_refs += "Use list_research to browse all research findings, then read_finding for details.\n"
 
     task = (
         f"Refine the article plan using the research findings.\n\n"
@@ -737,15 +867,15 @@ async def refine_plan(
         f"set_plan_header, add_section, add_research_question, and add_source_quote."
     )
 
-    all_servers = {**output_servers, **(compute_servers or {})}
-    all_tools = output_tool_names + (compute_tool_names or [])
+    all_servers = {**output_servers, **(source_servers or {}), **(compute_servers or {})}
+    all_tools = output_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     await query(
         task,
         model="claude-opus-4-6",
         system_prompt=REFINER_SYSTEM,
         tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -755,7 +885,7 @@ async def refine_plan(
     )
     if not refined_path.exists():
         return notes.load_artifact("plan", ArticlePlan) or ArticlePlan(
-            title="Untitled", thesis="", target_format="lesswrong",
+            title="Untitled", thesis="", target_format="auto",
             sections=[], research_questions=[], source_quotes=[],
             author_direction="", voice_notes="",
         )
@@ -770,6 +900,8 @@ async def research_plan(
     feedback_path: Path | None = None,
     servers: dict[str, McpServerConfig] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -788,8 +920,8 @@ async def research_plan(
     )
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("research", note_collector)
-    all_servers = {**servers, **output_servers, **note_servers, **(compute_servers or {})}
-    all_tools = research_tool_names() + output_tool_names + note_tool_names + (compute_tool_names or [])
+    all_servers = {**servers, **output_servers, **note_servers, **(source_servers or {}), **(compute_servers or {})}
+    all_tools = research_tool_names() + output_tool_names + note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     file_refs = f"Article plan: {plan_path}\n"
     if feedback_path:
@@ -807,7 +939,7 @@ async def research_plan(
         model="claude-opus-4-6",
         system_prompt=RESEARCHER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -831,9 +963,11 @@ async def write_section(
     section_research_path: Path | None = None,
     feedback_path: Path | None = None,
     section_context: str = "",
-    target_format: str = "lesswrong",
+    target_format: str = "auto",
     servers: dict[str, McpServerConfig] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -845,15 +979,15 @@ async def write_section(
 
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server(f"write:{section_title}", note_collector)
-    all_servers = {**servers, **note_servers, **(compute_servers or {})}
-    all_tools = research_tool_names() + note_tool_names + (compute_tool_names or [])
+    all_servers = {**servers, **note_servers, **(source_servers or {}), **(compute_servers or {})}
+    all_tools = research_tool_names() + note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     plan_path = notes.artifact_path("plan")
 
     file_refs = f"Article plan: {plan_path}\n"
     if section_research_path and section_research_path.exists():
         file_refs += f"Research findings for this section: {section_research_path}\n"
-    file_refs += "Use the query_research tool for additional research lookups.\n"
+    file_refs += "Use list_research to browse all research findings, then read_finding for details.\n"
     file_refs += build_voice_file_refs(voice_file_paths or [])
     if feedback_path:
         file_refs += f"Author feedback: {feedback_path}\n"
@@ -882,7 +1016,7 @@ async def write_section(
         model="claude-opus-4-6",
         system_prompt=SECTION_WRITER_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -911,6 +1045,8 @@ async def plan_merge(
     *,
     notes: PipelineNotes,
     output_path: Path,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -928,19 +1064,19 @@ async def plan_merge(
         f"Article plan: {plan_path}\n\n"
         f"Read each section draft and the article plan. Identify duplication, "
         f"missing transitions, redundant openings, and structural issues.\n"
-        f"Use the query_research tool for research context on any section.\n\n"
+        f"Use list_research to browse all findings, then read_finding for details on any section.\n\n"
         f"Write the merge plan to: {output_path}"
     )
 
-    all_servers = compute_servers or {}
-    all_tools = compute_tool_names or []
+    all_servers = {**(source_servers or {}), **(compute_servers or {})}
+    all_tools = (source_tool_names_list or []) + (compute_tool_names or [])
 
     await query(
         task,
         model="claude-opus-4-6",
         system_prompt=MERGE_PLAN_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -961,8 +1097,10 @@ async def merge_sections(
     output_path: Path,
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
-    target_format: str = "lesswrong",
+    target_format: str = "auto",
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -979,6 +1117,8 @@ async def merge_sections(
         section_draft_paths,
         notes=notes,
         output_path=merge_plan_path,
+        source_servers=source_servers,
+        source_tool_names_list=source_tool_names_list,
         compute_servers=compute_servers,
         compute_tool_names=compute_tool_names,
         trace_logger=trace_logger,
@@ -987,8 +1127,8 @@ async def merge_sections(
 
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("merge", note_collector)
-    merge_servers = {**note_servers, **(compute_servers or {})}
-    merge_tools = note_tool_names + (compute_tool_names or [])
+    merge_servers = {**note_servers, **(source_servers or {}), **(compute_servers or {})}
+    merge_tools = note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     drafts_list = "\n".join(
         f"  - {title}: {path}" for title, path in section_draft_paths.items()
@@ -1025,7 +1165,7 @@ async def merge_sections(
         model="claude-opus-4-6",
         system_prompt=COHERENCE_EDITOR_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=merge_servers,
         allowed_tools=merge_tools,
@@ -1048,12 +1188,14 @@ async def review_narrative(
     draft_path: Path,
     *,
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
-    """Review for narrative coherence (tool-free except output)."""
+    """Review for narrative coherence."""
     plan_path = notes.artifact_path("plan")
     review_path = notes.artifacts_dir / "review_narrative.json"
     collector = ReviewCollector(review_path, "narrative")
@@ -1062,8 +1204,8 @@ async def review_narrative(
     )
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("review:narrative", note_collector)
-    all_servers = {**output_servers, **note_servers, **(compute_servers or {})}
-    all_tools = output_tool_names + note_tool_names + (compute_tool_names or [])
+    all_servers = {**output_servers, **note_servers, **(source_servers or {}), **(compute_servers or {})}
+    all_tools = output_tool_names + note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     task = (
         f"Review the article draft for narrative coherence.\n\n"
@@ -1076,7 +1218,7 @@ async def review_narrative(
         model="claude-opus-4-6",
         system_prompt=NARRATIVE_REVIEWER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -1098,6 +1240,8 @@ async def review_facts(
     *,
     servers: dict[str, McpServerConfig] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -1114,24 +1258,23 @@ async def review_facts(
     )
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("review:facts", note_collector)
-    all_servers = {**servers, **output_servers, **note_servers, **(compute_servers or {})}
-    all_tools = review_tool_names() + output_tool_names + note_tool_names + (compute_tool_names or [])
+    all_servers = {**servers, **output_servers, **note_servers, **(source_servers or {}), **(compute_servers or {})}
+    all_tools = review_tool_names() + output_tool_names + note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     task = (
         f"Fact-check every verifiable claim in the article draft.\n\n"
         f"Draft: {draft_path}\n\n"
-        f"Read the draft. Use the query_research tool to look up research "
-        f"findings for specific claims or sections — it filters and returns "
-        f"structured results. Cross-reference the draft against research "
-        f"findings, then verify remaining claims with your research tools. "
-        f"Call record_finding for each issue."
+        f"Read the draft. Use list_research to see all research findings, "
+        f"then read_finding for details on specific ones. Cross-reference "
+        f"the draft against research findings, then verify remaining claims "
+        f"with your research tools. Call record_finding for each issue."
     )
     await query(
         task,
         model="claude-opus-4-6",
         system_prompt=FACT_CHECKER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -1153,12 +1296,14 @@ async def review_style(
     *,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ReviewOutput:
-    """Review for writing quality and voice consistency (tool-free except output)."""
+    """Review for writing quality and voice consistency."""
     review_path = notes.artifacts_dir / "review_style.json"
     collector = ReviewCollector(review_path, "style")
     output_servers, output_tool_names = build_output_server(
@@ -1166,8 +1311,8 @@ async def review_style(
     )
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("review:style", note_collector)
-    all_servers = {**output_servers, **note_servers, **(compute_servers or {})}
-    all_tools = output_tool_names + note_tool_names + (compute_tool_names or [])
+    all_servers = {**output_servers, **note_servers, **(source_servers or {}), **(compute_servers or {})}
+    all_tools = output_tool_names + note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     file_refs = f"Draft: {draft_path}\n"
     file_refs += build_voice_file_refs(voice_file_paths or [])
@@ -1183,7 +1328,7 @@ async def review_style(
         model="claude-opus-4-6",
         system_prompt=STYLE_REVIEWER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -1206,6 +1351,8 @@ async def review_all(
     servers: dict[str, McpServerConfig] | None = None,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -1215,6 +1362,8 @@ async def review_all(
     narrative_task = review_narrative(
         notes, draft_path,
         author_notes=author_notes,
+        source_servers=source_servers,
+        source_tool_names_list=source_tool_names_list,
         compute_servers=compute_servers,
         compute_tool_names=compute_tool_names,
         trace_logger=trace_logger,
@@ -1224,6 +1373,8 @@ async def review_all(
         notes, draft_path,
         servers=servers,
         author_notes=author_notes,
+        source_servers=source_servers,
+        source_tool_names_list=source_tool_names_list,
         compute_servers=compute_servers,
         compute_tool_names=compute_tool_names,
         trace_logger=trace_logger,
@@ -1233,6 +1384,8 @@ async def review_all(
         notes, draft_path,
         voice_file_paths=voice_file_paths,
         author_notes=author_notes,
+        source_servers=source_servers,
+        source_tool_names_list=source_tool_names_list,
         compute_servers=compute_servers,
         compute_tool_names=compute_tool_names,
         trace_logger=trace_logger,
@@ -1305,8 +1458,10 @@ async def rewrite_final(
     output_path: Path,
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
-    target_format: str = "lesswrong",
+    target_format: str = "auto",
     author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -1315,8 +1470,8 @@ async def rewrite_final(
     """Stage 6: Incorporate all feedback and produce the final article."""
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("rewrite", note_collector)
-    rewrite_servers = {**note_servers, **(compute_servers or {})}
-    rewrite_tools = note_tool_names + (compute_tool_names or [])
+    rewrite_servers = {**note_servers, **(source_servers or {}), **(compute_servers or {})}
+    rewrite_tools = note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
     plan_path = notes.artifact_path("plan")
 
     draft_content = draft_path.read_text(encoding="utf-8")
@@ -1356,7 +1511,7 @@ async def rewrite_final(
         f"Passages marked [PRESERVE:] were praised by reviewers: protect "
         f"their quality while editing around them. "
         f"Apply all critical findings and worthwhile suggestions. "
-        f"Use query_research to verify corrections against research findings. "
+        f"Use list_research + read_finding to verify corrections against research findings. "
         f"If a style rules file is available, read it and enforce every "
         f"hard editing rule with zero remaining violations.\n\n"
         f"Write the final piece to: {output_path}"
@@ -1367,7 +1522,7 @@ async def rewrite_final(
         model="claude-opus-4-6",
         system_prompt=REWRITER_SYSTEM,
         tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=rewrite_servers,
         allowed_tools=rewrite_tools,
@@ -1466,6 +1621,8 @@ async def surface_assumptions(
     *,
     has_research: bool = False,
     session_state: WritingSessionState,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
@@ -1490,15 +1647,15 @@ async def surface_assumptions(
         f"Read the files, then call record_assumption for each uncertainty."
     )
 
-    all_servers = {**output_servers, **(compute_servers or {})}
-    all_tools = output_tool_names + (compute_tool_names or [])
+    all_servers = {**output_servers, **(source_servers or {}), **(compute_servers or {})}
+    all_tools = output_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
 
     await query(
         task,
         model="claude-opus-4-6",
         system_prompt=ASSUMPTIONS_PROMPT,
         tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
@@ -1579,7 +1736,7 @@ async def plan_restart(
         output_type=RestartStrategy,
         model="claude-opus-4-6",
         system_prompt=ORCHESTRATOR_PROMPT,
-        max_thinking_tokens=None,
+        max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         prefix="[orchestrator] ",
         trace_logger=trace_logger,
@@ -1600,24 +1757,24 @@ class PipelineRunner:
 
     def __init__(
         self,
-        source: str,
         *,
-        target_format: str = "lesswrong",
+        sources: list[str],
+        refs: list[str] | None = None,
+        target_format: str = "auto",
         existing_doc_id: str | None = None,
         session_state: WritingSessionState | None = None,
         notes: PipelineNotes | None = None,
         trace_logger: TraceLogger | None = None,
-        refs: list[str] | None = None,
         listener: PipelineListener | None = None,
         cost_accumulator: CostAccumulator | None = None,
     ) -> None:
-        self.source = source
+        self.sources = sources
+        self.refs = refs or []
         self.target_format = target_format
         self.existing_doc_id = existing_doc_id
         self.state = session_state or WritingSessionState()
         self.notes = notes
         self.trace_logger = trace_logger
-        self.refs = refs or []
         self.hooks = listener or PipelineListener()
 
         if cost_accumulator is None:
@@ -1631,6 +1788,7 @@ class PipelineRunner:
 
         self.author_notes: list[AuthorNote] = []
         self.research_servers = build_research_servers()
+        self.source_servers, self.source_tool_names = build_source_server()
 
         self.sandbox: Sandbox | None = None
         self.compute_servers: dict[str, McpServerConfig] = {}
@@ -1650,6 +1808,13 @@ class PipelineRunner:
         self.source_watcher: BackgroundAgent | None = None
         self.source_is_extracted_gdoc = False
         self.section_research_paths: dict[str, Path] = {}
+
+    @property
+    def effective_format(self) -> str:
+        plan = self.snapshot.plan
+        if plan and plan.target_format and plan.target_format != "auto":
+            return plan.target_format
+        return self.target_format
 
     def ensure_notes(self) -> PipelineNotes:
         """Return notes, creating a temp dir if needed."""
@@ -1671,10 +1836,12 @@ class PipelineRunner:
         except Exception:
             logger.warning("Sandbox unavailable — running without code execution")
             self.sandbox = None
+            from inkwell.agent.tools.citations import CITATION_TOOLS
+
             self.compute_servers, self.compute_tool_names = (
                 build_output_server(
                     "compute",
-                    make_query_tools(notes.artifacts_dir),
+                    [*make_query_tools(notes.artifacts_dir), *CITATION_TOOLS],
                 )
             )
             return
@@ -1682,6 +1849,8 @@ class PipelineRunner:
         self.compute_servers, self.compute_tool_names = build_compute_server(
             self.sandbox, notes.artifacts_dir
         )
+        if self.state is not None:
+            self.state.shared_dir = shared_dir
         logger.info("Sandbox started with %d compute tools", len(self.compute_tool_names))
 
     def stop_sandbox(self) -> None:
@@ -1715,13 +1884,25 @@ class PipelineRunner:
         (base / "snapshot.json").write_text(data, encoding="utf-8")
         (base / f"snapshot_{self.snapshot.stage}.json").write_text(data, encoding="utf-8")
 
+    def install_block_callback(self) -> None:
+        """Set the contextvar so all query() calls forward blocks to the listener."""
+        from claude_agent_sdk import ContentBlock
+
+        async def forward_block(block: ContentBlock, prefix: str) -> None:
+            info = extract_block_info(block)
+            await self.hooks.on_block(info.label, info.content, prefix)
+
+        active_block_callback.set(forward_block)
+
     async def run(self) -> WritingOutput:
         """Execute the full pipeline with restart support."""
+        self.install_block_callback()
         configure_session_state(self.state)
         await self.setup_doc()
         self.start_sandbox()
 
         try:
+            await self.stage_preprocess()
             await self.stage_extract()
             await self.stage_voice()
             await self.stage_plan()
@@ -1771,6 +1952,7 @@ class PipelineRunner:
 
     async def run_from(self, snapshot: PipelineSnapshot) -> WritingOutput:
         """Resume pipeline execution from a saved snapshot."""
+        self.install_block_callback()
         self.snapshot = snapshot
         configure_session_state(self.state)
 
@@ -1796,7 +1978,7 @@ class PipelineRunner:
 
         try:
             stages = [
-                "extract", "voice", "plan",
+                "preprocess", "extract", "voice", "plan",
                 "research", "assumptions", "refine",
                 "write", "merge", "review", "rewrite", "format",
             ]
@@ -1871,7 +2053,7 @@ class PipelineRunner:
             self.known_tabs = {t.title: t.tab_id for t in existing}
         else:
             self.doc_id, self.doc_url = await do_create_doc(
-                f"Inkwell — {self.source[:60]}",
+                f"Inkwell — {', '.join(s[:30] for s in self.sources)[:60]}",
                 share_with=settings.author_email,
                 session_state=self.state,
             )
@@ -1893,7 +2075,7 @@ class PipelineRunner:
                 self.overview_tab_id,
                 (
                     f"# Writing Pipeline\n\n"
-                    f"**Source:** {self.source[:120]}\n\n"
+                    f"**Sources:** {', '.join(self.sources)[:120]}\n\n"
                     f"**Stage:** starting\n\n"
                     f"*Comment on any tab to give feedback. "
                     f"Edit directly to override agent decisions.*"
@@ -1949,7 +2131,7 @@ class PipelineRunner:
             output_type=ClassifiedComment,
             model="claude-opus-4-6",
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
-            max_thinking_tokens=None,
+            max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
             prefix=f"[classify-edit:{edit.tab}] ",
             trace_logger=self.trace_logger,
@@ -1995,9 +2177,9 @@ class PipelineRunner:
         classified = await query(
             f"Classify this terminal direction from the author:\n\n{text}",
             output_type=ClassifiedComment,
-            model="claude-sonnet-4-20250514",
+            model="claude-opus-4-6",
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
-            max_thinking_tokens=None,
+            max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
             prefix="[classify-terminal] ",
             trace_logger=self.trace_logger,
@@ -2072,28 +2254,91 @@ class PipelineRunner:
         logger.info("Saved %d pre-existing comments as author directions", len(comments))
         return len(comments)
 
+    async def stage_preprocess(self) -> None:
+        """Classify sources by role and extract author instructions."""
+        await self.hooks.on_stage("preprocess", "Classifying sources")
+
+        from inkwell.agent.tools.preprocess import preprocess_sources
+
+        result = await preprocess_sources(self.sources)
+        notes = self.ensure_notes()
+        notes.save_artifact("preprocess", result)
+
+        self.snapshot.raw_sources = result.raw_inputs
+        self.snapshot.author_instructions = result.instructions
+        self.snapshot.runtime_style_refs = result.style_refs
+        self.snapshot.stage = "preprocess"
+
+        routed_sources = result.sources
+        if routed_sources:
+            self.sources = routed_sources
+        self.refs = list(set(self.refs + result.style_refs + result.context_refs))
+
+        await self.save_snapshot()
+
+        parts: list[str] = []
+        if result.instructions:
+            parts.append("instructions extracted")
+        parts.append(f"{len(result.sources)} source(s)")
+        if result.style_refs:
+            parts.append(f"{len(result.style_refs)} style ref(s)")
+        if result.context_refs:
+            parts.append(f"{len(result.context_refs)} context ref(s)")
+        await self.hooks.on_progress(f"Preprocess: {', '.join(parts)}")
+
     async def stage_extract(self) -> None:
         await self.hooks.on_stage("extract", "Extracting source material")
         await self.update_overview(active_stage="extract")
 
+        notes = self.ensure_notes()
+        source_dir = notes.artifacts_dir / "sources"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        output_path = source_dir / "conversation.md"
+
         source_doc_id = ""
-        if GDOC_URL_PATTERN.search(self.source):
-            source_doc_id = parse_gdoc_id(self.source)
-            self.state.source_doc_id = source_doc_id
-            self.source_is_extracted_gdoc = True
+        for src in self.sources:
+            if not source_doc_id and GDOC_URL_PATTERN.search(src):
+                source_doc_id = parse_gdoc_id(src)
+                self.state.source_doc_id = source_doc_id
+                self.source_is_extracted_gdoc = True
 
-        conversation = await do_extract_source(self.source)
+        all_urls = list(self.sources) + list(self.refs)
+        results = await asyncio.gather(
+            *(extract_single_source(url, self.existing_doc_id) for url in all_urls),
+            return_exceptions=True,
+        )
 
-        for ref in self.refs:
-            try:
-                ref_text = await do_extract_source(ref)
-                conversation += f"\n\n--- Reference: {ref} ---\n\n{ref_text}"
-            except RuntimeError:
-                logger.warning("Failed to extract reference: %s", ref)
+        extracted_parts: list[str] = []
+        failed: list[str] = []
+        for url, result in zip(all_urls, results):
+            if isinstance(result, Exception):
+                logger.warning("Extraction failed for %s: %s", url, result)
+                failed.append(url)
+            elif result:
+                extracted_parts.append(f"--- Source: {url} ---\n\n{result}")
+
+        if failed:
+            await self.hooks.on_progress(
+                f"Retrying {len(failed)} failed source(s) with agent fallback"
+            )
+            recovered = await extract_with_agent_fallback(
+                failed,
+                source_dir,
+                source_servers=self.source_servers,
+                source_tool_names=self.source_tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
+            extracted_parts.extend(recovered)
+
+        conversation = "\n\n".join(extracted_parts)
+        output_path.write_text(conversation, encoding="utf-8")
+
+        all_source_paths = [str(p) for p in sorted(source_dir.glob("*")) if p.is_file()]
 
         self.snapshot.conversation = conversation
+        self.snapshot.source_file_paths = all_source_paths
         self.snapshot.stage = "extract"
-        notes = self.ensure_notes()
         notes.save_text_artifact("conversation", conversation)
         await self.save_snapshot()
 
@@ -2106,20 +2351,25 @@ class PipelineRunner:
 
         async with gdoc_nonfatal("write source tab"):
             source_tab_id = self.known_tabs["Source"]
+            gdoc_text = conversation
             await do_write_tab(
-                self.doc_id, source_tab_id, conversation, session_state=self.state
+                self.doc_id, source_tab_id, gdoc_text, session_state=self.state
             )
             assert self.tabs is not None
             await self.tabs.record_from_doc(source_tab_id, "Source")
         await self.update_overview()
 
+        if all_source_paths:
+            n_files = len(all_source_paths)
+            await self.hooks.on_progress(f"Extract: {n_files} source file(s) saved")
+
     async def stage_voice(self) -> None:
         await self.hooks.on_stage("voice", "Analyzing author's writing voice")
         await self.update_overview(active_stage="voice")
-        corpus_samples, corpus_sources = load_style_corpus()
+        corpus_samples, corpus_sources, corpus_types = await load_style_corpus()
         notes = self.ensure_notes()
 
-        fingerprint = compute_voice_fingerprint(
+        fingerprint = await compute_voice_fingerprint(
             self.snapshot.conversation, corpus_samples, self.target_format
         )
         if (
@@ -2136,32 +2386,76 @@ class PipelineRunner:
             invalidate_merged_cache()
             logger.info("Voice inputs changed — re-analyzing")
 
+        explicit_prescriptive: list[tuple[str, str]] = []
+        analyzable_samples: list[str] = []
+        analyzable_sources: list[str] = []
+        for sample, source, stype in zip(corpus_samples, corpus_sources, corpus_types):
+            if stype == "prescriptive":
+                explicit_prescriptive.append((sample, source))
+            else:
+                analyzable_samples.append(sample)
+                analyzable_sources.append(source)
+
         all_servers = {**self.research_servers, **self.compute_servers}
         all_tool_names = research_tool_names() + self.compute_tool_names
 
         analyses = await analyze_voice_individually(
             self.snapshot.conversation,
-            corpus_samples,
-            corpus_sources=corpus_sources,
+            analyzable_samples,
+            corpus_sources=analyzable_sources,
             target_format=self.target_format,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
             mcp_servers=all_servers,
             mcp_tool_names=all_tool_names,
         )
-        if not analyses:
+        if not analyses and not explicit_prescriptive:
             raise PipelineError("Voice analysis produced no output")
 
         voice_file_paths: list[str] = []
         voice_tab_parts: list[str] = []
+        n_voice = 0
+        n_auto_prescriptive = 0
+        presc_idx = 0
 
-        for i, (label, text) in enumerate(analyses):
+        source_by_label: dict[str, str] = {}
+        if analyzable_samples:
+            labels = analyzable_sources or [
+                f"sample-{i}" for i in range(len(analyzable_samples))
+            ]
+            for sample, label in zip(analyzable_samples, labels):
+                source_by_label[label] = sample
+
+        for i, (label, text, is_prescriptive) in enumerate(analyses):
             slug = slugify(label)
-            path = notes.save_text_artifact(f"voice_{i}_{slug}", text)
+            if is_prescriptive and label in source_by_label:
+                raw = source_by_label[label]
+                path = notes.save_text_artifact(f"prescriptive_{presc_idx}_{slug}", raw)
+                voice_tab_parts.append(f"## Prescriptive (auto): {label}\n\n{raw}")
+                presc_idx += 1
+                n_auto_prescriptive += 1
+            else:
+                path = notes.save_text_artifact(f"voice_{n_voice}_{slug}", text)
+                voice_tab_parts.append(f"## {label}\n\n{text}")
+                n_voice += 1
             voice_file_paths.append(str(path))
-            voice_tab_parts.append(f"## {label}\n\n{text}")
 
-        for i, (sample, source) in enumerate(zip(corpus_samples, corpus_sources)):
+        for sample, source in explicit_prescriptive:
+            slug = slugify(source)
+            path = notes.save_text_artifact(f"prescriptive_{presc_idx}_{slug}", sample)
+            voice_file_paths.append(str(path))
+            voice_tab_parts.append(f"## Prescriptive: {source}\n\n{sample}")
+            presc_idx += 1
+
+        for i, (sample, source) in enumerate(zip(analyzable_samples, analyzable_sources)):
+            if source not in source_by_label:
+                continue
+            label_entry = next(
+                (a for a in analyses if a[0] == source and a[2]),
+                None,
+            )
+            if label_entry:
+                continue
             slug = slugify(source)
             path = notes.save_text_artifact(f"corpus_{i}_{slug}", sample)
             voice_file_paths.append(str(path))
@@ -2172,11 +2466,15 @@ class PipelineRunner:
         self.snapshot.stage = "voice"
         await self.save_snapshot()
 
-        n_analyses = len(analyses)
-        n_corpus = len(corpus_samples)
-        await self.hooks.on_progress(
-            f"Voice: {n_analyses} analyses + {n_corpus} corpus files saved individually"
-        )
+        n_explicit = len(explicit_prescriptive)
+        parts: list[str] = []
+        if n_voice:
+            parts.append(f"{n_voice} analyses")
+        if n_auto_prescriptive:
+            parts.append(f"{n_auto_prescriptive} auto-prescriptive (verbatim)")
+        if n_explicit:
+            parts.append(f"{n_explicit} prescriptive (explicit)")
+        await self.hooks.on_progress(f"Voice: {' + '.join(parts)} saved")
         async with gdoc_nonfatal("write voice tab"):
             voice_tab_id = self.known_tabs["Voice"]
             voice_tab_content = "\n\n---\n\n".join(voice_tab_parts)
@@ -2202,13 +2500,19 @@ class PipelineRunner:
                 )
 
         directions = notes.load_directions()
+        if self.snapshot.author_instructions:
+            author_intent = f"Author's instructions: {self.snapshot.author_instructions}"
+            directions = f"{author_intent}\n\n{directions}" if directions else author_intent
 
         plan = await plan_article(
             notes,
             target_format=self.target_format,
             voice_file_paths=self.snapshot.voice_file_paths,
+            source_file_paths=self.snapshot.source_file_paths,
             author_notes=self.author_notes,
             author_directions=directions,
+            source_servers=self.source_servers,
+            source_tool_names_list=self.source_tool_names,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
@@ -2241,6 +2545,8 @@ class PipelineRunner:
             self.doc_id,
             has_research=self.snapshot.research is not None,
             session_state=self.state,
+            source_servers=self.source_servers,
+            source_tool_names_list=self.source_tool_names,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
@@ -2281,6 +2587,8 @@ class PipelineRunner:
             notes,
             feedback_path=feedback_path,
             servers=self.research_servers,
+            source_servers=self.source_servers,
+            source_tool_names_list=self.source_tool_names,
             author_notes=self.author_notes,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
@@ -2334,6 +2642,8 @@ class PipelineRunner:
             feedback_path=feedback_path,
             section_research_paths=self.section_research_paths or None,
             author_notes=self.author_notes,
+            source_servers=self.source_servers,
+            source_tool_names_list=self.source_tool_names,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
@@ -2408,8 +2718,10 @@ class PipelineRunner:
                     section_research_path=section_rp or general_rp,
                     feedback_path=feedback_path,
                     section_context=build_neighbor_context(idx),
-                    target_format=self.target_format,
+                    target_format=self.effective_format,
                     servers=self.research_servers,
+                    source_servers=self.source_servers,
+                    source_tool_names_list=self.source_tool_names,
                     author_notes=self.author_notes,
                     compute_servers=self.compute_servers,
                     compute_tool_names=self.compute_tool_names,
@@ -2483,6 +2795,7 @@ class PipelineRunner:
 
         syncer = DraftSyncer(
             self.doc_id, self.draft_tab_id, output_path,
+            tab_name="Draft",
             session_state=self.state, interval=8.0,
         )
         await syncer.start()
@@ -2493,8 +2806,10 @@ class PipelineRunner:
                 output_path=output_path,
                 voice_file_paths=self.snapshot.voice_file_paths,
                 feedback_path=feedback_path,
-                target_format=self.target_format,
+                target_format=self.effective_format,
                 author_notes=self.author_notes,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
                 compute_servers=self.compute_servers,
                 compute_tool_names=self.compute_tool_names,
                 trace_logger=self.trace_logger,
@@ -2530,6 +2845,8 @@ class PipelineRunner:
             servers=self.research_servers,
             voice_file_paths=self.snapshot.voice_file_paths,
             author_notes=self.author_notes,
+            source_servers=self.source_servers,
+            source_tool_names_list=self.source_tool_names,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
@@ -2565,6 +2882,7 @@ class PipelineRunner:
 
         syncer = DraftSyncer(
             self.doc_id, self.draft_tab_id, output_path,
+            tab_name="Draft",
             session_state=self.state, interval=8.0,
         )
         await syncer.start()
@@ -2576,8 +2894,10 @@ class PipelineRunner:
                 output_path=output_path,
                 voice_file_paths=self.snapshot.voice_file_paths,
                 feedback_path=feedback_path,
-                target_format=self.target_format,
+                target_format=self.effective_format,
                 author_notes=self.author_notes,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
                 compute_servers=self.compute_servers,
                 compute_tool_names=self.compute_tool_names,
                 trace_logger=self.trace_logger,
@@ -2586,42 +2906,6 @@ class PipelineRunner:
         finally:
             await syncer.stop()
         await self.post_author_notes()
-
-        voice_texts = []
-        for p in (self.snapshot.voice_file_paths or []):
-            path = Path(p)
-            if path.exists():
-                voice_texts.append(path.read_text(encoding="utf-8"))
-        if voice_texts and output.content:
-            report = verify_voice_rules(output.content, voice_texts)
-            if not report.passed:
-                logger.info(
-                    "Voice verification found %d violations — fixing",
-                    len(report.violations),
-                )
-                violation_text = "\n".join(
-                    f"- Line {v.line}: {v.rule} — \"{v.text}\""
-                    for v in report.violations[:20]
-                )
-                fix_task = (
-                    f"Fix these voice-rule violations in the text:\n\n"
-                    f"{violation_text}\n\n"
-                    f"Draft file: {output_path}\n\n"
-                    f"Read the file, apply targeted fixes for each "
-                    f"violation, then write the corrected version back."
-                )
-                await query(
-                    fix_task,
-                    model="claude-sonnet-4-20250514",
-                    tools=["Read", "Write", "Edit", "Grep", "Glob"],
-                    max_thinking_tokens=None,
-                    permission_mode="bypassPermissions",
-                    prefix="[voice-fix] ",
-                    trace_logger=self.trace_logger,
-                    cost_accumulator=self.cost_accumulator,
-                )
-                if output_path.exists():
-                    output.content = output_path.read_text(encoding="utf-8")
 
         output.voice_profile = self.snapshot.voice_profile
         output.open_questions = list(self.state.pending_questions)
@@ -2636,7 +2920,7 @@ class PipelineRunner:
         if output is None or plan is None:
             raise PipelineError("Cannot format without output and plan")
 
-        chosen_format = plan.target_format or self.target_format
+        chosen_format = self.effective_format
         await self.hooks.on_stage("format", f"Applying {chosen_format} formatting")
         await self.update_overview(active_stage="format")
         article_text = output.content or output.summary
@@ -2645,14 +2929,14 @@ class PipelineRunner:
         )
 
         async with gdoc_nonfatal("write final tab"):
-            if "Final" not in self.known_tabs:
-                self.known_tabs["Final"] = await do_create_tab(
-                    self.doc_id, "Final", session_state=self.state
-                )
-            self.final_tab_id = self.known_tabs["Final"]
-            await do_write_tab(
-                self.doc_id, self.final_tab_id, final_content, session_state=self.state
+            from inkwell.agent.tools.google_docs import write_with_continuation
+
+            tab_ids = await write_with_continuation(
+                self.doc_id, "Final", final_content, session_state=self.state
             )
+            if tab_ids:
+                self.final_tab_id = tab_ids[0]
+                self.known_tabs["Final"] = tab_ids[0]
 
         output.google_doc_id = self.doc_id
         output.google_doc_url = self.doc_url
@@ -2769,7 +3053,7 @@ class PipelineRunner:
             model="claude-opus-4-6",
             system_prompt=SECTION_WRITER_PROMPT,
             tools=BUILTIN_WRITE_TOOLS,
-            max_thinking_tokens=None,
+            max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
             prefix=f"[patch:{section}] ",
             trace_logger=self.trace_logger,
@@ -2804,7 +3088,7 @@ class PipelineRunner:
                     notes=notes,
                     draft_path=self.get_draft_path(section_plan.title),
                     voice_file_paths=self.snapshot.voice_file_paths,
-                    target_format=self.target_format,
+                    target_format=self.effective_format,
                     servers=self.research_servers,
                     author_notes=self.author_notes,
                     compute_servers=self.compute_servers,
@@ -2821,7 +3105,7 @@ class PipelineRunner:
                     notes=notes,
                     draft_path=self.get_draft_path(section_plan.title),
                     voice_file_paths=self.snapshot.voice_file_paths,
-                    target_format=self.target_format,
+                    target_format=self.effective_format,
                     servers=self.research_servers,
                     author_notes=self.author_notes,
                     compute_servers=self.compute_servers,
@@ -2876,7 +3160,7 @@ class PipelineRunner:
         while True:
             revision, from_sync = await self.wait_for_revision_or_sync(self.state)
             if revision is None and not from_sync:
-                break
+                continue
 
             batch = [revision] if revision else []
             if not from_sync:
@@ -2955,8 +3239,10 @@ class PipelineRunner:
             output_path=standby_output,
             voice_file_paths=self.snapshot.voice_file_paths,
             feedback_path=feedback_path,
-            target_format=self.target_format,
+            target_format=self.effective_format,
             author_notes=self.author_notes,
+            source_servers=self.source_servers,
+            source_tool_names_list=self.source_tool_names,
             compute_servers=self.compute_servers,
             compute_tool_names=self.compute_tool_names,
             trace_logger=self.trace_logger,
@@ -3138,12 +3424,14 @@ class PipelineRunner:
                 if sources_str:
                     research_text += f"\n\n**Sources:** {sources_str}"
                 research_text += "\n"
-            research_tab_id = self.known_tabs["Research"]
-            await do_write_tab(
-                self.doc_id, research_tab_id, research_text, session_state=self.state
+            from inkwell.agent.tools.google_docs import write_with_continuation
+
+            tab_ids = await write_with_continuation(
+                self.doc_id, "Research", research_text, session_state=self.state
             )
             assert self.tabs is not None
-            await self.tabs.record_from_doc(research_tab_id, "Research")
+            if tab_ids:
+                await self.tabs.record_from_doc(tab_ids[0], "Research")
 
     async def write_review_tab(self, findings: list[ReviewFinding]) -> None:
         async with gdoc_nonfatal("write review tab"):
@@ -3255,26 +3543,26 @@ class PipelineRunner:
 
 
 async def run_pipeline(
-    source: str,
     *,
-    target_format: str = "lesswrong",
+    sources: list[str],
+    refs: list[str] | None = None,
+    target_format: str = "auto",
     existing_doc_id: str | None = None,
     session_state: WritingSessionState | None = None,
     notes: PipelineNotes | None = None,
     trace_logger: TraceLogger | None = None,
-    refs: list[str] | None = None,
     listener: PipelineListener | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
-        source,
+        sources=sources,
+        refs=refs,
         target_format=target_format,
         existing_doc_id=existing_doc_id,
         session_state=session_state,
         notes=notes,
         trace_logger=trace_logger,
-        refs=refs,
         listener=listener,
         cost_accumulator=cost_accumulator,
     )

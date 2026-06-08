@@ -50,10 +50,6 @@ class ExtractConversationOutput(BaseModel):
     messages: list[ConversationMessage] = Field(description="Extracted messages")
     markdown: str = Field(description="Full conversation as markdown with speaker tags")
     message_count: int = Field(description="Number of messages extracted")
-    markdown_path: str | None = Field(
-        default=None,
-        description="Path to full markdown file when content was too large to return inline",
-    )
 
 
 def extract_share_id(url: str) -> str:
@@ -438,32 +434,17 @@ async def do_extract_conversation(url: str) -> ExtractConversationOutput:
     "into structured markdown with <user> and <claude> speaker tags. Use this as "
     "the first step when the author provides a Claude conversation as source "
     "material. Returns both structured messages and formatted markdown. "
-    "For long conversations (>~4000 words), writes markdown to a file and returns "
-    "the path — use Read to access the full text. "
     "Requires CLAUDE_COOKIE in .env.local for org-restricted share links."
 )
 async def extract_conversation(
     params: ExtractConversationInput,
 ) -> ExtractConversationOutput:
-    from inkwell.agent.tools.content_spill import (
-        chunked_spill_instruction,
-        should_spill,
-        spill_chunked,
-    )
-
     result = await do_extract_conversation(params.url)
-    if should_spill(result.markdown):
-        envelope = spill_chunked("conversation", params.url, result.markdown)
-        result = result.model_copy(update={
-            "markdown_path": envelope.path,
-            "markdown": chunked_spill_instruction(envelope),
-        })
     return ExtractConversationOutput(
         url=params.url,
         messages=result.messages,
         markdown=result.markdown,
         message_count=result.message_count,
-        markdown_path=result.markdown_path,
     )
 
 
@@ -475,10 +456,6 @@ class ExtractFileOutput(BaseModel):
     path: str = Field(description="Source file path")
     content: str = Field(description="Extracted text content")
     word_count: int = Field(description="Approximate word count")
-    content_path: str | None = Field(
-        default=None,
-        description="Path to full content file when content was too large to return inline",
-    )
 
 
 async def do_extract_file(file_path_str: str) -> ExtractFileOutput:
@@ -525,26 +502,11 @@ async def do_extract_file(file_path_str: str) -> ExtractFileOutput:
     "Extract text from a local file. Supports markdown (.md), plain "
     "text (.txt), HTML, and PDF files. For PDFs, returns the file path "
     "— use the Read tool to read PDF content directly (it supports "
-    "page ranges). For large files (>~4000 words), writes content to a "
-    "spill file and returns the path — use Read to access the full text. "
-    "Use this to ingest local reference documents "
+    "page ranges). Use this to ingest local reference documents "
     "provided by the author via --ref file paths."
 )
 async def extract_file(params: ExtractFileInput) -> ExtractFileOutput:
-    from inkwell.agent.tools.content_spill import (
-        chunked_spill_instruction,
-        should_spill,
-        spill_chunked,
-    )
-
-    result = await do_extract_file(params.path)
-    if should_spill(result.content):
-        envelope = spill_chunked("file", params.path, result.content)
-        result = result.model_copy(update={
-            "content_path": envelope.path,
-            "content": chunked_spill_instruction(envelope),
-        })
-    return result
+    return await do_extract_file(params.path)
 
 
 def write_source_chunks(text: str, output_dir: Path, prefix: str = "source") -> list[Path]:
@@ -670,10 +632,6 @@ class ExtractLessWrongOutput(BaseModel):
     comment_count: int = Field(description="Number of comments")
     posted_date: str = Field(description="Publication date (ISO format)")
     word_count: int = Field(description="Word count of post body")
-    content_path: str | None = Field(
-        default=None,
-        description="Path to full content file when content was too large to return inline",
-    )
 
 
 def parse_lesswrong_slug(url: str) -> str:
@@ -730,27 +688,12 @@ async def do_extract_lesswrong(url: str) -> ExtractLessWrongOutput:
 @lup_tool(
     "Extract a LessWrong post with metadata via the GraphQL API. Returns "
     "the post body as markdown plus author, karma score, and comment count. "
-    "For long posts (>~4000 words), writes content to a file and returns "
-    "the path — use Read to access the full text. "
     "Use for style references, source material, or cross-referencing LW posts."
 )
 async def extract_lesswrong(
     params: ExtractLessWrongInput,
 ) -> ExtractLessWrongOutput:
-    from inkwell.agent.tools.content_spill import (
-        chunked_spill_instruction,
-        should_spill,
-        spill_chunked,
-    )
-
-    result = await do_extract_lesswrong(params.url)
-    if should_spill(result.content):
-        envelope = spill_chunked("lesswrong", params.url, result.content)
-        result = result.model_copy(update={
-            "content_path": envelope.path,
-            "content": chunked_spill_instruction(envelope),
-        })
-    return result
+    return await do_extract_lesswrong(params.url)
 
 
 class ExtractBatchInput(BaseModel):
@@ -762,7 +705,6 @@ class BatchResult(BaseModel):
     title: str = ""
     content: str
     word_count: int
-    content_path: str | None = None
 
 
 class ExtractBatchOutput(BaseModel):
@@ -773,9 +715,7 @@ class ExtractBatchOutput(BaseModel):
 @lup_tool(
     "Extract text from multiple URLs in parallel. Use when ingesting "
     "several reference pages at once — faster than calling fetch_source "
-    "repeatedly. Returns extracted content for each URL and lists failures. "
-    "For pages with >~4000 words, writes content to a file and returns "
-    "the path — use Read to access the full text."
+    "repeatedly. Returns extracted content for each URL and lists failures."
 )
 async def extract_webpage_batch(
     params: ExtractBatchInput,
@@ -784,12 +724,6 @@ async def extract_webpage_batch(
     import json as json_mod
 
     import trafilatura
-
-    from inkwell.agent.tools.content_spill import (
-        chunked_spill_instruction,
-        should_spill,
-        spill_chunked,
-    )
 
     if not params.urls:
         raise ToolError("No URLs provided")
@@ -836,12 +770,6 @@ async def extract_webpage_batch(
         if outcome is None:
             failed.append(url)
         else:
-            if should_spill(outcome.content):
-                envelope = spill_chunked("batch", url, outcome.content)
-                outcome = outcome.model_copy(update={
-                    "content_path": envelope.path,
-                    "content": chunked_spill_instruction(envelope),
-                })
             results.append(outcome)
 
     return ExtractBatchOutput(results=results, failed=failed)
@@ -901,10 +829,6 @@ class GdocTab(BaseModel):
     title: str = Field(description="Tab title")
     content: str = Field(description="Tab content as plain text")
     word_count: int = Field(description="Approximate word count")
-    content_path: str | None = Field(
-        default=None,
-        description="Path to full content file when content was too large to return inline",
-    )
 
 
 class GdocComment(BaseModel):
@@ -1076,29 +1000,11 @@ async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
     "and discovers embedded links (Claude share links, article URLs). Use when "
     "the author provides a Google Doc as seed — reads its content, finds Claude "
     "conversations or reference URLs linked within, and returns structured source "
-    "material. For large tabs (>~4000 words), writes content to a file and "
-    "returns the path — use Read to access the full text. "
-    "Discovered links can be processed with extract_conversation or "
+    "material. Discovered links can be processed with extract_conversation or "
     "fetch_source."
 )
 async def extract_gdoc(params: ExtractGdocInput) -> ExtractGdocOutput:
-    from inkwell.agent.tools.content_spill import (
-        chunked_spill_instruction,
-        should_spill,
-        spill_chunked,
-    )
-
-    result = await do_extract_gdoc(params.url)
-    spilled_tabs: list[GdocTab] = []
-    for tab in result.tabs:
-        if should_spill(tab.content):
-            envelope = spill_chunked("gdoc", f"{result.doc_id}_{tab.tab_id}", tab.content)
-            tab = tab.model_copy(update={
-                "content_path": envelope.path,
-                "content": chunked_spill_instruction(envelope),
-            })
-        spilled_tabs.append(tab)
-    return result.model_copy(update={"tabs": spilled_tabs})
+    return await do_extract_gdoc(params.url)
 
 
 EXTRACT_TOOLS = [

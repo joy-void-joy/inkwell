@@ -48,10 +48,6 @@ class FetchSourceOutput(BaseModel):
     pdf_path: str | None = Field(
         default=None, description="Path to downloaded PDF (PDF format only)"
     )
-    content_path: str | None = Field(
-        default=None,
-        description="Path to full content file when content was too large to return inline",
-    )
 
 
 async def do_fetch_source(url: str) -> FetchSourceOutput:
@@ -158,25 +154,10 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
     "automatically fetches the raw file content. Use this whenever you "
     "encounter a URL you need to read — in source material, author "
     "feedback, GDoc comments, or research results. Returns clean text "
-    "with title and word count. For large pages (>~4000 words), writes "
-    "content to a file and returns the path — use Read to access the "
-    "full text."
+    "with title and word count."
 )
 async def fetch_source(params: FetchSourceInput) -> FetchSourceOutput:
-    from inkwell.agent.tools.content_spill import (
-        chunked_spill_instruction,
-        should_spill,
-        spill_chunked,
-    )
-
-    result = await do_fetch_source(params.url)
-    if should_spill(result.content):
-        envelope = spill_chunked("fetch", params.url, result.content)
-        result = result.model_copy(update={
-            "content_path": envelope.path,
-            "content": chunked_spill_instruction(envelope),
-        })
-    return result
+    return await do_fetch_source(params.url)
 
 
 fetch_url = fetch_source

@@ -281,7 +281,7 @@ def split_research_by_section(
             lines.append(render_finding_markdown(f))
             lines.append("")
         content = "\n".join(lines)
-        path = notes.save_text_artifact(f"research_{slug}", content)
+        path = notes.save_text_artifact(f"research_for_{slug}", content)
         paths[section_title] = path
 
     if unmatched:
@@ -309,13 +309,13 @@ def build_voice_file_refs(voice_file_paths: list[str]) -> str:
     lines: list[str] = []
     for p in voice_file_paths:
         name = Path(p).stem
-        if name.startswith("prescriptive_"):
+        if name.startswith("prescriptive_rules_"):
             lines.append(
                 f"Prescriptive rules (apply verbatim — these are hard constraints, not voice suggestions): {p}"
             )
-        elif name.startswith("corpus_"):
+        elif name.startswith("style_reference_"):
             lines.append(f"Style reference: {p}")
-        elif name.startswith("voice_"):
+        elif name.startswith("voice_analysis_"):
             lines.append(f"Voice analysis: {p}")
         else:
             lines.append(f"Voice/style file: {p}")
@@ -2433,7 +2433,7 @@ class PipelineRunner:
             if is_prescriptive and label in source_by_label:
                 raw = source_by_label[label]
                 envelope = await notes.save_content(
-                    f"prescriptive_{presc_idx}_{slug}", raw,
+                    f"prescriptive_rules_{slug}", raw,
                     stage="voice", content_type="prescriptive", label=label,
                 )
                 path = Path(envelope.path)
@@ -2442,7 +2442,7 @@ class PipelineRunner:
                 n_auto_prescriptive += 1
             else:
                 envelope = await notes.save_content(
-                    f"voice_{n_voice}_{slug}", text,
+                    f"voice_analysis_{slug}", text,
                     stage="voice", content_type="voice_analysis", label=label,
                 )
                 path = Path(envelope.path)
@@ -2453,7 +2453,7 @@ class PipelineRunner:
         for sample, source in explicit_prescriptive:
             slug = slugify(source)
             envelope = await notes.save_content(
-                f"prescriptive_{presc_idx}_{slug}", sample,
+                f"prescriptive_rules_{slug}", sample,
                 stage="voice", content_type="prescriptive", label=source,
             )
             voice_file_paths.append(envelope.path)
@@ -2471,7 +2471,7 @@ class PipelineRunner:
                 continue
             slug = slugify(source)
             envelope = await notes.save_content(
-                f"corpus_{i}_{slug}", sample,
+                f"style_reference_{slug}", sample,
                 stage="voice", content_type="source", label=source,
             )
             voice_file_paths.append(envelope.path)

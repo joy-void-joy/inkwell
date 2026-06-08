@@ -161,10 +161,6 @@ class ReadTabOutput(BaseModel):
     doc_id: str = Field(description="Google Doc ID")
     tab_id: str = Field(description="Tab that was read")
     content: str = Field(description="Tab content as plain text")
-    content_path: str | None = Field(
-        default=None,
-        description="Path to full content file when content was too large to return inline",
-    )
 
 
 class InsertCommentInput(BaseModel):
@@ -1064,17 +1060,9 @@ async def write_tab(params: WriteTabInput) -> WriteTabOutput:
 @lup_tool(
     "Read the content of a tab in the Google Doc. Use this to read section "
     "drafts before merging, to check what's been written, or to read the "
-    "current state of any tab. Returns plain text content. For large tabs "
-    "(>~4000 words), writes content to a file and returns the path — use "
-    "Read to access the full text."
+    "current state of any tab. Returns plain text content."
 )
 async def read_tab(params: ReadTabInput) -> ReadTabOutput:
-    from inkwell.agent.tools.content_spill import (
-        chunked_spill_instruction,
-        should_spill,
-        spill_chunked,
-    )
-
     doc_id = require_doc_id()
     svc = services()
     docs = svc.docs_service()
@@ -1089,17 +1077,10 @@ async def read_tab(params: ReadTabInput) -> ReadTabOutput:
     tab_id, tab = find_tab_by_id(doc, params.tab_id)
     content = extract_tab_text(tab)
 
-    content_path: str | None = None
-    if should_spill(content):
-        envelope = spill_chunked("read_tab", f"{doc_id}_{tab_id}", content)
-        content_path = envelope.path
-        content = chunked_spill_instruction(envelope)
-
     return ReadTabOutput(
         doc_id=doc_id,
         tab_id=tab_id,
         content=content,
-        content_path=content_path,
     )
 
 

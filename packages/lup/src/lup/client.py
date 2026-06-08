@@ -62,6 +62,7 @@ Examples:
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -92,9 +93,15 @@ from claude_agent_sdk.types import (
 )
 from pydantic import BaseModel, ValidationError
 
+from lup.hooks import create_large_read_hook, create_read_limit_hook, merge_hooks
 from lup.trace import TraceLogger, active_agents, print_message
 
 type HeartbeatCallback = Callable[[float], Coroutine[None, None, None]]
+type BlockCallback = Callable[[ContentBlock, str], Coroutine[None, None, None]]
+
+active_block_callback: contextvars.ContextVar[BlockCallback | None] = contextvars.ContextVar(
+    "active_block_callback", default=None
+)
 
 
 class TokenUsage(TypedDict, total=False):
@@ -118,6 +125,40 @@ JsonSchema = dict[str, object]
 
 OutputFormat = dict[str, str | JsonSchema]
 """SDK output format dict (e.g. ``{"type": "json_schema", "schema": ...}``)."""
+
+
+# ---------------------------------------------------------------------------
+# JSON extraction from text fallback
+# ---------------------------------------------------------------------------
+
+
+def extract_json_object(text: str) -> object | None:  # claude: ignore
+    """Try to pull a JSON object from *text*.
+
+    Checks fenced code blocks first (```json ... ```), then falls back to
+    finding the outermost ``{ ... }`` pair.  Returns the parsed object on
+    success, ``None`` on failure.
+    """
+    fence_start = text.find("```json")
+    if fence_start != -1:
+        content_start = text.index("\n", fence_start) + 1
+        fence_end = text.find("```", content_start)
+        if fence_end != -1:
+            try:
+                return json.loads(text[content_start:fence_end])
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    brace = text.find("{")
+    if brace == -1:
+        return None
+    rbrace = text.rfind("}")
+    if rbrace <= brace:
+        return None
+    try:
+        return json.loads(text[brace : rbrace + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +194,7 @@ class ResponseCollector:
         prefix: str = "",
         heartbeat: HeartbeatCallback | None = None,
         heartbeat_interval: float = 30.0,
+        block_callback: BlockCallback | None = None,
     ) -> None:
         self.client = client
         self.blocks: list[ContentBlock] = []
@@ -163,6 +205,7 @@ class ResponseCollector:
         self.prefix = prefix
         self.heartbeat = heartbeat
         self.heartbeat_interval = heartbeat_interval
+        self.block_callback = block_callback
 
     @property
     def text(self) -> str | None:
@@ -179,11 +222,20 @@ class ResponseCollector:
 
         Handles the SDK wrapping bug where the agent produces
         ``{"output": <actual_data>}`` instead of ``<actual_data>`` directly.
-        Returns ``None`` when the agent produced no structured output.
+
+        Falls back to extracting JSON from the text response when the model
+        emits the schema-conformant object as text instead of through the
+        structured output channel.
+
+        Returns ``None`` when no valid output can be extracted.
         """
-        if self.result is None or not self.result.structured_output:
+        data = (
+            self.result.structured_output
+            if self.result is not None and self.result.structured_output
+            else extract_json_object(self.text or "")
+        )
+        if data is None:
             return None
-        data = self.result.structured_output
         try:
             return output_type.model_validate(data)
         except ValidationError:
@@ -260,6 +312,14 @@ class ResponseCollector:
                     prefix=self.prefix,
                     trace=self.trace_logger,
                 )
+                if self.block_callback is not None:
+                    blocks: list[ContentBlock] = []
+                    match message:
+                        case AssistantMessage() | UserMessage():
+                            if isinstance(message.content, list):
+                                blocks = message.content
+                    for block in blocks:
+                        await self.block_callback(block, self.prefix)
         finally:
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
@@ -378,6 +438,8 @@ async def build_client(
             "no-session-persistence": None,
             **(extra_args or {}),
         }
+        default_hooks = merge_hooks(create_large_read_hook(), create_read_limit_hook())
+        merged_hooks = merge_hooks(default_hooks, hooks) if hooks else default_hooks
         options = ClaudeAgentOptions(
             model=model,
             system_prompt=system_prompt,
@@ -391,7 +453,7 @@ async def build_client(
             max_budget_usd=max_budget_usd,
             output_format=output_format,
             extra_args=merged_extra,
-            hooks=hooks,
+            hooks=merged_hooks,
             include_partial_messages=True,
         )
 
@@ -430,6 +492,7 @@ async def query(
     hooks: dict[HookEvent, list[HookMatcher]] | None = ...,
     heartbeat: HeartbeatCallback | None = ...,
     heartbeat_interval: float = ...,
+    block_callback: BlockCallback | None = ...,
 ) -> ResponseCollector: ...
 
 
@@ -458,6 +521,7 @@ async def query[T: BaseModel](
     hooks: dict[HookEvent, list[HookMatcher]] | None = ...,
     heartbeat: HeartbeatCallback | None = ...,
     heartbeat_interval: float = ...,
+    block_callback: BlockCallback | None = ...,
 ) -> T | None: ...
 
 
@@ -485,6 +549,7 @@ async def query(
     hooks: dict[HookEvent, list[HookMatcher]] | None = None,
     heartbeat: HeartbeatCallback | None = None,
     heartbeat_interval: float = 30.0,
+    block_callback: BlockCallback | None = None,
 ) -> ResponseCollector | BaseModel | None:
     """Query an SDK client and collect the full response.
 
@@ -514,6 +579,8 @@ async def query(
         elif system_prompt is None:
             system_prompt = schema_hint.lstrip()
 
+    resolved_callback = block_callback or active_block_callback.get()
+
     async with build_client(
         options=options,
         model=model,
@@ -537,6 +604,7 @@ async def query(
             trace_logger=trace_logger,
             heartbeat=heartbeat,
             heartbeat_interval=heartbeat_interval,
+            block_callback=resolved_callback,
         )
         await collector.collect()
 

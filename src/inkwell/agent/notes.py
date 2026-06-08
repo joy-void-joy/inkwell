@@ -5,7 +5,8 @@ read and write through PipelineNotes. Organized by category:
 
   notes/
   ├── artifacts/      # Typed pipeline artifacts (plan, research, voice)
-  ├── comments/       # Classified author comments
+  ├── comments/       # Classified author comments (live feedback)
+  ├── directions/     # Pre-existing GDoc comments treated as input context
   ├── drafts/         # Section drafts, merged article, final output
   ├── feedback/       # Rendered feedback files for stage consumption
   ├── research/       # Research notes triggered by comments
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from inkwell.agent.content import ContentEnvelope, build_envelope
 from inkwell.agent.models import ClassifiedComment
 
 logger = logging.getLogger(__name__)
@@ -54,12 +56,14 @@ class PipelineNotes:
         self.terminal_dir = base_dir / "terminal"
         self.drafts_dir = base_dir / "drafts"
         self.feedback_dir = base_dir / "feedback"
+        self.directions_dir = base_dir / "directions"
         self.processed_dir = base_dir / "processed"
         self.lock = asyncio.Lock()
 
         for d in (
             self.artifacts_dir,
             self.comments_dir,
+            self.directions_dir,
             self.drafts_dir,
             self.feedback_dir,
             self.research_dir,
@@ -74,6 +78,24 @@ class PipelineNotes:
     def draft_path(self, slug: str) -> Path:
         """Return path for a draft file: ``drafts/{slug}.md``."""
         return self.drafts_dir / f"{slug}.md"
+
+    def save_directions(self, rendered: str) -> Path:
+        """Save pre-existing GDoc comments as author directions.
+
+        These are treated as input context (like the conversation itself),
+        not as live feedback. Saved once during extract; injected into the
+        plan stage prompt so downstream stages inherit them through the plan.
+        """
+        path = self.directions_dir / "author_directions.md"
+        path.write_text(rendered, encoding="utf-8")
+        return path
+
+    def load_directions(self) -> str:
+        """Load author directions, or empty string if none exist."""
+        path = self.directions_dir / "author_directions.md"
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
 
     async def add_comment(self, classified: ClassifiedComment) -> None:
         """Write a classified comment to notes/comments/."""
@@ -294,3 +316,85 @@ class PipelineNotes:
         path = self.feedback_dir / f"{stage}.md"
         path.write_text(content or "(No feedback yet.)", encoding="utf-8")
         return path
+
+    # -- Content registry ---------------------------------------------------
+
+    def registry_path(self) -> Path:
+        return self.artifacts_dir / "content_registry.json"
+
+    def load_registry(self) -> list[ContentEnvelope]:
+        path = self.registry_path()
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return [ContentEnvelope.model_validate(item) for item in data]
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Failed to read content registry; starting fresh")
+            return []
+
+    def save_registry(self, registry: list[ContentEnvelope]) -> None:
+        path = self.registry_path()
+        path.write_text(
+            json.dumps([e.model_dump() for e in registry], indent=2),
+            encoding="utf-8",
+        )
+
+    async def register_content(self, envelope: ContentEnvelope) -> None:
+        """Append an envelope to the registry, deduplicating by (label, stage)."""
+        async with self.lock:
+            registry = self.load_registry()
+            registry = [
+                e for e in registry
+                if not (e.label == envelope.label and e.stage == envelope.stage)
+            ]
+            registry.append(envelope)
+            self.save_registry(registry)
+
+    def query_content(
+        self,
+        label: str | None = None,
+        stage: str | None = None,
+        content_type: str | None = None,
+    ) -> list[ContentEnvelope]:
+        """Filter the registry by label, stage, and/or content_type."""
+        registry = self.load_registry()
+        results = registry
+        if label is not None:
+            results = [e for e in results if e.label == label]
+        if stage is not None:
+            results = [e for e in results if e.stage == stage]
+        if content_type is not None:
+            results = [e for e in results if e.content_type == content_type]
+        return results
+
+    async def save_content(
+        self,
+        name: str,
+        content: str,
+        stage: str,
+        content_type: str,
+        label: str | None = None,
+        ext: str = "md",
+    ) -> ContentEnvelope:
+        """Save a text artifact and register its envelope.
+
+        Wraps save_text_artifact + register_content + build_envelope.
+        """
+        path = self.save_text_artifact(name, content, ext=ext)
+        envelope = build_envelope(
+            label=label or name,
+            stage=stage,
+            content_type=content_type,
+            path=path,
+            content=content,
+        )
+        await self.register_content(envelope)
+        return envelope
+
+    async def clear_registry_for_stage(self, stage: str) -> None:
+        """Remove registry entries for a stage (used on pipeline restart)."""
+        async with self.lock:
+            registry = self.load_registry()
+            registry = [e for e in registry if e.stage != stage]
+            self.save_registry(registry)

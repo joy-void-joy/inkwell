@@ -7,7 +7,7 @@ Requires Google OAuth credentials configured via `inkwell setup`.
 """
 
 # claude: ignore
-# pyright: reportAttributeAccessIssue=false, reportIndexIssue=false
+# pyright: reportAttributeAccessIssue=false, reportIndexIssue=false, reportMissingImports=false
 # googleapiclient returns untyped Resource objects throughout.
 
 from __future__ import annotations
@@ -161,6 +161,10 @@ class ReadTabOutput(BaseModel):
     doc_id: str = Field(description="Google Doc ID")
     tab_id: str = Field(description="Tab that was read")
     content: str = Field(description="Tab content as plain text")
+    content_path: str | None = Field(
+        default=None,
+        description="Path to full content file when content was too large to return inline",
+    )
 
 
 class InsertCommentInput(BaseModel):
@@ -220,6 +224,43 @@ class TabInfo(BaseModel):
 class ListTabsOutput(BaseModel):
     doc_id: str = Field(description="Google Doc ID")
     tabs: list[TabInfo] = Field(description="All tabs in the doc")
+
+
+class InsertImageInput(BaseModel):
+    file_path: str = Field(
+        description="Path to image file in /shared/ directory (e.g. '/shared/chart.png')"
+    )
+    tab_id: str = Field(description="Tab ID to insert the image into")
+    alt_text: str = Field(default="", description="Alt text for accessibility")
+    width_pts: int = Field(
+        default=400,
+        description="Image width in points (72pt = 1 inch). Height is computed from aspect ratio.",
+    )
+
+
+class InsertImageOutput(BaseModel):
+    doc_id: str = Field(description="Google Doc ID")
+    drive_file_id: str = Field(description="Google Drive file ID of the uploaded image")
+    image_url: str = Field(description="Public URL of the uploaded image")
+
+
+class RenderEquationInput(BaseModel):
+    latex: str = Field(
+        description="LaTeX math expression (e.g. 'E = mc^2' or '\\\\frac{a}{b}')"
+    )
+    tab_id: str = Field(description="Tab ID to insert the rendered equation into")
+    display: bool = Field(
+        default=False,
+        description="True for display mode (centered, larger), False for inline",
+    )
+
+
+class RenderEquationOutput(BaseModel):
+    doc_id: str = Field(description="Google Doc ID")
+    drive_file_id: str = Field(
+        description="Google Drive file ID of the rendered equation"
+    )
+    latex: str = Field(description="The LaTeX expression that was rendered")
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +421,10 @@ def _is_ordered_list(tab: object, list_id: str, nesting_level: int) -> bool:
     if not isinstance(level, dict):
         return False
     glyph_type = level.get("glyphType", "")
-    return isinstance(glyph_type, str) and glyph_type not in ("", "GLYPH_TYPE_UNSPECIFIED")
+    return isinstance(glyph_type, str) and glyph_type not in (
+        "",
+        "GLYPH_TYPE_UNSPECIFIED",
+    )
 
 
 def get_tab_end_index(tab: object) -> int:
@@ -403,9 +447,7 @@ def get_tab_end_index(tab: object) -> int:
     return end
 
 
-def search_tabs_recursive(
-    tabs: list[object], tab_id: str
-) -> tuple[str, object] | None:
+def search_tabs_recursive(tabs: list[object], tab_id: str) -> tuple[str, object] | None:
     """Recursively search tabs and their children for a tab ID."""
     for tab in tabs:
         if not isinstance(tab, dict):
@@ -456,14 +498,44 @@ async def do_create_doc(
     share_with: str | None = None,
     session_state: WritingSessionState | None = None,
 ) -> tuple[str, str]:
-    """Create a Google Doc. Returns (doc_id, url)."""
+    """Create a Google Doc. Returns (doc_id, url).
+
+    Sets default permissions:
+    - Anyone with the link can comment
+    - Anyone in the Google Workspace domain can edit (if domain configured)
+    - Named user gets editor access (if share_with provided)
+    """
+    from inkwell.agent.config import settings
+
     svc = services()
     docs = svc.docs_service()
     result = await execute_with_retry(docs.documents().create(body={"title": title}))
     doc_id = result["documentId"]
 
+    drive = svc.drive_service()
+
+    await execute_with_retry(
+        drive.permissions().create(
+            fileId=doc_id,
+            body={"type": "anyone", "role": "commenter"},
+            sendNotificationEmail=False,
+        )
+    )
+
+    if settings.google_workspace_domain:
+        await execute_with_retry(
+            drive.permissions().create(
+                fileId=doc_id,
+                body={
+                    "type": "domain",
+                    "role": "writer",
+                    "domain": settings.google_workspace_domain,
+                },
+                sendNotificationEmail=False,
+            )
+        )
+
     if share_with:
-        drive = svc.drive_service()
         await execute_with_retry(
             drive.permissions().create(
                 fileId=doc_id,
@@ -488,9 +560,7 @@ async def do_rename_doc(doc_id: str, title: str) -> None:
     """Rename a Google Doc via Drive API."""
     svc = services()
     drive = svc.drive_service()
-    await execute_with_retry(
-        drive.files().update(fileId=doc_id, body={"name": title})
-    )
+    await execute_with_retry(drive.files().update(fileId=doc_id, body={"name": title}))
 
 
 def truncate_tab_title(name: str) -> str:
@@ -633,12 +703,49 @@ async def do_insert_comment(
     return comment_id
 
 
+class CommentSpec(BaseModel):
+    content: str
+    anchor_text: str | None = None
+
+
+async def do_insert_comments_batch(
+    doc_id: str,
+    comments: list[CommentSpec],
+    session_state: WritingSessionState | None = None,
+) -> list[str]:
+    """Insert multiple comments concurrently. Returns list of comment IDs."""
+    if not comments:
+        return []
+
+    async def insert_one(spec: CommentSpec) -> str:
+        return await do_insert_comment(
+            doc_id,
+            spec.content,
+            anchor_text=spec.anchor_text,
+            session_state=session_state,
+        )
+
+    results = await asyncio.gather(
+        *(insert_one(spec) for spec in comments),
+        return_exceptions=True,
+    )
+    ids: list[str] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning("Batch comment failed: %s", result)
+            ids.append("")
+        else:
+            ids.append(result)
+    return ids
+
+
 async def do_fetch_comments(
     doc_id: str,
     *,
     exclude_ids: set[str] | None = None,
+    include_resolved: bool = False,
 ) -> list[CommentEntry]:
-    """Fetch all unresolved comments from any Google Doc by ID."""
+    """Fetch comments from any Google Doc by ID."""
     svc = services()
     drive = svc.drive_service()
     skip = exclude_ids or set()
@@ -658,7 +765,7 @@ async def do_fetch_comments(
         for item in result.get("comments", []):
             if not isinstance(item, dict):
                 continue
-            if item.get("resolved", False):
+            if not include_resolved and item.get("resolved", False):
                 continue
             comment_id = str(item.get("id", ""))
             if comment_id in skip:
@@ -690,7 +797,7 @@ async def do_fetch_comments(
                     content=str(item.get("content", "")),
                     anchor_text=anchor,
                     replies=replies,
-                    resolved=False,
+                    resolved=bool(item.get("resolved", False)),
                 )
             )
 
@@ -756,6 +863,87 @@ async def do_read_tab(
     return extract_tab_text(tab)
 
 
+async def do_insert_image(
+    doc_id: str,
+    tab_id: str,
+    host_path: str,
+    width_pts: int = 400,
+) -> tuple[str, str]:
+    """Upload an image to Drive and insert it into a Google Doc tab.
+
+    Returns (drive_file_id, image_url).
+    """
+    from pathlib import Path
+
+    from googleapiclient.http import MediaFileUpload
+    from PIL import Image
+
+    path = Path(host_path)
+    if not path.exists():
+        raise ToolError(f"Image file not found: {host_path}")
+
+    with Image.open(path) as img:
+        w, h = img.size
+    height_pts = int(width_pts * h / w) if w > 0 else width_pts
+
+    svc = services()
+    drive = svc.drive_service()
+
+    file_metadata: dict[str, str] = {"name": path.name, "mimeType": "image/png"}
+    media = MediaFileUpload(str(path), mimetype="image/png", resumable=False)
+    uploaded = await execute_with_retry(
+        drive.files().create(body=file_metadata, media_body=media, fields="id")
+    )
+    drive_file_id: str = uploaded["id"]
+
+    await execute_with_retry(
+        drive.permissions().create(
+            fileId=drive_file_id,
+            body={"type": "anyone", "role": "reader"},
+            sendNotificationEmail=False,
+        )
+    )
+
+    image_url = f"https://drive.google.com/uc?id={drive_file_id}"
+
+    docs = svc.docs_service()
+    doc = await execute_with_retry(
+        docs.documents().get(documentId=doc_id, includeTabsContent=True)
+    )
+    _, tab = find_tab_by_id(doc, tab_id)
+    end_index = get_tab_end_index(tab)
+    insert_index = max(1, end_index - 1)
+
+    requests_body: list[dict[str, object]] = [
+        {
+            "insertInlineImage": {
+                "uri": image_url,
+                "objectSize": {
+                    "width": {"magnitude": width_pts, "unit": "PT"},
+                    "height": {"magnitude": height_pts, "unit": "PT"},
+                },
+                "location": {"index": insert_index, "tabId": tab_id},
+            }
+        }
+    ]
+
+    await execute_with_retry(
+        docs.documents().batchUpdate(
+            documentId=doc_id, body={"requests": requests_body}
+        )
+    )
+
+    logger.info(
+        "Inserted image %s into tab %s (%dx%d pt)",
+        path.name,
+        tab_id,
+        width_pts,
+        height_pts,
+    )
+
+    return drive_file_id, image_url
+
+
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
@@ -811,9 +999,17 @@ async def write_tab(params: WriteTabInput) -> WriteTabOutput:
 @lup_tool(
     "Read the content of a tab in the Google Doc. Use this to read section "
     "drafts before merging, to check what's been written, or to read the "
-    "current state of any tab. Returns plain text content."
+    "current state of any tab. Returns plain text content. For large tabs "
+    "(>~4000 words), writes content to a file and returns the path — use "
+    "Read to access the full text."
 )
 async def read_tab(params: ReadTabInput) -> ReadTabOutput:
+    from inkwell.agent.tools.content_spill import (
+        chunked_spill_instruction,
+        should_spill,
+        spill_chunked,
+    )
+
     doc_id = require_doc_id()
     svc = services()
     docs = svc.docs_service()
@@ -828,10 +1024,17 @@ async def read_tab(params: ReadTabInput) -> ReadTabOutput:
     tab_id, tab = find_tab_by_id(doc, params.tab_id)
     content = extract_tab_text(tab)
 
+    content_path: str | None = None
+    if should_spill(content):
+        envelope = spill_chunked("read_tab", f"{doc_id}_{tab_id}", content)
+        content_path = envelope.path
+        content = chunked_spill_instruction(envelope)
+
     return ReadTabOutput(
         doc_id=doc_id,
         tab_id=tab_id,
         content=content,
+        content_path=content_path,
     )
 
 
@@ -991,9 +1194,7 @@ async def update_overview(params: UpdateOverviewInput) -> UpdateOverviewOutput:
                         )
                         _, matched_tab = find_tab_by_id(doc, overview_tab_id)
                         actual_end = get_tab_end_index(matched_tab)
-                        clamped = clamp_ranges(
-                            ov_batch["formatting"], actual_end
-                        )
+                        clamped = clamp_ranges(ov_batch["formatting"], actual_end)
                         if clamped:
                             await execute_with_retry(
                                 docs.documents().batchUpdate(
@@ -1214,7 +1415,7 @@ async def read_directions(_params: ReadDirectionsInput) -> ReadDirectionsOutput:
         if content != last:
             has_changes = True
             if last and content.startswith(last):
-                new_content = content[len(last):]
+                new_content = content[len(last) :]
             else:
                 new_content = content
             state.last_directions_content = content
@@ -1230,6 +1431,112 @@ async def read_directions(_params: ReadDirectionsInput) -> ReadDirectionsOutput:
     )
 
 
+@lup_tool(
+    "Insert an image from the /shared/ directory into a Google Doc tab. The image "
+    "must already exist on disk — create it using execute_code (matplotlib, PIL, etc.) "
+    "and save to /shared/. The tool uploads the image to Google Drive and inserts it "
+    "inline at the end of the tab content. Use for charts, diagrams, rendered "
+    "equations, or any visual content."
+)
+async def insert_image(params: InsertImageInput) -> InsertImageOutput:
+    doc_id = require_doc_id()
+
+    state = get_session_state()
+    if state is None or state.shared_dir is None:
+        raise ToolError(
+            "Sandbox not available — cannot resolve /shared/ path. "
+            "Images must be created via execute_code in the sandbox."
+        )
+    relative = params.file_path.lstrip("/")
+    if relative.startswith("shared/"):
+        relative = relative[len("shared/") :]
+    host_path = str(state.shared_dir / relative)
+
+    drive_file_id, image_url = await do_insert_image(
+        doc_id,
+        params.tab_id,
+        host_path,
+        width_pts=params.width_pts,
+    )
+    return InsertImageOutput(
+        doc_id=doc_id,
+        drive_file_id=drive_file_id,
+        image_url=image_url,
+    )
+
+
+def render_latex_to_png(latex: str, output_path: str, *, display: bool = False) -> None:
+    """Render a LaTeX expression to a PNG file using matplotlib's mathtext."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fontsize = 16 if display else 13
+    fig, ax = plt.subplots(figsize=(0.01, 0.01))
+    ax.axis("off")
+    wrapped = f"${latex}$" if not latex.startswith("$") else latex
+    ax.text(
+        0,
+        0,
+        wrapped,
+        fontsize=fontsize,
+        color="black",
+        verticalalignment="center",
+    )
+    fig.savefig(
+        output_path,
+        dpi=150,
+        bbox_inches="tight",
+        transparent=False,
+        pad_inches=0.05,
+        facecolor="white",
+    )
+    plt.close(fig)
+
+
+@lup_tool(
+    "Render a LaTeX math expression and insert it as an image in a Google Doc tab. "
+    "Use for equations, formulas, and mathematical notation in Google Docs output. "
+    "For markdown-native formats (LessWrong, blog), use $...$ notation directly in "
+    "the text instead — those platforms render LaTeX natively via KaTeX."
+)
+async def render_equation(params: RenderEquationInput) -> RenderEquationOutput:
+    import hashlib
+    from pathlib import Path
+
+    doc_id = require_doc_id()
+
+    state = get_session_state()
+    if state is None or state.shared_dir is None:
+        raise ToolError(
+            "Sandbox not available — cannot render equations without /shared/ directory."
+        )
+
+    eq_hash = hashlib.md5(params.latex.encode()).hexdigest()[:8]
+    filename = f"eq_{eq_hash}.png"
+    host_path = str(state.shared_dir / filename)
+
+    render_latex_to_png(params.latex, host_path, display=params.display)
+
+    if not Path(host_path).exists():
+        raise ToolError(f"Failed to render equation: {params.latex}")
+
+    width = 200 if params.display else 120
+    drive_file_id, _ = await do_insert_image(
+        doc_id,
+        params.tab_id,
+        host_path,
+        width_pts=width,
+    )
+
+    return RenderEquationOutput(
+        doc_id=doc_id,
+        drive_file_id=drive_file_id,
+        latex=params.latex,
+    )
+
+
 GOOGLE_DOCS_TOOLS = [
     create_doc,
     create_tab,
@@ -1241,4 +1548,6 @@ GOOGLE_DOCS_TOOLS = [
     list_tabs,
     attach_doc,
     read_directions,
+    insert_image,
+    render_equation,
 ]

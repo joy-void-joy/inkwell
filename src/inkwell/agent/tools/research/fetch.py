@@ -5,7 +5,9 @@ Handles HTML, PDF, plain text, and JSON responses.
 """
 
 import hashlib
+import json
 import logging
+import re
 from pathlib import Path
 
 import httpx
@@ -25,50 +27,59 @@ USER_AGENT = (
 )
 
 
-class FetchUrlInput(BaseModel):
+def github_blob_to_raw(url: str) -> str | None:
+    """Rewrite a GitHub blob URL to raw.githubusercontent.com."""
+    m = re.match(r"https?://github\.com/([^/]+/[^/]+)/blob/(.+)", url)
+    if m:
+        return f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}"
+    return None
+
+
+class FetchSourceInput(BaseModel):
     url: str = Field(description="URL to fetch and extract text from")
 
 
-class FetchUrlOutput(BaseModel):
+class FetchSourceOutput(BaseModel):
     url: str = Field(description="Fetched URL")
     format: str = Field(description="Content format: 'text', 'pdf', 'json'")
     title: str = Field(default="", description="Page title if available")
     content: str = Field(description="Extracted text content")
+    word_count: int = Field(default=0, description="Approximate word count of extracted content")
     pdf_path: str | None = Field(
         default=None, description="Path to downloaded PDF (PDF format only)"
     )
+    content_path: str | None = Field(
+        default=None,
+        description="Path to full content file when content was too large to return inline",
+    )
 
 
-@lup_tool(
-    "Fetch a URL and extract its text content. Works with web pages, "
-    "PDFs, plain text, and JSON. For web pages, uses trafilatura to "
-    "extract the article text, stripping navigation and ads. Use this "
-    "after finding interesting URLs via exa_search or search_arxiv to "
-    "read the full content. Returns clean, readable text."
-)
-async def fetch_url(params: FetchUrlInput) -> FetchUrlOutput:
+async def do_fetch_source(url: str) -> FetchSourceOutput:
+    """Fetch a URL and extract text. Callable from both MCP tools and Python."""
+    resolved_url = github_blob_to_raw(url) or url
+
     try:
         async with httpx.AsyncClient(
             timeout=20.0,
             follow_redirects=True,
             headers={"User-Agent": USER_AGENT},
         ) as client:
-            resp = await client.get(params.url)
+            resp = await client.get(resolved_url)
     except httpx.TimeoutException as e:
-        raise ToolError(f"Timeout fetching {params.url}") from e
+        raise ToolError(f"Timeout fetching {url}") from e
     except httpx.ConnectError as e:
-        raise ToolError(f"Could not connect to {params.url}") from e
+        raise ToolError(f"Could not connect to {url}") from e
     except httpx.HTTPError as e:
-        raise ToolError(f"HTTP error fetching {params.url}: {e}") from e
+        raise ToolError(f"HTTP error fetching {url}: {e}") from e
 
     if 400 <= resp.status_code < 500:
         raise ToolError(
-            f"HTTP {resp.status_code} for {params.url}. "
+            f"HTTP {resp.status_code} for {url}. "
             "Try exa_search for cached content."
         )
     if resp.status_code >= 500:
         raise ToolError(
-            f"Server error {resp.status_code} for {params.url}. Try again later."
+            f"Server error {resp.status_code} for {url}. Try again later."
         )
 
     ct = resp.headers.get("content-type", "")
@@ -80,21 +91,34 @@ async def fetch_url(params: FetchUrlInput) -> FetchUrlOutput:
             )
         target = DOWNLOADS_DIR / "pdf"
         target.mkdir(parents=True, exist_ok=True)
-        slug = hashlib.sha256(params.url.encode()).hexdigest()[:12]
+        slug = hashlib.sha256(url.encode()).hexdigest()[:12]
         pdf_path = target / f"{slug}.pdf"
         pdf_path.write_bytes(resp.content)
-        return FetchUrlOutput(
-            url=params.url,
+        return FetchSourceOutput(
+            url=url,
             format="pdf",
             content=f"PDF downloaded to {pdf_path.resolve()}. Use Read to read it.",
             pdf_path=str(pdf_path.resolve()),
         )
 
     if "text/plain" in ct or "application/json" in ct:
-        return FetchUrlOutput(
-            url=params.url,
+        text = resp.text
+        return FetchSourceOutput(
+            url=url,
             format="json" if "json" in ct else "text",
-            content=resp.text[:15000],
+            content=text,
+            word_count=len(text.split()),
+        )
+
+    if resolved_url != url:
+        text = resp.text
+        title = resolved_url.rsplit("/", 1)[-1]
+        return FetchSourceOutput(
+            url=url,
+            format="text",
+            title=title,
+            content=text,
+            word_count=len(text.split()),
         )
 
     extracted = trafilatura.extract(
@@ -105,27 +129,162 @@ async def fetch_url(params: FetchUrlInput) -> FetchUrlOutput:
         include_links=True,
     )
     if extracted:
-        title = trafilatura.extract(
+        title_json = trafilatura.extract(
             resp.text, output_format="json", include_links=False
         )
         title_str = ""
-        if title:
-            import json
-
+        if title_json:
             try:
-                title_str = json.loads(title).get("title", "")
+                title_str = json.loads(title_json).get("title", "")
             except (json.JSONDecodeError, AttributeError):
                 pass
-        return FetchUrlOutput(
-            url=params.url,
+        return FetchSourceOutput(
+            url=url,
             format="text",
             title=title_str,
-            content=extracted[:15000],
+            content=extracted,
+            word_count=len(extracted.split()),
         )
 
     raise ToolError(
-        f"Could not extract text from {params.url}. Try exa_search for indexed content."
+        f"Could not extract text from {url}. Try exa_search for indexed content."
     )
 
 
-FETCH_TOOLS = [fetch_url]
+@lup_tool(
+    "Fetch a URL and extract its text content. Works with web pages, "
+    "PDFs, plain text, JSON, and GitHub file URLs. For web pages, extracts "
+    "the article text stripping navigation and ads. For GitHub blob URLs, "
+    "automatically fetches the raw file content. Use this whenever you "
+    "encounter a URL you need to read — in source material, author "
+    "feedback, GDoc comments, or research results. Returns clean text "
+    "with title and word count. For large pages (>~4000 words), writes "
+    "content to a file and returns the path — use Read to access the "
+    "full text."
+)
+async def fetch_source(params: FetchSourceInput) -> FetchSourceOutput:
+    from inkwell.agent.tools.content_spill import (
+        chunked_spill_instruction,
+        should_spill,
+        spill_chunked,
+    )
+
+    result = await do_fetch_source(params.url)
+    if should_spill(result.content):
+        envelope = spill_chunked("fetch", params.url, result.content)
+        result = result.model_copy(update={
+            "content_path": envelope.path,
+            "content": chunked_spill_instruction(envelope),
+        })
+    return result
+
+
+fetch_url = fetch_source
+
+EXTRACT_THRESHOLD_WORDS = 1000
+
+FOCUSED_EXTRACT_SYSTEM = """\
+You extract the relevant parts of a web page given a focus question.
+
+Rules:
+- Return ONLY the parts that answer or relate to the focus question
+- Preserve exact quotes, numbers, names, and specific claims
+- Include enough surrounding context that the extract stands alone
+- If the page has nothing relevant, say so in one sentence
+- Target 200-400 words. Go longer only if precision demands it
+- Do NOT add commentary, analysis, or answers — just extract the relevant source text"""
+
+
+class FocusedExtract(BaseModel):
+    extract: str = Field(
+        description="The relevant passages and information, preserving key details and quotes"
+    )
+
+
+class FetchAndExtractInput(BaseModel):
+    url: str = Field(description="URL to fetch")
+    focus: str = Field(
+        description=(
+            "What you need from this page — a question, topic, or context "
+            "about why you're reading it. The extraction will return only "
+            "the parts relevant to this focus."
+        )
+    )
+
+
+class FetchAndExtractOutput(BaseModel):
+    url: str = Field(description="Fetched URL")
+    title: str = Field(default="", description="Page title if available")
+    extract: str = Field(
+        description="Focused extract — the parts relevant to your focus question"
+    )
+    word_count: int = Field(default=0, description="Word count of the extract")
+    was_truncated: bool = Field(
+        default=False,
+        description="True if content was long enough to require extraction",
+    )
+
+
+async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:
+    """Fetch a URL and extract only the parts relevant to focus."""
+    from lup.client import query
+
+    source = await do_fetch_source(url)
+
+    if source.format == "pdf":
+        return FetchAndExtractOutput(
+            url=url,
+            title=source.title,
+            extract=source.content,
+            word_count=source.word_count,
+        )
+
+    if source.word_count <= EXTRACT_THRESHOLD_WORDS:
+        return FetchAndExtractOutput(
+            url=url,
+            title=source.title,
+            extract=source.content,
+            word_count=source.word_count,
+        )
+
+    result = await query(
+        f"Focus: {focus}\n\n<page_content>\n{source.content}\n</page_content>",
+        model="claude-opus-4-6",
+        system_prompt=FOCUSED_EXTRACT_SYSTEM,
+        output_type=FocusedExtract,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        tools=[],
+    )
+
+    if result is None:
+        truncated = source.content[:6000]
+        return FetchAndExtractOutput(
+            url=url,
+            title=source.title,
+            extract=truncated,
+            word_count=len(truncated) // 5,
+            was_truncated=True,
+        )
+
+    return FetchAndExtractOutput(
+        url=url,
+        title=source.title,
+        extract=result.extract,
+        word_count=len(result.extract) // 5,
+        was_truncated=True,
+    )
+
+
+@lup_tool(
+    "Fetch a URL and extract only the parts relevant to a specific focus. "
+    "Use this instead of fetch_source when you have a specific question about "
+    "a linked page — e.g. a URL in author feedback, a reference in a comment, "
+    "or a citation you need to verify. Returns a focused extract (200-400 words) "
+    "rather than the full page. For full source ingestion, use fetch_source instead."
+)
+async def fetch_and_extract(params: FetchAndExtractInput) -> FetchAndExtractOutput:
+    return await do_fetch_and_extract(params.url, params.focus)
+
+
+FETCH_TOOLS = [fetch_source, fetch_and_extract]

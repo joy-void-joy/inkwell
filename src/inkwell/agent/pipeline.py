@@ -2339,7 +2339,9 @@ class PipelineRunner:
         self.snapshot.conversation = conversation
         self.snapshot.source_file_paths = all_source_paths
         self.snapshot.stage = "extract"
-        notes.save_text_artifact("conversation", conversation)
+        await notes.save_content(
+            "conversation", conversation, stage="extract", content_type="source",
+        )
         await self.save_snapshot()
 
         if source_doc_id:
@@ -2430,20 +2432,31 @@ class PipelineRunner:
             slug = slugify(label)
             if is_prescriptive and label in source_by_label:
                 raw = source_by_label[label]
-                path = notes.save_text_artifact(f"prescriptive_{presc_idx}_{slug}", raw)
+                envelope = await notes.save_content(
+                    f"prescriptive_{presc_idx}_{slug}", raw,
+                    stage="voice", content_type="prescriptive", label=label,
+                )
+                path = Path(envelope.path)
                 voice_tab_parts.append(f"## Prescriptive (auto): {label}\n\n{raw}")
                 presc_idx += 1
                 n_auto_prescriptive += 1
             else:
-                path = notes.save_text_artifact(f"voice_{n_voice}_{slug}", text)
+                envelope = await notes.save_content(
+                    f"voice_{n_voice}_{slug}", text,
+                    stage="voice", content_type="voice_analysis", label=label,
+                )
+                path = Path(envelope.path)
                 voice_tab_parts.append(f"## {label}\n\n{text}")
                 n_voice += 1
             voice_file_paths.append(str(path))
 
         for sample, source in explicit_prescriptive:
             slug = slugify(source)
-            path = notes.save_text_artifact(f"prescriptive_{presc_idx}_{slug}", sample)
-            voice_file_paths.append(str(path))
+            envelope = await notes.save_content(
+                f"prescriptive_{presc_idx}_{slug}", sample,
+                stage="voice", content_type="prescriptive", label=source,
+            )
+            voice_file_paths.append(envelope.path)
             voice_tab_parts.append(f"## Prescriptive: {source}\n\n{sample}")
             presc_idx += 1
 
@@ -2457,8 +2470,11 @@ class PipelineRunner:
             if label_entry:
                 continue
             slug = slugify(source)
-            path = notes.save_text_artifact(f"corpus_{i}_{slug}", sample)
-            voice_file_paths.append(str(path))
+            envelope = await notes.save_content(
+                f"corpus_{i}_{slug}", sample,
+                stage="voice", content_type="source", label=source,
+            )
+            voice_file_paths.append(envelope.path)
 
         self.snapshot.voice_file_paths = voice_file_paths
         self.snapshot.voice_profile = "individual"

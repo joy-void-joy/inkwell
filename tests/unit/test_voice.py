@@ -30,7 +30,7 @@ def style_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     corpus = tmp_path / "style"
     corpus.mkdir()
     monkeypatch.setattr(
-        "inkwell.agent.tools.voice.settings",
+        "inkwell.agent.config.settings",
         type("S", (), {"style_corpus_path": str(corpus)})(),
     )
     return corpus
@@ -89,7 +89,7 @@ class TestLoadStyleCorpus:
 
     async def test_nonexistent_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "inkwell.agent.tools.voice.settings",
+            "inkwell.agent.config.settings",
             type("S", (), {"style_corpus_path": "/nonexistent/path"})(),
         )
         samples, sources, source_types = await load_style_corpus()
@@ -454,8 +454,10 @@ class TestMergeVoiceAnalyses:
                 format_examples=[("good-post.md", "Example LW post content")],
             )
         prompt = mock_query.call_args[0][0]
-        assert "Format Reference Analyses" in prompt
-        assert "good-post.md" in prompt
+        assert "merge_input.md" in prompt
+        merge_input = Path(voice_cache_dir() / "merge_input.md").read_text(encoding="utf-8")
+        assert "Format Reference Analyses" in merge_input
+        assert "good-post.md" in merge_input
 
 
 class TestVoiceFingerprint:

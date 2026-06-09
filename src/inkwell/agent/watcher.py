@@ -227,3 +227,151 @@ def create_comment_watcher(
             "mcp__watcher__signal_restart",
         ],
     )
+
+
+SOURCE_WATCHER_SYSTEM_PROMPT = """\
+You are a source document watcher for a writing pipeline. The author's \
+original source material is a Google Doc. Each turn you receive new \
+comments from that source document. For each comment:
+
+1. Call poll_and_classify to classify the comment's impact
+2. Call acknowledge to reply on the source doc
+3. If the comment is plan-breaking, call signal_restart
+
+These comments are from the original source — not the output document. \
+Treat them as author intent signals: the author is annotating their own \
+material to guide what the pipeline should do with it.
+
+Process ALL comments in each batch. Be decisive.\
+"""
+
+
+def create_source_watcher_tools(
+    *,
+    session_state: WritingSessionState,
+    notes: PipelineNotes,
+    plan_breaking_signal: asyncio.Event,
+) -> list[LupMcpTool]:
+    """Create MCP tools for the Source Document Watcher."""
+
+    @lup_tool(
+        "Classify a source document comment's impact on the pipeline. "
+        "Uses a fast LLM call to determine impact level. "
+        "Also writes the classified comment to the shared notes system.",
+        name="poll_and_classify",
+    )
+    async def poll_and_classify(inp: PollInput) -> PollOutput:
+        task = (
+            f"Classify this author comment from the SOURCE document "
+            f"(the original material being turned into an article):\n\n"
+            f"Comment: {inp.content}\n"
+        )
+        if inp.anchor_text:
+            task += f"Anchored to: \"{inp.anchor_text}\"\n"
+        if inp.reply:
+            task += f"Reply to agent question: {inp.reply}\n"
+
+        classified = await query(
+            task,
+            output_type=ClassifiedComment,
+            model="claude-opus-4-6",
+            system_prompt=COMMENT_CLASSIFIER_PROMPT,
+            max_thinking_tokens=128_000 - 1,
+            permission_mode="bypassPermissions",
+            prefix="[source-classify] ",
+        )
+        if classified is None:
+            raise ToolError("Classification failed — no output from classifier")
+
+        classified.comment_id = inp.comment_id
+        classified.content = inp.content
+        classified.anchor_text = inp.anchor_text
+        classified.reply = inp.reply
+        classified.timestamp = datetime.now().isoformat()
+
+        await notes.add_comment(classified)
+        return PollOutput(classified=classified)
+
+    @lup_tool(
+        "Mark a source document comment as acknowledged. Does NOT post a "
+        "reply — the source document is read-only to the pipeline.",
+        name="acknowledge",
+    )
+    async def acknowledge(inp: AckInput) -> AckOutput:
+        return AckOutput(status="acknowledged")
+
+    @lup_tool(
+        "Signal the pipeline that plan-breaking feedback requires a restart. "
+        "Call this after classifying a comment as plan_breaking.",
+        name="signal_restart",
+    )
+    async def signal_restart(inp: SignalInput) -> SignalOutput:
+        logger.info("Plan-breaking signal (source doc): %s", inp.reason)
+        plan_breaking_signal.set()
+        return SignalOutput()
+
+    return [poll_and_classify, acknowledge, signal_restart]
+
+
+def create_source_watcher(
+    *,
+    session_state: WritingSessionState,
+    notes: PipelineNotes,
+    plan_breaking_signal: asyncio.Event,
+    poll_interval: float = 30.0,
+) -> BackgroundAgent:
+    """Create a Source Document Watcher BackgroundAgent.
+
+    Polls for new comments on the original source Google Doc, classifies
+    them, acknowledges them, and writes to PipelineNotes. Same feedback
+    loop as the output doc watcher but for the source material.
+    """
+    last_poll = [0.0]
+
+    def build_message() -> str | None:
+        import time
+
+        now = time.time()
+        if now - last_poll[0] < poll_interval:
+            return None
+        last_poll[0] = now
+
+        new_comments = session_state.get_new_source_comments_sync()
+        if not new_comments:
+            return None
+
+        lines = [f"New source document comments ({len(new_comments)}):"]
+        for c in new_comments:
+            lines.append("\n---")
+            lines.append(f"Comment ID: {c['comment_id']}")
+            lines.append(f"Content: {c['content']}")
+            if c["anchor_text"]:
+                lines.append(f"Anchored to: \"{c['anchor_text']}\"")
+            if c["reply"]:
+                lines.append(f"Reply: {c['reply']}")
+
+        lines.append(
+            "\nProcess each comment: classify → acknowledge → signal if plan-breaking."
+        )
+        return "\n".join(lines)
+
+    tools = create_source_watcher_tools(
+        session_state=session_state,
+        notes=notes,
+        plan_breaking_signal=plan_breaking_signal,
+    )
+
+    return BackgroundAgent(
+        name="source-watcher",
+        system_prompt=SOURCE_WATCHER_SYSTEM_PROMPT,
+        tools=extract_sdk_tools(tools),
+        build_message=build_message,
+        start_message="[Source watcher started — monitoring source Google Doc for author comments]",
+        model="claude-opus-4-6",
+        debounce_seconds=5.0,
+        allowed_tools=[
+            "mcp__source-watcher__poll_and_classify",
+            "mcp__source-watcher__acknowledge",
+            "mcp__source-watcher__signal_restart",
+        ],
+    )

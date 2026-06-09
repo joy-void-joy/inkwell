@@ -11,50 +11,52 @@ from pydantic import BaseModel, Field
 
 from lup.mcp import LupMcpTool, ToolError, lup_tool
 
-from inkwell.agent.models import ArticlePlan, ResearchCompilation
+from inkwell.agent.models import ArticlePlan, ResearchCompilation, ResearchFinding
+from inkwell.agent.tools.citations import BibliographyEntry
 
 logger = logging.getLogger(__name__)
 
 
-class QueryResearchInput(BaseModel):
-    section: str = Field(
-        default="",
+class EmptyInput(BaseModel):
+    pass
+
+
+class FindingSummary(BaseModel):
+    question: str
+    confidence: float
+    source_count: int
+
+
+class ListResearchOutput(BaseModel):
+    total_findings: int
+    findings: list[FindingSummary]
+    additional_context: str
+
+
+class ReadFindingInput(BaseModel):
+    questions: list[str] = Field(
         description=(
-            "Filter findings to those relevant to this section title. "
-            "Matches against the original research question text. "
-            "Leave empty to return all findings."
+            "Questions to look up (from list_research output). "
+            "Matches fuzzily — a substring of the original question works."
         ),
-    )
-    claim: str = Field(
-        default="",
-        description=(
-            "Search for findings related to this specific claim or topic. "
-            "Matches against question, answer, and data_points. "
-            "Leave empty to skip claim filtering."
-        ),
-    )
-    min_confidence: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="Only return findings with confidence >= this value",
     )
 
 
-class FindingResult(BaseModel):
+class FindingDetail(BaseModel):
     question: str
     answer: str
     confidence: float
-    source_count: int
     source_urls: list[str]
     data_points: list[str]
 
 
-class QueryResearchOutput(BaseModel):
-    total_findings: int
-    matched_findings: int
-    findings: list[FindingResult]
-    additional_context: str
+class ReadFindingOutput(BaseModel):
+    findings: list[FindingDetail]
+
+
+class ListSourcesOutput(BaseModel):
+    sources: list[BibliographyEntry]
+    total: int
 
 
 class QueryPlanInput(BaseModel):
@@ -87,75 +89,97 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
         path = artifacts_dir / "research.json"
         if not path.exists():
             return None
-        return ResearchCompilation.model_validate_json(
-            path.read_text(encoding="utf-8")
-        )
+        return ResearchCompilation.model_validate_json(path.read_text(encoding="utf-8"))
 
     def load_plan() -> ArticlePlan | None:
         path = artifacts_dir / "plan.json"
         if not path.exists():
             return None
-        return ArticlePlan.model_validate_json(
-            path.read_text(encoding="utf-8")
-        )
+        return ArticlePlan.model_validate_json(path.read_text(encoding="utf-8"))
 
-    def matches_text(query: str, *fields: str) -> bool:
-        q = query.lower()
-        return any(q in field.lower() for field in fields)
+    def find_best_match(
+        query: str, research: ResearchCompilation
+    ) -> ResearchFinding | None:
+        q = query.strip().lower()
+        for f in research.findings:
+            if f.question.strip().lower() == q:
+                return f
+        for f in research.findings:
+            if q in f.question.lower() or f.question.lower() in q:
+                return f
+        q_words = set(q.split())  # claude: ignore
+        best, best_overlap = None, 0.0
+        for f in research.findings:
+            f_words = set(f.question.lower().split())  # claude: ignore
+            overlap = len(q_words & f_words) / max(len(q_words | f_words), 1)
+            if overlap > best_overlap:
+                best, best_overlap = f, overlap
+        if best_overlap > 0.4:
+            return best
+        return None
 
     @lup_tool(
-        "Query research findings with optional filters. Use this instead of "
-        "reading research.json directly — it loads the structured data, filters "
-        "by section, claim text, or confidence, and returns typed results with "
-        "source URLs and data points. Call with no filters to get a summary of "
-        "all findings.",
-        name="query_research",
+        "List all research findings as a browsable index. Returns each "
+        "finding's question, confidence, and source count. Call "
+        "read_finding with the question text to get full answers and sources.",
+        name="list_research",
     )
-    async def query_research(inp: QueryResearchInput) -> QueryResearchOutput:
+    async def list_research(_inp: EmptyInput) -> ListResearchOutput:
         research = load_research()
         if research is None:
-            raise ToolError("No research artifact found — research stage hasn't run yet")
+            raise ToolError(
+                "No research artifact found — research stage hasn't run yet"
+            )
 
-        matched = research.findings
-
-        if inp.section:
-            matched = [
-                f for f in matched
-                if matches_text(inp.section, f.question)
-            ]
-
-        if inp.claim:
-            matched = [
-                f for f in matched
-                if matches_text(
-                    inp.claim,
-                    f.question,
-                    f.answer,
-                    *f.data_points,
-                )
-            ]
-
-        if inp.min_confidence > 0:
-            matched = [f for f in matched if f.confidence >= inp.min_confidence]
-
-        results = [
-            FindingResult(
+        summaries = [
+            FindingSummary(
                 question=f.question,
-                answer=f.answer,
                 confidence=f.confidence,
                 source_count=len(f.sources),
-                source_urls=[s.url for s in f.sources],
-                data_points=f.data_points,
             )
-            for f in matched
+            for f in research.findings
         ]
 
-        return QueryResearchOutput(
+        return ListResearchOutput(
             total_findings=len(research.findings),
-            matched_findings=len(results),
-            findings=results,
+            findings=summaries,
             additional_context=research.additional_context,
         )
+
+    @lup_tool(
+        "Read full details for specific research findings by question. Use "
+        "list_research first to see all available findings, then call this "
+        "with the questions you want. Matches fuzzily — a substring or "
+        "slight rewording of the original question works. Returns the "
+        "complete answer, source URLs, and extracted data points.",
+        name="read_finding",
+    )
+    async def read_finding(inp: ReadFindingInput) -> ReadFindingOutput:
+        research = load_research()
+        if research is None:
+            raise ToolError(
+                "No research artifact found — research stage hasn't run yet"
+            )
+
+        results: list[FindingDetail] = []
+        for query in inp.questions:
+            match = find_best_match(query, research)
+            if match is None:
+                available = [f.question for f in research.findings]
+                raise ToolError(
+                    f"No finding matching {query!r}. Available: {available}"
+                )
+            results.append(
+                FindingDetail(
+                    question=match.question,
+                    answer=match.answer,
+                    confidence=match.confidence,
+                    source_urls=[s.url for s in match.sources],
+                    data_points=match.data_points,
+                )
+            )
+
+        return ReadFindingOutput(findings=results)
 
     @lup_tool(
         "Query the article plan for section details, research questions, and "
@@ -171,15 +195,13 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
 
         sections = plan.sections
         if inp.section:
-            sections = [
-                s for s in sections
-                if inp.section.lower() in s.title.lower()
-            ]
+            sections = [s for s in sections if inp.section.lower() in s.title.lower()]
 
         results = []
         for s in sections:
             section_questions = [
-                q.question for q in plan.research_questions
+                q.question
+                for q in plan.research_questions
                 if q.section.lower() == s.title.lower()
             ]
             results.append(
@@ -200,4 +222,35 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
             total_research_questions=len(plan.research_questions),
         )
 
-    return [query_research, query_plan]
+    @lup_tool(
+        "List all unique sources from research findings as citation candidates. "
+        "Returns deduplicated sources with title, URL, and any available metadata. "
+        "Use before format_bibliography to see what sources are available for "
+        "building a reference section.",
+        name="list_sources",
+    )
+    async def list_sources(_inp: EmptyInput) -> ListSourcesOutput:
+        research = load_research()
+        if research is None:
+            raise ToolError(
+                "No research artifact found — research stage hasn't run yet"
+            )
+
+        seen_urls: set[str] = set()
+        entries: list[BibliographyEntry] = []
+        for finding in research.findings:
+            for src in finding.sources:
+                if src.url in seen_urls:
+                    continue
+                seen_urls.add(src.url)
+                entries.append(
+                    BibliographyEntry(
+                        title=src.title,
+                        url=src.url,
+                        key_excerpt=src.key_excerpt,
+                    )
+                )
+
+        return ListSourcesOutput(sources=entries, total=len(entries))
+
+    return [list_research, read_finding, query_plan, list_sources]

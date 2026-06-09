@@ -10,13 +10,24 @@ pipeline, and a @lup_tool wrapper for MCP access by the interactive agent.
 """
 
 import logging
+import tempfile
 import textwrap
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from lup.mcp import lup_tool
 
 logger = logging.getLogger(__name__)
+
+BUILTIN_READ_TOOLS = ["Read", "Grep", "Glob"]
+
+
+def save_content_for_query(content: str, label: str) -> Path:
+    """Save content to a temp file for LLM query input. Returns the file path."""
+    path = Path(tempfile.mkdtemp()) / f"{label}_input.md"
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 class FormatLesswrongInput(BaseModel):
@@ -46,7 +57,9 @@ class FormatTwitterOutput(BaseModel):
 
 
 class DialogTurn(BaseModel):
-    speaker: str = Field(description="Name or role of the speaker (e.g. 'Alice', 'Skeptic')")
+    speaker: str = Field(
+        description="Name or role of the speaker (e.g. 'Alice', 'Skeptic')"
+    )
     text: str = Field(description="What the speaker says in this turn")
 
 
@@ -98,6 +111,39 @@ class FormatMemoInput(BaseModel):
 
 class FormatMemoOutput(BaseModel):
     content: str = Field(description="Memo-formatted document")
+    word_count: int = Field(description="Word count")
+
+
+class FormatAcademicInput(BaseModel):
+    content: str = Field(description="Full article markdown content")
+    title: str = Field(description="Paper title")
+    authors: list[str] = Field(default_factory=list, description="Author names")
+    abstract: str = Field(
+        default="",
+        description="Abstract text (generated from content if empty)",
+    )
+    keywords: list[str] = Field(
+        default_factory=list, description="Keywords for indexing"
+    )
+
+
+class FormatAcademicOutput(BaseModel):
+    content: str = Field(description="Academic-formatted paper")
+    word_count: int = Field(description="Word count")
+
+
+class FormatNewsletterInput(BaseModel):
+    content: str = Field(description="Full article markdown content")
+    title: str = Field(description="Newsletter title / subject line")
+    subtitle: str = Field(default="", description="Subtitle or tagline")
+    cta: str = Field(
+        default="",
+        description="Call-to-action text (e.g. 'Subscribe for more')",
+    )
+
+
+class FormatNewsletterOutput(BaseModel):
+    content: str = Field(description="Newsletter-formatted article")
     word_count: int = Field(description="Word count")
 
 
@@ -232,6 +278,7 @@ async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
         if params.speakers
         else "Choose 2-3 speaker names that fit the content (e.g. named characters, roles like 'Skeptic'/'Advocate', or domain-appropriate labels)"
     )
+    content_path = save_content_for_query(params.content, "dialog")
     result = await query(
         (
             f"Rewrite this content as a natural dialog.\n"
@@ -239,10 +286,11 @@ async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
             f"Each speaker should have a distinct perspective. Distribute the "
             f"content's arguments and insights across speakers naturally — one "
             f"might raise objections, another might provide evidence, etc.\n\n"
-            f"<content>\n{params.content}\n</content>"
+            f"Read the content from: {content_path}"
         ),
         output_type=DialogTurns,
         model="claude-opus-4-6",
+        tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         system_prompt=(
@@ -324,46 +372,172 @@ def do_format_blog(params: FormatBlogInput) -> FormatBlogOutput:
     )
 
 
-def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
+async def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
     import datetime
 
-    lines: list[str] = []
+    from lup.client import query
+
+    header_lines: list[str] = []
 
     if params.classification:
-        lines.append(f"**{params.classification.upper()}**")
-        lines.append("")
+        header_lines.append(f"**{params.classification.upper()}**")
+        header_lines.append("")
 
-    lines.append("---")
-    lines.append("")
+    header_lines.append("---")
+    header_lines.append("")
     if params.to:
-        lines.append(f"**TO:** {params.to}")
+        header_lines.append(f"**TO:** {params.to}")
     if params.from_field:
-        lines.append(f"**FROM:** {params.from_field}")
-    lines.append(f"**DATE:** {datetime.date.today().isoformat()}")
-    lines.append(f"**SUBJECT:** {params.title}")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
+        header_lines.append(f"**FROM:** {params.from_field}")
+    header_lines.append(f"**DATE:** {datetime.date.today().isoformat()}")
+    header_lines.append(f"**SUBJECT:** {params.title}")
+    header_lines.append("")
+    header_lines.append("---")
+    header_lines.append("")
+    header_block = "\n".join(header_lines)
 
-    for line in params.content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            heading = stripped.lstrip("#").strip().upper()
-            lines.append(f"**{heading}**")
-            lines.append("")
-        else:
-            lines.append(line)
+    class MemoContent(BaseModel):
+        content: str = Field(description="The restructured memo body in markdown")
+
+    content_path = save_content_for_query(params.content, "memo")
+    result = await query(
+        (
+            f"Restructure this content into proper memo format.\n\n"
+            f"Read the content from: {content_path}"
+        ),
+        output_type=MemoContent,
+        model="claude-opus-4-6",
+        tools=BUILTIN_READ_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        system_prompt=(
+            "You restructure article-style content into memo format. "
+            "Apply these rules strictly:\n\n"
+            "1. EXECUTIVE SUMMARY: The first section (2-3 paragraphs) must "
+            "state the problem, the recommendation, and the stakes. A reader "
+            "who stops here should understand the core argument.\n\n"
+            "2. BOLD TOPIC SENTENCES: The first sentence of every paragraph "
+            "in the body must be **bold**. A reader skimming only bold "
+            "sentences should get the full argument.\n\n"
+            "3. SECTION HEADINGS: Use descriptive headings that state "
+            "conclusions, not topics. 'The Open-Weight Window Is Closing' "
+            "not 'Background on Open Weights.'\n\n"
+            "4. BULLET POINTS: Use bullets for any list of 3+ items and "
+            "for all action items. Never bury action items in prose.\n\n"
+            "5. CONCLUSION WITH ACTIONS: End with numbered concrete next "
+            "steps (who, what, when).\n\n"
+            "6. TONE: Diplomatic and professional. Direct but not aggressive. "
+            "No dramatic escalation, no zingers, no journalistic scene-setting. "
+            "State stakes plainly and let facts carry the weight.\n\n"
+            "7. LENGTH: Cut ruthlessly. Every paragraph must earn its place. "
+            "Remove any paragraph that repeats a point made elsewhere.\n\n"
+            "Preserve all substantive content, data, and citations. "
+            "Output only the restructured memo body in markdown."
+        ),
+    )
+    body = result.content if result else params.content
+
+    final = header_block + body
 
     if params.classification:
-        lines.append("---")
-        lines.append(f"**{params.classification.upper()}**")
-
-    result = "\n".join(lines)
+        final += f"\n\n---\n**{params.classification.upper()}**"
 
     return FormatMemoOutput(
-        content=result,
-        word_count=len(result.split()),
+        content=final,
+        word_count=len(final.split()),
     )
+
+
+async def do_format_academic(params: FormatAcademicInput) -> FormatAcademicOutput:
+    """Format content as an academic paper via LLM restructuring."""
+    from lup.client import query
+
+    class AcademicContent(BaseModel):
+        abstract: str = Field(description="Paper abstract (150-300 words)")
+        content: str = Field(description="Restructured paper body in markdown")
+
+    author_line = ", ".join(params.authors) if params.authors else ""
+    keyword_line = ", ".join(params.keywords) if params.keywords else ""
+
+    content_path = save_content_for_query(params.content, "academic")
+    result = await query(
+        (
+            f"Restructure this content into an academic paper.\n\n"
+            f"Title: {params.title}\n"
+            + (f"Authors: {author_line}\n" if author_line else "")
+            + (f"Abstract hint: {params.abstract}\n" if params.abstract else "")
+            + (f"Keywords: {keyword_line}\n" if keyword_line else "")
+            + f"\nRead the content from: {content_path}"
+        ),
+        output_type=AcademicContent,
+        model="claude-opus-4-6",
+        tools=BUILTIN_READ_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        system_prompt=(
+            "You restructure article-style content into academic paper format.\n\n"
+            "1. ABSTRACT: Write a 150-300 word abstract if none provided.\n"
+            "2. NUMBERED SECTIONS: Use 1, 1.1, 1.2, 2, etc. for headings.\n"
+            "3. REGISTER: Formal academic register. Hedge appropriately. "
+            "Use passive voice where the field convention expects it.\n"
+            "4. CLAIMS: Ground every claim in evidence. Flag speculation.\n"
+            "5. End with a 'References' section header (leave empty — "
+            "citations are added by a separate tool).\n\n"
+            "Preserve all substantive content. Output the abstract and "
+            "restructured body as markdown."
+        ),
+    )
+    abstract = result.abstract if result else params.abstract
+    body = result.content if result else params.content
+
+    lines: list[str] = [f"# {params.title}", ""]
+    if author_line:
+        lines.extend([f"*{author_line}*", ""])
+    lines.extend(["## Abstract", "", abstract, ""])
+    if keyword_line:
+        lines.extend([f"**Keywords:** {keyword_line}", ""])
+    lines.extend(["---", "", body])
+
+    final = "\n".join(lines)
+    return FormatAcademicOutput(content=final, word_count=len(final.split()))
+
+
+def do_format_newsletter(params: FormatNewsletterInput) -> FormatNewsletterOutput:
+    """Format content as a newsletter / Substack-style email."""
+    lines: list[str] = []
+
+    lines.append(f"# {params.title}")
+    if params.subtitle:
+        lines.append(f"*{params.subtitle}*")
+    lines.append("")
+
+    paragraphs = params.content.split("\n\n")
+
+    for para in paragraphs:
+        stripped = para.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith("#"):
+            lines.extend(["---", "", stripped, ""])
+            continue
+
+        sentences = split_sentences(stripped)
+        if len(sentences) > 3:
+            mid = len(sentences) // 2
+            lines.append(" ".join(sentences[:mid]))
+            lines.append("")
+            lines.append(" ".join(sentences[mid:]))
+            lines.append("")
+        else:
+            lines.append(stripped)
+            lines.append("")
+
+    if params.cta:
+        lines.extend(["---", "", f"*{params.cta}*", ""])
+
+    result = "\n".join(lines).strip()
+    return FormatNewsletterOutput(content=result, word_count=len(result.split()))
 
 
 async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
@@ -373,18 +547,20 @@ async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
     class FormattedContent(BaseModel):
         content: str = Field(description="The reformatted content")
 
+    content_path = save_content_for_query(params.content, "custom")
     prompt = (
         f"Reformat the following content according to these format instructions.\n\n"
         f"**Format:** {params.format_description}\n"
     )
     if params.title:
         prompt += f"**Title/Subject:** {params.title}\n"
-    prompt += f"\n<content>\n{params.content}\n</content>"
+    prompt += f"\nRead the content from: {content_path}"
 
     result = await query(
         prompt,
         output_type=FormattedContent,
         model="claude-opus-4-6",
+        tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
         system_prompt=(
@@ -457,7 +633,7 @@ async def format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
     "draft is complete."
 )
 async def format_memo(params: FormatMemoInput) -> FormatMemoOutput:
-    return do_format_memo(params)
+    return await do_format_memo(params)
 
 
 @lup_tool(
@@ -473,11 +649,36 @@ async def format_custom(params: FormatCustomInput) -> FormatCustomOutput:
     return await do_format_custom(params)
 
 
+@lup_tool(
+    "Format an article as an academic paper with abstract, numbered sections, "
+    "and formal register. Restructures via LLM to adopt academic conventions. "
+    "Adds a 'References' section header for use with format_bibliography. "
+    "Use for research papers, whitepapers, or any content targeting an "
+    "academic audience. Call after the final draft is complete."
+)
+async def format_academic(params: FormatAcademicInput) -> FormatAcademicOutput:
+    return await do_format_academic(params)
+
+
+@lup_tool(
+    "Format an article as a newsletter / Substack-style email. Optimizes for "
+    "mobile readability: short paragraphs, section dividers, and a call-to-action. "
+    "Use for email newsletters, Substack posts, or any content designed to be "
+    "read as a periodic dispatch. Call after the final draft is complete."
+)
+async def format_newsletter(
+    params: FormatNewsletterInput,
+) -> FormatNewsletterOutput:
+    return do_format_newsletter(params)
+
+
 FORMAT_TOOLS = [
     format_lesswrong,
     format_twitter,
     format_blog,
     format_dialog,
     format_memo,
+    format_academic,
+    format_newsletter,
     format_custom,
 ]

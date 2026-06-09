@@ -173,7 +173,7 @@ uv run pytest
 
 # Write an article from a Claude conversation
 inkwell write "https://claude.ai/share/abc123"
-inkwell write "https://claude.ai/share/abc123" --ref "paper.pdf" -f twitter
+inkwell write "https://claude.ai/share/abc123" paper.pdf -f twitter
 
 # Manage style corpus (voice matching references)
 inkwell style add "https://lesswrong.com/posts/my-best-post"

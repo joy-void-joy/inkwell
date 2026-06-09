@@ -4,11 +4,11 @@
 from inkwell.agent.tools.formats import (
     FormatBlogInput,
     FormatLesswrongInput,
-    FormatTwitterInput,
     do_format_blog,
     do_format_lesswrong,
-    do_format_twitter,
+    number_thread,
     split_sentences,
+    split_thread,
 )
 
 
@@ -73,34 +73,37 @@ class TestFormatLesswrong:
         )
         assert "**Related:**" not in result.content
 
+    def test_no_header_when_status_empty(self) -> None:
+        result = do_format_lesswrong(FormatLesswrongInput(content="Body text."))
+        assert "Epistemic status" not in result.content
+        assert result.content.startswith("Body text.")
 
-class TestFormatTwitter:
+
+class TestSplitThread:
     def test_hook_is_first_tweet(self) -> None:
-        result = do_format_twitter(
-            FormatTwitterInput(content="Some paragraph here.", hook="This is the hook!")
-        )
-        assert result.tweets[0].startswith("This is the hook!")
+        tweets = split_thread("Some paragraph here.", hook="This is the hook!")
+        assert tweets[0] == "This is the hook!"
 
-    def test_thread_numbering(self) -> None:
-        result = do_format_twitter(
-            FormatTwitterInput(
-                content="First paragraph.\n\nSecond paragraph.", hook="Hook tweet"
-            )
-        )
-        assert result.thread_count == len(result.tweets)
-        for i, tweet in enumerate(result.tweets, 1):
-            assert tweet.endswith(f"{i}/{result.thread_count}")
+    def test_derives_hook_from_first_line_when_empty(self) -> None:
+        tweets = split_thread("# Title Line\n\nBody paragraph.", hook="")
+        assert tweets[0] == "Title Line"
 
     def test_long_paragraph_split(self) -> None:
         long_para = "This is a sentence. " * 30
-        result = do_format_twitter(FormatTwitterInput(content=long_para, hook="Start"))
-        for tweet in result.tweets:
-            text_part = tweet.rsplit("\n\n", 1)[0]
-            assert len(text_part) <= 280
+        tweets = split_thread(long_para, hook="Start")
+        for tweet in tweets:
+            assert len(tweet) <= 260
 
-    def test_empty_content(self) -> None:
-        result = do_format_twitter(FormatTwitterInput(content="", hook="Just a hook"))
-        assert result.thread_count >= 1
+    def test_empty_content_still_has_hook(self) -> None:
+        tweets = split_thread("", hook="Just a hook")
+        assert len(tweets) >= 1
+
+
+class TestNumberThread:
+    def test_appends_position_markers(self) -> None:
+        numbered = number_thread(["first", "second"])
+        assert numbered[0].endswith("1/2")
+        assert numbered[1].endswith("2/2")
 
 
 class TestFormatBlog:

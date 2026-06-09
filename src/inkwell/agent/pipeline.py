@@ -1602,21 +1602,10 @@ async def apply_format(
     """Apply format-specific transformations to the final content."""
     match target_format:
         case "lesswrong":
-            result = do_format_lesswrong(
-                FormatLesswrongInput(
-                    content=content,
-                    epistemic_status="Moderately confident",
-                )
-            )
+            result = do_format_lesswrong(FormatLesswrongInput(content=content))
             return result.content
         case "twitter":
-            first_line = content.split("\n", 1)[0].lstrip("#").strip()
-            result = do_format_twitter(
-                FormatTwitterInput(
-                    content=content,
-                    hook=first_line[:260],
-                )
-            )
+            result = await do_format_twitter(FormatTwitterInput(content=content))
             return "\n\n---\n\n".join(result.tweets)
         case "blog":
             result = do_format_blog(

@@ -29,7 +29,12 @@ def save_content_for_query(content: str, label: str) -> Path:
 class FormatLesswrongInput(BaseModel):
     content: str = Field(description="Full article markdown content")
     epistemic_status: str = Field(
-        description="Epistemic status statement (e.g. 'fairly confident, based on...')"
+        default="",
+        description=(
+            "Epistemic status statement (e.g. 'fairly confident, based on...'). "
+            "Empty means the draft already carries its own epistemic framing — "
+            "no header is added."
+        ),
     )
     crossrefs: list[str] = Field(
         default_factory=list,
@@ -44,7 +49,13 @@ class FormatLesswrongOutput(BaseModel):
 
 class FormatTwitterInput(BaseModel):
     content: str = Field(description="Full article content to thread-ify")
-    hook: str = Field(description="Opening hook for tweet 1 (grabs attention)")
+    hook: str = Field(
+        default="",
+        description=(
+            "Opening hook for tweet 1 (grabs attention). Empty lets the "
+            "thread writer derive one from the content."
+        ),
+    )
 
 
 class FormatTwitterOutput(BaseModel):
@@ -172,8 +183,9 @@ def split_sentences(text: str) -> list[str]:
 def do_format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
     lines: list[str] = []
 
-    lines.append(f"*Epistemic status: {params.epistemic_status}*")
-    lines.append("")
+    if params.epistemic_status:
+        lines.append(f"*Epistemic status: {params.epistemic_status}*")
+        lines.append("")
 
     footnotes: list[str] = []
     content = params.content
@@ -220,12 +232,24 @@ def do_format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
     )
 
 
-def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
+def number_thread(tweets: list[str]) -> list[str]:
+    """Append n/total markers to each tweet."""
+    total = len(tweets)
+    return [f"{tweet}\n\n{i}/{total}" for i, tweet in enumerate(tweets, 1)]
+
+
+def split_thread(content: str, hook: str) -> list[str]:
+    """Mechanically split content into <=260-char tweets at sentence boundaries.
+
+    Fallback for when the LLM thread writer is unavailable — produces
+    correct-length tweets but no editorial judgment about what makes
+    each tweet stand alone.
+    """
     tweets: list[str] = []
+    first_line = content.split("\n", 1)[0].lstrip("#").strip()
+    tweets.append((hook or first_line or "Thread:").strip()[:260])
 
-    tweets.append(params.hook.strip())
-
-    paragraphs = [p.strip() for p in params.content.split("\n\n") if p.strip()]
+    paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
 
     for para in paragraphs:
         para = para.lstrip("#").strip()
@@ -251,11 +275,58 @@ def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
             if current:
                 tweets.append(current)
 
-    numbered = []
-    total = len(tweets)
-    for i, tweet in enumerate(tweets, 1):
-        numbered.append(f"{tweet}\n\n{i}/{total}")
+    return tweets
 
+
+THREAD_WRITER_SYSTEM = """\
+You rewrite articles as Twitter/X threads. This is a rewrite, not a
+split: every tweet must be self-contained, land a complete point, and
+make the reader want the next one.
+
+Rules:
+- Each tweet <= 260 characters (numbering is added separately)
+- Tweet 1 is the hook — it must grab attention with zero context
+- One idea per tweet; cut connective tissue that only works in prose
+- Keep the author's voice, claims, and specific numbers exactly
+- Preserve the argument's order and force; drop padding, not substance
+- No headers, no markdown formatting, no "a thread 🧵" clichés"""
+
+
+async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
+    """Rewrite content as a thread via LLM, with mechanical splitting as fallback."""
+    from lup.client import query
+
+    class TwitterThread(BaseModel):
+        tweets: list[str] = Field(
+            description="Self-contained tweets in thread order, each <= 260 characters"
+        )
+
+    hook_directive = (
+        f"Use this hook for tweet 1: {params.hook}"
+        if params.hook
+        else "Write tweet 1 as a hook derived from the content's strongest claim."
+    )
+    content_path = save_content_for_query(params.content, "twitter")
+    result = await query(
+        (
+            f"Rewrite this article as a thread.\n"
+            f"{hook_directive}\n\n"
+            f"Read the article from: {content_path}"
+        ),
+        output_type=TwitterThread,
+        model="claude-opus-4-6",
+        tools=BUILTIN_READ_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        system_prompt=THREAD_WRITER_SYSTEM,
+    )
+
+    tweets = [t.strip()[:260] for t in result.tweets if t.strip()] if result else []
+    if not tweets:
+        logger.warning("Thread writer produced no tweets — using mechanical split")
+        tweets = split_thread(params.content, params.hook)
+
+    numbered = number_thread(tweets)
     return FormatTwitterOutput(
         tweets=numbered,
         thread_count=len(numbered),

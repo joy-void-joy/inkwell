@@ -10,7 +10,7 @@ from typing import TypedDict
 import httpx
 from pydantic import BaseModel, Field
 
-from inkwell.agent.config import settings
+import inkwell.agent.config as config_mod
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ class FredSeriesOutput(BaseModel):
 
 
 def get_api_key() -> str:
-    key = settings.fred_api_key
+    key = config_mod.settings.fred_api_key
     if not key:
         raise ToolError("FRED_API_KEY not configured. Run `inkwell setup fred`.")
     return key

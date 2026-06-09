@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from claude_agent_sdk import McpServerConfig
 
-from inkwell.agent.config import settings
+import inkwell.agent.config as config_mod
 from lup.client import CostAccumulator, query
 from lup.trace import TraceLogger
 from lup.mcp import ToolError, lup_tool
@@ -49,7 +49,7 @@ async def load_style_corpus() -> tuple[list[str], list[str], list[str]]:
 
     Prescriptive documents live in config/style/prescriptive/.
     """
-    style_dir = Path(settings.style_corpus_path)
+    style_dir = Path(config_mod.settings.style_corpus_path)
     if not style_dir.exists():
         return [], [], []
 
@@ -133,7 +133,7 @@ async def load_format_examples(target_format: str) -> tuple[list[str], list[str]
     Returns (samples, sources) — empty if no examples exist for this format.
     """
     base_format = target_format.split(":")[0]
-    format_dir = Path(settings.style_corpus_path) / "formats" / base_format
+    format_dir = Path(config_mod.settings.style_corpus_path) / "formats" / base_format
     if not format_dir.exists():
         return [], []
 
@@ -166,7 +166,7 @@ async def load_format_examples(target_format: str) -> tuple[list[str], list[str]
 def add_format_example(target_format: str, source: str) -> str:
     """Add a file or URL as a format-specific reference example."""
     base_format = target_format.split(":")[0]
-    format_dir = Path(settings.style_corpus_path) / "formats" / base_format
+    format_dir = Path(config_mod.settings.style_corpus_path) / "formats" / base_format
     format_dir.mkdir(parents=True, exist_ok=True)
 
     source_path = Path(source).expanduser()
@@ -190,7 +190,7 @@ def list_format_examples(
     target_format: str | None = None,
 ) -> dict[str, list[StyleEntry]]:
     """List format-specific reference examples, optionally filtered to one format."""
-    formats_dir = Path(settings.style_corpus_path) / "formats"
+    formats_dir = Path(config_mod.settings.style_corpus_path) / "formats"
     if not formats_dir.exists():
         return {}
 
@@ -279,7 +279,7 @@ def voice_cache_key(text: str) -> str:
 
 def voice_cache_dir() -> Path:
     """Cache directory for per-source voice analyses."""
-    cache = Path(settings.style_corpus_path) / ".cache" / "voice"
+    cache = Path(config_mod.settings.style_corpus_path) / ".cache" / "voice"
     cache.mkdir(parents=True, exist_ok=True)
     return cache
 
@@ -786,7 +786,7 @@ def add_style_reference(
     if target_format:
         return add_format_example(target_format, source)
 
-    style_dir = Path(settings.style_corpus_path)
+    style_dir = Path(config_mod.settings.style_corpus_path)
     if prescriptive:
         style_dir = style_dir / "prescriptive"
     style_dir.mkdir(parents=True, exist_ok=True)
@@ -824,7 +824,7 @@ def list_style_references() -> tuple[list[StyleEntry], list[StyleEntry]]:
 
     Returns (voice_entries, prescriptive_entries).
     """
-    style_dir = Path(settings.style_corpus_path)
+    style_dir = Path(config_mod.settings.style_corpus_path)
 
     voice_entries: list[StyleEntry] = []
     if style_dir.exists():

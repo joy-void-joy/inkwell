@@ -30,6 +30,7 @@ from inkwell.agent.markdown_to_docs import (
     markdown_to_requests,
     split_markdown_batch,
 )
+from lup.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 if TYPE_CHECKING:
@@ -160,7 +161,7 @@ class ReadTabInput(BaseModel):
 class ReadTabOutput(BaseModel):
     doc_id: str = Field(description="Google Doc ID")
     tab_id: str = Field(description="Tab that was read")
-    content: str = Field(description="Tab content as plain text")
+    content: SavedContent = Field(description="Tab content saved to disk")
 
 
 class InsertCommentInput(BaseModel):
@@ -608,14 +609,22 @@ async def do_create_tab(
                     session_state.add_section(name, tab_id)
                 return tab_id
         raise
-    tab_id = ""
     replies = result.get("replies", [])
+    tab_id: str | None = None
     if replies:
         first = replies[0]
         if isinstance(first, dict):
             props = first.get("addDocumentTab", {}).get("tabProperties", {})
             if isinstance(props, dict):
-                tab_id = str(props.get("tabId", ""))
+                raw = props.get("tabId")
+                if raw:
+                    tab_id = str(raw)
+
+    if not tab_id:
+        raise ToolError(
+            f"Failed to extract tab ID after creating tab '{name}': "
+            f"unexpected API response: {result!r}"
+        )
 
     if session_state is not None:
         session_state.add_section(name, tab_id)
@@ -695,7 +704,7 @@ async def write_with_continuation(
 
     Returns the list of tab IDs written to.
     """
-    from inkwell.agent.tools.content_spill import split_on_headings
+    from lup.content_safety import split_on_headings
 
     if len(content) <= TAB_CONTINUATION_CHARS:
         tab_id = await find_tab_by_title(doc_id, tab_name)
@@ -720,8 +729,19 @@ async def write_with_continuation(
         merged.append("\n\n".join(current))
 
     if len(merged) > MAX_CONTINUATION_TABS:
+        dropped = len(merged) - MAX_CONTINUATION_TABS
+        logger.warning(
+            "Content for '%s' needs %d tabs but max is %d — dropping %d tab(s)",
+            tab_name,
+            len(merged),
+            MAX_CONTINUATION_TABS,
+            dropped,
+        )
         merged = merged[:MAX_CONTINUATION_TABS]
-        merged[-1] += "\n\n---\n*Full content available in local draft files.*"
+        merged[-1] += (
+            f"\n\n---\n*{dropped} additional section(s) omitted from Google Doc. "
+            f"Full content available in local draft files.*"
+        )
 
     total = len(merged)
     tab_ids: list[str] = []
@@ -1058,9 +1078,11 @@ async def write_tab(params: WriteTabInput) -> WriteTabOutput:
 
 
 @lup_tool(
-    "Read the content of a tab in the Google Doc. Use this to read section "
-    "drafts before merging, to check what's been written, or to read the "
-    "current state of any tab. Returns plain text content."
+    "Read the content of a tab in the Google Doc. Saves the tab content "
+    "to disk and returns a file path, word count, and preview. Use Read "
+    "to access the full text. Use this to read section drafts before "
+    "merging, to check what's been written, or to read the current "
+    "state of any tab."
 )
 async def read_tab(params: ReadTabInput) -> ReadTabOutput:
     doc_id = require_doc_id()
@@ -1075,12 +1097,13 @@ async def read_tab(params: ReadTabInput) -> ReadTabOutput:
     )
 
     tab_id, tab = find_tab_by_id(doc, params.tab_id)
-    content = extract_tab_text(tab)
+    text = extract_tab_text(tab)
+    saved = save_content("tab", f"{doc_id}-{tab_id}", text)
 
     return ReadTabOutput(
         doc_id=doc_id,
         tab_id=tab_id,
-        content=content,
+        content=saved,
     )
 
 

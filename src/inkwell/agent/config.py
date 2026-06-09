@@ -10,11 +10,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 
+def active_profile() -> str | None:
+    """Return the active profile name, or None for the default config."""
+    return os.environ.get("INKWELL_PROFILE") or None
+
+
+def build_env_files() -> tuple[str, ...]:
+    """Build the env file chain based on the active profile."""
+    profile = active_profile()
+    if profile:
+        return (".env", f"profiles/{profile}/env")
+    return (".env", ".env.local")
+
+
 class Settings(BaseSettings):
     """Inkwell settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=(".env", ".env.local"),
+        env_file=build_env_files(),
         extra="ignore",
     )
 
@@ -49,6 +62,12 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="INKWELL_AUTHOR_EMAIL",
         description="Author's email for Google Doc sharing (editor access)",
+    )
+
+    google_workspace_domain: str | None = Field(
+        default=None,
+        validation_alias="INKWELL_GOOGLE_WORKSPACE_DOMAIN",
+        description="Google Workspace domain for org-wide edit sharing (e.g. 'example.com')",
     )
 
     # ==========================================================================
@@ -86,6 +105,12 @@ class Settings(BaseSettings):
     # ==========================================================================
     # LLM ROUTING
     # ==========================================================================
+
+    claude_config_dir: str | None = Field(
+        default=None,
+        validation_alias="CLAUDE_CONFIG_DIR",
+        description="Separate Claude config directory for agent login",
+    )
 
     openrouter_api_key: str | None = Field(
         default=None,
@@ -164,6 +189,38 @@ class Settings(BaseSettings):
         validation_alias="AGENT_MAX_CONCURRENT_REQUESTS",
         description="Max concurrent external API requests",
     )
+
+    # ==========================================================================
+    # PROFILE
+    # ==========================================================================
+
+    profile: str | None = Field(
+        default=None,
+        validation_alias="INKWELL_PROFILE",
+        description="Active configuration profile name",
+    )
+
+
+def load_settings(profile: str | None = None) -> Settings:
+    """Create a Settings instance for the given profile.
+
+    Temporarily sets INKWELL_PROFILE so build_env_files() resolves
+    the correct env file chain, then constructs Settings with that chain.
+    """
+    import os as _os
+
+    prev = _os.environ.get("INKWELL_PROFILE")
+    if profile:
+        _os.environ["INKWELL_PROFILE"] = profile
+    else:
+        _os.environ.pop("INKWELL_PROFILE", None)
+    try:
+        return Settings(_env_file=build_env_files())  # pyright: ignore[reportCallIssue]
+    finally:
+        if prev is not None:
+            _os.environ["INKWELL_PROFILE"] = prev
+        else:
+            _os.environ.pop("INKWELL_PROFILE", None)
 
 
 settings = Settings.model_validate({})

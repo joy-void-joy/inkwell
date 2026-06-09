@@ -1,16 +1,12 @@
-"""Conditional tool availability for inkwell.
+"""Tool allowlists for pipeline stages.
 
-Manages which tools are available based on API key presence.
-Tools degrade gracefully — missing keys log warnings, don't crash.
+Names the built-in and research MCP tools that research-capable stages
+(researcher, section writers, fact checker) may call. Output collector,
+note, source, and compute tool names are computed by the pipeline's
+server builders — only the shared research surface lives here.
 """
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from inkwell.agent.config import Settings
-
 
 BUILTIN_TOOLS: frozenset[str] = frozenset(
     {
@@ -24,55 +20,6 @@ BUILTIN_TOOLS: frozenset[str] = frozenset(
         "Task",
         "TodoRead",
         "TodoWrite",
-    }
-)
-
-GOOGLE_DOCS_TOOLS: frozenset[str] = frozenset(
-    {
-        "mcp__docs__create_doc",
-        "mcp__docs__create_tab",
-        "mcp__docs__write_tab",
-        "mcp__docs__read_tab",
-        "mcp__docs__insert_comment",
-        "mcp__docs__read_comments",
-        "mcp__docs__update_overview",
-        "mcp__docs__list_tabs",
-        "mcp__docs__insert_image",
-        "mcp__docs__render_equation",
-    }
-)
-
-AUTHOR_TOOLS: frozenset[str] = frozenset(
-    {
-        "mcp__docs__ask_author",
-        "mcp__docs__check_author_feedback",
-        "mcp__docs__update_progress",
-        "mcp__docs__load_corpus",
-        "mcp__docs__analyze_voice",
-        "mcp__docs__attach_doc",
-        "mcp__docs__read_directions",
-    }
-)
-
-FORMAT_TOOLS: frozenset[str] = frozenset(
-    {
-        "mcp__format__format_lesswrong",
-        "mcp__format__format_twitter",
-        "mcp__format__format_blog",
-        "mcp__format__format_academic",
-        "mcp__format__format_newsletter",
-    }
-)
-
-SOURCE_TOOLS: frozenset[str] = frozenset(
-    {
-        "mcp__source__fetch_source",
-        "mcp__source__fetch_and_extract",
-        "mcp__source__extract_conversation",
-        "mcp__source__extract_file",
-        "mcp__source__extract_lesswrong",
-        "mcp__source__extract_webpage_batch",
-        "mcp__source__extract_gdoc",
     }
 )
 
@@ -91,77 +38,6 @@ RESEARCH_TOOLS: frozenset[str] = frozenset(
         "mcp__research__fetch_wikipedia",
     }
 )
-
-REALTIME_TOOLS: frozenset[str] = frozenset(
-    {
-        "mcp__session__sleep",
-        "mcp__session__context",
-        "mcp__session__reply",
-        "mcp__session__meta",
-        "mcp__session__remind",
-        "mcp__session__notes",
-        "mcp__session__ideas",
-        "mcp__session__schedule_action",
-        "mcp__session__debounce",
-    }
-)
-
-COMPUTE_TOOLS: frozenset[str] = frozenset(
-    {
-        "mcp__compute__execute_code",
-        "mcp__compute__install_package",
-        "mcp__compute__list_research",
-        "mcp__compute__read_finding",
-        "mcp__compute__query_plan",
-        "mcp__compute__format_bibliography",
-        "mcp__compute__list_sources",
-    }
-)
-
-
-class ToolPolicy:
-    """Centralized policy for tool availability."""
-
-    def __init__(
-        self,
-        settings: Settings,
-    ) -> None:
-        self.settings = settings
-
-        excluded: set[str] = set()
-
-        if not settings.google_credentials_path:
-            excluded.update(GOOGLE_DOCS_TOOLS)
-            excluded.update(AUTHOR_TOOLS)
-
-        if not settings.exa_api_key:
-            excluded.add("mcp__research__exa_search")
-            excluded.add("mcp__source__exa_search")
-
-        if not settings.fred_api_key:
-            excluded.add("mcp__research__fred_search")
-            excluded.add("mcp__research__fred_series")
-
-        self.excluded_tools: frozenset[str] = frozenset(excluded)
-
-    def get_allowed_tools(self) -> list[str]:
-        tools: set[str] = set()
-        tools.update(BUILTIN_TOOLS)
-        tools.update(GOOGLE_DOCS_TOOLS)
-        tools.update(AUTHOR_TOOLS)
-        tools.update(FORMAT_TOOLS)
-        tools.update(SOURCE_TOOLS)
-        tools.update(RESEARCH_TOOLS)
-        tools.update(REALTIME_TOOLS)
-        tools -= self.excluded_tools
-        return sorted(tools)
-
-    def is_tool_available(self, tool_name: str) -> bool:
-        return tool_name not in self.excluded_tools
-
-
-def source_tool_names() -> list[str]:
-    return sorted(SOURCE_TOOLS)
 
 
 def research_tool_names() -> list[str]:

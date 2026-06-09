@@ -123,9 +123,7 @@ class PipelineNotes:
             path = self.research_dir / f"{key}.md"
             path.write_text(content, encoding="utf-8")
 
-    async def list_comments(
-        self, impact: str | None = None
-    ) -> list[ClassifiedComment]:
+    async def list_comments(self, impact: str | None = None) -> list[ClassifiedComment]:
         """Read all comments, optionally filtered by impact level."""
         async with self.lock:
             return self._read_comments(self.comments_dir, impact)
@@ -214,7 +212,8 @@ class PipelineNotes:
         terminal = await self.list_terminal_inputs()
 
         relevant = [
-            c for c in comments
+            c
+            for c in comments
             if section.lower() in c.anchor_text.lower()
             or section.lower() in c.content.lower()
             or any(section.lower() in tag.lower() for tag in c.tags)
@@ -302,7 +301,9 @@ class PipelineNotes:
         """Return the path for a text artifact."""
         return self.artifacts_dir / f"{name}.{ext}"
 
-    async def render_feedback_file(self, stage: str, extra: list[str] | None = None) -> Path:
+    async def render_feedback_file(
+        self, stage: str, extra: list[str] | None = None
+    ) -> Path:
         """Render accumulated feedback to a file agents can Read.
 
         Writes feedback/{stage}.md with all accumulated comments,
@@ -345,7 +346,8 @@ class PipelineNotes:
         async with self.lock:
             registry = self.load_registry()
             registry = [
-                e for e in registry
+                e
+                for e in registry
                 if not (e.label == envelope.label and e.stage == envelope.stage)
             ]
             registry.append(envelope)

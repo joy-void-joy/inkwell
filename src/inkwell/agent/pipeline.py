@@ -234,8 +234,6 @@ def slugify(label: str) -> str:
     return slug.strip("-")[:80]
 
 
-
-
 def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> None:
     """Add voice/style file references to a content manifest."""
     for p in voice_file_paths:
@@ -1635,6 +1633,26 @@ async def apply_format(
             from inkwell.agent.tools.formats import FormatMemoInput, do_format_memo
 
             result = await do_format_memo(FormatMemoInput(content=content, title=title))
+            return result.content
+        case "academic":
+            from inkwell.agent.tools.formats import (
+                FormatAcademicInput,
+                do_format_academic,
+            )
+
+            result = await do_format_academic(
+                FormatAcademicInput(content=content, title=title)
+            )
+            return result.content
+        case "newsletter":
+            from inkwell.agent.tools.formats import (
+                FormatNewsletterInput,
+                do_format_newsletter,
+            )
+
+            result = do_format_newsletter(
+                FormatNewsletterInput(content=content, title=title)
+            )
             return result.content
         case _ if target_format.startswith("custom:"):
             from inkwell.agent.tools.formats import FormatCustomInput, do_format_custom

@@ -47,13 +47,17 @@ async def ws_ping(websocket: WebSocket) -> None:
 async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     mgr = get_manager()
     await websocket.accept()
-    logger.info("WS %s: accepted, handle_exists=%s", session_id, session_id in mgr.sessions)
+    logger.info(
+        "WS %s: accepted, handle_exists=%s", session_id, session_id in mgr.sessions
+    )
 
     handle = mgr.sessions.get(session_id)
 
     if handle is None:
         saved_events = mgr.load_events(session_id)
-        logger.info("WS %s: no handle, replaying %d saved events", session_id, len(saved_events))
+        logger.info(
+            "WS %s: no handle, replaying %d saved events", session_id, len(saved_events)
+        )
         for event in saved_events:
             try:
                 await websocket.send_text(json.dumps(event, default=str))
@@ -61,17 +65,28 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
                 logger.info("WS %s: send failed during replay", session_id)
                 return
         try:
-            await websocket.send_text(json.dumps({
-                "type": "session_ended",
-                "status": "completed",
-                "timestamp": datetime.now().isoformat(),
-            }))
-            await websocket.close(code=WS_CLOSE_SESSION_NOT_FOUND, reason="Session not found")
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "session_ended",
+                        "status": "completed",
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+            )
+            await websocket.close(
+                code=WS_CLOSE_SESSION_NOT_FOUND, reason="Session not found"
+            )
         except (RuntimeError, OSError, ConnectionError):
             logger.info("WS %s: send/close failed for session_ended", session_id)
         return
 
-    logger.info("WS %s: handle found, status=%s, events=%d", session_id, handle.status, len(handle.events))
+    logger.info(
+        "WS %s: handle found, status=%s, events=%d",
+        session_id,
+        handle.status,
+        len(handle.events),
+    )
     handle.clients.add(websocket)
 
     replayed = len(handle.events)
@@ -84,13 +99,21 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
             return
 
     if handle.status != "running":
-        logger.info("WS %s: session not running (%s), sending ended + close", session_id, handle.status)
+        logger.info(
+            "WS %s: session not running (%s), sending ended + close",
+            session_id,
+            handle.status,
+        )
         try:
-            await websocket.send_text(json.dumps({
-                "type": "session_ended",
-                "status": handle.status,
-                "timestamp": datetime.now().isoformat(),
-            }))
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "session_ended",
+                        "status": handle.status,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+            )
             await websocket.close(code=1000)
         except (RuntimeError, OSError, ConnectionError):
             pass
@@ -101,11 +124,16 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     if handle.listener.awaiting_revision:
         state_snapshot = handle.listener.serialize_state(handle.state)
         try:
-            await websocket.send_text(json.dumps({
-                "type": "collect_revision",
-                "state": state_snapshot,
-                "timestamp": datetime.now().isoformat(),
-            }, default=str))
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "collect_revision",
+                        "state": state_snapshot,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                    default=str,
+                )
+            )
         except (RuntimeError, OSError, ConnectionError):
             mgr.remove_client(session_id, websocket)
             return

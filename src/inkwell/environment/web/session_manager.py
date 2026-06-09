@@ -93,6 +93,7 @@ class SessionManager:
                 resolved_profile = original.profile
         if not resolved_profile:
             from inkwell.agent.core import load_snapshot
+
             snapshot = load_snapshot(resume_session_id, from_stage=from_stage)
             if snapshot:
                 resolved_profile = snapshot.profile
@@ -165,11 +166,15 @@ class SessionManager:
         )
         self.sessions[session_id] = handle
 
-        task.add_done_callback(lambda t: asyncio.create_task(self.on_session_done(session_id, t)))
+        task.add_done_callback(
+            lambda t: asyncio.create_task(self.on_session_done(session_id, t))
+        )
 
         return session_id
 
-    async def on_session_done(self, session_id: str, task: asyncio.Task[AgentSessionResult]) -> None:
+    async def on_session_done(
+        self, session_id: str, task: asyncio.Task[AgentSessionResult]
+    ) -> None:
         handle = self.sessions.get(session_id)
         if not handle:
             return
@@ -177,38 +182,52 @@ class SessionManager:
         try:
             handle.result = task.result()
             handle.status = "completed"
-            await self.broadcast(session_id, {
-                "type": "session_ended",
-                "status": "completed",
-                "timestamp": datetime.now().isoformat(),
-            })
+            await self.broadcast(
+                session_id,
+                {
+                    "type": "session_ended",
+                    "status": "completed",
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
         except asyncio.CancelledError:
             handle.status = "cancelled"
-            await self.broadcast(session_id, {
-                "type": "session_ended",
-                "status": "cancelled",
-                "timestamp": datetime.now().isoformat(),
-            })
+            await self.broadcast(
+                session_id,
+                {
+                    "type": "session_ended",
+                    "status": "cancelled",
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
         except Exception as exc:
             handle.status = "failed"
             logger.exception("Session %s failed", session_id)
-            await self.broadcast(session_id, {
-                "type": "error",
-                "message": str(exc),
-                "timestamp": datetime.now().isoformat(),
-            })
-            await self.broadcast(session_id, {
-                "type": "session_ended",
-                "status": "failed",
-                "timestamp": datetime.now().isoformat(),
-            })
+            await self.broadcast(
+                session_id,
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            await self.broadcast(
+                session_id,
+                {
+                    "type": "session_ended",
+                    "status": "failed",
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
         finally:
             if handle.trace_holder:
                 try:
                     trace_path = handle.trace_holder[0].save()
                     logger.info("Trace saved to %s", trace_path)
                 except (OSError, RuntimeError):
-                    logger.warning("Failed to save trace for session %s", session_id, exc_info=True)
+                    logger.warning(
+                        "Failed to save trace for session %s", session_id, exc_info=True
+                    )
             self.save_events(handle)
 
     def save_events(self, handle: SessionHandle) -> None:
@@ -216,7 +235,9 @@ class SessionManager:
             log_dir = trace_logs_dir() / handle.session_id
             log_dir.mkdir(parents=True, exist_ok=True)
             events_file = log_dir / "events.json"
-            events_file.write_text(json.dumps(handle.events, default=str), encoding="utf-8")
+            events_file.write_text(
+                json.dumps(handle.events, default=str), encoding="utf-8"
+            )
         except OSError:
             logger.warning("Failed to save events for session %s", handle.session_id)
 
@@ -235,6 +256,7 @@ class SessionManager:
 
     def load_snapshot(self, session_id: str) -> PipelineSnapshot | None:
         from inkwell.agent.core import load_snapshot
+
         return load_snapshot(session_id)
 
     def snapshot_checkpoints(self, session_id: str) -> list[str]:
@@ -242,8 +264,7 @@ class SessionManager:
         if not notes_dir.exists():
             return []
         return sorted(
-            f.stem.removeprefix("snapshot_")
-            for f in notes_dir.glob("snapshot_*.json")
+            f.stem.removeprefix("snapshot_") for f in notes_dir.glob("snapshot_*.json")
         )
 
     def list_sessions(self) -> list[SessionSummary]:
@@ -253,17 +274,19 @@ class SessionManager:
         for handle in self.sessions.values():
             seen_ids.add(handle.session_id)
             title = handle.result.output.title if handle.result else handle.state.title
-            summaries.append(SessionSummary(
-                session_id=handle.session_id,
-                title=title,
-                status=handle.status,  # type: ignore[arg-type]
-                stage=handle.state.stage,
-                cost_usd=handle.cost.total_cost_usd,
-                duration_s=handle.cost.duration_seconds,
-                doc_url=handle.state.doc_url,
-                created_at=handle.created_at.isoformat(),
-                profile=handle.profile,
-            ))
+            summaries.append(
+                SessionSummary(
+                    session_id=handle.session_id,
+                    title=title,
+                    status=handle.status,  # type: ignore[arg-type]
+                    stage=handle.state.stage,
+                    cost_usd=handle.cost.total_cost_usd,
+                    duration_s=handle.cost.duration_seconds,
+                    doc_url=handle.state.doc_url,
+                    created_at=handle.created_at.isoformat(),
+                    profile=handle.profile,
+                )
+            )
 
         for sid in list_all_sessions():
             if sid in seen_ids:
@@ -274,29 +297,33 @@ class SessionManager:
                 snapshot = self.load_snapshot(sid)
                 if snapshot and snapshot.stage != "init":
                     title = snapshot.plan.title if snapshot.plan else ""
-                    summaries.append(SessionSummary(
-                        session_id=sid,
-                        title=title,
-                        status="interrupted",
-                        stage=snapshot.stage,
-                        doc_url=snapshot.doc_url,
-                        profile=snapshot.profile,
-                        checkpoints=self.snapshot_checkpoints(sid),
-                    ))
+                    summaries.append(
+                        SessionSummary(
+                            session_id=sid,
+                            title=title,
+                            status="interrupted",
+                            stage=snapshot.stage,
+                            doc_url=snapshot.doc_url,
+                            profile=snapshot.profile,
+                            checkpoints=self.snapshot_checkpoints(sid),
+                        )
+                    )
                 continue
             parsed = HistorySessionData.model_validate(raw)
-            summaries.append(SessionSummary(
-                session_id=sid,
-                title=parsed.output.title if parsed.output else "",
-                status="completed",
-                stage="done",
-                cost_usd=parsed.cost_usd or 0.0,
-                duration_s=parsed.duration_seconds or 0.0,
-                doc_url=parsed.output.google_doc_url if parsed.output else "",
-                created_at=parsed.timestamp,
-                profile=parsed.profile,
-                checkpoints=self.snapshot_checkpoints(sid),
-            ))
+            summaries.append(
+                SessionSummary(
+                    session_id=sid,
+                    title=parsed.output.title if parsed.output else "",
+                    status="completed",
+                    stage="done",
+                    cost_usd=parsed.cost_usd or 0.0,
+                    duration_s=parsed.duration_seconds or 0.0,
+                    doc_url=parsed.output.google_doc_url if parsed.output else "",
+                    created_at=parsed.timestamp,
+                    profile=parsed.profile,
+                    checkpoints=self.snapshot_checkpoints(sid),
+                )
+            )
 
         summaries.sort(key=lambda s: s.created_at or "", reverse=True)
         return summaries
@@ -346,7 +373,10 @@ class SessionManager:
                 doc_url=handle.state.doc_url,
                 title=handle.state.title,
                 stage=handle.state.stage,
-                sections=[SectionInfo(title=s["title"], tab_id=s["tab_id"]) for s in handle.state.sections],
+                sections=[
+                    SectionInfo(title=s["title"], tab_id=s["tab_id"])
+                    for s in handle.state.sections
+                ],
                 pending_questions=list(handle.state.pending_questions),
             ),
             cost=CostSnapshot(
@@ -369,7 +399,9 @@ class SessionManager:
             events=handle.events[-200:],
         )
 
-    def detail_from_snapshot(self, session_id: str, snapshot: PipelineSnapshot) -> SessionDetail:
+    def detail_from_snapshot(
+        self, session_id: str, snapshot: PipelineSnapshot
+    ) -> SessionDetail:
         sections = [
             SectionInfo(title=s.title, tab_id="")
             for s in (snapshot.plan.sections if snapshot.plan else [])
@@ -400,7 +432,9 @@ class SessionManager:
             checkpoints=self.snapshot_checkpoints(session_id),
         )
 
-    async def send_action(self, session_id: str, action: str, text: str | None = None) -> bool:
+    async def send_action(
+        self, session_id: str, action: str, text: str | None = None
+    ) -> bool:
         handle = self.sessions.get(session_id)
         if not handle or handle.status != "running":
             return False
@@ -422,7 +456,9 @@ class SessionManager:
                 return False
         return True
 
-    async def fetch_and_queue_comments(self, handle: SessionHandle, doc_arg: str) -> None:
+    async def fetch_and_queue_comments(
+        self, handle: SessionHandle, doc_arg: str
+    ) -> None:
         """Fetch comments from a Google Doc and queue them as feedback."""
         from inkwell.agent.tools.extract import GDOC_URL_PATTERN, parse_gdoc_id
         from inkwell.agent.tools.google_docs import do_fetch_comments
@@ -433,20 +469,30 @@ class SessionManager:
             else:
                 doc_id = doc_arg
 
-            already_seen = handle.state.seen_comment_ids | handle.state.agent_comment_ids
-            comments = await do_fetch_comments(doc_id, exclude_ids=already_seen, include_resolved=True)
+            already_seen = (
+                handle.state.seen_comment_ids | handle.state.agent_comment_ids
+            )
+            comments = await do_fetch_comments(
+                doc_id, exclude_ids=already_seen, include_resolved=True
+            )
         except (RuntimeError, OSError, ValueError) as exc:
-            await self.broadcast(handle.session_id, {
-                "type": "progress",
-                "message": f"Failed to fetch comments: {exc}",
-            })
+            await self.broadcast(
+                handle.session_id,
+                {
+                    "type": "progress",
+                    "message": f"Failed to fetch comments: {exc}",
+                },
+            )
             return
 
         if not comments:
-            await self.broadcast(handle.session_id, {
-                "type": "progress",
-                "message": "No new comments found on that doc.",
-            })
+            await self.broadcast(
+                handle.session_id,
+                {
+                    "type": "progress",
+                    "message": "No new comments found on that doc.",
+                },
+            )
             return
 
         items: list[str] = []
@@ -460,10 +506,13 @@ class SessionManager:
             items.append(line)
 
         await handle.listener.feedback_queue.put(items)
-        await self.broadcast(handle.session_id, {
-            "type": "progress",
-            "message": f"Fetched {len(comments)} comment(s) from doc — queued as feedback",
-        })
+        await self.broadcast(
+            handle.session_id,
+            {
+                "type": "progress",
+                "message": f"Fetched {len(comments)} comment(s) from doc — queued as feedback",
+            },
+        )
 
     async def broadcast(self, session_id: str, message: dict[str, object]) -> None:
         handle = self.sessions.get(session_id)
@@ -507,5 +556,7 @@ class SessionManager:
                 try:
                     handle.trace_holder[0].save()
                 except (OSError, RuntimeError):
-                    logger.warning("Failed to save trace for %s during shutdown", handle.session_id)
+                    logger.warning(
+                        "Failed to save trace for %s during shutdown", handle.session_id
+                    )
             self.save_events(handle)

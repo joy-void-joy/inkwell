@@ -52,7 +52,9 @@ async def extract_cookies(profile: str | None = None) -> dict[str, str]:
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        logger.warning("playwright not installed — run: uv add playwright && playwright install chromium")
+        logger.warning(
+            "playwright not installed — run: uv add playwright && playwright install chromium"
+        )
         return {}
 
     cookies: dict[str, str] = {}
@@ -64,7 +66,9 @@ async def extract_cookies(profile: str | None = None) -> dict[str, str]:
         )
         try:
             page = browser.pages[0] if browser.pages else await browser.new_page()
-            await page.goto("https://claude.ai", wait_until="domcontentloaded", timeout=15_000)
+            await page.goto(
+                "https://claude.ai", wait_until="domcontentloaded", timeout=15_000
+            )
             all_cookies = await browser.cookies("https://claude.ai")
             for c in all_cookies:
                 name = c.get("name", "")
@@ -72,7 +76,9 @@ async def extract_cookies(profile: str | None = None) -> dict[str, str]:
                 if name:
                     cookies[name] = value
             if cookies:
-                logger.info("Extracted %d cookies from persistent browser context", len(cookies))
+                logger.info(
+                    "Extracted %d cookies from persistent browser context", len(cookies)
+                )
         finally:
             await browser.close()
 
@@ -108,7 +114,9 @@ async def login_interactive(profile: str | None = None) -> bool:
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        logger.error("playwright not installed — run: uv add playwright && playwright install chromium")
+        logger.error(
+            "playwright not installed — run: uv add playwright && playwright install chromium"
+        )
         return False
 
     async with async_playwright() as p:

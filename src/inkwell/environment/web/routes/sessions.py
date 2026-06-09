@@ -37,7 +37,9 @@ def get_manager() -> SessionManager:
 @formats_router.get("/formats")
 async def get_formats() -> list[FormatOption]:
     return [
-        FormatOption(key=f.key, label=f.label, accepts_description=f.accepts_description)
+        FormatOption(
+            key=f.key, label=f.label, accepts_description=f.accepts_description
+        )
         for f in OUTPUT_FORMATS
     ]
 
@@ -69,12 +71,16 @@ async def get_session(session_id: str) -> SessionDetail:
 
 
 @router.post("/{session_id}/resume")
-async def resume_session(session_id: str, req: ResumeSessionRequest | None = None) -> dict[str, str]:
+async def resume_session(
+    session_id: str, req: ResumeSessionRequest | None = None
+) -> dict[str, str]:
     mgr = get_manager()
     from_stage = req.from_stage if req else None
     profile = req.profile if req else None
     try:
-        sid = await mgr.resume_session(session_id, from_stage=from_stage, profile=profile)
+        sid = await mgr.resume_session(
+            session_id, from_stage=from_stage, profile=profile
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"session_id": sid, "status": "running"}

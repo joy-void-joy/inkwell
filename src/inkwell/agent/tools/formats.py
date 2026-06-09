@@ -1,12 +1,10 @@
 # claude: ignore
-"""Output format adapter tools.
+"""Output format adapters.
 
 Transform a generic article draft into format-specific output:
-LessWrong, Twitter thread, memo, or custom. Called by the rewriter after
-producing the final draft.
-
-Each format has a plain function (do_format_*) for direct use by the
-pipeline, and a @lup_tool wrapper for MCP access by the interactive agent.
+LessWrong, Twitter thread, memo, academic paper, newsletter, or custom.
+Called by the pipeline's format stage via apply_format after the final
+draft is produced.
 """
 
 import logging
@@ -15,8 +13,6 @@ import textwrap
 from pathlib import Path
 
 from pydantic import BaseModel, Field
-
-from lup.mcp import lup_tool
 
 logger = logging.getLogger(__name__)
 
@@ -576,109 +572,3 @@ async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
         content=content,
         word_count=len(content.split()),
     )
-
-
-# ---------------------------------------------------------------------------
-# MCP tool wrappers (thin async wrappers for agent access)
-# ---------------------------------------------------------------------------
-
-
-@lup_tool(
-    "Format an article for LessWrong publication. Adds epistemic status "
-    "header, converts inline asides to footnotes, adds cross-references "
-    "to related posts, and ensures heading depth is appropriate for LW. "
-    "Call this after the final draft is complete."
-)
-async def format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
-    return do_format_lesswrong(params)
-
-
-@lup_tool(
-    "Convert an article into a Twitter/X thread. Splits content into "
-    "individual tweets (280 char limit), adds thread numbering, ensures "
-    "each tweet can stand alone while building on the thread. The hook "
-    "parameter becomes tweet 1 — it should grab attention without "
-    "needing context. Call this after the final draft is complete."
-)
-async def format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
-    return do_format_twitter(params)
-
-
-@lup_tool(
-    "Format an article for blog publication. Adds SEO-friendly structure "
-    "with a meta description, ensures subheading density for scannability, "
-    "and optimizes paragraph length. Call this after the final draft "
-    "is complete."
-)
-async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
-    return do_format_blog(params)
-
-
-@lup_tool(
-    "Restructure an article as a dialog between named speakers. Each speaker "
-    "gets a distinct perspective — one might advocate, another might push back. "
-    "Produces structured turns (speaker + text) and a compiled markdown rendering. "
-    "Use this when the content is naturally dialectical (opposing views, Q&A, "
-    "interview format, Socratic exploration). Call after the final draft is complete."
-)
-async def format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
-    return await do_format_dialog(params)
-
-
-@lup_tool(
-    "Format an article as a formal memo with header block (TO/FROM/DATE/SUBJECT) "
-    "and section headings in caps. Optionally includes classification markings. "
-    "Use this for policy briefs, diplomatic notes, internal recommendations, "
-    "or any content that needs formal structure. Call this after the final "
-    "draft is complete."
-)
-async def format_memo(params: FormatMemoInput) -> FormatMemoOutput:
-    return await do_format_memo(params)
-
-
-@lup_tool(
-    "Reformat an article into any format described in natural language. "
-    "Use this when none of the built-in formats (lesswrong, twitter, blog, "
-    "dialog, memo) fit the content. The format_description field controls "
-    "the output structure, tone, and conventions — be specific. Examples: "
-    "'academic abstract with keywords and JEL codes', 'diplomatic cable "
-    "with SUBJECT/REF headers', 'executive one-pager with bullet points'. "
-    "Call this after the final draft is complete."
-)
-async def format_custom(params: FormatCustomInput) -> FormatCustomOutput:
-    return await do_format_custom(params)
-
-
-@lup_tool(
-    "Format an article as an academic paper with abstract, numbered sections, "
-    "and formal register. Restructures via LLM to adopt academic conventions. "
-    "Adds a 'References' section header for use with format_bibliography. "
-    "Use for research papers, whitepapers, or any content targeting an "
-    "academic audience. Call after the final draft is complete."
-)
-async def format_academic(params: FormatAcademicInput) -> FormatAcademicOutput:
-    return await do_format_academic(params)
-
-
-@lup_tool(
-    "Format an article as a newsletter / Substack-style email. Optimizes for "
-    "mobile readability: short paragraphs, section dividers, and a call-to-action. "
-    "Use for email newsletters, Substack posts, or any content designed to be "
-    "read as a periodic dispatch. Call after the final draft is complete."
-)
-async def format_newsletter(
-    params: FormatNewsletterInput,
-) -> FormatNewsletterOutput:
-    return do_format_newsletter(params)
-
-
-FORMAT_TOOLS = [
-    format_lesswrong,
-    format_twitter,
-    format_blog,
-    format_dialog,
-    format_memo,
-    format_academic,
-    format_newsletter,
-    format_custom,
-]

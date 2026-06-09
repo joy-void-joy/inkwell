@@ -1,8 +1,6 @@
 """Live session state for the writing pipeline.
 
 Tracks doc_id, section status, pending questions, and author comments.
-Provides check_unread() for the pending-event guard and build_context()
-for the realtime context tool.
 """
 
 # claude: ignore
@@ -13,10 +11,6 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import TypedDict
-
-from pydantic import Field
-
-from inkwell.agent.tools.realtime import ContextOutput
 
 logger = logging.getLogger(__name__)
 
@@ -294,23 +288,3 @@ class WritingSessionState:
             self.seen_comment_ids.add(comment_id)
 
         return new_comments
-
-
-class WritingContext(ContextOutput):
-    """Rich context returned by the context tool during writing sessions."""
-
-    stage: str = Field(description="Current pipeline stage")
-    doc_id: str = Field(default="", description="Google Doc ID")
-    doc_url: str = Field(default="", description="Google Doc URL")
-    sections_status: list[SectionStatus] = Field(
-        default_factory=list, description="Status of each section"
-    )
-    pending_questions: list[str] = Field(
-        default_factory=list, description="Unanswered questions for the author"
-    )
-    new_author_comments: list[AuthorComment] = Field(
-        default_factory=list, description="Author replies since last check"
-    )
-    scheduler: dict[str, object] = Field(
-        default_factory=dict, description="Scheduler timing state"
-    )

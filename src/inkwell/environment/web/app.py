@@ -93,7 +93,9 @@ def create_app() -> FastAPI:
     if FRONTEND_DIST.is_dir():
         index_html = FRONTEND_DIST / "index.html"
 
-        app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+        app.mount(
+            "/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets"
+        )
 
         @app.get("/{path:path}")
         async def spa_fallback(path: str) -> FileResponse:

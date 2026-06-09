@@ -600,10 +600,16 @@ def cache_status() -> None:
 
     if voice_dir.exists():
         analyses = list(voice_dir.glob("*.md"))
-        inputs = list((voice_dir / "inputs").glob("*")) if (voice_dir / "inputs").exists() else []
+        inputs = (
+            list((voice_dir / "inputs").glob("*"))
+            if (voice_dir / "inputs").exists()
+            else []
+        )
         merged = voice_dir / "merged_guide.md"
-        typer.echo(f"Voice cache:  {len(analyses)} analyses, {len(inputs)} inputs"
-                   + (" + merged guide" if merged.exists() else ""))
+        typer.echo(
+            f"Voice cache:  {len(analyses)} analyses, {len(inputs)} inputs"
+            + (" + merged guide" if merged.exists() else "")
+        )
     else:
         typer.echo("Voice cache:  empty")
 

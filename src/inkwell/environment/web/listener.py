@@ -43,7 +43,9 @@ class WebListener(PipelineListener):
         handle = self.manager.sessions.get(self.session_id)
         if not handle:
             return
-        await self.broadcast({"type": "state_update", "state": self.serialize_state(handle.state)})
+        await self.broadcast(
+            {"type": "state_update", "state": self.serialize_state(handle.state)}
+        )
 
     async def broadcast_cost(self) -> None:
         handle = self.manager.sessions.get(self.session_id)
@@ -74,20 +76,27 @@ class WebListener(PipelineListener):
             doc_url=state.doc_url,
             title=state.title,
             stage=state.stage,
-            sections=[SectionInfo(title=s["title"], tab_id=s["tab_id"]) for s in state.sections],
+            sections=[
+                SectionInfo(title=s["title"], tab_id=s["tab_id"])
+                for s in state.sections
+            ],
             pending_questions=list(state.pending_questions),
         ).model_dump()
 
     async def on_block(self, block_type: str, content: str, prefix: str) -> None:
-        await self.broadcast({
-            "type": "block",
-            "block_type": block_type,
-            "content": content[:2000],
-            "prefix": prefix,
-        })
+        await self.broadcast(
+            {
+                "type": "block",
+                "block_type": block_type,
+                "content": content[:2000],
+                "prefix": prefix,
+            }
+        )
 
     async def on_stage(self, stage: str, description: str) -> None:
-        await self.broadcast({"type": "stage", "stage": stage, "description": description})
+        await self.broadcast(
+            {"type": "stage", "stage": stage, "description": description}
+        )
         await self.broadcast_state()
         await self.broadcast_cost()
 
@@ -95,16 +104,18 @@ class WebListener(PipelineListener):
         await self.broadcast({"type": "progress", "message": message})
 
     async def on_complete(self, output: WritingOutput) -> None:
-        await self.broadcast({
-            "type": "complete",
-            "output": {
-                "title": output.title,
-                "word_count": output.word_count,
-                "summary": output.summary,
-                "google_doc_url": output.google_doc_url,
-                "review_findings_count": len(output.review_findings),
-            },
-        })
+        await self.broadcast(
+            {
+                "type": "complete",
+                "output": {
+                    "title": output.title,
+                    "word_count": output.word_count,
+                    "summary": output.summary,
+                    "google_doc_url": output.google_doc_url,
+                    "review_findings_count": len(output.review_findings),
+                },
+            }
+        )
         await self.broadcast_cost()
 
     async def on_message(self, source: str, message: str) -> None:
@@ -113,7 +124,9 @@ class WebListener(PipelineListener):
     async def collect_feedback(self, state: WritingSessionState) -> list[str]:
         feedback = await super().collect_feedback(state)
 
-        await self.broadcast({"type": "state_update", "state": self.serialize_state(state)})
+        await self.broadcast(
+            {"type": "state_update", "state": self.serialize_state(state)}
+        )
 
         web_items: list[str] = []
         while not self.feedback_queue.empty():
@@ -136,10 +149,12 @@ class WebListener(PipelineListener):
                     logger.warning("Failed to mirror web input to GDoc")
 
         if feedback:
-            await self.broadcast({
-                "type": "progress",
-                "message": f"Incorporating {len(feedback)} feedback item(s)",
-            })
+            await self.broadcast(
+                {
+                    "type": "progress",
+                    "message": f"Incorporating {len(feedback)} feedback item(s)",
+                }
+            )
 
         return feedback
 
@@ -158,10 +173,12 @@ class WebListener(PipelineListener):
 
         self.awaiting_revision = True
         try:
-            await self.broadcast({
-                "type": "collect_revision",
-                "state": self.serialize_state(state),
-            })
+            await self.broadcast(
+                {
+                    "type": "collect_revision",
+                    "state": self.serialize_state(state),
+                }
+            )
             return await asyncio.wait_for(self.revision_queue.get(), timeout=300)
         except asyncio.TimeoutError:
             return None

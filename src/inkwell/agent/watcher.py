@@ -54,7 +54,9 @@ class PollInput(BaseModel):
     comment_id: str = Field(description="The comment ID to classify")
     content: str = Field(description="The comment text")
     anchor_text: str = Field(default="", description="Text the comment is anchored to")
-    reply: str = Field(default="", description="Reply text if responding to agent comment")
+    reply: str = Field(
+        default="", description="Reply text if responding to agent comment"
+    )
 
 
 class PollOutput(BaseModel):
@@ -94,12 +96,9 @@ def create_watcher_tools(
         name="poll_and_classify",
     )
     async def poll_and_classify(inp: PollInput) -> PollOutput:
-        task = (
-            f"Classify this author comment:\n\n"
-            f"Comment: {inp.content}\n"
-        )
+        task = f"Classify this author comment:\n\nComment: {inp.content}\n"
         if inp.anchor_text:
-            task += f"Anchored to: \"{inp.anchor_text}\"\n"
+            task += f'Anchored to: "{inp.anchor_text}"\n'
         if inp.reply:
             task += f"Reply to agent question: {inp.reply}\n"
 
@@ -198,7 +197,7 @@ def create_comment_watcher(
             lines.append(f"Comment ID: {c['comment_id']}")
             lines.append(f"Content: {c['content']}")
             if c["anchor_text"]:
-                lines.append(f"Anchored to: \"{c['anchor_text']}\"")
+                lines.append(f'Anchored to: "{c["anchor_text"]}"')
             if c["reply"]:
                 lines.append(f"Reply: {c['reply']}")
 
@@ -267,7 +266,7 @@ def create_source_watcher_tools(
             f"Comment: {inp.content}\n"
         )
         if inp.anchor_text:
-            task += f"Anchored to: \"{inp.anchor_text}\"\n"
+            task += f'Anchored to: "{inp.anchor_text}"\n'
         if inp.reply:
             task += f"Reply to agent question: {inp.reply}\n"
 
@@ -346,7 +345,7 @@ def create_source_watcher(
             lines.append(f"Comment ID: {c['comment_id']}")
             lines.append(f"Content: {c['content']}")
             if c["anchor_text"]:
-                lines.append(f"Anchored to: \"{c['anchor_text']}\"")
+                lines.append(f'Anchored to: "{c["anchor_text"]}"')
             if c["reply"]:
                 lines.append(f"Reply: {c['reply']}")
 

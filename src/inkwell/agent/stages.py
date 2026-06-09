@@ -691,6 +691,8 @@ OUTPUT_FORMATS: list[OutputFormatSpec] = [
     OutputFormatSpec(key="twitter", label="Twitter thread"),
     OutputFormatSpec(key="dialog", label="Dialog"),
     OutputFormatSpec(key="memo", label="Policy memo"),
+    OutputFormatSpec(key="academic", label="Academic paper"),
+    OutputFormatSpec(key="newsletter", label="Newsletter"),
     OutputFormatSpec(key="custom", label="Custom format", accepts_description=True),
 ]
 

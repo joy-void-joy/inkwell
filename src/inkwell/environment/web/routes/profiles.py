@@ -58,25 +58,31 @@ class GoogleStatusResponse(BaseModel):
 class DetectedLogin(BaseModel):
     path: str = Field(description="Absolute path to the config directory")
     label: str = Field(description="Human-readable label for this location")
-    is_profile_match: bool = Field(description="Whether this matches the current profile")
+    is_profile_match: bool = Field(
+        description="Whether this matches the current profile"
+    )
 
 
 class DetectResult(BaseModel):
-    found: list[DetectedLogin] = Field(description="Config directories with credentials")
+    found: list[DetectedLogin] = Field(
+        description="Config directories with credentials"
+    )
 
 
-SETTABLE_KEYS = frozenset({
-    "EXA_API_KEY",
-    "FRED_API_KEY",
-    "CLAUDE_COOKIE",
-    "CLAUDE_ORG_UUID",
-    "CLAUDE_CONFIG_DIR",
-    "INKWELL_AUTHOR_EMAIL",
-    "INKWELL_GOOGLE_WORKSPACE_DOMAIN",
-    "AGENT_MODEL",
-    "AGENT_MAX_BUDGET_USD",
-    "OPENROUTER_API_KEY",
-})
+SETTABLE_KEYS = frozenset(
+    {
+        "EXA_API_KEY",
+        "FRED_API_KEY",
+        "CLAUDE_COOKIE",
+        "CLAUDE_ORG_UUID",
+        "CLAUDE_CONFIG_DIR",
+        "INKWELL_AUTHOR_EMAIL",
+        "INKWELL_GOOGLE_WORKSPACE_DOMAIN",
+        "AGENT_MODEL",
+        "AGENT_MAX_BUDGET_USD",
+        "OPENROUTER_API_KEY",
+    }
+)
 
 
 @router.get("/capabilities")
@@ -103,11 +109,13 @@ async def build_profile_response(name: str) -> ProfileResponse:
 
     config_dir = env.get("CLAUDE_CONFIG_DIR", "")
     login_ok = bool(config_dir) and (Path(config_dir) / ".credentials.json").exists()
-    integrations.append(IntegrationStatus(
-        name="Claude login",
-        configured=login_ok,
-        detail=config_dir if login_ok else "not configured",
-    ))
+    integrations.append(
+        IntegrationStatus(
+            name="Claude login",
+            configured=login_ok,
+            detail=config_dir if login_ok else "not configured",
+        )
+    )
 
     google_creds, _ = google_paths_for_profile(name)
     google_ok = google_token.exists()
@@ -117,18 +125,22 @@ async def build_profile_response(name: str) -> ProfileResponse:
         google_detail = "credentials uploaded, not yet authorized"
     else:
         google_detail = "not configured"
-    integrations.append(IntegrationStatus(
-        name="Google",
-        configured=google_ok,
-        detail=google_detail,
-    ))
+    integrations.append(
+        IntegrationStatus(
+            name="Google",
+            configured=google_ok,
+            detail=google_detail,
+        )
+    )
 
     exa_key = env.get("EXA_API_KEY", "")
-    integrations.append(IntegrationStatus(
-        name="Exa",
-        configured=bool(exa_key),
-        detail=mask(exa_key) if exa_key else "not configured",
-    ))
+    integrations.append(
+        IntegrationStatus(
+            name="Exa",
+            configured=bool(exa_key),
+            detail=mask(exa_key) if exa_key else "not configured",
+        )
+    )
 
     has_browser = await context_has_cookies(name)
     claude_cookie = env.get("CLAUDE_COOKIE", "")
@@ -139,18 +151,22 @@ async def build_profile_response(name: str) -> ProfileResponse:
         claude_detail = mask(claude_cookie)
     else:
         claude_detail = "not configured"
-    integrations.append(IntegrationStatus(
-        name="Claude.ai session",
-        configured=claude_ok,
-        detail=claude_detail,
-    ))
+    integrations.append(
+        IntegrationStatus(
+            name="Claude.ai session",
+            configured=claude_ok,
+            detail=claude_detail,
+        )
+    )
 
     fred_key = env.get("FRED_API_KEY", "")
-    integrations.append(IntegrationStatus(
-        name="FRED",
-        configured=bool(fred_key),
-        detail=mask(fred_key) if fred_key else "not configured",
-    ))
+    integrations.append(
+        IntegrationStatus(
+            name="FRED",
+            configured=bool(fred_key),
+            detail=mask(fred_key) if fred_key else "not configured",
+        )
+    )
 
     return ProfileResponse(name=name, integrations=integrations)
 
@@ -201,7 +217,9 @@ async def rename_profile(name: str, req: RenameProfileRequest) -> ProfileRespons
         raise HTTPException(status_code=400, detail="Profile name cannot be empty")
     new_dir = PROFILES_DIR / new_name
     if new_dir.exists():
-        raise HTTPException(status_code=409, detail=f"Profile '{new_name}' already exists")
+        raise HTTPException(
+            status_code=409, detail=f"Profile '{new_name}' already exists"
+        )
     profile_dir.rename(new_dir)
     return await build_profile_response(new_name)
 
@@ -232,7 +250,9 @@ async def trigger_login(name: str) -> ProfileResponse:
         raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
     logged_in = await login_interactive(name)
     if not logged_in:
-        raise HTTPException(status_code=400, detail="Login did not complete successfully")
+        raise HTTPException(
+            status_code=400, detail="Login did not complete successfully"
+        )
     return await build_profile_response(name)
 
 
@@ -249,7 +269,7 @@ async def detect_claude_login(name: str) -> DetectResult:
     default_dir = claude_config_dir_for_profile(None)
 
     candidates: list[tuple[Path, str, bool]] = [
-        (profile_dir, f"Profile \"{name}\"", True),
+        (profile_dir, f'Profile "{name}"', True),
         (default_dir, "Default (shared across profiles)", False),
         (Path.home() / ".claude", "Claude Code login (your dev account)", False),
     ]
@@ -324,9 +344,7 @@ async def authorize_google(name: str) -> GoogleStatusResponse:
         )
 
     try:
-        await asyncio.to_thread(
-            run_oauth_flow, str(creds_path), str(token_path)
-        )
+        await asyncio.to_thread(run_oauth_flow, str(creds_path), str(token_path))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AccessDeniedError as exc:

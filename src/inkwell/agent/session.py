@@ -11,6 +11,7 @@ for the realtime context tool.
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TypedDict
 
 from pydantic import Field
@@ -43,14 +44,18 @@ class WritingSessionState:
     def __init__(self) -> None:
         self.doc_id: str = ""
         self.doc_url: str = ""
+        self.title: str = ""
+        self.source_doc_id: str = ""
         self.stage: str = "starting"
         self.sections: list[SectionStatus] = []
         self.pending_questions: list[str] = []
         self.seen_comment_ids: set[str] = set()
         self.agent_comment_ids: set[str] = set()
+        self.seen_source_comment_ids: set[str] = set()
         self.sleep_entered: asyncio.Event = asyncio.Event()
         self.directions_tab_id: str = ""
         self.last_directions_content: str = ""
+        self.shared_dir: Path | None = None
 
     def set_doc(self, doc_id: str, doc_url: str) -> None:
         self.doc_id = doc_id
@@ -174,6 +179,73 @@ class WritingSessionState:
         except Exception:
             logger.warning("Failed to fetch author comments (sync)", exc_info=True)
             return []
+
+    def get_new_source_comments_sync(self) -> list[AuthorComment]:
+        """Fetch new comments from the source Google Doc (sync)."""
+        if not self.source_doc_id:
+            return []
+
+        try:
+            from inkwell.agent.tools.google_docs import services
+
+            svc = services()
+            drive = svc.drive_service()
+
+            result = (
+                drive.comments()
+                .list(
+                    fileId=self.source_doc_id,
+                    fields="comments(id,content,quotedFileContent/value,replies/content,resolved)",
+                    pageSize=100,
+                )
+                .execute()
+            )
+
+            return self.parse_source_comments(result)
+        except Exception:
+            logger.warning("Failed to fetch source doc comments (sync)", exc_info=True)
+            return []
+
+    def parse_source_comments(self, result: object) -> list[AuthorComment]:
+        """Parse source doc comments, tracking seen IDs separately."""
+        if not isinstance(result, dict):
+            return []
+
+        new_comments: list[AuthorComment] = []
+        for item in result.get("comments", []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("resolved", False):
+                continue
+
+            comment_id = str(item.get("id", ""))
+            if comment_id in self.seen_source_comment_ids:
+                continue
+
+            content = str(item.get("content", ""))
+            anchor = ""
+            quoted = item.get("quotedFileContent")
+            if isinstance(quoted, dict):
+                anchor = str(quoted.get("value", ""))
+
+            reply_list = item.get("replies", [])
+            reply_text = ""
+            if isinstance(reply_list, list) and reply_list:
+                last_reply = reply_list[-1]
+                if isinstance(last_reply, dict):
+                    reply_text = str(last_reply.get("content", ""))
+
+            new_comments.append(
+                AuthorComment(
+                    comment_id=comment_id,
+                    content=content,
+                    anchor_text=anchor,
+                    reply=reply_text,
+                )
+            )
+            self.seen_source_comment_ids.add(comment_id)
+
+        return new_comments
 
     def parse_comments(self, result: object) -> list[AuthorComment]:
         """Parse comments API response into AuthorComment list, updating seen set."""

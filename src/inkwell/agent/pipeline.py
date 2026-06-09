@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import NamedTuple
 
+
 from claude_agent_sdk import McpServerConfig
 from pydantic import BaseModel, Field
 
@@ -26,7 +27,7 @@ from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
 from lup.sandbox import Sandbox
 from lup.trace import TraceLogger, extract_block_info
 
-from inkwell.agent.config import settings
+import inkwell.agent.config as config_mod
 from inkwell.agent.models import (
     AddAction,
     ArticlePlan,
@@ -38,7 +39,6 @@ from inkwell.agent.models import (
     PipelineSnapshot,
     PreserveAction,
     ResearchCompilation,
-    ResearchFinding,
     RestartStrategy,
     ReviewFinding,
     ReviewOutput,
@@ -236,75 +236,6 @@ def slugify(label: str) -> str:
     return slug.strip("-")[:80]
 
 
-def render_finding_markdown(f: ResearchFinding) -> str:
-    """Render a single research finding as readable markdown."""
-    parts = [f"### {f.question}\n", f"{f.answer}\n"]
-    if f.data_points:
-        parts.append("**Data points:** " + "; ".join(f.data_points))
-    parts.append(f"**Confidence:** {f.confidence:.0%}")
-    if f.sources:
-        urls = [s.url for s in f.sources if s.url]
-        if urls:
-            parts.append("**Sources:** " + ", ".join(urls))
-    return "\n".join(parts)
-
-
-def split_research_by_section(
-    research: ResearchCompilation,
-    plan: ArticlePlan,
-    notes: PipelineNotes,
-) -> dict[str, Path]:
-    """Split research findings into per-section markdown files.
-
-    Matches findings to sections via the plan's research questions.
-    Each section gets a readable markdown file small enough to Read
-    without truncation. Returns section_title -> file path.
-    """
-    section_questions: dict[str, list[str]] = {}
-    for q in plan.research_questions:
-        section_questions.setdefault(q.section, []).append(q.question.lower())
-
-    section_findings: dict[str, list[ResearchFinding]] = {}
-    unmatched: list[ResearchFinding] = []
-
-    for finding in research.findings:
-        q_lower = finding.question.lower()
-        matched = False
-        for section_title, questions in section_questions.items():
-            if any(q in q_lower or q_lower in q for q in questions):
-                section_findings.setdefault(section_title, []).append(finding)
-                matched = True
-                break
-        if not matched:
-            unmatched.append(finding)
-
-    paths: dict[str, Path] = {}
-    for section_title, findings in section_findings.items():
-        slug = slugify(section_title)
-        lines = [f"# Research: {section_title}\n"]
-        for f in findings:
-            lines.append(render_finding_markdown(f))
-            lines.append("")
-        content = "\n".join(lines)
-        path = notes.save_text_artifact(f"research_{slug}", content)
-        paths[section_title] = path
-
-    if unmatched:
-        lines = ["# Research: General / Cross-Section\n"]
-        for f in unmatched:
-            lines.append(render_finding_markdown(f))
-            lines.append("")
-        if research.additional_context:
-            lines.append(f"## Additional Context\n\n{research.additional_context}")
-        if research.suggested_additions:
-            lines.append("## Suggested Additions\n")
-            for s in research.suggested_additions:
-                lines.append(f"- {s}")
-        content = "\n".join(lines)
-        path = notes.save_text_artifact("research_general", content)
-        paths["_general"] = path
-
-    return paths
 
 
 def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> None:
@@ -852,7 +783,6 @@ async def refine_plan(
     *,
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
-    section_research_paths: dict[str, Path] | None = None,
     author_notes: list[AuthorNote] | None = None,
     source_servers: dict[str, McpServerConfig] | None = None,
     source_tool_names_list: list[str] | None = None,
@@ -876,14 +806,6 @@ async def refine_plan(
 
     manifest = ContentManifest()
     manifest.add(plan_path, "plan", "Current plan")
-    if section_research_paths:
-        for title, path in section_research_paths.items():
-            manifest.add(
-                path,
-                "research",
-                f"Research: {title}",
-                instruction="cite findings from this",
-            )
     add_voice_refs(manifest, voice_file_paths or [])
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
@@ -892,7 +814,7 @@ async def refine_plan(
         f"Refine the article plan using the research findings.\n\n"
         f"{manifest.render()}\n"
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
-        f"Read the plan and research files, then build the refined plan using "
+        f"Read the plan, then build the refined plan using "
         f"set_plan_header, add_section, add_research_question, and add_source_quote."
     )
 
@@ -1012,7 +934,6 @@ async def write_section(
     notes: PipelineNotes,
     draft_path: Path,
     voice_file_paths: list[str] | None = None,
-    section_research_path: Path | None = None,
     feedback_path: Path | None = None,
     section_context: str = "",
     target_format: str = "auto",
@@ -1050,13 +971,6 @@ async def write_section(
 
     manifest = ContentManifest()
     manifest.add(plan_path, "plan", "Article plan")
-    if section_research_path and section_research_path.exists():
-        manifest.add(
-            section_research_path,
-            "research",
-            f"Research: {section_title}",
-            instruction="cite findings from this",
-        )
     add_voice_refs(manifest, voice_file_paths or [])
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
@@ -1073,8 +987,8 @@ async def write_section(
         task += f"{section_context}\n\n"
     task += (
         f"Read the plan to find this section's details (summary, key points, "
-        f"quotes to include), then read the research findings file for this "
-        f"section. Read each voice analysis and style reference file to match "
+        f"quotes to include). Use list_research and read_finding for research. "
+        f"Read each voice analysis and style reference file to match "
         f"the author's style and apply all hard editing rules.\n\n"
         f"Write the complete section to: {draft_path}\n\n"
         f"Use the Write tool to write the file. Write the entire section "
@@ -1768,14 +1682,18 @@ async def surface_assumptions(
     )
 
     file_refs = f"Article plan: {plan_path}\n"
+
+    research_hint = ""
     if has_research:
-        research_path = notes.artifact_path("research")
-        file_refs += f"Research findings: {research_path}\n"
+        research_hint = (
+            "Use list_research and read_finding to check research findings.\n"
+        )
 
     task = (
         f"Review the article plan and surface all uncertainties.\n\n"
         f"{file_refs}\n"
-        f"Read the files, then call record_assumption for each uncertainty."
+        f"{research_hint}"
+        f"Read the plan, then call record_assumption for each uncertainty."
     )
 
     all_servers = {
@@ -1944,7 +1862,6 @@ class PipelineRunner:
         self.watcher: BackgroundAgent | None = None
         self.source_watcher: BackgroundAgent | None = None
         self.source_is_extracted_gdoc = False
-        self.section_research_paths: dict[str, Path] = {}
 
     @property
     def effective_format(self) -> str:
@@ -2039,6 +1956,7 @@ class PipelineRunner:
     async def run(self) -> WritingOutput:
         """Execute the full pipeline with restart support."""
         self.install_block_callback()
+        self.snapshot.profile = config_mod.settings.profile
         configure_session_state(self.state)
         await self.setup_doc()
         self.start_sandbox()
@@ -2111,12 +2029,6 @@ class PipelineRunner:
 
         await self.setup_doc()
         self.start_sandbox()
-
-        if snapshot.research and snapshot.plan:
-            notes = self.ensure_notes()
-            self.section_research_paths = split_research_by_section(
-                snapshot.research, snapshot.plan, notes
-            )
 
         try:
             stages = [
@@ -2205,7 +2117,7 @@ class PipelineRunner:
         else:
             self.doc_id, self.doc_url = await do_create_doc(
                 f"Inkwell — {', '.join(s[:30] for s in self.sources)[:60]}",
-                share_with=settings.author_email,
+                share_with=config_mod.settings.author_email,
                 session_state=self.state,
             )
             await self.hooks.on_progress(f"Google Doc: {self.doc_url}")
@@ -2727,6 +2639,7 @@ class PipelineRunner:
         await self.post_author_notes()
         self.snapshot.plan = plan
         self.snapshot.stage = "plan"
+        self.state.title = plan.title
         await self.save_snapshot()
 
         await self.hooks.on_progress(
@@ -2808,10 +2721,8 @@ class PipelineRunner:
         self.snapshot.stage = "research"
         await self.save_snapshot()
 
-        self.section_research_paths = split_research_by_section(research, plan, notes)
         await self.hooks.on_progress(
-            f"Research complete: {len(research.findings)} findings, "
-            f"split into {len(self.section_research_paths)} section files"
+            f"Research complete: {len(research.findings)} findings"
         )
         await self.write_research_tab(research)
         await self.update_overview()
@@ -2847,7 +2758,6 @@ class PipelineRunner:
             notes,
             voice_file_paths=self.snapshot.voice_file_paths,
             feedback_path=feedback_path,
-            section_research_paths=self.section_research_paths or None,
             author_notes=self.author_notes,
             source_servers=self.source_servers,
             source_tool_names_list=self.source_tool_names,
@@ -2916,14 +2826,11 @@ class PipelineRunner:
                 )
                 await syncer.start()
             try:
-                section_rp = self.section_research_paths.get(section.title)
-                general_rp = self.section_research_paths.get("_general")
                 draft = await write_section(
                     section.title,
                     notes=notes,
                     draft_path=draft_path,
                     voice_file_paths=self.snapshot.voice_file_paths,
-                    section_research_path=section_rp or general_rp,
                     feedback_path=feedback_path,
                     section_context=build_neighbor_context(idx),
                     target_format=self.effective_format,

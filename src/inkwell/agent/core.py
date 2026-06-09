@@ -18,6 +18,8 @@ Exports:
 # McpServerConfig is imported from a typed module but used with untyped servers.
 
 import logging
+import time
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -55,7 +57,7 @@ from lup.realtime import (
 from lup.sandbox import Sandbox
 from lup.trace import TraceLogger
 
-from inkwell.agent.config import settings
+import inkwell.agent.config as config_mod
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot, WritingOutput
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import PipelineError, PipelineListener, PipelineRunner, run_pipeline
@@ -72,8 +74,11 @@ from inkwell.agent.tools.voice import VOICE_TOOLS
 
 logger = logging.getLogger(__name__)
 
-NOTES_PATH = Path(settings.notes_path)
-TRACES_PATH = NOTES_PATH / "traces"
+def notes_path() -> Path:
+    return Path(config_mod.settings.notes_path)
+
+def traces_path() -> Path:
+    return notes_path() / "traces"
 
 
 def build_context(
@@ -99,19 +104,41 @@ def build_context(
 def create_writing_stop_guard(
     session_state: WritingSessionState,
 ) -> HooksConfig:
-    """Stop guard that adapts to pipeline state."""
+    """Stop guard that adapts to pipeline state.
+
+    Allows rapid consecutive stops through (e.g. usage exhaustion)
+    to prevent infinite loops when the agent can neither sleep nor stop.
+    """
+    rapid_block_count = 0
+    last_block_time = 0.0
 
     async def stop_guard(
         input_data: HookInput,
         _tool_use_id: str | None,  # claude: ignore
         _context: HookContext,  # claude: ignore
     ) -> SyncHookJSONOutput:
+        nonlocal rapid_block_count, last_block_time
+
         if input_data["hook_event_name"] != "Stop":
             return SyncHookJSONOutput()
         if input_data["stop_hook_active"]:
+            rapid_block_count = 0
             return SyncHookJSONOutput()
         if not session_state.doc_id:
             return SyncHookJSONOutput()
+
+        now = time.monotonic()
+        if now - last_block_time < 10.0:
+            rapid_block_count += 1
+        else:
+            rapid_block_count = 1
+        last_block_time = now
+
+        if rapid_block_count >= 3:
+            logger.warning("Stop guard: allowing stop after %d rapid attempts (likely stuck)", rapid_block_count)
+            rapid_block_count = 0
+            return SyncHookJSONOutput()
+
         return block_hook_output(
             "Use sleep to enter standby mode. The author may have "
             "feedback or revision requests at any time."
@@ -145,13 +172,13 @@ def setup_session(
     (freeform mode) and as infrastructure for the pipeline.
     """
     notes = setup_notes(session_id, "0")
-    trace_path = TRACES_PATH / session_id / f"{datetime.now().strftime('%H%M%S')}.md"
+    trace_path = traces_path() / session_id / f"{datetime.now().strftime('%H%M%S')}.md"
     trace_logger = TraceLogger(trace_path=trace_path, title=f"Session {session_id}")
 
     sandbox = Sandbox(
         session_id=session_id,
         shared_dir=notes.session / "sandbox_shared",
-        timeout_seconds=settings.sandbox_timeout_seconds,
+        timeout_seconds=config_mod.settings.sandbox_timeout_seconds,
     )
 
     if session_state is None:
@@ -267,7 +294,7 @@ def build_options(
     persistent: bool = True,
 ) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions for the writing agent."""
-    policy = ToolPolicy(settings)
+    policy = ToolPolicy(config_mod.settings)
 
     servers = build_agent_servers(
         session_dir=notes_config.session,
@@ -295,10 +322,14 @@ def build_options(
         ]:
             hooks = merge_hooks(hooks, layer)
 
+    env: dict[str, str] = {}
+    if config_mod.settings.claude_config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_mod.settings.claude_config_dir
+
     return ClaudeAgentOptions(
-        model=settings.model,
-        system_prompt=get_system_prompt(author_email=settings.author_email),
-        max_thinking_tokens=settings.max_thinking_tokens or (128_000 - 1),
+        model=config_mod.settings.model,
+        system_prompt=get_system_prompt(author_email=config_mod.settings.author_email),
+        max_thinking_tokens=config_mod.settings.max_thinking_tokens or (128_000 - 1),
         permission_mode="bypassPermissions",
         extra_args={"no-session-persistence": None},
         hooks=hooks,
@@ -310,6 +341,7 @@ def build_options(
         mcp_servers=servers,
         add_dirs=[str(d) for d in notes_config.all_dirs],
         allowed_tools=policy.get_allowed_tools(),
+        env=env,
     )
 
 
@@ -409,30 +441,29 @@ class SessionTrace:
 
 async def run_session(
     *,
-    source: str | None = None,
-    task: str | None = None,
+    sources: list[str] | None = None,
+    refs: list[str] | None = None,
     resume_session_id: str | None = None,
     resume_from_stage: str | None = None,
-    target_format: str = "lesswrong",
+    target_format: str = "auto",
     existing_doc_id: str | None = None,
     session_id: str | None = None,
     task_id: str | None = None,
-    refs: list[str] | None = None,
     listener: PipelineListener | None = None,
     on_action: ActionCallback | None = None,
     persistent: bool = True,
     trace_holder: list[SessionTrace] | None = None,
     session_state: WritingSessionState | None = None,
+    cost_accumulator: CostAccumulator | None = None,
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
-    Exactly one of source, task, or resume_session_id must be provided:
-    - source: Run the full pipeline from source material (URL, file, share link)
-    - task: Run the pipeline using freeform text as source material
+    Either sources or resume_session_id must be provided:
+    - sources: One or more source materials (URLs, files, share links, freeform text)
     - resume_session_id: Resume from a saved pipeline snapshot
     """
     if session_id is None:
-        session_id = resume_session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_id = resume_session_id or uuid.uuid4().hex[:16]
 
     logger.info("Starting session %s", session_id)
     reset_metrics()
@@ -447,7 +478,7 @@ async def run_session(
     if trace_holder is not None:
         trace_holder.append(SessionTrace(setup.trace_logger))
 
-    cost_acc = CostAccumulator()
+    cost_acc = cost_accumulator or CostAccumulator()
     pipeline_notes = PipelineNotes(setup.notes.session / "pipeline_notes")
 
     if resume_session_id:
@@ -463,27 +494,26 @@ async def run_session(
             existing_doc_id = snapshot.output.google_doc_id
 
         runner = PipelineRunner(
-            source or "",
+            sources=sources or [],
+            refs=refs or [],
             target_format=target_format,
             existing_doc_id=existing_doc_id,
             session_state=setup.session_state,
             notes=pipeline_notes,
             trace_logger=setup.trace_logger,
-            refs=refs,
             listener=listener,
             cost_accumulator=cost_acc,
         )
         output = await runner.run_from(snapshot)
     else:
-        pipeline_source = source or task or ""
         output = await run_pipeline(
-            pipeline_source,
+            sources=sources or [],
+            refs=refs or [],
             target_format=target_format,
             existing_doc_id=existing_doc_id,
             session_state=setup.session_state,
             notes=pipeline_notes,
             trace_logger=setup.trace_logger,
-            refs=refs,
             listener=listener,
             cost_accumulator=cost_acc,
         )
@@ -520,6 +550,7 @@ async def run_session(
         if cost_acc.call_count
         else None,
         tool_metrics=get_metrics_summary(),
+        profile=config_mod.settings.profile,
     )
 
     save_session(result, session_id=result.session_id)
@@ -527,24 +558,22 @@ async def run_session(
 
 
 async def run_batch(
-    source: str,
+    sources: list[str],
     *,
-    target_format: str = "lesswrong",
+    target_format: str = "auto",
     existing_doc_id: str | None = None,
     session_id: str | None = None,
     task_id: str | None = None,
-    refs: list[str] | None = None,
     listener: PipelineListener | None = None,
     on_action: ActionCallback | None = None,
 ) -> AgentSessionResult:
     """Backward-compatible wrapper around run_session for pipeline mode."""
     return await run_session(
-        source=source,
+        sources=sources,
         target_format=target_format,
         existing_doc_id=existing_doc_id,
         session_id=session_id,
         task_id=task_id,
-        refs=refs,
         listener=listener,
         on_action=on_action,
         persistent=False,
@@ -562,7 +591,7 @@ async def run_agent(
 ) -> AgentSessionResult:
     """Backward-compatible wrapper around run_session for freeform mode."""
     return await run_session(
-        task=task,
+        sources=[task],
         existing_doc_id=existing_doc_id,
         session_id=session_id,
         task_id=task_id,

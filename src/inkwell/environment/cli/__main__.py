@@ -8,11 +8,18 @@ Usage:
 
 import asyncio
 import logging
-from pathlib import PurePosixPath
+import os
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib.parse import urlparse
 
 import typer
+
+from inkwell.agent.stages import OUTPUT_FORMATS
+
+FORMAT_HELP = "Suggested format (agent may override): " + ", ".join(
+    f"{f.key}:<description>" if f.accepts_description else f.key for f in OUTPUT_FORMATS
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +32,7 @@ def extract_doc_id_from_url(url: str) -> str:
         if part == "d" and i + 1 < len(parts):
             return parts[i + 1]
     return ""
+
 
 app = typer.Typer(
     name="inkwell",
@@ -42,8 +50,21 @@ app.add_typer(style_app, name="style")
 
 
 @app.callback(invoke_without_command=True)
-def callback(ctx: typer.Context) -> None:
+def callback(
+    ctx: typer.Context,
+    profile: Annotated[
+        str | None,
+        typer.Option(
+            "--profile",
+            "-p",
+            help="Configuration profile to use (e.g. 'work', 'personal')",
+            envvar="INKWELL_PROFILE",
+        ),
+    ] = None,
+) -> None:
     """AI writing agent — opens interactive chat when run with no arguments."""
+    if profile:
+        os.environ["INKWELL_PROFILE"] = profile
     if ctx.invoked_subcommand is None:
         from inkwell.environment.cli.chat import chat_session
 
@@ -55,18 +76,20 @@ def callback(ctx: typer.Context) -> None:
 
 @app.command()
 def write(
-    source: Annotated[
-        str,
-        typer.Argument(help="Claude share link, URL, or writing brief"),
-    ],
+    sources: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Source materials: Claude share links, URLs, file paths, or a writing brief"
+        ),
+    ] = None,
     ref: Annotated[
         list[str] | None,
-        typer.Option("--ref", "-r", help="Additional reference URLs or file paths"),
+        typer.Option("--ref", "-r", help="Supplementary reference URLs or file paths"),
     ] = None,
     target_format: Annotated[
         str,
-        typer.Option("--format", "-f", help="Suggested format (agent may override): lesswrong, twitter, blog, dialog, memo, or custom:<description>"),
-    ] = "lesswrong",
+        typer.Option("--format", "-f", help=FORMAT_HELP),
+    ] = "auto",
     doc: Annotated[
         str | None,
         typer.Option("--doc", "-d", help="Existing Google Doc URL or ID to write into"),
@@ -82,18 +105,17 @@ def write(
 ) -> None:
     """Write an article from source material.
 
-    SOURCE can be:
+    Each SOURCE can be:
     - A Claude.ai share link (https://claude.ai/share/...)
     - A URL to extract content from
     - A local file path
 
-    Runs the full pipeline (plan, research, write, review, rewrite)
-    with live progress in the terminal and a Google Doc for collaboration.
+    Multiple sources are extracted and combined for the pipeline.
 
     Examples:
         inkwell write "https://claude.ai/share/abc123"
-        inkwell write "https://claude.ai/share/abc123" --ref "paper.pdf" -f twitter
-        inkwell write "https://claude.ai/share/abc123" --doc "https://docs.google.com/document/d/..."
+        inkwell write "https://claude.ai/share/abc123" paper.pdf -f twitter
+        inkwell write conversation.md notes.txt --ref "https://arxiv.org/abs/..." --doc "https://docs.google.com/..."
     """
     from inkwell.environment.cli.chat import chat_session
 
@@ -107,10 +129,10 @@ def write(
     try:
         asyncio.run(
             chat_session(
-                initial_task=source,
+                sources=sources or [],
+                refs=ref,
                 session_id=session_id,
                 target_format=target_format,
-                refs=ref,
                 existing_doc_id=doc_id,
                 verbose=verbose,
             )
@@ -124,8 +146,8 @@ def run(
     task: Annotated[str, typer.Argument(help="Freeform task for the agent")],
     target_format: Annotated[
         str,
-        typer.Option("--format", "-f", help="Suggested format (agent may override): lesswrong, twitter, blog, dialog, memo, or custom:<description>"),
-    ] = "lesswrong",
+        typer.Option("--format", "-f", help=FORMAT_HELP),
+    ] = "auto",
     session_id: Annotated[
         str | None,
         typer.Option("--session-id", "-s", help="Session identifier"),
@@ -146,7 +168,7 @@ def run(
     try:
         asyncio.run(
             chat_session(
-                initial_task=task,
+                sources=[task],
                 session_id=session_id,
                 target_format=target_format,
                 verbose=verbose,
@@ -212,8 +234,17 @@ def sessions(
 
 
 VALID_STAGES = [
-    "extract", "voice", "plan", "research", "assumptions",
-    "refine", "write", "merge", "review", "rewrite", "format",
+    "extract",
+    "voice",
+    "plan",
+    "research",
+    "assumptions",
+    "refine",
+    "write",
+    "merge",
+    "review",
+    "rewrite",
+    "format",
 ]
 
 
@@ -226,7 +257,8 @@ def resume(
     from_stage: Annotated[
         str | None,
         typer.Option(
-            "--from", "-f",
+            "--from",
+            "-f",
             help="Resume from after this stage (e.g. 'write' to re-run merge onward). "
             "Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
         ),
@@ -248,8 +280,7 @@ def resume(
     """
     if from_stage and from_stage not in VALID_STAGES:
         typer.echo(
-            f"Invalid stage '{from_stage}'. "
-            f"Valid stages: {', '.join(VALID_STAGES)}"
+            f"Invalid stage '{from_stage}'. Valid stages: {', '.join(VALID_STAGES)}"
         )
         raise typer.Exit(1)
 
@@ -275,7 +306,11 @@ def fetch_comments(
     ],
     session_id: Annotated[
         str | None,
-        typer.Option("--session", "-s", help="Session ID to merge comments into (queues as feedback)"),
+        typer.Option(
+            "--session",
+            "-s",
+            help="Session ID to merge comments into (queues as feedback)",
+        ),
     ] = None,
 ) -> None:
     """Fetch and display comments from a Google Doc.
@@ -295,10 +330,10 @@ def fetch_comments(
     else:
         doc_id = doc
 
-    comments = asyncio.run(do_fetch_comments(doc_id))
+    comments = asyncio.run(do_fetch_comments(doc_id, include_resolved=True))
 
     if not comments:
-        typer.echo("No unresolved comments found.")
+        typer.echo("No comments found.")
         return
 
     typer.echo(f"{len(comments)} comment(s):\n")
@@ -314,7 +349,9 @@ def fetch_comments(
 
         notes_dir = sessions_dir() / session_id / "pipeline_notes"
         if not notes_dir.exists():
-            typer.echo(f"Session '{session_id}' not found — comments printed but not merged.")
+            typer.echo(
+                f"Session '{session_id}' not found — comments printed but not merged."
+            )
             return
 
         feedback_file = notes_dir / "fetched_comments.md"
@@ -329,12 +366,60 @@ def fetch_comments(
 
 
 @app.command()
-def setup() -> None:
-    """Run the setup wizard to configure integrations."""
-    from inkwell.devtools.setup import main as setup_main
+def extract(
+    source: Annotated[
+        str,
+        typer.Argument(help="Claude share link, URL, or file path to extract"),
+    ],
+    output: Annotated[
+        str | None,
+        typer.Option("--output", "-o", help="Output file path (default: stdout)"),
+    ] = None,
+) -> None:
+    """Extract source material to a local file for offline use.
 
-    ctx = typer.Context(typer.main.get_command(app))
-    setup_main(ctx)
+    Extracts content from a Claude share link, URL, or file and saves it
+    as markdown. Useful for pre-extracting conversations while your session
+    cookie is fresh, then running `inkwell write` later in headless environments.
+
+    Examples:
+        inkwell extract "https://claude.ai/share/abc123" -o conversation.md
+        inkwell extract "https://lesswrong.com/posts/.../slug" -o post.md
+        inkwell write conversation.md   # no cookie needed
+    """
+    import tempfile
+    from pathlib import Path as P
+
+    from inkwell.agent.tools.research.fetch import do_fetch_source
+    from lup.content_safety import configure_content_safety
+    from lup.mcp import ToolError
+
+    configure_content_safety(P(tempfile.mkdtemp(prefix="inkwell-extract-")))
+
+    try:
+        result = asyncio.run(do_fetch_source(source))
+        text = P(result.content.path).read_text(encoding="utf-8")
+    except (RuntimeError, ToolError) as e:
+        typer.echo(f"Extraction failed: {e}", err=True)
+        raise typer.Exit(1)
+
+    if output:
+        from pathlib import Path
+
+        out_path = Path(output)
+        out_path.write_text(text, encoding="utf-8")
+        typer.echo(f"Extracted to {out_path}")
+    else:
+        typer.echo(text)
+
+
+def register_setup() -> None:
+    from inkwell.devtools.setup import app as setup_app
+
+    app.add_typer(setup_app, name="setup", help="Configure integrations")
+
+
+register_setup()
 
 
 @style_app.command("add")
@@ -345,22 +430,42 @@ def style_add(
     ],
     target_format: Annotated[
         str | None,
-        typer.Option("--format", "-f", help="Add as format-specific example (lesswrong, twitter, blog, dialog, memo)"),
+        typer.Option(
+            "--format",
+            "-f",
+            help="Add as format-specific example ("
+            + ", ".join(f.key for f in OUTPUT_FORMATS if not f.accepts_description)
+            + ")",
+        ),
     ] = None,
+    prescriptive: Annotated[
+        bool,
+        typer.Option(
+            "--prescriptive",
+            "-p",
+            help="Treat as prescriptive rules (passed verbatim, not analyzed for voice)",
+        ),
+    ] = False,
 ) -> None:
     """Add a writing sample to the style corpus.
 
-    Without --format, the sample is used as a general voice reference.
+    Without flags, the sample is analyzed for voice characteristics.
+    With --prescriptive, the document is passed through verbatim as
+    hard editing rules (style guides, checklists, do/don't lists).
     With --format, it's used as an example of good output in that format.
 
     Examples:
         inkwell style add ~/writing/my-essay.md
+        inkwell style add ~/editing/style-guide.md --prescriptive
         inkwell style add "https://lesswrong.com/posts/my-post" --format lesswrong
-        inkwell style add ~/memos/good-memo.md -f memo
     """
     from inkwell.agent.tools.voice import add_style_reference
 
-    typer.echo(add_style_reference(source, target_format=target_format))
+    typer.echo(
+        add_style_reference(
+            source, target_format=target_format, prescriptive=prescriptive
+        )
+    )
 
 
 @style_app.command("list")
@@ -368,20 +473,26 @@ def style_list() -> None:
     """List the current style corpus and format-specific examples."""
     from inkwell.agent.tools.voice import list_format_examples, list_style_references
 
-    entries = list_style_references()
+    voice_entries, prescriptive_entries = list_style_references()
     format_entries = list_format_examples()
 
-    if not entries and not format_entries:
+    if not voice_entries and not prescriptive_entries and not format_entries:
         typer.echo("No style corpus configured. Use `inkwell style add` to start.")
         return
 
-    if entries:
+    if voice_entries:
         typer.echo("Voice references:")
-        for entry in entries:
+        for entry in voice_entries:
             if entry.kind == "url":
                 typer.echo(f"  [url]  {entry.name}")
             else:
                 typer.echo(f"  [file] {entry.name} ({entry.size:,} bytes)")
+
+    if prescriptive_entries:
+        typer.echo("")
+        typer.echo("Prescriptive rules (passed verbatim):")
+        for entry in prescriptive_entries:
+            typer.echo(f"  [file] {entry.name} ({entry.size:,} bytes)")
 
     if format_entries:
         typer.echo("")
@@ -393,6 +504,110 @@ def style_list() -> None:
                     typer.echo(f"    [url]  {entry.name}")
                 else:
                     typer.echo(f"    [file] {entry.name} ({entry.size:,} bytes)")
+
+
+cache_app = typer.Typer(
+    name="cache",
+    help="Manage local caches",
+    no_args_is_help=True,
+)
+app.add_typer(cache_app, name="cache")
+
+
+@cache_app.command("clear")
+def cache_clear(
+    voice: Annotated[
+        bool,
+        typer.Option("--voice", help="Clear only voice analysis cache"),
+    ] = False,
+    urls: Annotated[
+        bool,
+        typer.Option("--urls", help="Clear only URL fetch cache"),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip confirmation"),
+    ] = False,
+) -> None:
+    """Clear cached voice analyses and URL fetches.
+
+    By default clears everything. Use --voice or --urls to target
+    a specific cache.
+
+    Examples:
+        inkwell cache clear           # clear all caches
+        inkwell cache clear --voice   # clear voice analyses only
+        inkwell cache clear --urls    # clear URL fetch cache only
+    """
+    import shutil
+
+    from inkwell.agent.config import settings
+
+    style_root = Path(settings.style_corpus_path)
+    cache_root = style_root / ".cache"
+
+    if not cache_root.exists():
+        typer.echo("No caches found.")
+        return
+
+    clear_all = not voice and not urls
+    targets: list[tuple[str, Path]] = []
+
+    voice_dir = cache_root / "voice"
+    url_cache_files = list(cache_root.glob("*.txt"))
+
+    if (clear_all or voice) and voice_dir.exists():
+        count = sum(1 for _ in voice_dir.rglob("*") if _.is_file())
+        targets.append((f"voice analyses ({count} files)", voice_dir))
+
+    if (clear_all or urls) and url_cache_files:
+        targets.append((f"URL fetch cache ({len(url_cache_files)} files)", cache_root))
+
+    if not targets:
+        typer.echo("Nothing to clear.")
+        return
+
+    for label, _ in targets:
+        typer.echo(f"  {label}")
+
+    if not yes:
+        typer.confirm("Delete these caches?", abort=True)
+
+    for label, path in targets:
+        if path == cache_root:
+            for f in url_cache_files:
+                f.unlink()
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+
+    typer.echo("Cleared.")
+
+
+@cache_app.command("status")
+def cache_status() -> None:
+    """Show cache sizes and file counts."""
+    from inkwell.agent.config import settings
+
+    style_root = Path(settings.style_corpus_path)
+    cache_root = style_root / ".cache"
+
+    if not cache_root.exists():
+        typer.echo("No caches found.")
+        return
+
+    voice_dir = cache_root / "voice"
+    url_files = list(cache_root.glob("*.txt"))
+
+    if voice_dir.exists():
+        analyses = list(voice_dir.glob("*.md"))
+        inputs = list((voice_dir / "inputs").glob("*")) if (voice_dir / "inputs").exists() else []
+        merged = voice_dir / "merged_guide.md"
+        typer.echo(f"Voice cache:  {len(analyses)} analyses, {len(inputs)} inputs"
+                   + (" + merged guide" if merged.exists() else ""))
+    else:
+        typer.echo("Voice cache:  empty")
+
+    typer.echo(f"URL cache:    {len(url_files)} fetched URLs")
 
 
 if __name__ == "__main__":

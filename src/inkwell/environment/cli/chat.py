@@ -14,7 +14,7 @@ Usage:
 
 import asyncio
 import logging
-from datetime import datetime
+import uuid
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
@@ -121,7 +121,7 @@ class InteractiveListener(PipelineListener):
                 f"[dim]Review:[/dim] {len(output.review_findings)} findings",
                 title="Pipeline complete",
                 border_style="green",
-                width=72,
+                expand=False,
             )
         )
 
@@ -281,7 +281,7 @@ async def fetch_and_queue_comments(
         if session_state:
             already_seen = session_state.seen_comment_ids | session_state.agent_comment_ids
 
-        comments = await do_fetch_comments(doc_id, exclude_ids=already_seen)
+        comments = await do_fetch_comments(doc_id, exclude_ids=already_seen, include_resolved=True)
     except (RuntimeError, OSError, ValueError) as exc:
         console.print(f"  [red]Failed to fetch comments: {exc}[/red]")
         return
@@ -291,7 +291,8 @@ async def fetch_and_queue_comments(
         return
 
     for c in comments:
-        line = f"[GDoc Comment from {doc_id}] {c.content}"
+        tag = "Resolved GDoc Comment" if c.resolved else "GDoc Comment"
+        line = f"[{tag} from {doc_id}] {c.content}"
         if c.anchor_text:
             line += f' (on: "{c.anchor_text}")'
         if c.replies:
@@ -348,12 +349,14 @@ async def read_terminal_input(
         if stripped.startswith("/style"):
             from inkwell.agent.tools.voice import list_style_references
 
-            entries = list_style_references()
-            if not entries:
+            voice_entries, prescriptive_entries = list_style_references()
+            if not voice_entries and not prescriptive_entries:
                 console.print("  [dim]No style corpus. Use `inkwell style add`.[/dim]")
             else:
-                for e in entries:
+                for e in voice_entries:
                     console.print(f"  [dim][{e.kind}] {e.name}[/dim]")
+                for e in prescriptive_entries:
+                    console.print(f"  [dim][prescriptive] {e.name}[/dim]")
             continue
         if stripped == "/sync":
             if listener:
@@ -381,12 +384,12 @@ async def read_terminal_input(
 
 async def chat_session(
     *,
-    initial_task: str | None = None,
+    sources: list[str] | None = None,
+    refs: list[str] | None = None,
     session_id: str | None = None,
     resume_session_id: str | None = None,
     resume_from_stage: str | None = None,
-    target_format: str = "lesswrong",
-    refs: list[str] | None = None,
+    target_format: str = "auto",
     existing_doc_id: str | None = None,
     verbose: bool = False,
 ) -> None:
@@ -400,7 +403,7 @@ async def chat_session(
         logging.basicConfig(level=logging.DEBUG)
 
     if session_id is None:
-        session_id = resume_session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_id = resume_session_id or uuid.uuid4().hex[:16]
 
     console = Console(highlight=False)
     show_welcome(console)
@@ -412,23 +415,23 @@ async def chat_session(
     pt_session = build_prompt_session(listener)
 
     with patch_stdout(raw=True):
-        source = initial_task
-        if source is None and resume_session_id is None:
+        resolved_sources = list(sources or [])
+        if not resolved_sources and resume_session_id is None:
             try:
-                source = await pt_session.prompt_async()
+                raw = await pt_session.prompt_async()
             except (EOFError, KeyboardInterrupt):
                 return
 
-            source = source.strip()
-            if not source or source in ("/quit", "/exit", "/q"):
+            raw = raw.strip()
+            if not raw or raw in ("/quit", "/exit", "/q"):
                 return
+            resolved_sources = [raw]
 
-        if source:
-            console.print(
-                f"  [dim]Source: {source[:80]}...[/dim]"
-                if len(source) > 80
-                else f"  [dim]Source: {source}[/dim]"
-            )
+        if resolved_sources:
+            label = ", ".join(s[:40] for s in resolved_sources)
+            if len(label) > 80:
+                label = label[:77] + "..."
+            console.print(f"  [dim]Sources: {label}[/dim]")
         elif resume_session_id:
             console.print(f"  [dim]Resuming session: {resume_session_id}[/dim]")
 
@@ -443,13 +446,13 @@ async def chat_session(
 
         try:
             result = await run_session(
-                source=source,
+                sources=resolved_sources,
+                refs=refs,
                 resume_session_id=resume_session_id,
                 resume_from_stage=resume_from_stage,
                 target_format=target_format,
                 existing_doc_id=existing_doc_id,
                 session_id=session_id,
-                refs=refs,
                 listener=listener,
                 persistent=False,
                 trace_holder=trace_holder,

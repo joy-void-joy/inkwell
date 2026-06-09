@@ -67,7 +67,9 @@ GUIDELINES = """\
 3. Preserve the author's original quotes verbatim where marked
 4. Research deeply before writing — thin research produces thin writing
 5. Each section should stand alone but also flow naturally into the next
-6. Adapt format to target: LessWrong wants epistemic rigor, Twitter wants hooks, blogs want narrative"""
+6. Adapt format to target: LessWrong wants epistemic rigor, Twitter wants hooks, blogs want narrative
+7. Never reference reviews, reviewers, comments, or the editorial process in output — \
+readers don't have that context. If feedback identified something, fix it silently"""
 
 INTERACTIVE = """\
 ## Session

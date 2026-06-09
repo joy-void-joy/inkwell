@@ -14,6 +14,7 @@ import httpx
 import trafilatura
 from pydantic import BaseModel, Field
 
+from lup.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -62,8 +63,9 @@ class FetchArxivOutput(BaseModel):
     paper_id: str = Field(description="arXiv paper ID")
     format: str = Field(description="Content format: 'html' or 'pdf'")
     url: str = Field(description="Source URL")
-    content: str | None = Field(
-        default=None, description="Full paper text (HTML format only)"
+    content: SavedContent | None = Field(
+        default=None,
+        description="Paper text saved to disk (HTML format). Use Read to access.",
     )
     pdf_path: str | None = Field(
         default=None, description="Path to downloaded PDF (PDF format only)"
@@ -126,6 +128,7 @@ async def search_arxiv(params: SearchArxivInput) -> SearchArxivOutput:
 @lup_tool(
     "Fetch an arXiv paper's full text. Tries HTML first (fast, searchable); "
     "if unavailable, downloads the PDF and returns the file path for reading. "
+    "HTML content is saved to disk — use Read with offset/limit to access. "
     "Use search_arxiv first to find paper IDs, then fetch_arxiv to read them."
 )
 async def fetch_arxiv(params: FetchArxivInput) -> FetchArxivOutput:
@@ -145,11 +148,12 @@ async def fetch_arxiv(params: FetchArxivInput) -> FetchArxivOutput:
             ):
                 text = trafilatura.extract(resp.text) or ""
                 if len(text) > 500:
+                    saved = save_content("arxiv", paper_id, text)
                     return FetchArxivOutput(
                         paper_id=paper_id,
                         format="html",
                         url=html_url,
-                        content=text[:15000],
+                        content=saved,
                     )
         except httpx.HTTPError:
             logger.debug("HTML fetch failed for %s, trying PDF", paper_id)

@@ -14,6 +14,7 @@ import httpx
 import trafilatura
 from pydantic import BaseModel, Field
 
+from lup.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -43,8 +44,7 @@ class FetchSourceOutput(BaseModel):
     url: str = Field(description="Fetched URL")
     format: str = Field(description="Content format: 'text', 'pdf', 'json'")
     title: str = Field(default="", description="Page title if available")
-    content: str = Field(description="Extracted text content")
-    word_count: int = Field(default=0, description="Approximate word count of extracted content")
+    content: SavedContent = Field(description="Extracted text saved to disk")
     pdf_path: str | None = Field(
         default=None, description="Path to downloaded PDF (PDF format only)"
     )
@@ -70,13 +70,10 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
 
     if 400 <= resp.status_code < 500:
         raise ToolError(
-            f"HTTP {resp.status_code} for {url}. "
-            "Try exa_search for cached content."
+            f"HTTP {resp.status_code} for {url}. Try exa_search for cached content."
         )
     if resp.status_code >= 500:
-        raise ToolError(
-            f"Server error {resp.status_code} for {url}. Try again later."
-        )
+        raise ToolError(f"Server error {resp.status_code} for {url}. Try again later.")
 
     ct = resp.headers.get("content-type", "")
 
@@ -90,31 +87,33 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
         slug = hashlib.sha256(url.encode()).hexdigest()[:12]
         pdf_path = target / f"{slug}.pdf"
         pdf_path.write_bytes(resp.content)
+        pdf_note = f"PDF downloaded to {pdf_path.resolve()}. Use Read to read it."
+        saved = save_content("fetch", url, pdf_note)
         return FetchSourceOutput(
             url=url,
             format="pdf",
-            content=f"PDF downloaded to {pdf_path.resolve()}. Use Read to read it.",
+            content=saved,
             pdf_path=str(pdf_path.resolve()),
         )
 
     if "text/plain" in ct or "application/json" in ct:
         text = resp.text
+        saved = save_content("fetch", url, text)
         return FetchSourceOutput(
             url=url,
             format="json" if "json" in ct else "text",
-            content=text,
-            word_count=len(text.split()),
+            content=saved,
         )
 
     if resolved_url != url:
         text = resp.text
         title = resolved_url.rsplit("/", 1)[-1]
+        saved = save_content("fetch", url, text)
         return FetchSourceOutput(
             url=url,
             format="text",
             title=title,
-            content=text,
-            word_count=len(text.split()),
+            content=saved,
         )
 
     extracted = trafilatura.extract(
@@ -134,12 +133,12 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
                 title_str = json.loads(title_json).get("title", "")
             except (json.JSONDecodeError, AttributeError):
                 pass
+        saved = save_content("fetch", url, extracted)
         return FetchSourceOutput(
             url=url,
             format="text",
             title=title_str,
-            content=extracted,
-            word_count=len(extracted.split()),
+            content=saved,
         )
 
     raise ToolError(
@@ -148,13 +147,13 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
 
 
 @lup_tool(
-    "Fetch a URL and extract its text content. Works with web pages, "
-    "PDFs, plain text, JSON, and GitHub file URLs. For web pages, extracts "
-    "the article text stripping navigation and ads. For GitHub blob URLs, "
-    "automatically fetches the raw file content. Use this whenever you "
+    "Fetch a URL and extract its text content. Saves the extracted text "
+    "to disk and returns a file path, word count, and preview. Works "
+    "with web pages, PDFs, plain text, JSON, and GitHub file URLs. "
+    "For web pages, extracts the article text stripping navigation and "
+    "ads. Use Read to access the full text. Use this whenever you "
     "encounter a URL you need to read — in source material, author "
-    "feedback, GDoc comments, or research results. Returns clean text "
-    "with title and word count."
+    "feedback, GDoc comments, or research results."
 )
 async def fetch_source(params: FetchSourceInput) -> FetchSourceOutput:
     return await do_fetch_source(params.url)
@@ -211,41 +210,52 @@ async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:
     from lup.client import query
 
     source = await do_fetch_source(url)
+    content_path = source.content.path
 
     if source.format == "pdf":
+        full_text = Path(content_path).read_text(encoding="utf-8")
         return FetchAndExtractOutput(
             url=url,
             title=source.title,
-            extract=source.content,
-            word_count=source.word_count,
+            extract=full_text,
+            word_count=source.content.word_count,
         )
 
-    if source.word_count <= EXTRACT_THRESHOLD_WORDS:
+    if source.content.word_count <= EXTRACT_THRESHOLD_WORDS:
+        full_text = Path(content_path).read_text(encoding="utf-8")
         return FetchAndExtractOutput(
             url=url,
             title=source.title,
-            extract=source.content,
-            word_count=source.word_count,
+            extract=full_text,
+            word_count=source.content.word_count,
         )
 
     result = await query(
-        f"Focus: {focus}\n\n<page_content>\n{source.content}\n</page_content>",
+        (
+            f"Focus: {focus}\n\n"
+            f"Read the page content from: {content_path}"
+        ),
         model="claude-opus-4-6",
         system_prompt=FOCUSED_EXTRACT_SYSTEM,
         output_type=FocusedExtract,
+        tools=["Read"],
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        tools=[],
     )
 
     if result is None:
-        truncated = source.content[:6000]
+        logger.warning(
+            "Focused extraction failed for %s (%d words), returning full text via file",
+            url,
+            source.content.word_count,
+        )
+        full_text = Path(content_path).read_text(encoding="utf-8")
         return FetchAndExtractOutput(
             url=url,
             title=source.title,
-            extract=truncated,
-            word_count=len(truncated) // 5,
-            was_truncated=True,
+            extract=full_text,
+            word_count=source.content.word_count,
+            was_truncated=False,
         )
 
     return FetchAndExtractOutput(

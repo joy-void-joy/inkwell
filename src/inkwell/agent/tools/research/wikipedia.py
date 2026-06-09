@@ -9,6 +9,7 @@ import logging
 import httpx
 from pydantic import BaseModel, Field
 
+from lup.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -50,8 +51,10 @@ class FetchWikipediaInput(BaseModel):
 class FetchWikipediaOutput(BaseModel):
     title: str = Field(description="Article title")
     url: str = Field(description="Wikipedia URL")
-    content: str = Field(description="Article text content")
-    word_count: int = Field(description="Approximate word count")
+    content: SavedContent = Field(description="Article text saved to disk")
+    section_extracted: bool = Field(
+        default=False, description="True if a specific section was extracted"
+    )
 
 
 @lup_tool(
@@ -97,11 +100,12 @@ async def wiki_search(params: WikiSearchInput) -> WikiSearchOutput:
 
 
 @lup_tool(
-    "Fetch a Wikipedia article's full text. Returns clean, readable text "
-    "extracted from the article. Use wiki_search first to find the right "
-    "title. Optionally extract just one section by name. Good for "
-    "background context, definitions, historical timelines, and "
-    "verifying basic facts."
+    "Fetch a Wikipedia article's full text. Saves the extracted text to "
+    "disk and returns a file path, word count, and preview. Use Read "
+    "with offset/limit to access the full text. Use wiki_search first "
+    "to find the right title. Optionally extract just one section by "
+    "name. Good for background context, definitions, historical "
+    "timelines, and verifying basic facts."
 )
 async def fetch_wikipedia(params: FetchWikipediaInput) -> FetchWikipediaOutput:
     safe_title = params.title.replace(" ", "_")
@@ -139,18 +143,21 @@ async def fetch_wikipedia(params: FetchWikipediaInput) -> FetchWikipediaOutput:
     if not content:
         raise ToolError(f"No text content in Wikipedia article '{params.title}'.")
 
+    section_extracted = False
     if params.section:
         section_content = extract_section(content, params.section)
         if section_content:
             content = section_content
+            section_extracted = True
 
-    content = content[:15000]
+    title = page.get("title", params.title)
+    saved = save_content("wikipedia", title, content)
 
     return FetchWikipediaOutput(
-        title=page.get("title", params.title),
+        title=title,
         url=f"https://en.wikipedia.org/wiki/{safe_title}",
-        content=content,
-        word_count=len(content.split()),
+        content=saved,
+        section_extracted=section_extracted,
     )
 
 

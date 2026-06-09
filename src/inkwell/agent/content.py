@@ -1,15 +1,33 @@
-"""Content contract: metadata envelopes for pipeline artifacts.
+"""Content contract: metadata envelopes and typed file references.
 
 Every piece of content the pipeline produces — source extracts, voice
 analyses, section drafts, merged articles — gets a ContentEnvelope that
 carries identity, size, and navigable structure. The envelope does NOT
 hold content itself; it points to markdown files on disk.
+
+ContentRef and ContentManifest provide typed, role-annotated file
+references for pipeline stage inputs. Agents see the role tag before
+reading a file, so they know its purpose without guessing.
 """
 
 import re
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+ContentRole = Literal[
+    "source",
+    "plan",
+    "research",
+    "voice_analysis",
+    "prescriptive_rules",
+    "style_reference",
+    "draft",
+    "feedback",
+    "review",
+    "merge_plan",
+]
 
 
 class ContentSection(BaseModel):
@@ -102,3 +120,49 @@ def build_envelope(
         sections=extract_sections(content),
         extra_paths=extra_paths or [],
     )
+
+
+class ContentRef(BaseModel):
+    """A file reference with semantic role annotation."""
+
+    path: str
+    role: ContentRole
+    label: str
+    word_count: int = 0
+    instruction: str = ""
+
+    def render_line(self) -> str:
+        wc = f" ({self.word_count} words)" if self.word_count else ""
+        inst = f" — {self.instruction}" if self.instruction else ""
+        return f"- [{self.role}] {self.label}{wc}: {self.path}{inst}"
+
+
+class ContentManifest(BaseModel):
+    """Typed set of file references for a pipeline stage."""
+
+    refs: list[ContentRef] = Field(default_factory=list)
+
+    def add(
+        self,
+        path: str | Path,
+        role: ContentRole,
+        label: str,
+        *,
+        word_count: int = 0,
+        instruction: str = "",
+    ) -> None:
+        self.refs.append(ContentRef(
+            path=str(path),
+            role=role,
+            label=label,
+            word_count=word_count,
+            instruction=instruction,
+        ))
+
+    def render(self) -> str:
+        if not self.refs:
+            return ""
+        lines = ["## Input files\n"]
+        for ref in self.refs:
+            lines.append(ref.render_line())
+        return "\n".join(lines)

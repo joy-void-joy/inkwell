@@ -133,25 +133,16 @@ class InteractiveListener(PipelineListener):
     async def on_message(self, source: str, message: str) -> None:
         self.console.print(f"  💬 [dim]{message}[/dim]")
 
-    async def collect_feedback(self, state: WritingSessionState) -> list[str]:
-        feedback = await super().collect_feedback(state)
-
-        for item in feedback:
-            if item.startswith("Author reply"):
-                self.console.print(f"  [cyan][GDoc Reply] {item}[/cyan]")
-            else:
-                self.console.print(f"  [cyan][GDoc Comment] {item}[/cyan]")
-
-        terminal_items: list[str] = []
+    async def collect_author_input(self, state: WritingSessionState) -> list[str]:
+        items: list[str] = []
         while not self.input_queue.empty():
             try:
-                msg = self.input_queue.get_nowait()
-                terminal_items.append(msg)
+                items.append(self.input_queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
 
-        for msg in terminal_items:
-            feedback.append(f"[Terminal] Author direction: {msg}")
+        for msg in items:
+            self.console.print(f"  [cyan]Author direction: {msg}[/cyan]")
             if state.doc_id:
                 try:
                     await do_insert_comment(
@@ -162,12 +153,7 @@ class InteractiveListener(PipelineListener):
                 except (RuntimeError, OSError):
                     logger.warning("Failed to mirror terminal input to GDoc")
 
-        if feedback:
-            self.console.print(
-                f"  [yellow]Incorporating {len(feedback)} feedback item(s)[/yellow]"
-            )
-
-        return feedback
+        return items
 
     async def collect_revision(self, state: WritingSessionState) -> str | None:
         revisions: list[str] = []

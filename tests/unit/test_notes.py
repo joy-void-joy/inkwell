@@ -33,7 +33,9 @@ class TestPipelineNotesComments:
             ClassifiedComment(comment_id="c1", content="minor", impact="clarification")
         )
         await notes.add_comment(
-            ClassifiedComment(comment_id="c2", content="critical", impact="plan_breaking")
+            ClassifiedComment(
+                comment_id="c2", content="critical", impact="plan_breaking"
+            )
         )
         plan_breaking = await notes.list_comments(impact="plan_breaking")
         assert len(plan_breaking) == 1
@@ -94,10 +96,14 @@ class TestGetAllFeedback:
     @pytest.mark.anyio
     async def test_includes_all_categories(self, notes: PipelineNotes) -> None:
         await notes.add_comment(
-            ClassifiedComment(comment_id="c1", content="wrong angle", impact="plan_breaking")
+            ClassifiedComment(
+                comment_id="c1", content="wrong angle", impact="plan_breaking"
+            )
         )
         await notes.add_comment(
-            ClassifiedComment(comment_id="c2", content="more detail", impact="stage_local")
+            ClassifiedComment(
+                comment_id="c2", content="more detail", impact="stage_local"
+            )
         )
         await notes.add_terminal_input("add charts")
         await notes.add_research_note("key", "some data")
@@ -109,35 +115,3 @@ class TestGetAllFeedback:
         assert "Research Notes" in result
         assert "wrong angle" in result
         assert "add charts" in result
-
-
-class TestGetSectionFeedback:
-    """Section-specific feedback filtering."""
-
-    @pytest.mark.anyio
-    async def test_matches_by_content(self, notes: PipelineNotes) -> None:
-        await notes.add_comment(
-            ClassifiedComment(
-                comment_id="c1",
-                content="The intro needs work",
-                impact="stage_local",
-            )
-        )
-        await notes.add_comment(
-            ClassifiedComment(
-                comment_id="c2",
-                content="Conclusion is fine",
-                impact="clarification",
-            )
-        )
-        result = await notes.get_section_feedback("intro")
-        assert "intro needs work" in result.lower()
-        assert "conclusion" not in result.lower()
-
-    @pytest.mark.anyio
-    async def test_no_matches_returns_empty(self, notes: PipelineNotes) -> None:
-        await notes.add_comment(
-            ClassifiedComment(comment_id="c1", content="unrelated", impact="stage_local")
-        )
-        result = await notes.get_section_feedback("nonexistent")
-        assert result == ""

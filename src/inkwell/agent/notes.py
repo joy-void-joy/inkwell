@@ -206,34 +206,6 @@ class PipelineNotes:
 
         return "\n\n## Author Feedback\n\n" + "\n".join(parts) + "\n"
 
-    async def get_section_feedback(self, section: str) -> str:
-        """Render feedback relevant to a specific section."""
-        comments = await self.list_comments()
-        terminal = await self.list_terminal_inputs()
-
-        relevant = [
-            c
-            for c in comments
-            if section.lower() in c.anchor_text.lower()
-            or section.lower() in c.content.lower()
-            or any(section.lower() in tag.lower() for tag in c.tags)
-        ]
-        relevant.extend(terminal)
-
-        if not relevant:
-            return ""
-
-        lines = [f"## Feedback for '{section}'", ""]
-        for c in relevant:
-            line = f"- [{c.impact}] {c.content}"
-            if c.anchor_text:
-                line += f' (on: "{c.anchor_text}")'
-            if c.reply:
-                line += f" — Author: {c.reply}"
-            lines.append(line)
-
-        return "\n".join(lines) + "\n"
-
     async def clear_downstream(self, from_stage: str) -> None:
         """Clear notes invalidated by a restart.
 
@@ -301,19 +273,13 @@ class PipelineNotes:
         """Return the path for a text artifact."""
         return self.artifacts_dir / f"{name}.{ext}"
 
-    async def render_feedback_file(
-        self, stage: str, extra: list[str] | None = None
-    ) -> Path:
+    async def render_feedback_file(self, stage: str) -> Path:
         """Render accumulated feedback to a file agents can Read.
 
-        Writes feedback/{stage}.md with all accumulated comments,
-        terminal input, and any extra strings. Returns the path.
+        Writes feedback/{stage}.md with all accumulated comments and
+        terminal input. Returns the path.
         """
         content = await self.get_all_feedback()
-        if extra:
-            extra_text = "\n".join(f"- {e}" for e in extra)
-            content += f"\n\n## Stage-Specific Notes\n\n{extra_text}\n"
-
         path = self.feedback_dir / f"{stage}.md"
         path.write_text(content or "(No feedback yet.)", encoding="utf-8")
         return path

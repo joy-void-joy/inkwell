@@ -30,7 +30,9 @@ def make_paragraph(
     return para
 
 
-def run(text: str, bold: bool = False, italic: bool = False, url: str = "") -> dict[str, object]:  # type: ignore[type-arg]
+def run(
+    text: str, bold: bool = False, italic: bool = False, url: str = ""
+) -> dict[str, object]:  # type: ignore[type-arg]
     style: dict[str, object] = {}  # type: ignore[type-arg]
     if bold:
         style["bold"] = True
@@ -47,10 +49,12 @@ class TestPlainText:
         assert extract_tab_markdown(tab) == "Hello world\n"
 
     def test_multiple_paragraphs(self) -> None:
-        tab = make_tab([
-            make_paragraph([run("First")]),
-            make_paragraph([run("Second")]),
-        ])
+        tab = make_tab(
+            [
+                make_paragraph([run("First")]),
+                make_paragraph([run("Second")]),
+            ]
+        )
         assert extract_tab_markdown(tab) == "First\n\nSecond\n"
 
 
@@ -86,11 +90,17 @@ class TestInlineFormatting:
         assert extract_tab_markdown(tab) == "[click here](https://example.com)\n"
 
     def test_mixed_runs(self) -> None:
-        tab = make_tab([make_paragraph([
-            run("normal "),
-            run("bold", bold=True),
-            run(" end"),
-        ])])
+        tab = make_tab(
+            [
+                make_paragraph(
+                    [
+                        run("normal "),
+                        run("bold", bold=True),
+                        run(" end"),
+                    ]
+                )
+            ]
+        )
         result = extract_tab_markdown(tab)
         assert "normal " in result
         assert "**bold**" in result
@@ -120,7 +130,9 @@ class TestLists:
 
     def test_ordered_list(self) -> None:
         list_id = "list2"
-        lists = {list_id: {"listProperties": {"nestingLevels": [{"glyphType": "DECIMAL"}]}}}
+        lists = {
+            list_id: {"listProperties": {"nestingLevels": [{"glyphType": "DECIMAL"}]}}
+        }
         tab = make_tab(
             [
                 make_paragraph(
@@ -153,7 +165,11 @@ class TestEdgeCases:
         assert result.strip() == ""
 
     def test_heading_with_bold_run(self) -> None:
-        tab = make_tab([
-            make_paragraph([run("Bold heading", bold=True)], named_style="HEADING_1"),
-        ])
+        tab = make_tab(
+            [
+                make_paragraph(
+                    [run("Bold heading", bold=True)], named_style="HEADING_1"
+                ),
+            ]
+        )
         assert extract_tab_markdown(tab) == "# **Bold heading**\n"

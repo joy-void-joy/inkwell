@@ -12,6 +12,7 @@ import json
 import logging
 import tempfile
 import unicodedata
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -49,8 +50,12 @@ from lup.background import BackgroundAgent
 
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.watcher import create_comment_watcher, create_source_watcher
-from inkwell.agent.session import WritingSessionState
+from inkwell.agent.watcher import (
+    ACKNOWLEDGE_TEMPLATES,
+    create_comment_watcher,
+    create_source_watcher,
+)
+from inkwell.agent.session import AuthorComment, WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
     COHERENCE_EDITOR_PROMPT,
@@ -101,6 +106,7 @@ from inkwell.agent.tools.google_docs import (
     do_list_tabs,
     do_read_tab,
     do_rename_doc,
+    do_reply_to_comment,
     do_write_tab,
     gdoc_nonfatal,
     truncate_tab_title,
@@ -261,7 +267,12 @@ def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> No
 
 
 class PipelineListener:
-    """Receives pipeline events and collects author feedback."""
+    """Receives pipeline events and collects author input from the environment.
+
+    GDoc comments and tab edits are ingested by the pipeline itself
+    (classified, recorded, acknowledged) — listeners only supply input
+    typed in their environment (terminal, web UI).
+    """
 
     def __init__(self) -> None:
         self.sync_requested = asyncio.Event()
@@ -284,18 +295,9 @@ class PipelineListener:
     async def on_message(self, source: str, message: str) -> None:
         logger.info("[%s] %s", source, message)
 
-    async def collect_feedback(self, state: WritingSessionState) -> list[str]:
-        comments = await state.get_new_author_comments()
-        feedback: list[str] = []
-        for c in comments:
-            if c["reply"]:
-                line = f'[GDoc Reply] Author reply to "{c["content"]}": {c["reply"]}'
-            else:
-                line = f"[GDoc Comment] {c['content']}"
-                if c["anchor_text"]:
-                    line += f' (on: "{c["anchor_text"]}")'
-            feedback.append(line)
-        return feedback
+    async def collect_author_input(self, state: WritingSessionState) -> list[str]:
+        """Return new author directions typed in the environment."""
+        return []
 
     async def collect_revision(self, state: WritingSessionState) -> str | None:
         return None
@@ -2151,23 +2153,85 @@ class PipelineRunner:
                 session_state=self.state,
             )
 
-    async def gather_feedback(self) -> list[str]:
-        comment_feedback = await self.hooks.collect_feedback(self.state)
+    async def gather_feedback(self) -> int:
+        """Ingest new author feedback from every channel.
 
-        terminal = [fb for fb in comment_feedback if fb.startswith("[Terminal]")]
-        gdoc = [fb for fb in comment_feedback if not fb.startswith("[Terminal]")]
+        GDoc comments, environment input, and tab edits all flow through
+        the same classify-and-record path, so impact classification (and
+        plan-breaking detection) does not depend on which poller sees an
+        item first. Returns the number of new items ingested.
+        """
+        count = 0
 
-        notes = self.ensure_notes()
-        for fb in gdoc:
-            await notes.add_terminal_input(fb)
-        for fb in terminal:
-            await self.classify_and_record_terminal(fb)
+        for comment in await self.state.get_new_author_comments():
+            await self.classify_and_record_comment(comment)
+            count += 1
+
+        for text in await self.hooks.collect_author_input(self.state):
+            await self.classify_and_record_terminal(text)
+            count += 1
 
         if self.tabs is not None:
             for edit in await self.tabs.detect_edits():
                 await self.classify_and_record_edit(edit)
+                count += 1
 
-        return comment_feedback
+        return count
+
+    async def classify_and_record_comment(self, comment: AuthorComment) -> None:
+        """Classify a GDoc comment, record it, acknowledge it on the doc."""
+        if comment["reply"]:
+            display = f'Author reply to "{comment["content"]}": {comment["reply"]}'
+        else:
+            display = comment["content"]
+            if comment["anchor_text"]:
+                display += f' (on: "{comment["anchor_text"]}")'
+        await self.hooks.on_message("gdoc", display)
+
+        task = f"Classify this author comment:\n\nComment: {comment['content']}\n"
+        if comment["anchor_text"]:
+            task += f'Anchored to: "{comment["anchor_text"]}"\n'
+        if comment["reply"]:
+            task += f"Reply to agent question: {comment['reply']}\n"
+
+        classified = await query(
+            task,
+            output_type=ClassifiedComment,
+            model="claude-opus-4-6",
+            system_prompt=COMMENT_CLASSIFIER_PROMPT,
+            max_thinking_tokens=128_000 - 1,
+            permission_mode="bypassPermissions",
+            prefix="[classify-comment] ",
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        if classified is None:
+            classified = ClassifiedComment(
+                comment_id="",
+                content="",
+                impact="stage_local",
+            )
+        classified.comment_id = comment["comment_id"]
+        classified.content = comment["content"]
+        classified.anchor_text = comment["anchor_text"]
+        classified.reply = comment["reply"]
+
+        if classified.impact == "dismiss":
+            return
+
+        notes = self.ensure_notes()
+        await notes.add_comment(classified)
+
+        reply_text = ACKNOWLEDGE_TEMPLATES.get(classified.impact)
+        if reply_text:
+            async with gdoc_nonfatal("acknowledge comment"):
+                await do_reply_to_comment(
+                    self.doc_id, comment["comment_id"], reply_text
+                )
+
+        if classified.impact == "plan_breaking":
+            logger.info("Plan-breaking GDoc comment")
+            self.plan_breaking.set()
 
     async def post_author_notes(self) -> None:
         """Post any new author notes as GDoc comments, then clear the list."""
@@ -2269,7 +2333,7 @@ class PipelineRunner:
         if classified.impact == "dismiss":
             return
 
-        classified.comment_id = f"terminal-{id(text)}"
+        classified.comment_id = f"terminal-{uuid.uuid4().hex[:8]}"
         classified.content = text
         classified.tags = [*(classified.tags or []), "terminal"]
 
@@ -2281,13 +2345,12 @@ class PipelineRunner:
             self.plan_breaking.set()
 
     async def prepare_feedback(self, stage: str) -> Path | None:
-        """Gather feedback and render to a file. Returns path or None."""
-        feedback = await self.gather_feedback()
+        """Ingest new feedback and render the accumulated set to a file."""
+        await self.gather_feedback()
         notes = self.ensure_notes()
-        feedback_with_notes = await self.format_stage_context(stage, feedback)
-        if not feedback_with_notes:
+        if not await notes.get_all_feedback():
             return None
-        return await notes.render_feedback_file(stage, feedback_with_notes)
+        return await notes.render_feedback_file(stage)
 
     async def collect_preexisting_directions(self, doc_id: str) -> int:
         """Collect pre-existing comments from the source GDoc as author directions.
@@ -3086,8 +3149,7 @@ class PipelineRunner:
         self.hooks.sync_requested.clear()
         logger.info("Sync requested — gathering feedback")
         await self.hooks.on_stage("sync", "Polling comments, edits, and terminal input")
-        feedback = await self.gather_feedback()
-        n = len(feedback)
+        n = await self.gather_feedback()
         if n:
             await self.hooks.on_progress(f"Found {n} feedback item(s)")
         else:
@@ -3317,17 +3379,15 @@ class PipelineRunner:
             self.snapshot.stage = "revise"
             await self.update_overview(active_stage="revise")
 
-            all_feedback = await self.gather_feedback()
-            n = len(all_feedback)
+            n = await self.gather_feedback()
             if n:
                 await self.hooks.on_progress(f"Found {n} feedback item(s)")
-            all_feedback.extend(batch)
+            for revision_text in batch:
+                await self.classify_and_record_terminal(revision_text)
 
-            if not all_feedback:
+            if not n and not batch:
                 await self.hooks.on_progress("Nothing to revise")
                 continue
-
-            all_feedback = await self.format_stage_context("revise", all_feedback)
 
             plan = self.snapshot.plan
             if plan is None:
@@ -3339,9 +3399,9 @@ class PipelineRunner:
                 await self.check_and_maybe_restart()
                 await notes.clear_plan_breaking()
 
-            await self.do_standby_rewrite(all_feedback)
+            await self.do_standby_rewrite()
 
-    async def do_standby_rewrite(self, feedback: list[str]) -> None:
+    async def do_standby_rewrite(self) -> None:
         plan = self.snapshot.plan
         if plan is None:
             return
@@ -3365,7 +3425,7 @@ class PipelineRunner:
         standby_draft.write_text(current_content, encoding="utf-8")
         standby_output = self.get_draft_path("final-standby")
 
-        feedback_path = await notes.render_feedback_file("standby", feedback)
+        feedback_path = await notes.render_feedback_file("standby")
 
         output = await rewrite_final(
             notes,
@@ -3432,48 +3492,6 @@ class PipelineRunner:
             if extra is None:
                 return
             batch.append(extra)
-
-    # -- Notes integration -----------------------------------------------
-
-    async def format_stage_context(
-        self, stage: str, feedback: list[str], section: str | None = None
-    ) -> list[str]:
-        notes = self.ensure_notes()
-
-        match stage:
-            case "research":
-                comments = await notes.list_comments(impact="plan_breaking")
-                comments.extend(await notes.list_comments(impact="stage_local"))
-                if comments:
-                    lines = ["## Author Direction (from comments)", ""]
-                    for c in comments:
-                        line = f"- [{c.impact}] {c.content}"
-                        if c.anchor_text:
-                            line += f' (on: "{c.anchor_text}")'
-                        lines.append(line)
-                    feedback = [*feedback, "\n".join(lines)]
-
-            case "write":
-                if section:
-                    section_fb = await notes.get_section_feedback(section)
-                    if section_fb:
-                        feedback = [*feedback, section_fb]
-                else:
-                    notes_text = await notes.get_all_feedback()
-                    if notes_text:
-                        feedback = [*feedback, notes_text]
-
-            case "merge" | "review" | "rewrite" | "revise":
-                notes_text = await notes.get_all_feedback()
-                if notes_text:
-                    feedback = [*feedback, notes_text]
-
-            case _:
-                notes_text = await notes.get_all_feedback()
-                if notes_text:
-                    feedback = [*feedback, notes_text]
-
-        return feedback
 
     # -- Tab helpers ------------------------------------------------------
 

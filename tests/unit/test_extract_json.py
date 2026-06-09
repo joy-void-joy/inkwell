@@ -23,7 +23,7 @@ class TestExtractJsonObject:
         assert extract_json_object("") is None
 
     def test_malformed_json_in_fence(self) -> None:
-        text = '```json\n{not valid json}\n```'
+        text = "```json\n{not valid json}\n```"
         assert extract_json_object(text) is None
 
     def test_prefers_fence_over_bare(self) -> None:

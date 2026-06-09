@@ -26,9 +26,7 @@ def test_formatting_indices_account_for_surrogates() -> None:
     requests = markdown_to_requests(md)
     batch = split_markdown_batch(requests)
 
-    bold_reqs = [
-        r for r in batch["formatting"] if "updateTextStyle" in r
-    ]
+    bold_reqs = [r for r in batch["formatting"] if "updateTextStyle" in r]
     assert len(bold_reqs) == 1
 
     rng = bold_reqs[0]["updateTextStyle"]["range"]  # type: ignore[index]
@@ -39,7 +37,12 @@ def test_formatting_indices_account_for_surrogates() -> None:
 
 def test_clamp_ranges_drops_out_of_bounds() -> None:
     requests = [
-        {"updateTextStyle": {"range": {"startIndex": 100, "endIndex": 200}, "textStyle": {}}}
+        {
+            "updateTextStyle": {
+                "range": {"startIndex": 100, "endIndex": 200},
+                "textStyle": {},
+            }
+        }
     ]
     result = clamp_ranges(requests, segment_end=50)
     assert result == []
@@ -47,7 +50,12 @@ def test_clamp_ranges_drops_out_of_bounds() -> None:
 
 def test_clamp_ranges_clamps_end() -> None:
     requests = [
-        {"updateTextStyle": {"range": {"startIndex": 10, "endIndex": 200}, "textStyle": {}}}
+        {
+            "updateTextStyle": {
+                "range": {"startIndex": 10, "endIndex": 200},
+                "textStyle": {},
+            }
+        }
     ]
     result = clamp_ranges(requests, segment_end=50)
     assert len(result) == 1

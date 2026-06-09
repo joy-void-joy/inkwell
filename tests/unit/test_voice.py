@@ -363,26 +363,30 @@ class TestVoiceCaching:
             "---\nprescriptive: false\n---\nCached analysis: dry humor, short sentences."
         )
 
-        label, analysis, is_prescriptive = await analyze_single_source(text, "test-sample")
+        label, analysis, is_prescriptive = await analyze_single_source(
+            text, "test-sample"
+        )
         assert "dry humor" in analysis
         assert not is_prescriptive
 
     @pytest.mark.asyncio
-    async def test_analyze_single_source_caches_prescriptive(self, style_dir: Path) -> None:
+    async def test_analyze_single_source_caches_prescriptive(
+        self, style_dir: Path
+    ) -> None:
         text = "Never use em dashes. Always use active voice."
         cache = voice_cache_dir()
         key = voice_cache_key(text)
         cache_path = cache / f"{key}.md"
-        cache_path.write_text(
-            "---\nprescriptive: true\n---\nBrief summary of rules."
-        )
+        cache_path.write_text("---\nprescriptive: true\n---\nBrief summary of rules.")
 
         label, analysis, is_prescriptive = await analyze_single_source(text, "rules")
         assert is_prescriptive
         assert "summary" in analysis
 
     @pytest.mark.asyncio
-    async def test_analyze_single_source_old_cache_no_frontmatter(self, style_dir: Path) -> None:
+    async def test_analyze_single_source_old_cache_no_frontmatter(
+        self, style_dir: Path
+    ) -> None:
         text = "Legacy cached analysis without frontmatter."
         cache = voice_cache_dir()
         key = voice_cache_key(text)
@@ -394,17 +398,27 @@ class TestVoiceCaching:
         assert not is_prescriptive
 
     @pytest.mark.asyncio
-    async def test_analyze_single_source_calls_query_on_miss(self, style_dir: Path) -> None:
+    async def test_analyze_single_source_calls_query_on_miss(
+        self, style_dir: Path
+    ) -> None:
         text = "New text to analyze."
         key = voice_cache_key(text)
         cache_path = voice_cache_dir() / f"{key}.md"
 
         async def fake_query(*args: object, **kwargs: object) -> object:
-            cache_path.write_text("---\nprescriptive: false\n---\nFresh analysis result.")
+            cache_path.write_text(
+                "---\nprescriptive: false\n---\nFresh analysis result."
+            )
             return type("C", (), {"text": ""})()
 
-        with patch("inkwell.agent.tools.voice.query", new_callable=AsyncMock, side_effect=fake_query):
-            label, analysis, is_prescriptive = await analyze_single_source(text, "new-sample")
+        with patch(
+            "inkwell.agent.tools.voice.query",
+            new_callable=AsyncMock,
+            side_effect=fake_query,
+        ):
+            label, analysis, is_prescriptive = await analyze_single_source(
+                text, "new-sample"
+            )
 
         assert analysis == "Fresh analysis result."
         assert not is_prescriptive
@@ -432,7 +446,11 @@ class TestMergeVoiceAnalyses:
             output_path.write_text("Merged guide content.")
             return type("C", (), {"text": ""})()
 
-        with patch("inkwell.agent.tools.voice.query", new_callable=AsyncMock, side_effect=fake_query):
+        with patch(
+            "inkwell.agent.tools.voice.query",
+            new_callable=AsyncMock,
+            side_effect=fake_query,
+        ):
             result = await merge_voice_analyses(
                 [("source-1", "Analysis 1"), ("source-2", "Analysis 2")],
                 output_path,
@@ -447,7 +465,11 @@ class TestMergeVoiceAnalyses:
             output_path.write_text("Guide with format awareness.")
             return type("C", (), {"text": ""})()
 
-        with patch("inkwell.agent.tools.voice.query", new_callable=AsyncMock, side_effect=fake_query) as mock_query:
+        with patch(
+            "inkwell.agent.tools.voice.query",
+            new_callable=AsyncMock,
+            side_effect=fake_query,
+        ) as mock_query:
             await merge_voice_analyses(
                 [("source-1", "Analysis 1")],
                 output_path,
@@ -455,7 +477,9 @@ class TestMergeVoiceAnalyses:
             )
         prompt = mock_query.call_args[0][0]
         assert "merge_input.md" in prompt
-        merge_input = Path(voice_cache_dir() / "merge_input.md").read_text(encoding="utf-8")
+        merge_input = Path(voice_cache_dir() / "merge_input.md").read_text(
+            encoding="utf-8"
+        )
         assert "Format Reference Analyses" in merge_input
         assert "good-post.md" in merge_input
 

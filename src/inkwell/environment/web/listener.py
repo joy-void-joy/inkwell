@@ -121,23 +121,19 @@ class WebListener(PipelineListener):
     async def on_message(self, source: str, message: str) -> None:
         await self.broadcast({"type": "message", "source": source, "message": message})
 
-    async def collect_feedback(self, state: WritingSessionState) -> list[str]:
-        feedback = await super().collect_feedback(state)
-
+    async def collect_author_input(self, state: WritingSessionState) -> list[str]:
         await self.broadcast(
             {"type": "state_update", "state": self.serialize_state(state)}
         )
 
-        web_items: list[str] = []
+        items: list[str] = []
         while not self.feedback_queue.empty():
             try:
-                batch = self.feedback_queue.get_nowait()
-                web_items.extend(batch)
+                items.extend(self.feedback_queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
 
-        for msg in web_items:
-            feedback.append(f"[Terminal] Author direction: {msg}")
+        for msg in items:
             if state.doc_id:
                 try:
                     await do_insert_comment(
@@ -148,15 +144,15 @@ class WebListener(PipelineListener):
                 except (RuntimeError, OSError):
                     logger.warning("Failed to mirror web input to GDoc")
 
-        if feedback:
+        if items:
             await self.broadcast(
                 {
                     "type": "progress",
-                    "message": f"Incorporating {len(feedback)} feedback item(s)",
+                    "message": f"Incorporating {len(items)} feedback item(s)",
                 }
             )
 
-        return feedback
+        return items
 
     async def collect_revision(self, state: WritingSessionState) -> str | None:
         revisions: list[str] = []

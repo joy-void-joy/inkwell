@@ -127,7 +127,9 @@ class SectionDraft(BaseModel):
 
     @field_validator("questions_for_author", mode="before")
     @classmethod
-    def coerce_strings_to_author_notes(cls, v: list[str | AuthorNote | dict[str, str]]) -> list[AuthorNote | dict[str, str]]:
+    def coerce_strings_to_author_notes(
+        cls, v: list[str | AuthorNote | dict[str, str]]
+    ) -> list[AuthorNote | dict[str, str]]:
         """Accept plain strings from old snapshots."""
         return [AuthorNote(note=item) if isinstance(item, str) else item for item in v]
 
@@ -176,8 +178,12 @@ class ClassifiedComment(BaseModel):
 
     comment_id: str = Field(description="Google Drive comment ID")
     content: str = Field(description="Comment text")
-    anchor_text: str = Field(default="", description="Quoted text the comment is anchored to")
-    reply: str = Field(default="", description="Author's reply text, if replying to an agent comment")
+    anchor_text: str = Field(
+        default="", description="Quoted text the comment is anchored to"
+    )
+    reply: str = Field(
+        default="", description="Author's reply text, if replying to an agent comment"
+    )
     impact: Literal[
         "plan_breaking", "stage_local", "clarification", "dismiss", "revert_suggested"
     ] = Field(
@@ -222,7 +228,9 @@ class Assumption(BaseModel):
 class AssumptionsList(BaseModel):
     """Output of the assumptions stage — all uncertainties surfaced at once."""
 
-    items: list[Assumption] = Field(description="All assumptions and questions to surface")
+    items: list[Assumption] = Field(
+        description="All assumptions and questions to surface"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +337,37 @@ class PipelineSnapshot(BaseModel):
         default_factory=list, description="Unanswered questions for the author"
     )
 
+    profile: str = Field(default="", description="Settings profile active for this run")
+    raw_sources: list[str] = Field(
+        default_factory=list,
+        description="Original source strings exactly as the user provided them",
+    )
+    author_instructions: str = Field(
+        default="",
+        description="Author directions extracted from freeform input at preprocess",
+    )
+    runtime_style_refs: list[str] = Field(
+        default_factory=list,
+        description="Style references discovered during preprocess",
+    )
+    source_file_paths: list[str] = Field(
+        default_factory=list, description="Extracted source files on disk"
+    )
+    voice_file_paths: list[str] = Field(
+        default_factory=list,
+        description="Voice analysis and style reference files for writing stages",
+    )
+    voice_fingerprint: str = Field(
+        default="",
+        description="Hash of voice-analysis inputs, for cache invalidation",
+    )
+    source_doc_id: str = Field(
+        default="", description="Source Google Doc ID (for resume)"
+    )
+    seen_source_comment_ids: set[str] = Field(
+        default_factory=set,
+        description="Source doc comment IDs already processed",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +391,9 @@ class WritingOutput(BaseModel):
     title: str = Field(description="Final article title")
     content: str = Field(default="", description="Full article content in markdown")
     google_doc_id: str = Field(default="", description="Google Doc ID")
-    google_doc_url: str = Field(default="", description="URL of the Google Doc with the article")
+    google_doc_url: str = Field(
+        default="", description="URL of the Google Doc with the article"
+    )
     word_count: int = Field(default=0, description="Total word count")
     review_findings: list[ReviewFinding] = Field(
         default_factory=list, description="Findings from all reviewers"

@@ -8,6 +8,29 @@ output via incremental MCP tools (plan, research, review) or built-in
 Write/Edit (prose stages).
 """
 
+from pydantic import BaseModel, Field
+
+EXTRACTOR_PROMPT = """\
+You recover source material that failed automatic extraction.
+
+For each failed source, try alternatives in order:
+
+1. fetch_source or fetch_and_extract with a cleaned-up URL — strip \
+tracking parameters, fix obvious typos, try the canonical version
+2. exa_search for the page title or a distinctive phrase to find the \
+same content at another URL (mirrors, archives, republications)
+3. extract_webpage_batch when you have several candidate URLs
+
+If a "source" is plain text rather than a URL, it IS the content — \
+copy it through verbatim.
+
+You are extracting, not summarizing. Preserve the full text of \
+whatever you recover, including quotes, numbers, and structure. \
+Write everything to the output file given in your task, using the \
+requested per-source headers. If a source is unrecoverable, write a \
+short note under its header saying what you tried."""
+
+
 RESEARCHER_PROMPT = """\
 You are a research agent. Read the article plan from the file path in \
 your task, then investigate every research question.
@@ -525,7 +548,6 @@ story.
 if possible. Every paragraph must earn its place.
 - Cut any paragraph that repeats a point already made elsewhere.
 - If a section runs over 800 words, split it or cut.""",
-
     "lesswrong": """\
 ## Format: LessWrong
 
@@ -625,14 +647,12 @@ must earn its place.
 Remove any paragraph that repeats a point made elsewhere.
 - Dense supplementary material goes in footnotes or collapsible \
 sections, not the main body.""",
-
     "blog": """\
 ## Format: Blog Post
 
 Write for a general audience. Hook the reader in the first paragraph. \
 Use subheadings every 300-400 words for scannability. Paragraphs \
 should be short (3-5 sentences). Conversational but substantive.""",
-
     "twitter": """\
 ## Format: Twitter Thread
 
@@ -640,7 +660,6 @@ Each point must be self-contained within ~260 characters. The first \
 tweet is the hook — it must grab attention without context. Build \
 a thread that rewards sequential reading but where each tweet \
 also works standalone.""",
-
     "dialog": """\
 ## Format: Dialog
 
@@ -653,3 +672,28 @@ Distribute arguments naturally across speakers. Vary turn length.""",
 def get_format_guidance(target_format: str) -> str:
     """Return structural guidance for a target format, or empty string."""
     return FORMAT_GUIDANCE.get(target_format, "")
+
+
+class OutputFormatSpec(BaseModel):
+    """A selectable output format for the pipeline."""
+
+    key: str = Field(description="Format key used in plans and CLI flags")
+    label: str = Field(description="Human-readable format name")
+    accepts_description: bool = Field(
+        default=False,
+        description="Whether the key takes a ':<description>' suffix",
+    )
+
+
+OUTPUT_FORMATS: list[OutputFormatSpec] = [
+    OutputFormatSpec(key="lesswrong", label="LessWrong post"),
+    OutputFormatSpec(key="blog", label="Blog post"),
+    OutputFormatSpec(key="twitter", label="Twitter thread"),
+    OutputFormatSpec(key="dialog", label="Dialog"),
+    OutputFormatSpec(key="memo", label="Policy memo"),
+    OutputFormatSpec(key="custom", label="Custom format", accepts_description=True),
+]
+
+FORMAT_KEYS: list[str] = [
+    f"{f.key}:<description>" if f.accepts_description else f.key for f in OUTPUT_FORMATS
+]

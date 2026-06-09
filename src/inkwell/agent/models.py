@@ -337,7 +337,9 @@ class PipelineSnapshot(BaseModel):
         default_factory=list, description="Unanswered questions for the author"
     )
 
-    profile: str = Field(default="", description="Settings profile active for this run")
+    profile: str | None = Field(
+        default=None, description="Settings profile active for this run"
+    )
     raw_sources: list[str] = Field(
         default_factory=list,
         description="Original source strings exactly as the user provided them",

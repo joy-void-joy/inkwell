@@ -1,5 +1,3 @@
-# claude: ignore
-# pyright: reportAttributeAccessIssue=false, reportIndexIssue=false
 """Unified writing pipeline with restartable state machine.
 
 Stages read inputs from files (via built-in Read) and produce output

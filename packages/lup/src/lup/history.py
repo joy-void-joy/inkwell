@@ -92,6 +92,7 @@ class SessionResult[OutputT: BaseModel](BaseModel):
     token_usage: TokenUsage | None = None
     tool_metrics: MetricsSummary | None = None
     outcome: str | None = Field(default=None, description="Outcome after resolution")
+    profile: str | None = Field(default=None, description="Configuration profile used")
 
 
 def save_session(result: BaseModel, *, session_id: str) -> Path:

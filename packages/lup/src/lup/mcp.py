@@ -78,6 +78,17 @@ def mcp_response(text: str, *, is_error: bool = False) -> ToolResponse:
     return response
 
 
+LABEL_FIELDS = ("url", "label", "file_path", "doc_id", "query", "path")
+
+
+def _extract_label(args: dict[str, Any], fallback: str) -> str:
+    """Extract a human-readable label from tool input args."""
+    for field in LABEL_FIELDS:
+        if field in args and isinstance(args[field], str) and args[field]:
+            return args[field]
+    return fallback
+
+
 def generate_json_schema(
     input_schema: type | dict[str, type | str],
 ) -> dict[str, object]:
@@ -328,7 +339,26 @@ def lup_tool(
                         f"lup_tool '{tool_name}': expected {resolved_output.__name__}, "
                         f"got {type(result).__name__}"
                     )
-                return mcp_response(json.dumps(result.model_dump(), default=str))
+                from lup.content_safety import (
+                    CONTENT_SAFETY_THRESHOLD,
+                    content_dir,
+                    spill_oversized_result,
+                )
+
+                serialized = json.dumps(result.model_dump(), default=str)
+                if (
+                    content_dir is not None
+                    and len(serialized) > CONTENT_SAFETY_THRESHOLD
+                ):
+                    label = _extract_label(args, tool_name)
+                    result = spill_oversized_result(
+                        tool_name,
+                        label,
+                        result,
+                        content_dir,
+                    )
+                    serialized = json.dumps(result.model_dump(), default=str)
+                return mcp_response(serialized)
             except Exception:
                 is_error = True
                 raise

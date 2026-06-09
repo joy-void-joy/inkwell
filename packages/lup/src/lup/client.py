@@ -93,7 +93,7 @@ from claude_agent_sdk.types import (
 )
 from pydantic import BaseModel, ValidationError
 
-from lup.hooks import create_large_read_hook, create_read_limit_hook, merge_hooks
+from lup.hooks import create_large_read_hook, merge_hooks
 from lup.trace import TraceLogger, active_agents, print_message
 
 type HeartbeatCallback = Callable[[float], Coroutine[None, None, None]]
@@ -438,7 +438,7 @@ async def build_client(
             "no-session-persistence": None,
             **(extra_args or {}),
         }
-        default_hooks = merge_hooks(create_large_read_hook(), create_read_limit_hook())
+        default_hooks = create_large_read_hook()
         merged_hooks = merge_hooks(default_hooks, hooks) if hooks else default_hooks
         options = ClaudeAgentOptions(
             model=model,

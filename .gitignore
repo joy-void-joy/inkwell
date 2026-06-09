@@ -138,6 +138,8 @@ celerybeat.pid
 # Environments
 # .env is committed as template, .env.local contains secrets
 .env.local
+profiles/
+credentials/
 .envrc
 .venv
 env/
@@ -215,3 +217,7 @@ downstream.json.local
 .cache/
 refs/
 **/*.bak
+
+# Frontend
+node_modules/
+src/inkwell/environment/web/frontend/dist/

@@ -16,6 +16,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import active_profile, settings
+from lup.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 CHUNK_CHARS = 100_000
@@ -47,9 +48,10 @@ class ConversationMessage(BaseModel):
 
 class ExtractConversationOutput(BaseModel):
     url: str = Field(description="Original share URL")
-    messages: list[ConversationMessage] = Field(description="Extracted messages")
-    markdown: str = Field(description="Full conversation as markdown with speaker tags")
     message_count: int = Field(description="Number of messages extracted")
+    content: SavedContent = Field(
+        description="Conversation saved to disk as markdown with speaker tags"
+    )
 
 
 def extract_share_id(url: str) -> str:
@@ -93,7 +95,11 @@ def extract_block_text(block: dict[str, object]) -> str | None:
             for field in ("text", "content", "source"):
                 val = block.get(field, "")
                 if isinstance(val, str) and val:
-                    logger.debug("Recovered text from unknown block type=%s via field=%s", block_type, field)
+                    logger.debug(
+                        "Recovered text from unknown block type=%s via field=%s",
+                        block_type,
+                        field,
+                    )
                     return val
             return None
 
@@ -151,8 +157,11 @@ def load_cookies_from_browser() -> dict[str, str]:
     profile = active_profile()
     if loop and loop.is_running():
         import concurrent.futures
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            cookies = pool.submit(lambda: asyncio.run(extract_cookies(profile))).result(timeout=30)
+            cookies = pool.submit(lambda: asyncio.run(extract_cookies(profile))).result(
+                timeout=30
+            )
     else:
         cookies = asyncio.run(extract_cookies(profile))
 
@@ -267,9 +276,7 @@ async def fetch_with_cookie(
                     result = resp.json()
                     return result, fallback_uuid
 
-    raise ToolError(
-        f"Conversation not found in any of {len(candidates)} org(s)"
-    )
+    raise ToolError(f"Conversation not found in any of {len(candidates)} org(s)")
 
 
 async def prompt_for_cookie(reason: str) -> str:
@@ -289,7 +296,9 @@ async def prompt_for_cookie(reason: str) -> str:
 
     if has_graphical_display():
         console.print("  Opening a browser window — log in to claude.ai.")
-        console.print("  [dim]This session is stored separately from your main browser.[/dim]")
+        console.print(
+            "  [dim]This session is stored separately from your main browser.[/dim]"
+        )
         console.print()
 
         profile = active_profile()
@@ -383,16 +392,14 @@ async def fetch_snapshot(share_id: str) -> dict[str, object]:
                 except CookieExpiredError:
                     pass
             cookie = await prompt_for_cookie("Claude session cookie expired.")
-            data, org_uuid = await fetch_with_cookie(
-                client, share_id, cookie, None
-            )
+            data, org_uuid = await fetch_with_cookie(client, share_id, cookie, None)
 
         persist_credentials(cookie, org_uuid)
         return data
 
 
 async def do_extract_conversation(url: str) -> ExtractConversationOutput:
-    """Extract a Claude conversation into structured markdown. No spill logic."""
+    """Extract a Claude conversation into structured markdown, saved to disk."""
     share_id = extract_share_id(url)
     data = await fetch_snapshot(share_id)
 
@@ -421,31 +428,27 @@ async def do_extract_conversation(url: str) -> ExtractConversationOutput:
         raise ToolError("No messages found in conversation")
 
     markdown = "\n\n".join(md_parts)
+    saved = save_content("conversation", share_id, markdown)
+
     return ExtractConversationOutput(
         url=url,
-        messages=messages,
-        markdown=markdown,
         message_count=len(messages),
+        content=saved,
     )
 
 
 @lup_tool(
-    "Extract a Claude.ai conversation from a share link. Converts the conversation "
-    "into structured markdown with <user> and <claude> speaker tags. Use this as "
-    "the first step when the author provides a Claude conversation as source "
-    "material. Returns both structured messages and formatted markdown. "
+    "Extract a Claude.ai conversation from a share link. Saves the conversation "
+    "as structured markdown with <user> and <claude> speaker tags. Returns a "
+    "file path, word count, and preview — use Read to access the full text. "
+    "Use this as the first step when the author provides a Claude conversation "
+    "as source material. "
     "Requires CLAUDE_COOKIE in .env.local for org-restricted share links."
 )
 async def extract_conversation(
     params: ExtractConversationInput,
 ) -> ExtractConversationOutput:
-    result = await do_extract_conversation(params.url)
-    return ExtractConversationOutput(
-        url=params.url,
-        messages=result.messages,
-        markdown=result.markdown,
-        message_count=result.message_count,
-    )
+    return await do_extract_conversation(params.url)
 
 
 class ExtractFileInput(BaseModel):
@@ -453,13 +456,12 @@ class ExtractFileInput(BaseModel):
 
 
 class ExtractFileOutput(BaseModel):
-    path: str = Field(description="Source file path")
-    content: str = Field(description="Extracted text content")
-    word_count: int = Field(description="Approximate word count")
+    source_path: str = Field(description="Original file path")
+    content: SavedContent = Field(description="Extracted text saved to disk")
 
 
 async def do_extract_file(file_path_str: str) -> ExtractFileOutput:
-    """Extract text from a local file. No spill logic."""
+    """Extract text from a local file, saved to disk."""
     file_path = Path(file_path_str).expanduser().resolve()
     if not file_path.exists():
         raise ToolError(f"File not found: {file_path}")
@@ -467,13 +469,13 @@ async def do_extract_file(file_path_str: str) -> ExtractFileOutput:
     suffix = file_path.suffix.lower()
 
     if suffix == ".pdf":
-        return ExtractFileOutput(
-            path=str(file_path),
-            content=f"[PDF file: {file_path.name}. Use the Read tool with "
+        pdf_note = (
+            f"[PDF file: {file_path.name}. Use the Read tool with "
             f'file_path="{file_path}" and pages="1-20" to read content. '
-            f"Adjust page ranges to cover the full document.]",
-            word_count=0,
+            f"Adjust page ranges to cover the full document.]"
         )
+        saved = save_content("file", file_path.stem, pdf_note)
+        return ExtractFileOutput(source_path=str(file_path), content=saved)
 
     try:
         raw = file_path.read_text(encoding="utf-8")
@@ -482,34 +484,38 @@ async def do_extract_file(file_path_str: str) -> ExtractFileOutput:
             f"Could not read {file_path} as text. Supported formats: .md, .txt, .html, .pdf"
         )
 
-    if suffix in (".html", ".htm") or raw.lstrip()[:100].lower().startswith(("<!doctype", "<html")):
+    if suffix in (".html", ".htm") or raw.lstrip()[:100].lower().startswith(
+        ("<!doctype", "<html")
+    ):
         import trafilatura
 
-        content = trafilatura.extract(raw, include_comments=False, include_tables=True) or ""
+        content = (
+            trafilatura.extract(raw, include_comments=False, include_tables=True) or ""
+        )
         if not content:
             raise ToolError(f"Could not extract text from HTML file: {file_path}")
     else:
         content = raw
 
-    return ExtractFileOutput(
-        path=str(file_path),
-        content=content,
-        word_count=len(content.split()),
-    )
+    saved = save_content("file", file_path.stem, content)
+    return ExtractFileOutput(source_path=str(file_path), content=saved)
 
 
 @lup_tool(
     "Extract text from a local file. Supports markdown (.md), plain "
-    "text (.txt), HTML, and PDF files. For PDFs, returns the file path "
-    "— use the Read tool to read PDF content directly (it supports "
-    "page ranges). Use this to ingest local reference documents "
-    "provided by the author via --ref file paths."
+    "text (.txt), HTML, and PDF files. Saves extracted content to disk "
+    "and returns a file path, word count, and preview — use Read to "
+    "access the full text. For PDFs, returns the original path for "
+    "direct reading with page ranges. Use this to ingest local "
+    "reference documents provided by the author via --ref file paths."
 )
 async def extract_file(params: ExtractFileInput) -> ExtractFileOutput:
     return await do_extract_file(params.path)
 
 
-def write_source_chunks(text: str, output_dir: Path, prefix: str = "source") -> list[Path]:
+def write_source_chunks(
+    text: str, output_dir: Path, prefix: str = "source"
+) -> list[Path]:
     """Write text to one or more numbered chunk files.
 
     Returns the list of file paths written. For text shorter than
@@ -557,9 +563,8 @@ def save_source_to_files(
 ) -> list[Path]:
     """Save extracted source to files for agent consumption.
 
-    For PDF sources, copies the PDF to the output dir (agents read
-    PDFs directly via the Read tool). For text, writes to chunked
-    files if the text is large.
+    For PDF sources, extracts text and writes to chunked markdown files.
+    For text, writes to chunked files if the text is large.
     """
     if pdf_source is not None:
         dest = output_dir / pdf_source.name
@@ -581,17 +586,20 @@ async def extract_source_tab_only(url: str) -> str:
     own output (Plan, Research, section drafts). This reads only the
     "Source" tab, falling back to all non-pipeline tabs if "Source"
     doesn't exist.
+
+    Returns the text content (reads saved files from disk).
     """
     result = await do_extract_gdoc(url)
 
     source_tabs = [t for t in result.tabs if t.title == "Source"]
     if source_tabs:
-        content = source_tabs[0].content
+        content = Path(source_tabs[0].content.path).read_text(encoding="utf-8")
     else:
-        content = "\n\n".join(
-            t.content for t in result.tabs
-            if t.title not in PIPELINE_TAB_NAMES
-        )
+        parts = []
+        for t in result.tabs:
+            if t.title not in PIPELINE_TAB_NAMES:
+                parts.append(Path(t.content.path).read_text(encoding="utf-8"))
+        content = "\n\n".join(parts)
 
     comments_md = format_comments_as_markdown(result.comments)
     if comments_md:
@@ -627,11 +635,10 @@ class ExtractLessWrongOutput(BaseModel):
     url: str = Field(description="Source URL")
     title: str = Field(description="Post title")
     author: str = Field(description="Author display name")
-    content: str = Field(description="Post body as markdown")
     score: int = Field(description="Post karma score")
     comment_count: int = Field(description="Number of comments")
     posted_date: str = Field(description="Publication date (ISO format)")
-    word_count: int = Field(description="Word count of post body")
+    content: SavedContent = Field(description="Post body saved to disk as markdown")
 
 
 def parse_lesswrong_slug(url: str) -> str:
@@ -673,22 +680,25 @@ async def do_extract_lesswrong(url: str) -> ExtractLessWrongOutput:
     content = markdownify.markdownify(html_body, strip=["img"]) if html_body else ""
 
     user = post.get("user") or {}
+    title = post.get("title", "")
+    saved = save_content("lesswrong", title or url, content)
     return ExtractLessWrongOutput(
         url=url,
-        title=post.get("title", ""),
+        title=title,
         author=user.get("displayName", "Unknown"),
-        content=content,
         score=post.get("baseScore", 0),
         comment_count=post.get("commentCount", 0),
         posted_date=post.get("postedAt", ""),
-        word_count=len(content.split()),
+        content=saved,
     )
 
 
 @lup_tool(
-    "Extract a LessWrong post with metadata via the GraphQL API. Returns "
-    "the post body as markdown plus author, karma score, and comment count. "
-    "Use for style references, source material, or cross-referencing LW posts."
+    "Extract a LessWrong post with metadata via the GraphQL API. Saves the "
+    "post body as markdown to disk and returns a file path, word count, and "
+    "preview plus author, karma score, and comment count. Use Read to access "
+    "the full text. Use for style references, source material, or "
+    "cross-referencing LW posts."
 )
 async def extract_lesswrong(
     params: ExtractLessWrongInput,
@@ -697,14 +707,15 @@ async def extract_lesswrong(
 
 
 class ExtractBatchInput(BaseModel):
-    urls: list[str] = Field(description="URLs to extract text from (processed in parallel)")
+    urls: list[str] = Field(
+        description="URLs to extract text from (processed in parallel)"
+    )
 
 
 class BatchResult(BaseModel):
     url: str
     title: str = ""
-    content: str
-    word_count: int
+    content: SavedContent
 
 
 class ExtractBatchOutput(BaseModel):
@@ -715,7 +726,8 @@ class ExtractBatchOutput(BaseModel):
 @lup_tool(
     "Extract text from multiple URLs in parallel. Use when ingesting "
     "several reference pages at once — faster than calling fetch_source "
-    "repeatedly. Returns extracted content for each URL and lists failures."
+    "repeatedly. Saves each page to disk and returns file paths, word "
+    "counts, and previews. Use Read to access the full text of any page."
 )
 async def extract_webpage_batch(
     params: ExtractBatchInput,
@@ -747,14 +759,17 @@ async def extract_webpage_batch(
             return None
 
         title = ""
-        title_json = trafilatura.extract(resp.text, output_format="json", include_links=False)
+        title_json = trafilatura.extract(
+            resp.text, output_format="json", include_links=False
+        )
         if title_json:
             try:
                 title = json_mod.loads(title_json).get("title", "")
             except (json_mod.JSONDecodeError, AttributeError):
                 pass
 
-        return BatchResult(url=url, title=title, content=text, word_count=len(text.split()))
+        saved = save_content("batch", url, text)
+        return BatchResult(url=url, title=title, content=saved)
 
     async with httpx.AsyncClient(
         timeout=20.0,
@@ -775,9 +790,7 @@ async def extract_webpage_batch(
     return ExtractBatchOutput(results=results, failed=failed)
 
 
-GDOC_URL_PATTERN = re.compile(
-    r"https://docs\.google\.com/document/d/([a-zA-Z0-9_-]+)"
-)
+GDOC_URL_PATTERN = re.compile(r"https://docs\.google\.com/document/d/([a-zA-Z0-9_-]+)")
 
 LINK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("claude_share", re.compile(r"https://claude\.ai/share/[a-zA-Z0-9_-]+")),
@@ -827,8 +840,7 @@ class ExtractGdocInput(BaseModel):
 class GdocTab(BaseModel):
     tab_id: str = Field(description="Tab ID")
     title: str = Field(description="Tab title")
-    content: str = Field(description="Tab content as plain text")
-    word_count: int = Field(description="Approximate word count")
+    content: SavedContent = Field(description="Tab content saved to disk as markdown")
 
 
 class GdocComment(BaseModel):
@@ -959,6 +971,7 @@ async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
 
     tabs: list[GdocTab] = []
     all_text_parts: list[str] = []
+    total_words = 0
 
     for tab in tabs_raw:
         if not isinstance(tab, dict):
@@ -972,12 +985,13 @@ async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
         text = extract_tab_markdown(tab)
         all_text_parts.append(text)
 
+        saved = save_content("gdoc", f"{doc_title}-{tab_title}", text)
+        total_words += saved.word_count
         tabs.append(
             GdocTab(
                 tab_id=tab_id,
                 title=tab_title,
-                content=text,
-                word_count=len(text.split()),
+                content=saved,
             )
         )
 
@@ -991,23 +1005,26 @@ async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
         tabs=tabs,
         comments=comments,
         discovered_links=discovered,
-        total_word_count=len(all_text.split()),
+        total_word_count=total_words,
     )
 
 
 @lup_tool(
-    "Extract content from a Google Doc. Reads all tabs as markdown, comments, "
-    "and discovers embedded links (Claude share links, article URLs). Use when "
-    "the author provides a Google Doc as seed — reads its content, finds Claude "
-    "conversations or reference URLs linked within, and returns structured source "
-    "material. Discovered links can be processed with extract_conversation or "
-    "fetch_source."
+    "Extract content from a Google Doc. Saves each tab as markdown to disk "
+    "and returns file paths, word counts, and previews. Also reads comments "
+    "and discovers embedded links (Claude share links, article URLs). "
+    "Use Read to access the full text of any tab. Use when the author "
+    "provides a Google Doc as seed. Discovered links can be processed "
+    "with extract_conversation or fetch_source."
 )
 async def extract_gdoc(params: ExtractGdocInput) -> ExtractGdocOutput:
     return await do_extract_gdoc(params.url)
 
 
 EXTRACT_TOOLS = [
-    extract_conversation, extract_file,
-    extract_lesswrong, extract_webpage_batch, extract_gdoc,
+    extract_conversation,
+    extract_file,
+    extract_lesswrong,
+    extract_webpage_batch,
+    extract_gdoc,
 ]

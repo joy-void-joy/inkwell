@@ -12,6 +12,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 import inkwell.agent.config as config_mod
+from lup.content_safety import save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ class ExaResult(TypedDict):
     highlights: list[str] | None
     published_date: str | None
     score: float | None
+    full_text_path: str | None
+    """Path to the full result text on disk — Read it for complete content."""
 
 
 class ExaSearchInput(BaseModel):
@@ -61,9 +64,11 @@ class ExaSearchOutput(BaseModel):
     "posts, news, technical documentation. Better than generic web search "
     "for research because it understands meaning, not just keywords. "
     "Supports domain filtering (include/exclude specific sites), date "
-    "range filtering, and livecrawl for fresh content. Returns titles, "
-    "URLs, text snippets, and highlighted key passages. "
-    "Use fetch_url to read the full text of interesting results."
+    "range filtering, and livecrawl for fresh content. Each result has a "
+    "title, URL, snippet, highlighted key passages, and full_text_path — "
+    "the complete page text saved to disk. Read full_text_path before "
+    "citing or fact-checking against a result; the snippet alone is not "
+    "enough to verify a claim."
 )
 async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
     api_key = config_mod.settings.exa_api_key
@@ -116,14 +121,24 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
         if isinstance(published_date, str):
             published_date = published_date.rstrip("Z")
 
+        full_text = r.get("text") or ""
+        full_text_path: str | None = None
+        if len(full_text) > 500:
+            try:
+                saved = save_content("exa", r.get("url") or params.query, full_text)
+                full_text_path = saved.path
+            except RuntimeError:
+                logger.debug("No content directory configured; returning snippet only")
+
         results.append(
             ExaResult(
                 title=r.get("title"),
                 url=r.get("url"),
-                snippet=(r.get("text") or "")[:500] or None,
+                snippet=full_text[:500] or None,
                 highlights=[h[:500] for h in r.get("highlights", [])[:3]] or None,
                 published_date=published_date,
                 score=r.get("score"),
+                full_text_path=full_text_path,
             )
         )
 

@@ -159,8 +159,6 @@ async def fetch_source(params: FetchSourceInput) -> FetchSourceOutput:
     return await do_fetch_source(params.url)
 
 
-fetch_url = fetch_source
-
 EXTRACT_THRESHOLD_WORDS = 1000
 
 FOCUSED_EXTRACT_SYSTEM = """\

@@ -1638,6 +1638,16 @@ async def apply_format(
 
             result = await do_format_memo(FormatMemoInput(content=content, title=title))
             return result.content
+        case "academic":
+            from inkwell.agent.tools.formats import (
+                FormatAcademicInput,
+                do_format_academic,
+            )
+
+            academic = await do_format_academic(
+                FormatAcademicInput(content=content, title=title)
+            )
+            return academic.content
         case _ if target_format.startswith("custom:"):
             from inkwell.agent.tools.formats import FormatCustomInput, do_format_custom
 

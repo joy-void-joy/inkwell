@@ -36,6 +36,32 @@ def github_blob_to_raw(url: str) -> str | None:
     return None
 
 
+CHALLENGE_MARKERS = (
+    "making sure you're not a bot",
+    "checking your browser before accessing",
+    "just a moment...",
+    "verify you are human",
+    "enable javascript and cookies to continue",
+    "attention required! | cloudflare",
+    "ddos-guard",
+)
+
+
+def challenge_page_marker(text: str) -> str | None:
+    """Detect anti-bot interstitials served in place of page content.
+
+    Challenge pages are short HTML shells; real articles that merely
+    mention these phrases are far longer, so size-gate the check.
+    """
+    if len(text) > 30_000:
+        return None
+    sample = text[:6000].lower()
+    for marker in CHALLENGE_MARKERS:
+        if marker in sample:
+            return marker
+    return None
+
+
 class FetchSourceInput(BaseModel):
     url: str = Field(description="URL to fetch and extract text from")
 
@@ -76,6 +102,15 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
         raise ToolError(f"Server error {resp.status_code} for {url}. Try again later.")
 
     ct = resp.headers.get("content-type", "")
+
+    if "html" in ct:
+        marker = challenge_page_marker(resp.text)
+        if marker is not None:
+            raise ToolError(
+                f"{url} served an anti-bot challenge page (matched {marker!r}) "
+                f"instead of content. The fetch was blocked — try a mirror "
+                f"or exa_search for cached content."
+            )
 
     if "application/pdf" in ct:
         if len(resp.content) > MAX_PDF_BYTES:

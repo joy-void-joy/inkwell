@@ -222,3 +222,4 @@ refs/
 node_modules/
 src/inkwell/environment/web/frontend/dist/
 .lup/
+tree/

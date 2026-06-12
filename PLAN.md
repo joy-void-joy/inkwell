@@ -43,6 +43,49 @@
 
 ## What Remains
 
+### 0. Source-Fidelity Overhaul (decisions from session 1b4114eeabf24695 review)
+
+Trace review + author interview decisions. Work lands directly on `dev` (explicit override of the worktree rule for this effort).
+
+**Phase A — wiring bugfixes** (existing capabilities, stranded):
+
+- [ ] `apply_format`: dispatch `academic` → `do_format_academic` (today falls through to identity while events log "Applying academic formatting")
+- [ ] Feedback round-trip: agent-authored GDoc comments re-ingested as `[GDoc Comment]` author feedback — tag via `agent_comment_ids`, never present pipeline output as author input
+- [ ] Cost accumulator: every `cost_update` was 0.0 for the full session
+- [ ] Sandbox mounts: `execute_code` cannot see `pipeline_notes/artifacts` (researcher hit FileNotFoundError, retyped data from memory)
+- [ ] `fetch_and_extract`: detect anti-bot/challenge pages (Anubis page was accepted as content)
+- [ ] Trace markdown: emit stage-boundary markers (stage attribution had to be reverse-engineered)
+
+**Phase B — source as a first-class citizen:**
+
+- [ ] Brief vs sources split: preprocess emits an immutable Brief (instructions, author comments, deliverable criteria) separate from `sources[]`; the planner plans the brief's deliverable using sources as reference — not "distill the source"
+- [ ] Deliverable contract: plan carries explicit criteria from the brief (e.g. self-contained proofs, single logic) that reviewers check the draft against
+- [ ] Scope gate: brief is immutable; refiner may record proposed deviations but the pipeline proceeds with the author's stated scope unless approved
+- [ ] `consult_source(question, pages?)` nested-reader tool: subagent reads the actual PDF (visual Read — no text-extraction-as-content), returns answers with page refs; available to every stage
+- [ ] `find_in_source(pattern)` locator: greps a throwaway text layer, returns page numbers only (navigation, never content)
+- [ ] Source listed in every stage manifest (write, merge, review, rewrite)
+- [ ] `ResearchFinding` provenance: origin discriminator — `source_document` (requires verbatim quote + page locator) vs `external` (URL); unquoted source claims are unverified
+
+**Phase C — pipeline shape + models:**
+
+- [ ] Per-stage model config (stage→model map in settings; `claude-fable-5` usable)
+- [ ] Single-writer mode as an orthogonal pipeline option (not tied to model): one writer drafts the whole piece with `consult_source` + research tools; no merge stage
+- [ ] Compaction resilience: reading pass via nested readers writing per-chapter notes (verbatim key passages + page refs) to disk; no stage depends on holding the whole source in context
+
+**Phase D — review + coherence:**
+
+- [ ] New source-fidelity reviewer (4th reviewer): verifies definitions, theorem statements, and proof structure against cited source pages via `consult_source`
+- [ ] Fact-checker: keep web + compute duties; recompute examples from the source's definitions (not the draft's premises); port aib REPL improvements (persistent session, `install_package`)
+- [ ] Resolve-against-source stage before rewrite: triage pending questions — source-answerable ones get answered from the source; only author-judgment questions reach the author
+- [ ] Generic `conventions` field on `ArticlePlan` dispatched to all writers (shared terms/concepts/conventions; domain-agnostic)
+- [ ] Merge plan: terminology/notation-consistency analysis dimension (generic, alongside duplication/transitions)
+- [ ] Severity split: correctness-critical vs style-critical; rewriter hierarchy puts correctness above voice rules
+- [ ] `FORMAT_GUIDANCE` `academic` entry (define before use, self-containment, notation conventions)
+
+**Phase E — academic deliverable:**
+
+- [ ] LaTeX-first output for academic format: produce `paper.tex`, compile to PDF in the sandbox (tectonic), upload PDF to Drive and link it from the GDoc; GDoc remains the comment/review surface
+
 ### 1. ~~Terminal Input During Sleep~~ Interactive Chat CLI
 
 - [x] Interactive chat as default (`inkwell` opens chat, subcommands pre-seed it)
@@ -90,6 +133,7 @@ Lower-priority research tools not yet ported:
 
 ## Priority Order
 
+0. **Source-fidelity overhaul** — Phases A→E in order; A is independent quick wins, B unblocks C/D/E
 1. **Terminal input during sleep** — Enables the interactive revision workflow
 2. **Testing** — Build alongside each feature
 3. **Additional extractors** — Expands input sources

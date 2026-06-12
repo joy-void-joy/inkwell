@@ -221,3 +221,4 @@ refs/
 # Frontend
 node_modules/
 src/inkwell/environment/web/frontend/dist/
+.lup/

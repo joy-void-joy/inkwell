@@ -75,6 +75,15 @@ class ArticlePlan(BaseModel):
             "and reviewers flag violations as critical."
         ),
     )
+    conventions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Shared conventions every section must follow: recurring terms "
+            "and what they mean, names for key concepts, notational or "
+            "formatting choices. The channel that keeps independently "
+            "written sections consistent."
+        ),
+    )
     voice_notes: str = Field(
         description="Observations about the author's tone, style, and voice from the source conversation"
     )

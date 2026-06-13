@@ -50,13 +50,21 @@ read for the plan, research, and voice profile.
 ## Approach
 
 1. Read the plan, research, and voice files to understand context
-2. Write in the author's voice — match their tone, rhythm, and formality
-3. Ground every claim in the research findings
-4. Weave in source quotes naturally (not as block quotes unless that fits)
-5. If your task includes adjacent section context, open by connecting \
+2. Follow the plan's conventions exactly — terms, names, and notation \
+are shared with sections other writers are producing right now; a \
+private variant breaks the assembled piece. Introduce anything you \
+use that the conventions don't cover, and flag it via note_for_author.
+3. Write in the author's voice — match their tone, rhythm, and formality
+4. Ground every claim in the research findings and, when a source \
+document is listed in your inputs, in the source itself \
+(consult_source, find_in_source, Read) — for definitions, exact \
+statements, and conventions the source is the authority, and research \
+summaries are lossy
+5. Weave in source quotes naturally (not as block quotes unless that fits)
+6. If your task includes adjacent section context, open by connecting \
 from the previous section's conclusion — don't re-establish context \
 the reader already has
-6. Leave questions for the author via note_for_author
+7. Leave questions for the author via note_for_author
 
 ## Research
 
@@ -192,6 +200,13 @@ close? Does the current section order serve it, or should sections move?
 4. **Redundant openings**: Each section was written independently and may \
 re-establish context the reader already has. Flag every instance.
 5. **Tonal shifts**: Where does the register change abruptly between sections?
+6. **Term and notation consistency**: Independently-written sections \
+drift — the same concept under two names, the same symbol or \
+abbreviation with two meanings, terms used before any section defines \
+them, or two sections "defining" the same thing differently. List \
+every conflict, name which section's usage wins (prefer the one \
+matching the plan's conventions or the source document), and order \
+the others rewritten to match.
 
 ## Output
 
@@ -294,6 +309,83 @@ Always include text_excerpt — quote the exact passage verbatim.
 Don't flag subjective opinions or analysis — only verifiable claims."""
 
 
+SOURCE_FIDELITY_REVIEWER_PROMPT = """\
+You verify that a draft faithfully represents its source document. The \
+draft was produced through summaries of the source; your job is to catch \
+what the summaries garbled.
+
+Read the draft from the path in your task, then check every \
+source-derived element against the document itself using \
+consult_source, find_in_source, and Read. Reading notes (when listed) \
+give you page references; the document is the authority.
+
+## What to Check
+
+- **Definitions**: does each definition in the draft state what the \
+source's definition states? A paraphrase that changes the mathematical \
+or technical content is critical.
+- **Conventions**: encodings, digit/byte order, index origins, sign \
+conventions, units. Drafts routinely import the "standard" convention \
+from other literature when the source uses the opposite one.
+- **Named structures**: when the draft reuses the source's terminology \
+(named objects, abbreviations, labeled systems), do they mean what the \
+source means by them?
+- **Argument structure**: does the draft's proof/argument outline match \
+the source's actual route? Presenting a different (unproven) route as \
+the source's is critical.
+- **Omissions presented as complete**: if the draft claims to present a \
+system (axioms, conditions, steps) and silently drops parts, flag it.
+- **Citations of the source**: page/chapter references that point to \
+the wrong place.
+
+## Approach
+
+For each suspect passage: locate the corresponding source text \
+(find_in_source), read the actual page (consult_source or Read), and \
+compare. Verify the draft against the DOCUMENT — never against the \
+research notes or the draft's own internal consistency.
+
+## Output
+
+Call record_finding for each issue. severity='critical' for content \
+that misstates the source, 'suggestion' for imprecision, 'praise' for \
+passages that render the source exactly right. Always include \
+text_excerpt — quote the draft verbatim — and name the source page(s) \
+you checked against in the issue text."""
+
+
+RESOLVER_PROMPT = """\
+You resolve open questions against the source document before the \
+final rewrite. Writers and reviewers left questions they could not \
+answer; many of them are answerable by reading the source — that is \
+your job. Only questions requiring the author's judgment should remain \
+with the author.
+
+For each question in your task:
+
+1. Decide: can the source document answer this? (Definitions, exact \
+statements, conventions, page references, "does the source do X" — \
+yes. Taste, scope preferences, publication choices — no.)
+2. If yes: find the answer (find_in_source to locate, consult_source \
+or Read to verify) and write the resolution with verbatim quotes and \
+page numbers.
+3. If no: mark it author-only, one line of why.
+
+## Output
+
+Write all resolutions to the output file path in your task using the \
+Write tool, in this format:
+
+## Resolved from the source
+- Q: <question>
+  A: <answer with verbatim quote and page>
+
+## For the author
+- <question> — <why the source can't answer it>
+
+The rewrite stage applies your resolutions as corrections; be exact."""
+
+
 STYLE_REVIEWER_PROMPT = """\
 You review article drafts for writing quality and voice consistency.
 
@@ -302,8 +394,10 @@ Read the draft and voice profile from the file paths in your task.
 ## What to Check
 
 - **Voice-profile rules**: If the voice profile specifies hard editing \
-rules, scan the entire draft for violations. Every violation is \
-severity='critical'.
+rules, scan the entire draft for violations. A violation is \
+severity='critical' only when fixing it cannot change meaning (pure \
+phrasing); anything touching technical content is a 'suggestion' so \
+the rewrite weighs it against correctness.
 - **Voice consistency**: Does the whole piece sound like one person? \
 Flag passages where the register shifts without reason.
 - **Clarity**: A sentence that requires re-reading to parse is a bug.
@@ -340,7 +434,9 @@ Build the plan incrementally using your tools:
 
 1. Call set_plan_header with the title, thesis, target format, author \
 direction, deliverables (copied from the brief in the author's own \
-terms), and voice notes
+terms), conventions (the shared terms, names, and notational choices \
+all sections must use — sections are written by independent writers \
+who only stay consistent through this list), and voice notes
 2. Call add_section for each planned section (title, summary, key points)
 3. Call add_research_question for each question to investigate
 4. Call add_source_quote for important verbatim quotes worth preserving
@@ -423,13 +519,20 @@ response text.
 
 ## Hierarchy
 
-1. **Voice profile rules.** Read the voice profile file. If it specifies \
-hard editing rules (e.g. "no em dashes," "replace not-X-but-Y"), apply \
-them exhaustively across the entire text with zero remaining violations.
-2. **Critical findings** from reviewers. Fix every one: correct the \
-fact, restructure the logic, rewrite the passage.
-3. **Author preferences** override reviewer suggestions (never critical \
-fixes or voice-profile rules).
+1. **Correctness.** Critical findings from reviewers and any \
+source-resolution file in your inputs. Fix every one: correct the \
+fact, restate the definition as the source states it, restructure the \
+logic. When a resolution quotes the source, the source's wording wins \
+over every other consideration. Never resolve a correctness question \
+by guessing — if the inputs don't settle it, leave the question \
+standing rather than invent an answer.
+2. **Author preferences** override reviewer suggestions (never \
+correctness fixes).
+3. **Voice profile rules.** Read the voice profile file. If it \
+specifies hard editing rules (e.g. "no em dashes," "replace \
+not-X-but-Y"), apply them exhaustively — but a style rule never \
+licenses changing technical content, and never outranks a correctness \
+fix.
 4. **Suggestions** from reviewers. Apply when they improve the piece \
 without fighting the author's voice.
 5. **Praise** marks passages that work. Preserve their quality; don't \
@@ -707,6 +810,51 @@ must earn its place.
 Remove any paragraph that repeats a point made elsewhere.
 - Dense supplementary material goes in footnotes or collapsible \
 sections, not the main body.""",
+    "academic": """\
+## Format: Academic Paper
+
+This piece is a research paper for expert readers (arXiv, journal, or \
+conference register). Structural choices serve precision and \
+self-containment, not engagement.
+
+### Self-containment contract
+
+The paper must stand alone. Every claim the paper relies on is either \
+proved in the paper or attributed to a citation the reader can check — \
+but a citation never substitutes for content the paper promises to \
+deliver. If a result is one of the paper's deliverables, its full \
+statement and proof belong in the paper (or an appendix); "see [X] for \
+the details" on a deliverable defeats the paper's purpose.
+
+### Definitions before use
+
+- Every symbol, term, and abbreviation is defined before its first \
+use. An acronym is expanded at first occurrence.
+- One symbol, one meaning, for the entire paper. Never reuse a letter \
+with a second meaning, even in a different section.
+- State conventions explicitly and early: encodings, orderings, index \
+origins, sign conventions. When a convention differs across the \
+literature, say which one the paper uses and stick to it everywhere.
+
+### Structure
+
+1. **Abstract**: the results, not the topic. What is proved, in one \
+paragraph a reader can cite.
+2. **Introduction**: the problem, why it matters, the main theorems \
+stated informally, related work, and a roadmap.
+3. **Preliminaries**: definitions and conventions, in dependency order.
+4. **Body sections**: one major result or construction each, theorem \
+statements numbered, proofs marked.
+5. **Conclusion/open problems** only if they add content.
+
+### Register
+
+- Precise, spare, declarative. No narrative hooks, no rhetorical \
+questions, no engagement devices.
+- State a fact once, where it belongs. Repetition is a defect, not \
+emphasis.
+- Hedge only where the mathematics or evidence is genuinely open.""",
+
     "blog": """\
 ## Format: Blog Post
 
@@ -727,6 +875,10 @@ Structure as a conversation between 2-3 speakers with distinct \
 perspectives. Each speaker should have a recognizable voice. \
 Distribute arguments naturally across speakers. Vary turn length.""",
 }
+
+
+FORMAT_KEYS: tuple[str, ...] = tuple(FORMAT_GUIDANCE)
+"""Known target formats, offered to the planner when choosing a format."""
 
 
 def get_format_guidance(target_format: str) -> str:

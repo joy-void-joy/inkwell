@@ -82,7 +82,7 @@ class SetPlanHeaderInput(BaseModel):
     title: str = Field(description="Working title for the article")
     thesis: str = Field(description="Core argument or insight in one sentence")
     target_format: str = Field(
-        description="Output format: lesswrong, twitter, blog, dialog, memo, or custom:<description>"
+        description="Output format: academic, lesswrong, twitter, blog, dialog, memo, or custom:<description>"
     )
     author_direction: str = Field(
         description="General direction, constraints, or preferences from the author"
@@ -93,6 +93,16 @@ class SetPlanHeaderInput(BaseModel):
             "The author's contract: concrete requested outputs in their own "
             "terms, copied from the brief. Do not widen, narrow, or reword "
             "the author's scope."
+        ),
+    )
+    conventions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Shared conventions every section must follow: recurring terms "
+            "and their meanings, names for key concepts, notational or "
+            "formatting choices (one item each). Writers working in "
+            "parallel inherit these; without them each writer invents "
+            "its own."
         ),
     )
     voice_notes: str = Field(

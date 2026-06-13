@@ -236,8 +236,6 @@ def slugify(label: str) -> str:
     return slug.strip("-")[:80]
 
 
-
-
 def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> None:
     """Add voice/style file references to a content manifest."""
     for p in voice_file_paths:
@@ -522,7 +520,18 @@ def build_compute_server(
     """
     from inkwell.agent.tools.citations import CITATION_TOOLS
 
-    tools = [*sandbox.create_tools(), *make_query_tools(artifacts_dir), *CITATION_TOOLS]
+    tools = [
+        *sandbox.create_tools(
+            usage_notes=(
+                "Pipeline session data is mounted read-only at /notes: the plan at "
+                "/notes/artifacts/plan.json, research at /notes/artifacts/research.json, "
+                "section drafts under /notes/drafts/. Read these instead of retyping "
+                "values from memory."
+            )
+        ),
+        *make_query_tools(artifacts_dir),
+        *CITATION_TOOLS,
+    ]
     server = create_mcp_server(
         name="compute",
         version="1.0.0",
@@ -1899,6 +1908,7 @@ class PipelineRunner:
         self.sandbox = Sandbox(
             session_id=f"inkwell-{id(self)}",
             shared_dir=shared_dir,
+            read_only_mounts={notes.base_dir: "/notes"},
         )
         try:
             self.sandbox.start()

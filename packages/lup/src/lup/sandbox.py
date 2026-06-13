@@ -384,6 +384,8 @@ class Sandbox:
         network_mode: Network access level ("bridge" or "none").
         timeout_seconds: Default timeout for code execution.
         pre_install: Packages to pre-install on start. Pass ``None`` to skip.
+        read_only_mounts: Host→container path mapping mounted read-only,
+            for exposing session data (artifacts, notes) to executed code.
     """
 
     DEFAULT_DOCKER_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
@@ -397,12 +399,17 @@ class Sandbox:
         network_mode: NetworkMode = "bridge",
         timeout_seconds: int = 30,
         pre_install: Sequence[str] | None = DEFAULT_PRE_INSTALL,
+        read_only_mounts: dict[str | Path, str] | None = None,
     ) -> None:
         suffix = session_id.replace("/", "-")
         self.container_name = f"lup-sandbox-{suffix}"
         self.docker_image = docker_image
         self.volume_name = f"lup-sandbox-ws-{suffix}"
         self.shared_dir = Path(shared_dir).resolve()
+        self.read_only_mounts = {
+            Path(host).resolve(): container
+            for host, container in (read_only_mounts or {}).items()
+        }
         self.network_mode = network_mode
         self.timeout_seconds = timeout_seconds
         self.pre_install = list(pre_install) if pre_install is not None else None
@@ -508,6 +515,10 @@ class Sandbox:
             volumes={
                 self.volume_name: {"bind": "/workspace", "mode": "rw"},
                 str(self.shared_dir): {"bind": "/shared", "mode": "rw"},
+                **{
+                    str(host): {"bind": container, "mode": "ro"}
+                    for host, container in self.read_only_mounts.items()
+                },
             },
             working_dir="/workspace",
             mem_limit="1g",
@@ -636,19 +647,33 @@ class Sandbox:
 
     # --- MCP tool creation ---
 
-    def create_tools(self) -> list[LupMcpTool]:
+    def create_tools(self, *, usage_notes: str = "") -> list[LupMcpTool]:
         """Create MCP tools bound to this sandbox instance.
+
+        Args:
+            usage_notes: Extra text appended to the execute_code description,
+                e.g. documenting application-specific read-only mounts.
 
         Returns:
             List of MCP tools for code execution and package installation.
         """
         timeout_seconds = self.timeout_seconds
+        mounts_note = "".join(
+            f"Read-only mount: {container} (host data).\n"
+            for container in self.read_only_mounts.values()
+        )
+        extra_notes = (
+            f"\n{mounts_note}{usage_notes}".rstrip() + "\n\n"
+            if (mounts_note or usage_notes)
+            else "\n\n"
+        )
 
         @lup_tool(
             "Execute Python code in an isolated Docker container with persistent state. "
             "Variables, imports, and data persist between calls — no need to re-define them. "
             f"The container has network access, a persistent /workspace directory, and a "
-            f"/shared directory for file exchange with the host. Timeout: {timeout_seconds}s.\n\n"
+            f"/shared directory for file exchange with the host. Timeout: {timeout_seconds}s."
+            f"{extra_notes}"
             "Examples:\n"
             "  execute_code(code='import numpy as np; data = [1,2,3]; print(np.mean(data))')\n"
             "  execute_code(code='# Monte Carlo simulation\\nimport numpy as np\\n"

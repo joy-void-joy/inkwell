@@ -238,6 +238,14 @@ a coherent piece.
 
 You are NOT writing prose. You are making architectural decisions.
 
+Every section file in your task was already drafted — its byte size is \
+shown and you can Read it. Your job is to unify what exists, never to \
+declare a section missing. If a listed file won't open, report that \
+explicitly and stop; do not write that a section "was never drafted" or \
+"must be constructed" and tell the rewriter to build it from fragments. \
+A section you find thin is rewritten in place from its own draft, not \
+reconstructed from scraps of its neighbors.
+
 ## What to Analyze
 
 1. **Duplication**: Which facts, examples, or arguments appear in multiple \

@@ -1280,17 +1280,26 @@ async def plan_merge(
     cost_accumulator: CostAccumulator | None = None,
 ) -> Path:
     """Phase 1 of merge: produce a structural plan (deduplication, transitions, cuts)."""
+
+    def inventory_line(title: str, path: Path) -> str:
+        size = path.stat().st_size if path.exists() else 0
+        return f"- {title} ({size} bytes on disk): {path}"
+
     drafts_list = "\n".join(
-        f"- {title}: {path}" for title, path in section_draft_paths.items()
+        inventory_line(title, path) for title, path in section_draft_paths.items()
     )
 
     plan_path = notes.artifact_path("plan")
     task = (
         f"Analyze these independently-written sections and produce a merge plan.\n\n"
-        f"Section draft files:\n{drafts_list}\n"
+        f"Section draft files (every one already drafted; byte size shown):\n"
+        f"{drafts_list}\n"
         f"Article plan: {plan_path}\n\n"
         f"Read each section draft and the article plan. Identify duplication, "
         f"missing transitions, redundant openings, and structural issues.\n"
+        f"Every file listed above exists and is non-empty — Read and account "
+        f"for all of them. If a file will not open, say so explicitly; never "
+        f"treat a listed section as 'not drafted' or 'to be constructed'.\n"
         f"Use list_research to browse all findings, then read_finding for details on any section.\n\n"
         f"Write the merge plan to: {output_path}"
     )

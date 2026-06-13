@@ -66,7 +66,7 @@ import contextvars
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, TypedDict, overload
@@ -335,6 +335,41 @@ class ResponseCollector:
 # ---------------------------------------------------------------------------
 
 
+def input_tokens_from_usage(usage: Mapping[str, object]) -> int:
+    """Prompt-side tokens including cache creation and cache reads.
+
+    The raw ``input_tokens`` field excludes cached context, which makes
+    long agent runs look like they read almost nothing.
+    """
+    total = 0
+    for key in (
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ):
+        value = usage.get(key)
+        if isinstance(value, int):
+            total += value
+    return total
+
+
+class StageCostState(TypedDict):
+    cost_usd: float
+    duration_ms: float
+    input_tokens: int
+    output_tokens: int
+    call_count: int
+
+
+class CostState(TypedDict):
+    total_cost_usd: float
+    total_duration_ms: float
+    total_input_tokens: int
+    total_output_tokens: int
+    call_count: int
+    stages: dict[str, StageCostState]
+
+
 class StageCost:
     """Cost breakdown for a single pipeline stage."""
 
@@ -377,7 +412,7 @@ class CostAccumulator:
         if result.duration_ms is not None:
             self.total_duration_ms += result.duration_ms
         if result.usage:
-            self.total_input_tokens += result.usage.get("input_tokens", 0)
+            self.total_input_tokens += input_tokens_from_usage(result.usage)
             self.total_output_tokens += result.usage.get("output_tokens", 0)
 
         if stage is not None:
@@ -390,7 +425,7 @@ class CostAccumulator:
             if result.duration_ms is not None:
                 sc.duration_ms += result.duration_ms
             if result.usage:
-                sc.input_tokens += result.usage.get("input_tokens", 0)
+                sc.input_tokens += input_tokens_from_usage(result.usage)
                 sc.output_tokens += result.usage.get("output_tokens", 0)
 
     @property
@@ -400,6 +435,41 @@ class CostAccumulator:
     @property
     def duration_seconds(self) -> float:
         return self.total_duration_ms / 1000
+
+    def state_dict(self) -> CostState:
+        """Serializable snapshot for carrying costs across process restarts."""
+        return CostState(
+            total_cost_usd=self.total_cost_usd,
+            total_duration_ms=self.total_duration_ms,
+            total_input_tokens=self.total_input_tokens,
+            total_output_tokens=self.total_output_tokens,
+            call_count=self.call_count,
+            stages={
+                name: StageCostState(
+                    cost_usd=sc.cost_usd,
+                    duration_ms=sc.duration_ms,
+                    input_tokens=sc.input_tokens,
+                    output_tokens=sc.output_tokens,
+                    call_count=sc.call_count,
+                )
+                for name, sc in self.stages.items()
+            },
+        )
+
+    def load_state(self, state: CostState) -> None:
+        """Seed the accumulator from a persisted snapshot (additive)."""
+        self.total_cost_usd += state["total_cost_usd"]
+        self.total_duration_ms += state["total_duration_ms"]
+        self.total_input_tokens += state["total_input_tokens"]
+        self.total_output_tokens += state["total_output_tokens"]
+        self.call_count += state["call_count"]
+        for name, sc_state in state["stages"].items():
+            sc = self.stages.setdefault(name, StageCost())
+            sc.cost_usd += sc_state["cost_usd"]
+            sc.duration_ms += sc_state["duration_ms"]
+            sc.input_tokens += sc_state["input_tokens"]
+            sc.output_tokens += sc_state["output_tokens"]
+            sc.call_count += sc_state["call_count"]
 
 
 # ---------------------------------------------------------------------------

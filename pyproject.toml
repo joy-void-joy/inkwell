@@ -68,7 +68,7 @@ dev = [
 where = ["src"]
 
 [tool.lup]
-agent_version = "0.1.0"
+agent_version = "0.2.0"
 
 [tool.uv.workspace]
 members = ["packages/*"]

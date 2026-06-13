@@ -1,5 +1,3 @@
-# claude: ignore
-# pyright: reportAttributeAccessIssue=false, reportIndexIssue=false
 """Unified writing pipeline with restartable state machine.
 
 Stages read inputs from files (via built-in Read) and produce output
@@ -14,6 +12,7 @@ import json
 import logging
 import tempfile
 import unicodedata
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -51,8 +50,12 @@ from lup.background import BackgroundAgent
 
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.watcher import create_comment_watcher, create_source_watcher
-from inkwell.agent.session import WritingSessionState
+from inkwell.agent.watcher import (
+    ACKNOWLEDGE_TEMPLATES,
+    create_comment_watcher,
+    create_source_watcher,
+)
+from inkwell.agent.session import AuthorComment, WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
     COHERENCE_EDITOR_PROMPT,
@@ -114,6 +117,7 @@ from inkwell.agent.tools.google_docs import (
     do_list_tabs,
     do_read_tab,
     do_rename_doc,
+    do_reply_to_comment,
     do_write_tab,
     gdoc_nonfatal,
     truncate_tab_title,
@@ -314,7 +318,12 @@ def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> No
 
 
 class PipelineListener:
-    """Receives pipeline events and collects author feedback."""
+    """Receives pipeline events and collects author input from the environment.
+
+    GDoc comments and tab edits are ingested by the pipeline itself
+    (classified, recorded, acknowledged) — listeners only supply input
+    typed in their environment (terminal, web UI).
+    """
 
     def __init__(self) -> None:
         self.sync_requested = asyncio.Event()
@@ -337,18 +346,9 @@ class PipelineListener:
     async def on_message(self, source: str, message: str) -> None:
         logger.info("[%s] %s", source, message)
 
-    async def collect_feedback(self, state: WritingSessionState) -> list[str]:
-        comments = await state.get_new_author_comments()
-        feedback: list[str] = []
-        for c in comments:
-            if c["reply"]:
-                line = f'[GDoc Reply] Author reply to "{c["content"]}": {c["reply"]}'
-            else:
-                line = f"[GDoc Comment] {c['content']}"
-                if c["anchor_text"]:
-                    line += f' (on: "{c["anchor_text"]}")'
-            feedback.append(line)
-        return feedback
+    async def collect_author_input(self, state: WritingSessionState) -> list[str]:
+        """Return new author directions typed in the environment."""
+        return []
 
     async def collect_revision(self, state: WritingSessionState) -> str | None:
         return None
@@ -993,6 +993,75 @@ async def research_plan(
     )
     if not research_path.exists():
         raise PipelineError("Researcher produced no output (research file not written)")
+    return ResearchCompilation.model_validate_json(
+        research_path.read_text(encoding="utf-8")
+    )
+
+
+async def research_questions(
+    notes: PipelineNotes,
+    questions: list[str],
+    *,
+    servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> ResearchCompilation:
+    """Research specific questions, appending findings to the research artifact.
+
+    Used by restarts: the orchestrator's RewriteActions carry new research
+    questions whose answers must land before section rewrites read them.
+    """
+    if servers is None:
+        servers = build_research_servers()
+
+    research_path = notes.artifact_path("research")
+    collector = ResearchCollector(research_path)
+    if research_path.exists():
+        existing = json.loads(research_path.read_text(encoding="utf-8"))
+        collector.findings = list(existing.get("findings", []))
+        collector.suggested_additions = list(existing.get("suggested_additions", []))
+        collector.additional_context = str(existing.get("additional_context", ""))
+
+    output_servers, output_tool_names = build_output_server(
+        "output", make_research_output_tools(collector)
+    )
+    all_servers = {
+        **servers,
+        **output_servers,
+        **(source_servers or {}),
+        **(compute_servers or {}),
+    }
+    all_tools = (
+        research_tool_names()
+        + output_tool_names
+        + (source_tool_names_list or [])
+        + (compute_tool_names or [])
+    )
+
+    question_list = "\n".join(f"- {q}" for q in questions)
+    task = (
+        f"Research these questions raised by author feedback:\n\n"
+        f"{question_list}\n\n"
+        f"Investigate each one, then call record_finding for each answer."
+    )
+
+    await query(
+        task,
+        model="claude-opus-4-6",
+        system_prompt=RESEARCHER_PROMPT,
+        tools=BUILTIN_READ_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
+        trace_logger=trace_logger,
+        prefix="[research:restart] ",
+        cost_accumulator=cost_accumulator,
+    )
     return ResearchCompilation.model_validate_json(
         research_path.read_text(encoding="utf-8")
     )
@@ -1852,21 +1921,10 @@ async def apply_format(
     """Apply format-specific transformations to the final content."""
     match target_format:
         case "lesswrong":
-            result = do_format_lesswrong(
-                FormatLesswrongInput(
-                    content=content,
-                    epistemic_status="Moderately confident",
-                )
-            )
+            result = do_format_lesswrong(FormatLesswrongInput(content=content))
             return result.content
         case "twitter":
-            first_line = content.split("\n", 1)[0].lstrip("#").strip()
-            result = do_format_twitter(
-                FormatTwitterInput(
-                    content=content,
-                    hook=first_line[:260],
-                )
-            )
+            result = await do_format_twitter(FormatTwitterInput(content=content))
             return "\n\n---\n\n".join(result.tweets)
         case "blog":
             result = do_format_blog(
@@ -1890,10 +1948,20 @@ async def apply_format(
                 do_format_academic,
             )
 
-            academic = await do_format_academic(
+            result = await do_format_academic(
                 FormatAcademicInput(content=content, title=title)
             )
-            return academic.content
+            return result.content
+        case "newsletter":
+            from inkwell.agent.tools.formats import (
+                FormatNewsletterInput,
+                do_format_newsletter,
+            )
+
+            result = do_format_newsletter(
+                FormatNewsletterInput(content=content, title=title)
+            )
+            return result.content
         case _ if target_format.startswith("custom:"):
             from inkwell.agent.tools.formats import FormatCustomInput, do_format_custom
 
@@ -2423,23 +2491,85 @@ class PipelineRunner:
                 session_state=self.state,
             )
 
-    async def gather_feedback(self) -> list[str]:
-        comment_feedback = await self.hooks.collect_feedback(self.state)
+    async def gather_feedback(self) -> int:
+        """Ingest new author feedback from every channel.
 
-        terminal = [fb for fb in comment_feedback if fb.startswith("[Terminal]")]
-        gdoc = [fb for fb in comment_feedback if not fb.startswith("[Terminal]")]
+        GDoc comments, environment input, and tab edits all flow through
+        the same classify-and-record path, so impact classification (and
+        plan-breaking detection) does not depend on which poller sees an
+        item first. Returns the number of new items ingested.
+        """
+        count = 0
 
-        notes = self.ensure_notes()
-        for fb in gdoc:
-            await notes.add_terminal_input(fb, tag="gdoc")
-        for fb in terminal:
-            await self.classify_and_record_terminal(fb)
+        for comment in await self.state.get_new_author_comments():
+            await self.classify_and_record_comment(comment)
+            count += 1
+
+        for text in await self.hooks.collect_author_input(self.state):
+            await self.classify_and_record_terminal(text)
+            count += 1
 
         if self.tabs is not None:
             for edit in await self.tabs.detect_edits():
                 await self.classify_and_record_edit(edit)
+                count += 1
 
-        return comment_feedback
+        return count
+
+    async def classify_and_record_comment(self, comment: AuthorComment) -> None:
+        """Classify a GDoc comment, record it, acknowledge it on the doc."""
+        if comment["reply"]:
+            display = f'Author reply to "{comment["content"]}": {comment["reply"]}'
+        else:
+            display = comment["content"]
+            if comment["anchor_text"]:
+                display += f' (on: "{comment["anchor_text"]}")'
+        await self.hooks.on_message("gdoc", display)
+
+        task = f"Classify this author comment:\n\nComment: {comment['content']}\n"
+        if comment["anchor_text"]:
+            task += f'Anchored to: "{comment["anchor_text"]}"\n'
+        if comment["reply"]:
+            task += f"Reply to agent question: {comment['reply']}\n"
+
+        classified = await query(
+            task,
+            output_type=ClassifiedComment,
+            model="claude-opus-4-6",
+            system_prompt=COMMENT_CLASSIFIER_PROMPT,
+            max_thinking_tokens=128_000 - 1,
+            permission_mode="bypassPermissions",
+            prefix="[classify-comment] ",
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        if classified is None:
+            classified = ClassifiedComment(
+                comment_id="",
+                content="",
+                impact="stage_local",
+            )
+        classified.comment_id = comment["comment_id"]
+        classified.content = comment["content"]
+        classified.anchor_text = comment["anchor_text"]
+        classified.reply = comment["reply"]
+
+        if classified.impact == "dismiss":
+            return
+
+        notes = self.ensure_notes()
+        await notes.add_comment(classified)
+
+        reply_text = ACKNOWLEDGE_TEMPLATES.get(classified.impact)
+        if reply_text:
+            async with gdoc_nonfatal("acknowledge comment"):
+                await do_reply_to_comment(
+                    self.doc_id, comment["comment_id"], reply_text
+                )
+
+        if classified.impact == "plan_breaking":
+            logger.info("Plan-breaking GDoc comment")
+            self.plan_breaking.set()
 
     async def post_author_notes(self) -> None:
         """Post any new author notes as GDoc comments, then clear the list."""
@@ -2541,7 +2671,7 @@ class PipelineRunner:
         if classified.impact == "dismiss":
             return
 
-        classified.comment_id = f"terminal-{id(text)}"
+        classified.comment_id = f"terminal-{uuid.uuid4().hex[:8]}"
         classified.content = text
         classified.tags = [*(classified.tags or []), "terminal"]
 
@@ -2553,13 +2683,12 @@ class PipelineRunner:
             self.plan_breaking.set()
 
     async def prepare_feedback(self, stage: str) -> Path | None:
-        """Gather feedback and render to a file. Returns path or None."""
-        feedback = await self.gather_feedback()
+        """Ingest new feedback and render the accumulated set to a file."""
+        await self.gather_feedback()
         notes = self.ensure_notes()
-        feedback_with_notes = await self.format_stage_context(stage, feedback)
-        if not feedback_with_notes:
+        if not await notes.get_all_feedback():
             return None
-        return await notes.render_feedback_file(stage, feedback_with_notes)
+        return await notes.render_feedback_file(stage)
 
     async def collect_preexisting_directions(self, doc_id: str) -> int:
         """Collect pre-existing comments from the source GDoc as author directions.
@@ -3119,24 +3248,6 @@ class PipelineRunner:
         feedback_path = await self.prepare_feedback("write")
         notes = self.ensure_notes()
 
-        def build_neighbor_context(idx: int) -> str:
-            assert plan is not None
-            parts: list[str] = []
-            if idx > 0:
-                prev = plan.sections[idx - 1]
-                parts.append(f'Previous section: "{prev.title}" — {prev.summary}')
-            if idx < len(plan.sections) - 1:
-                nxt = plan.sections[idx + 1]
-                parts.append(f'Next section: "{nxt.title}" — {nxt.summary}')
-            if not parts:
-                return ""
-            return (
-                "## Adjacent Sections\n\n"
-                + "\n".join(parts)
-                + "\n\nConnect to adjacent sections — don't re-establish "
-                "context the reader will already have."
-            )
-
         async def write_and_publish(section: SectionPlan, idx: int) -> SectionDraft:
             tid = self.tab_ids.get(section.title, "")
             draft_path = self.get_draft_path(section.title)
@@ -3156,7 +3267,7 @@ class PipelineRunner:
                     draft_path=draft_path,
                     voice_file_paths=self.snapshot.voice_file_paths,
                     feedback_path=feedback_path,
-                    section_context=build_neighbor_context(idx),
+                    section_context=self.build_neighbor_context(plan, section.title),
                     target_format=self.effective_format,
                     servers=self.research_servers,
                     source_servers=self.source_servers,
@@ -3557,8 +3668,7 @@ class PipelineRunner:
         self.hooks.sync_requested.clear()
         logger.info("Sync requested — gathering feedback")
         await self.announce_stage("sync", "Polling comments, edits, and terminal input")
-        feedback = await self.gather_feedback()
-        n = len(feedback)
+        n = await self.gather_feedback()
         if n:
             await self.hooks.on_progress(f"Found {n} feedback item(s)")
         else:
@@ -3653,6 +3763,14 @@ class PipelineRunner:
             f"Read the draft with the Read tool, then use Edit to apply "
             f"the change. Use Write if the change is too large for Edit."
         )
+        all_servers = {
+            **self.research_servers,
+            **self.source_servers,
+            **self.compute_servers,
+        }
+        all_tools = (
+            research_tool_names() + self.source_tool_names + self.compute_tool_names
+        )
         await query(
             task,
             model=stage_model("write"),
@@ -3660,6 +3778,8 @@ class PipelineRunner:
             tools=BUILTIN_WRITE_TOOLS,
             max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
+            mcp_servers=all_servers,
+            allowed_tools=all_tools,
             prefix=f"[patch:{section}] ",
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
@@ -3683,42 +3803,47 @@ class PipelineRunner:
             return
 
         notes = self.ensure_notes()
-        all_plans: list[SectionPlan] = []
-        all_coros = []
-        for section_plan, _questions in rewrite_tasks:
-            all_plans.append(section_plan)
-            all_coros.append(
-                write_section(
-                    section_plan.title,
-                    notes=notes,
-                    draft_path=self.get_draft_path(section_plan.title),
-                    voice_file_paths=self.snapshot.voice_file_paths,
-                    target_format=self.effective_format,
-                    servers=self.research_servers,
-                    author_notes=self.author_notes,
-                    compute_servers=self.compute_servers,
-                    compute_tool_names=self.compute_tool_names,
-                    trace_logger=self.trace_logger,
-                    cost_accumulator=self.cost_accumulator,
-                )
+
+        new_questions = [q for _section_plan, qs in rewrite_tasks for q in qs]
+        if new_questions:
+            await self.hooks.on_progress(
+                f"Researching {len(new_questions)} new question(s) before rewriting"
             )
-        for section_plan in add_tasks:
-            all_plans.append(section_plan)
-            all_coros.append(
-                write_section(
-                    section_plan.title,
-                    notes=notes,
-                    draft_path=self.get_draft_path(section_plan.title),
-                    voice_file_paths=self.snapshot.voice_file_paths,
-                    target_format=self.effective_format,
-                    servers=self.research_servers,
-                    author_notes=self.author_notes,
-                    compute_servers=self.compute_servers,
-                    compute_tool_names=self.compute_tool_names,
-                    trace_logger=self.trace_logger,
-                    cost_accumulator=self.cost_accumulator,
-                )
+            self.snapshot.research = await research_questions(
+                notes,
+                new_questions,
+                servers=self.research_servers,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                compute_servers=self.compute_servers,
+                compute_tool_names=self.compute_tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
             )
+
+        feedback_path = await self.prepare_feedback("restart")
+
+        def rewrite_coro(section_plan: SectionPlan):
+            return write_section(
+                section_plan.title,
+                notes=notes,
+                draft_path=self.get_draft_path(section_plan.title),
+                voice_file_paths=self.snapshot.voice_file_paths,
+                feedback_path=feedback_path,
+                section_context=self.build_neighbor_context(plan, section_plan.title),
+                target_format=self.effective_format,
+                servers=self.research_servers,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                author_notes=self.author_notes,
+                compute_servers=self.compute_servers,
+                compute_tool_names=self.compute_tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
+
+        all_plans = [sp for sp, _qs in rewrite_tasks] + add_tasks
+        all_coros = [rewrite_coro(sp) for sp in all_plans]
 
         results = await asyncio.gather(*all_coros, return_exceptions=True)
         for i, result in enumerate(results):
@@ -3736,6 +3861,28 @@ class PipelineRunner:
             if s.title == section_title:
                 return s
         return None
+
+    def build_neighbor_context(self, plan: ArticlePlan, title: str) -> str:
+        """Describe adjacent sections so a writer connects rather than re-opens."""
+        titles = [s.title for s in plan.sections]
+        if title not in titles:
+            return ""
+        idx = titles.index(title)
+        parts: list[str] = []
+        if idx > 0:
+            prev = plan.sections[idx - 1]
+            parts.append(f'Previous section: "{prev.title}" — {prev.summary}')
+        if idx < len(plan.sections) - 1:
+            nxt = plan.sections[idx + 1]
+            parts.append(f'Next section: "{nxt.title}" — {nxt.summary}')
+        if not parts:
+            return ""
+        return (
+            "## Adjacent Sections\n\n"
+            + "\n".join(parts)
+            + "\n\nConnect to adjacent sections — don't re-establish "
+            "context the reader will already have."
+        )
 
     # -- Standby loop ------------------------------------------
 
@@ -3788,17 +3935,15 @@ class PipelineRunner:
             self.snapshot.stage = "revise"
             await self.update_overview(active_stage="revise")
 
-            all_feedback = await self.gather_feedback()
-            n = len(all_feedback)
+            n = await self.gather_feedback()
             if n:
                 await self.hooks.on_progress(f"Found {n} feedback item(s)")
-            all_feedback.extend(batch)
+            for revision_text in batch:
+                await self.classify_and_record_terminal(revision_text)
 
-            if not all_feedback:
+            if not n and not batch:
                 await self.hooks.on_progress("Nothing to revise")
                 continue
-
-            all_feedback = await self.format_stage_context("revise", all_feedback)
 
             plan = self.snapshot.plan
             if plan is None:
@@ -3810,9 +3955,9 @@ class PipelineRunner:
                 await self.check_and_maybe_restart()
                 await notes.clear_plan_breaking()
 
-            await self.do_standby_rewrite(all_feedback)
+            await self.do_standby_rewrite()
 
-    async def do_standby_rewrite(self, feedback: list[str]) -> None:
+    async def do_standby_rewrite(self) -> None:
         plan = self.snapshot.plan
         if plan is None:
             return
@@ -3827,21 +3972,25 @@ class PipelineRunner:
                 logger.warning("Could not read Final tab; using last known")
 
         if not current_content and self.snapshot.output:
-            current_content = (
-                self.snapshot.output.content or self.snapshot.output.summary
-            )
+            current_content = self.snapshot.output.content
+        if not current_content:
+            logger.warning("No current article content — skipping standby rewrite")
+            return
 
         # Write current content to a temp draft for the rewriter to read
         standby_draft = self.get_draft_path("standby-input")
         standby_draft.write_text(current_content, encoding="utf-8")
         standby_output = self.get_draft_path("final-standby")
 
-        feedback_path = await notes.render_feedback_file("standby", feedback)
+        feedback_path = await notes.render_feedback_file("standby")
 
+        # Original review findings were already applied in stage_rewrite;
+        # re-annotating them here would anchor stale excerpts onto revised
+        # text. Standby rewrites are driven by author feedback alone.
         output = await rewrite_final(
             notes,
             standby_draft,
-            self.snapshot.findings,
+            [],
             output_path=standby_output,
             voice_file_paths=self.snapshot.voice_file_paths,
             feedback_path=feedback_path,
@@ -3856,8 +4005,9 @@ class PipelineRunner:
         )
         await self.post_author_notes()
 
-        article_text = output.content or output.summary
-        final_content = await apply_format(article_text, plan.title, self.target_format)
+        final_content = await apply_format(
+            output.content, plan.title, self.effective_format
+        )
         async with gdoc_nonfatal("write standby rewrite"):
             if self.final_tab_id:
                 await do_write_tab(
@@ -3903,48 +4053,6 @@ class PipelineRunner:
             if extra is None:
                 return
             batch.append(extra)
-
-    # -- Notes integration -----------------------------------------------
-
-    async def format_stage_context(
-        self, stage: str, feedback: list[str], section: str | None = None
-    ) -> list[str]:
-        notes = self.ensure_notes()
-
-        match stage:
-            case "research":
-                comments = await notes.list_comments(impact="plan_breaking")
-                comments.extend(await notes.list_comments(impact="stage_local"))
-                if comments:
-                    lines = ["## Author Direction (from comments)", ""]
-                    for c in comments:
-                        line = f"- [{c.impact}] {c.content}"
-                        if c.anchor_text:
-                            line += f' (on: "{c.anchor_text}")'
-                        lines.append(line)
-                    feedback = [*feedback, "\n".join(lines)]
-
-            case "write":
-                if section:
-                    section_fb = await notes.get_section_feedback(section)
-                    if section_fb:
-                        feedback = [*feedback, section_fb]
-                else:
-                    notes_text = await notes.get_all_feedback()
-                    if notes_text:
-                        feedback = [*feedback, notes_text]
-
-            case "merge" | "review" | "rewrite" | "revise":
-                notes_text = await notes.get_all_feedback()
-                if notes_text:
-                    feedback = [*feedback, notes_text]
-
-            case _:
-                notes_text = await notes.get_all_feedback()
-                if notes_text:
-                    feedback = [*feedback, notes_text]
-
-        return feedback
 
     # -- Tab helpers ------------------------------------------------------
 

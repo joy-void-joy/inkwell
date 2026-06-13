@@ -1,12 +1,10 @@
 # claude: ignore
-"""Output format adapter tools.
+"""Output format adapters.
 
 Transform a generic article draft into format-specific output:
-LessWrong, Twitter thread, memo, or custom. Called by the rewriter after
-producing the final draft.
-
-Each format has a plain function (do_format_*) for direct use by the
-pipeline, and a @lup_tool wrapper for MCP access by the interactive agent.
+LessWrong, Twitter thread, memo, academic paper, newsletter, or custom.
+Called by the pipeline's format stage via apply_format after the final
+draft is produced.
 """
 
 import logging
@@ -17,7 +15,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import stage_model
-from lup.mcp import lup_tool
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +31,12 @@ def save_content_for_query(content: str, label: str) -> Path:
 class FormatLesswrongInput(BaseModel):
     content: str = Field(description="Full article markdown content")
     epistemic_status: str = Field(
-        description="Epistemic status statement (e.g. 'fairly confident, based on...')"
+        default="",
+        description=(
+            "Epistemic status statement (e.g. 'fairly confident, based on...'). "
+            "Empty means the draft already carries its own epistemic framing — "
+            "no header is added."
+        ),
     )
     crossrefs: list[str] = Field(
         default_factory=list,
@@ -49,7 +51,13 @@ class FormatLesswrongOutput(BaseModel):
 
 class FormatTwitterInput(BaseModel):
     content: str = Field(description="Full article content to thread-ify")
-    hook: str = Field(description="Opening hook for tweet 1 (grabs attention)")
+    hook: str = Field(
+        default="",
+        description=(
+            "Opening hook for tweet 1 (grabs attention). Empty lets the "
+            "thread writer derive one from the content."
+        ),
+    )
 
 
 class FormatTwitterOutput(BaseModel):
@@ -177,8 +185,9 @@ def split_sentences(text: str) -> list[str]:
 def do_format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
     lines: list[str] = []
 
-    lines.append(f"*Epistemic status: {params.epistemic_status}*")
-    lines.append("")
+    if params.epistemic_status:
+        lines.append(f"*Epistemic status: {params.epistemic_status}*")
+        lines.append("")
 
     footnotes: list[str] = []
     content = params.content
@@ -225,12 +234,24 @@ def do_format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
     )
 
 
-def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
+def number_thread(tweets: list[str]) -> list[str]:
+    """Append n/total markers to each tweet."""
+    total = len(tweets)
+    return [f"{tweet}\n\n{i}/{total}" for i, tweet in enumerate(tweets, 1)]
+
+
+def split_thread(content: str, hook: str) -> list[str]:
+    """Mechanically split content into <=260-char tweets at sentence boundaries.
+
+    Fallback for when the LLM thread writer is unavailable — produces
+    correct-length tweets but no editorial judgment about what makes
+    each tweet stand alone.
+    """
     tweets: list[str] = []
+    first_line = content.split("\n", 1)[0].lstrip("#").strip()
+    tweets.append((hook or first_line or "Thread:").strip()[:260])
 
-    tweets.append(params.hook.strip())
-
-    paragraphs = [p.strip() for p in params.content.split("\n\n") if p.strip()]
+    paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
 
     for para in paragraphs:
         para = para.lstrip("#").strip()
@@ -256,11 +277,58 @@ def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
             if current:
                 tweets.append(current)
 
-    numbered = []
-    total = len(tweets)
-    for i, tweet in enumerate(tweets, 1):
-        numbered.append(f"{tweet}\n\n{i}/{total}")
+    return tweets
 
+
+THREAD_WRITER_SYSTEM = """\
+You rewrite articles as Twitter/X threads. This is a rewrite, not a
+split: every tweet must be self-contained, land a complete point, and
+make the reader want the next one.
+
+Rules:
+- Each tweet <= 260 characters (numbering is added separately)
+- Tweet 1 is the hook — it must grab attention with zero context
+- One idea per tweet; cut connective tissue that only works in prose
+- Keep the author's voice, claims, and specific numbers exactly
+- Preserve the argument's order and force; drop padding, not substance
+- No headers, no markdown formatting, no "a thread 🧵" clichés"""
+
+
+async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
+    """Rewrite content as a thread via LLM, with mechanical splitting as fallback."""
+    from lup.client import query
+
+    class TwitterThread(BaseModel):
+        tweets: list[str] = Field(
+            description="Self-contained tweets in thread order, each <= 260 characters"
+        )
+
+    hook_directive = (
+        f"Use this hook for tweet 1: {params.hook}"
+        if params.hook
+        else "Write tweet 1 as a hook derived from the content's strongest claim."
+    )
+    content_path = save_content_for_query(params.content, "twitter")
+    result = await query(
+        (
+            f"Rewrite this article as a thread.\n"
+            f"{hook_directive}\n\n"
+            f"Read the article from: {content_path}"
+        ),
+        output_type=TwitterThread,
+        model=stage_model("format"),
+        tools=BUILTIN_READ_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        system_prompt=THREAD_WRITER_SYSTEM,
+    )
+
+    tweets = [t.strip()[:260] for t in result.tweets if t.strip()] if result else []
+    if not tweets:
+        logger.warning("Thread writer produced no tweets — using mechanical split")
+        tweets = split_thread(params.content, params.hook)
+
+    numbered = number_thread(tweets)
     return FormatTwitterOutput(
         tweets=numbered,
         thread_count=len(numbered),
@@ -577,109 +645,3 @@ async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
         content=content,
         word_count=len(content.split()),
     )
-
-
-# ---------------------------------------------------------------------------
-# MCP tool wrappers (thin async wrappers for agent access)
-# ---------------------------------------------------------------------------
-
-
-@lup_tool(
-    "Format an article for LessWrong publication. Adds epistemic status "
-    "header, converts inline asides to footnotes, adds cross-references "
-    "to related posts, and ensures heading depth is appropriate for LW. "
-    "Call this after the final draft is complete."
-)
-async def format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
-    return do_format_lesswrong(params)
-
-
-@lup_tool(
-    "Convert an article into a Twitter/X thread. Splits content into "
-    "individual tweets (280 char limit), adds thread numbering, ensures "
-    "each tweet can stand alone while building on the thread. The hook "
-    "parameter becomes tweet 1 — it should grab attention without "
-    "needing context. Call this after the final draft is complete."
-)
-async def format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
-    return do_format_twitter(params)
-
-
-@lup_tool(
-    "Format an article for blog publication. Adds SEO-friendly structure "
-    "with a meta description, ensures subheading density for scannability, "
-    "and optimizes paragraph length. Call this after the final draft "
-    "is complete."
-)
-async def format_blog(params: FormatBlogInput) -> FormatBlogOutput:
-    return do_format_blog(params)
-
-
-@lup_tool(
-    "Restructure an article as a dialog between named speakers. Each speaker "
-    "gets a distinct perspective — one might advocate, another might push back. "
-    "Produces structured turns (speaker + text) and a compiled markdown rendering. "
-    "Use this when the content is naturally dialectical (opposing views, Q&A, "
-    "interview format, Socratic exploration). Call after the final draft is complete."
-)
-async def format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
-    return await do_format_dialog(params)
-
-
-@lup_tool(
-    "Format an article as a formal memo with header block (TO/FROM/DATE/SUBJECT) "
-    "and section headings in caps. Optionally includes classification markings. "
-    "Use this for policy briefs, diplomatic notes, internal recommendations, "
-    "or any content that needs formal structure. Call this after the final "
-    "draft is complete."
-)
-async def format_memo(params: FormatMemoInput) -> FormatMemoOutput:
-    return await do_format_memo(params)
-
-
-@lup_tool(
-    "Reformat an article into any format described in natural language. "
-    "Use this when none of the built-in formats (lesswrong, twitter, blog, "
-    "dialog, memo) fit the content. The format_description field controls "
-    "the output structure, tone, and conventions — be specific. Examples: "
-    "'academic abstract with keywords and JEL codes', 'diplomatic cable "
-    "with SUBJECT/REF headers', 'executive one-pager with bullet points'. "
-    "Call this after the final draft is complete."
-)
-async def format_custom(params: FormatCustomInput) -> FormatCustomOutput:
-    return await do_format_custom(params)
-
-
-@lup_tool(
-    "Format an article as an academic paper with abstract, numbered sections, "
-    "and formal register. Restructures via LLM to adopt academic conventions. "
-    "Adds a 'References' section header for use with format_bibliography. "
-    "Use for research papers, whitepapers, or any content targeting an "
-    "academic audience. Call after the final draft is complete."
-)
-async def format_academic(params: FormatAcademicInput) -> FormatAcademicOutput:
-    return await do_format_academic(params)
-
-
-@lup_tool(
-    "Format an article as a newsletter / Substack-style email. Optimizes for "
-    "mobile readability: short paragraphs, section dividers, and a call-to-action. "
-    "Use for email newsletters, Substack posts, or any content designed to be "
-    "read as a periodic dispatch. Call after the final draft is complete."
-)
-async def format_newsletter(
-    params: FormatNewsletterInput,
-) -> FormatNewsletterOutput:
-    return do_format_newsletter(params)
-
-
-FORMAT_TOOLS = [
-    format_lesswrong,
-    format_twitter,
-    format_blog,
-    format_dialog,
-    format_memo,
-    format_academic,
-    format_newsletter,
-    format_custom,
-]

@@ -44,7 +44,6 @@ import typer
 
 from inkwell.agent.config import settings
 from inkwell.agent.models import WritingOutput
-from inkwell.agent.prompts import get_system_prompt
 from inkwell.agent.stages import (
     COHERENCE_EDITOR_PROMPT,
     FACT_CHECKER_PROMPT,
@@ -55,11 +54,21 @@ from inkwell.agent.stages import (
     SECTION_WRITER_PROMPT,
     STYLE_REVIEWER_PROMPT,
 )
+from inkwell.agent.pipeline import build_research_tools
 from inkwell.agent.tools.extract import EXTRACT_TOOLS
 from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS
+from inkwell.agent.tools.research.fetch import FETCH_TOOLS
+from inkwell.agent.tools.voice import VOICE_TOOLS
 from lup.mcp import LupMcpTool
 
 logger = logging.getLogger(__name__)
+
+REPL_SYSTEM_PROMPT = """\
+You are a development REPL for Inkwell, an AI writing agent. You have
+the pipeline's source, research, docs, and compute tools available for
+manual testing. Use them directly when asked — this session is for
+exercising tools and inspecting their behavior, not for running the
+full writing pipeline."""
 
 PIPELINE_STAGES: dict[str, str] = {
     "planner": PLANNER_SYSTEM,
@@ -202,10 +211,11 @@ def print_tool_full(out: io.StringIO, tool: LupMcpTool) -> None:
 
 
 def collect_tools_by_server() -> dict[str, list[LupMcpTool]]:
-    """Collect all LupMcpTool instances grouped by server name."""
+    """Collect LupMcpTool instances grouped by live pipeline server name."""
     return {
-        "docs": list(GOOGLE_DOCS_TOOLS),
-        "extract": list(EXTRACT_TOOLS),
+        "source": [*FETCH_TOOLS, *EXTRACT_TOOLS],
+        "research": build_research_tools(),
+        "docs": [*GOOGLE_DOCS_TOOLS, *VOICE_TOOLS],
     }
 
 
@@ -259,7 +269,6 @@ def inspect_cmd(
     tools_by_server = collect_tools_by_server()
     all_tools = collect_all_tools()
     stages = PIPELINE_STAGES
-    prompt = get_system_prompt()
 
     if as_json:
         data: dict[str, object] = {
@@ -267,10 +276,9 @@ def inspect_cmd(
             "max_thinking_tokens": settings.max_thinking_tokens,
             "tools": [tool_to_dict(t) for t in all_tools],
             "output_schema": WritingOutput.model_json_schema(),
-            "pipeline_stages": {
-                name: {"prompt_length": len(p)} for name, p in stages.items()
-            },
-            "system_prompt": prompt,
+            "pipeline_stages": dict(stages)
+            if full
+            else {name: {"prompt_length": len(p)} for name, p in stages.items()},
         }
         typer.echo(json.dumps(data, indent=2))
         return
@@ -311,25 +319,18 @@ def inspect_cmd(
             type_name = getattr(ann, "__name__", None) if ann is not None else None
             out.write(f"    {name}: {type_name or '?'}\n")
 
-    # Pipeline stages
+    # Pipeline stage prompts — the agent's actual system prompts
     out.write(f"\n{'─' * 60}\n")
-    out.write(f"  Pipeline Stages ({len(stages)})\n")
+    out.write(f"  Pipeline Stage Prompts ({len(stages)})\n")
     out.write(f"{'─' * 60}\n")
     for name, stage_prompt in stages.items():
         out.write(f"\n  {name} ({len(stage_prompt)} chars)\n")
         if full:
-            out.write(f"    {stage_prompt[:200]}...\n")
+            for line in stage_prompt.splitlines():
+                out.write(f"    {line}\n")
 
-    # System prompt
-    out.write(f"\n{'─' * 60}\n")
-    out.write("  System Prompt\n")
-    out.write(f"{'─' * 60}\n")
-    if full or len(prompt) <= 500:
-        out.write(prompt + "\n")
-    else:
-        out.write(
-            f"{prompt[:500]}... ({len(prompt)} chars total, use --full to see all)\n"
-        )
+    if not full:
+        out.write("\n  (use --full to see complete stage prompts)\n")
 
     out.write("\n")
 
@@ -419,8 +420,7 @@ def chat_cmd(
 
     # System prompt
     if not no_prompt:
-        prompt = get_system_prompt()
-        claude_args.extend(["--append-system-prompt", prompt])
+        claude_args.extend(["--append-system-prompt", REPL_SYSTEM_PROMPT])
 
     # MCP config with serve-tools as stdio server
     mcp_config_path: str | None = None
@@ -530,8 +530,14 @@ async def repl(
 
     from claude_agent_sdk.types import McpServerConfig
 
-    from inkwell.agent.core import build_agent_servers
+    from inkwell.agent.pipeline import (
+        build_compute_server,
+        build_research_servers,
+        build_source_server,
+    )
     from lup.client import build_client, ResponseCollector
+    from lup.content_safety import configure_content_safety
+    from lup.mcp import create_mcp_server, extract_sdk_tools
     from lup.paths import project_root
     from lup.sandbox import Sandbox
 
@@ -543,21 +549,32 @@ async def repl(
 
     if not no_tools:
         repl_dir = project_root() / ".lup" / "repl"
+        configure_content_safety(repl_dir / "content")
         sandbox = Sandbox(
             session_id="repl",
             shared_dir=repl_dir / "sandbox_shared",
             timeout_seconds=settings.sandbox_timeout_seconds,
         )
         stack.enter_context(sandbox)
-        mcp_servers = build_agent_servers(
-            session_dir=repl_dir,
-            sandbox=sandbox,
+
+        source_servers, _ = build_source_server()
+        compute_servers, _ = build_compute_server(sandbox, repl_dir / "artifacts")
+        docs_server = create_mcp_server(
+            name="docs",
+            version="1.0.0",
+            tools=extract_sdk_tools([*GOOGLE_DOCS_TOOLS, *VOICE_TOOLS]),
         )
+        mcp_servers = {
+            **source_servers,
+            **build_research_servers(),
+            **compute_servers,
+            "docs": docs_server,
+        }
 
         # Shutdown message — registered last so it runs first (LIFO)
         stack.callback(lambda: console.print("[dim]Shutting down...[/dim]"))
 
-    prompt = get_system_prompt() if not no_prompt else ""
+    prompt = REPL_SYSTEM_PROMPT if not no_prompt else ""
 
     # Welcome panel with server → tool listing
     panel_lines = [

@@ -337,7 +337,7 @@ async def polymarket_price(
         title=title,
         probability=probability,
         url=f"https://polymarket.com/event/{params.slug}",
-        description=description[:500],
+        description=description,
         history=history,
     )
 

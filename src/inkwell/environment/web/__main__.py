@@ -23,7 +23,7 @@ def build_frontend() -> None:
     if not (FRONTEND_DIR / "package.json").exists():
         return
     typer.echo("Building frontend…")
-    sh.npm("run", "build", _cwd=str(FRONTEND_DIR))
+    sh.Command("npm")("run", "build", _cwd=str(FRONTEND_DIR))
 
 
 def port_available(host: str, port: int) -> bool:

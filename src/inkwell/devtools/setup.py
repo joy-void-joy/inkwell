@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from oauthlib.oauth2.rfc6749.errors import AccessDeniedError
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -30,8 +31,6 @@ app = typer.Typer(
 )
 
 console = Console()
-
-from oauthlib.oauth2.rfc6749.errors import AccessDeniedError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PROFILES_DIR = PROJECT_ROOT / "profiles"

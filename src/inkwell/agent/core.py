@@ -138,7 +138,13 @@ async def run_session(
     if session_id is None:
         session_id = resume_session_id or uuid.uuid4().hex[:16]
 
-    logger.info("Starting session %s", session_id)
+    active = config_mod.current_settings()
+    logger.info(
+        "Starting session %s (profile=%s, claude_config_dir=%s)",
+        session_id,
+        active.profile or "default",
+        active.claude_config_dir or "ambient login (server default account)",
+    )
     reset_metrics()
 
     setup = setup_session(session_id, session_state=session_state)

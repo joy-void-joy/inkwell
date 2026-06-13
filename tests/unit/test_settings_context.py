@@ -8,7 +8,10 @@ from inkwell.agent.config import (
     active_settings,
     current_settings,
     stage_model,
+    subprocess_auth_env,
+    use_settings,
 )
+from lup.client import client_env
 
 
 def make_settings(**overrides: str) -> Settings:
@@ -69,3 +72,45 @@ class TestSettingsContext:
             assert stage_model("plan") == "claude-opus-4-6"
         finally:
             active_settings.reset(token)
+
+
+class TestSubprocessAuthEnv:
+    def test_claude_login_is_routed(self) -> None:
+        s = make_settings(claude_config_dir="/tmp/cesia")
+        s.openrouter_api_key = None
+        assert subprocess_auth_env(s) == {"CLAUDE_CONFIG_DIR": "/tmp/cesia"}
+
+    def test_openrouter_is_routed(self) -> None:
+        s = make_settings(openrouter_api_key="sk-or-xyz")
+        s.claude_config_dir = None
+        env = subprocess_auth_env(s)
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-xyz"
+        assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+        assert env["ANTHROPIC_API_KEY"] == ""
+
+    def test_empty_without_credentials(self) -> None:
+        s = make_settings()
+        s.claude_config_dir = None
+        s.openrouter_api_key = None
+        assert subprocess_auth_env(s) == {}
+
+
+class TestUseSettings:
+    def test_scopes_settings_and_subprocess_env(self) -> None:
+        s = make_settings(claude_config_dir="/tmp/cesia")
+        s.openrouter_api_key = None
+        with use_settings(s):
+            assert current_settings() is s
+            assert client_env.get() == {"CLAUDE_CONFIG_DIR": "/tmp/cesia"}
+        assert current_settings() is config_mod.settings
+        assert client_env.get() is None
+
+    def test_resets_both_on_exception(self) -> None:
+        s = make_settings(claude_config_dir="/tmp/cesia")
+        try:
+            with use_settings(s):
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        assert client_env.get() is None
+        assert current_settings() is config_mod.settings

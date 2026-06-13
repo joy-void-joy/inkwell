@@ -137,7 +137,7 @@ class SessionManager:
         stage_models: dict[str, str] | None = None,
         writer_mode: str | None = None,
     ) -> str:
-        from inkwell.agent.config import active_settings, load_settings
+        from inkwell.agent.config import load_settings, use_settings
 
         session_settings = load_settings(profile)
         if model:
@@ -158,9 +158,9 @@ class SessionManager:
         async def run_in_session_context() -> AgentSessionResult:
             # Each task owns a contextvar copy, so this scopes the
             # configuration to this session and everything it spawns —
-            # concurrent sessions with different configs don't race.
-            token = active_settings.set(session_settings)
-            try:
+            # concurrent sessions with different profiles don't race, and
+            # the spawned claude CLI bills the profile's account.
+            with use_settings(session_settings):
                 return await run_session(
                     sources=sources or [],
                     refs=refs,
@@ -174,8 +174,6 @@ class SessionManager:
                     cost_accumulator=cost,
                     trace_holder=trace_holder,
                 )
-            finally:
-                active_settings.reset(token)
 
         task = asyncio.create_task(
             run_in_session_context(),

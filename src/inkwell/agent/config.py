@@ -3,6 +3,8 @@
 import contextvars
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Self
 
 from pydantic import Field, model_validator
@@ -312,6 +314,44 @@ def current_settings() -> Settings:
 def stage_model(stage: str) -> str:
     """Model for a pipeline stage from the active settings."""
     return current_settings().model_for(stage)
+
+
+def subprocess_auth_env(session_settings: Settings) -> dict[str, str]:
+    """Auth env routing a session's spawned ``claude`` CLI to its profile.
+
+    The CLI decides which account pays for inference from its own
+    environment, so a profile only affects billing if these vars reach the
+    subprocess. Without it, every session inherits the server's ambient
+    login and bills that account regardless of the selected profile.
+    """
+    env: dict[str, str] = {}
+    if session_settings.claude_config_dir:
+        env["CLAUDE_CONFIG_DIR"] = session_settings.claude_config_dir
+    if session_settings.openrouter_api_key:
+        env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
+        env["ANTHROPIC_AUTH_TOKEN"] = session_settings.openrouter_api_key
+        env["ANTHROPIC_API_KEY"] = ""
+    return env
+
+
+@contextmanager
+def use_settings(session_settings: Settings) -> Iterator[None]:
+    """Scope a session's settings and subprocess auth env to the task.
+
+    Sets ``active_settings`` so ``current_settings()`` reflects the profile,
+    and lup's ``client_env`` so the spawned ``claude`` CLI bills the
+    profile's account. Both the web and CLI entry points wrap session
+    execution in this, so profile selection is honored end to end.
+    """
+    from lup.client import client_env
+
+    settings_token = active_settings.set(session_settings)
+    env_token = client_env.set(subprocess_auth_env(session_settings))
+    try:
+        yield
+    finally:
+        client_env.reset(env_token)
+        active_settings.reset(settings_token)
 
 
 if settings.openrouter_api_key:

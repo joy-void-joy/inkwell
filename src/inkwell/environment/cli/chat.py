@@ -441,19 +441,31 @@ async def chat_session(
             )
         )
 
+        from inkwell.agent.config import active_profile, load_settings, use_settings
+
+        resolved_profile = active_profile()
+        if not resolved_profile and resume_session_id:
+            from inkwell.agent.core import load_snapshot
+
+            snapshot = load_snapshot(resume_session_id, from_stage=resume_from_stage)
+            if snapshot:
+                resolved_profile = snapshot.profile
+        session_settings = load_settings(resolved_profile)
+
         try:
-            result = await run_session(
-                sources=resolved_sources,
-                refs=refs,
-                resume_session_id=resume_session_id,
-                resume_from_stage=resume_from_stage,
-                target_format=target_format,
-                existing_doc_id=existing_doc_id,
-                session_id=session_id,
-                listener=listener,
-                trace_holder=trace_holder,
-                session_state=session_state,
-            )
+            with use_settings(session_settings):
+                result = await run_session(
+                    sources=resolved_sources,
+                    refs=refs,
+                    resume_session_id=resume_session_id,
+                    resume_from_stage=resume_from_stage,
+                    target_format=target_format,
+                    existing_doc_id=existing_doc_id,
+                    session_id=session_id,
+                    listener=listener,
+                    trace_holder=trace_holder,
+                    session_state=session_state,
+                )
 
             if result.cost_usd is not None:
                 console.print(f"  [dim]Cost: ${result.cost_usd:.2f}[/dim]")

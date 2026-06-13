@@ -23,6 +23,38 @@ def build_env_files() -> tuple[str, ...]:
     return (".env", ".env.local")
 
 
+PIPELINE_STAGES: tuple[str, ...] = (
+    "preprocess",
+    "extract",
+    "voice",
+    "plan",
+    "assumptions",
+    "research",
+    "refine",
+    "write",
+    "merge",
+    "review",
+    "resolve",
+    "rewrite",
+    "classify",
+    "orchestrate",
+    "reader",
+    "format",
+)
+"""Stage names accepted by per-stage model overrides."""
+
+SUGGESTED_MODELS: tuple[str, ...] = (
+    "claude-opus-4-6",
+    "claude-fable-5",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+)
+"""Model ids offered in pickers; any model id string is accepted."""
+
+WRITER_MODES: tuple[str, ...] = ("parallel", "single")
+"""Draft production modes for the write stage."""
+
+
 class Settings(BaseSettings):
     """Inkwell settings loaded from environment variables."""
 
@@ -134,9 +166,8 @@ class Settings(BaseSettings):
         description=(
             "Per-stage model overrides as JSON, e.g. "
             '{"write": "claude-fable-5", "reader": "claude-haiku-4-5"}. '
-            "Stages: preprocess, extract, voice, plan, assumptions, "
-            "research, refine, write, merge, review, rewrite, classify, "
-            "orchestrate, reader, format. Unlisted stages use AGENT_MODEL."
+            f"Stages: {', '.join(PIPELINE_STAGES)}. "
+            "Unlisted stages use AGENT_MODEL."
         ),
     )
 

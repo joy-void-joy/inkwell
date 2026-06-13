@@ -1,7 +1,63 @@
 import { useCallback, useEffect, useState, type DragEvent, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { createSession, fetchFormats, fetchProfiles, uploadFile } from "../api/client";
-import type { FormatOption, ProfileResponse } from "../types";
+import {
+  createSession,
+  fetchFormats,
+  fetchModelOptions,
+  fetchProfiles,
+  uploadFile,
+} from "../api/client";
+import type { FormatOption, ModelOptions, ProfileResponse } from "../types";
+
+const CUSTOM = "__custom__";
+
+function ModelPicker({
+  value,
+  onChange,
+  suggested,
+  emptyLabel,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  suggested: string[];
+  emptyLabel: string;
+}) {
+  const isKnown = value === "" || suggested.includes(value);
+  const [customMode, setCustomMode] = useState(!isKnown);
+  const selectValue = customMode ? CUSTOM : value;
+
+  return (
+    <div className="model-picker">
+      <select
+        value={selectValue}
+        onChange={(e) => {
+          if (e.target.value === CUSTOM) {
+            setCustomMode(true);
+          } else {
+            setCustomMode(false);
+            onChange(e.target.value);
+          }
+        }}
+      >
+        <option value="">{emptyLabel}</option>
+        {suggested.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+        <option value={CUSTOM}>custom model id...</option>
+      </select>
+      {customMode && (
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="claude-..."
+        />
+      )}
+    </div>
+  );
+}
 
 interface UploadedFile {
   serverPath: string;
@@ -29,6 +85,10 @@ export function NewSession() {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [modelOptions, setModelOptions] = useState<ModelOptions | null>(null);
+  const [writerMode, setWriterMode] = useState("");
+  const [defaultModel, setDefaultModel] = useState("");
+  const [stageOverrides, setStageOverrides] = useState<Record<string, string>>({});
 
   useEffect(() => {
     fetchFormats().then(setFormats).catch(() => {});
@@ -38,7 +98,23 @@ export function NewSession() {
         if (p.length > 0 && !selectedProfile) setSelectedProfile(p[0].name);
       })
       .catch(() => {});
+    fetchModelOptions()
+      .then((opts) => {
+        setModelOptions(opts);
+        setWriterMode(opts.default_writer_mode);
+        setStageOverrides(opts.default_stage_models);
+      })
+      .catch(() => {});
   }, []);
+
+  const setStageModel = (stage: string, model: string) => {
+    setStageOverrides((prev) => {
+      const next = { ...prev };
+      if (model) next[stage] = model;
+      else delete next[stage];
+      return next;
+    });
+  };
 
   const selected = formats.find((f) => f.key === format);
   const resolvedFormat = selected?.accepts_description
@@ -97,11 +173,19 @@ export function NewSession() {
         .split("\n")
         .map((r) => r.trim())
         .filter(Boolean);
+      const overrides = Object.fromEntries(
+        Object.entries(stageOverrides).filter(([, v]) => v.trim()),
+      );
       const result = await createSession(
         sources,
         resolvedFormat,
         refList,
         selectedProfile,
+        {
+          model: defaultModel.trim() || undefined,
+          writer_mode: writerMode || undefined,
+          stage_models: Object.keys(overrides).length ? overrides : undefined,
+        },
       );
       navigate(`/session/${result.session_id}`);
     } catch (err) {
@@ -226,6 +310,65 @@ export function NewSession() {
             rows={3}
           />
         </div>
+
+        {modelOptions && (
+          <details className="model-config">
+            <summary>
+              Models &amp; pipeline
+              <span className="model-config-hint">
+                {defaultModel || modelOptions.default_model}
+                {writerMode ? ` · ${writerMode} writer` : ""}
+                {Object.values(stageOverrides).some((v) => v.trim())
+                  ? ` · ${Object.values(stageOverrides).filter((v) => v.trim()).length} stage override(s)`
+                  : ""}
+              </span>
+            </summary>
+
+            <div className="form-group">
+              <label htmlFor="writer-mode">Writer mode</label>
+              <select
+                id="writer-mode"
+                value={writerMode}
+                onChange={(e) => setWriterMode(e.target.value)}
+              >
+                {modelOptions.writer_modes.map((m) => (
+                  <option key={m} value={m}>
+                    {m === "single"
+                      ? "single — one writer drafts the whole piece (no merge stage)"
+                      : "parallel — one writer per section, then merge"}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Default model (all stages)</label>
+              <ModelPicker
+                value={defaultModel}
+                onChange={setDefaultModel}
+                suggested={modelOptions.suggested_models}
+                emptyLabel={`profile default (${modelOptions.default_model})`}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Per-stage overrides</label>
+              <div className="stage-model-grid">
+                {modelOptions.stages.map((stage) => (
+                  <div key={stage} className="stage-model-row">
+                    <span className="stage-model-name">{stage}</span>
+                    <ModelPicker
+                      value={stageOverrides[stage] ?? ""}
+                      onChange={(v) => setStageModel(stage, v)}
+                      suggested={modelOptions.suggested_models}
+                      emptyLabel="default"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </details>
+        )}
 
         {error && <div className="error-message">{error}</div>}
 

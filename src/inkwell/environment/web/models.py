@@ -19,7 +19,22 @@ class UploadResult(BaseModel):
     size: int = Field(description="File size in bytes")
 
 
-class CreateSessionRequest(BaseModel):
+class ModelConfigOverrides(BaseModel):
+    """Per-session model/pipeline overrides, applied on top of the profile."""
+
+    model: str | None = Field(
+        default=None, description="Default model for all stages (AGENT_MODEL)"
+    )
+    stage_models: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-stage model overrides, stage name -> model id",
+    )
+    writer_mode: str | None = Field(
+        default=None, description="Draft production mode: 'parallel' or 'single'"
+    )
+
+
+class CreateSessionRequest(ModelConfigOverrides):
     sources: list[str] = Field(
         description="Source materials: URLs, Claude share links, file paths, or freeform text"
     )
@@ -35,6 +50,21 @@ class CreateSessionRequest(BaseModel):
     )
 
 
+class ModelOptions(BaseModel):
+    """Choices the UI offers for model/pipeline configuration."""
+
+    stages: list[str] = Field(description="Stage names accepting model overrides")
+    suggested_models: list[str] = Field(
+        description="Known model ids; free-text ids are also accepted"
+    )
+    writer_modes: list[str] = Field(description="Available draft production modes")
+    default_model: str = Field(description="Active default model")
+    default_writer_mode: str = Field(description="Active writer mode")
+    default_stage_models: dict[str, str] = Field(
+        description="Per-stage overrides active in the current settings"
+    )
+
+
 class SessionAction(BaseModel):
     action: Literal["sync", "done", "quit", "feedback"] = Field(
         description="Action to perform"
@@ -42,7 +72,7 @@ class SessionAction(BaseModel):
     text: str | None = Field(default=None, description="Text for feedback action")
 
 
-class ResumeSessionRequest(BaseModel):
+class ResumeSessionRequest(ModelConfigOverrides):
     from_stage: str | None = Field(
         default=None, description="Resume from after this stage"
     )

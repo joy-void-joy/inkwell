@@ -1068,3 +1068,82 @@ textarea { resize: none; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* --- Model configuration (new session) --- */
+
+.model-config {
+  margin-bottom: 18px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  padding: 0;
+}
+
+.model-config summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-weight: 500;
+  user-select: none;
+}
+
+.model-config summary:hover {
+  background: var(--bg-hover);
+}
+
+.model-config[open] summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.model-config > .form-group {
+  padding: 0 14px;
+  margin-top: 12px;
+}
+
+.model-config > .form-group:last-child {
+  padding-bottom: 14px;
+}
+
+.model-config-hint {
+  margin-left: 10px;
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.model-picker {
+  display: flex;
+  gap: 8px;
+}
+
+.model-picker select {
+  flex: 1;
+}
+
+.model-picker input {
+  flex: 1;
+}
+
+.stage-model-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+
+.stage-model-row {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.stage-model-name {
+  font-family: var(--mono, monospace);
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+@media (max-width: 900px) {
+  .stage-model-grid {
+    grid-template-columns: 1fr;
+  }
+}

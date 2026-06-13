@@ -4,6 +4,21 @@ export interface FormatOption {
   accepts_description: boolean;
 }
 
+export interface ModelOptions {
+  stages: string[];
+  suggested_models: string[];
+  writer_modes: string[];
+  default_model: string;
+  default_writer_mode: string;
+  default_stage_models: Record<string, string>;
+}
+
+export interface ModelConfig {
+  model?: string;
+  stage_models?: Record<string, string>;
+  writer_mode?: string;
+}
+
 export type SessionStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted" | "resuming";
 
 export interface StageCostSummary {

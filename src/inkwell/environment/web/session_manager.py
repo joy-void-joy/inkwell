@@ -63,6 +63,9 @@ class SessionManager:
         target_format: str = "auto",
         existing_doc_id: str | None = None,
         profile: str | None = None,
+        model: str | None = None,
+        stage_models: dict[str, str] | None = None,
+        writer_mode: str | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex[:16]
         return self.launch(
@@ -72,6 +75,9 @@ class SessionManager:
             target_format=target_format,
             existing_doc_id=existing_doc_id,
             profile=profile,
+            model=model,
+            stage_models=stage_models,
+            writer_mode=writer_mode,
         )
 
     async def resume_session(
@@ -80,6 +86,9 @@ class SessionManager:
         *,
         from_stage: str | None = None,
         profile: str | None = None,
+        model: str | None = None,
+        stage_models: dict[str, str] | None = None,
+        writer_mode: str | None = None,
     ) -> str:
         if resume_session_id in self.sessions:
             handle = self.sessions[resume_session_id]
@@ -108,6 +117,9 @@ class SessionManager:
             resume_session_id=resume_session_id,
             resume_from_stage=from_stage,
             profile=resolved_profile,
+            model=model,
+            stage_models=stage_models,
+            writer_mode=writer_mode,
         )
 
     def launch(
@@ -121,6 +133,9 @@ class SessionManager:
         resume_session_id: str | None = None,
         resume_from_stage: str | None = None,
         profile: str | None = None,
+        model: str | None = None,
+        stage_models: dict[str, str] | None = None,
+        writer_mode: str | None = None,
     ) -> str:
         import os
 
@@ -132,6 +147,15 @@ class SessionManager:
         else:
             os.environ.pop("INKWELL_PROFILE", None)
         config_mod.settings = load_settings(profile)
+        if model:
+            config_mod.settings.model = model
+        if stage_models:
+            config_mod.settings.stage_models = {
+                **config_mod.settings.stage_models,
+                **stage_models,
+            }
+        if writer_mode:
+            config_mod.settings.writer_mode = writer_mode
 
         state = WritingSessionState()
         cost = CostAccumulator()

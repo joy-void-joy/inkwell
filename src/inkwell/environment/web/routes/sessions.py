@@ -9,6 +9,7 @@ from inkwell.agent.stages import OUTPUT_FORMATS
 from inkwell.environment.web.models import (
     CreateSessionRequest,
     FormatOption,
+    ModelOptions,
     ResumeSessionRequest,
     SessionAction,
     SessionDetail,
@@ -44,6 +45,22 @@ async def get_formats() -> list[FormatOption]:
     ]
 
 
+@formats_router.get("/model-options")
+async def get_model_options() -> ModelOptions:
+    import inkwell.agent.config as config_mod
+    from inkwell.agent.config import PIPELINE_STAGES, SUGGESTED_MODELS, WRITER_MODES
+
+    settings = config_mod.settings
+    return ModelOptions(
+        stages=list(PIPELINE_STAGES),
+        suggested_models=list(SUGGESTED_MODELS),
+        writer_modes=list(WRITER_MODES),
+        default_model=settings.model,
+        default_writer_mode=settings.writer_mode,
+        default_stage_models=dict(settings.stage_models),
+    )
+
+
 @router.post("", status_code=201)
 async def create_session(req: CreateSessionRequest) -> dict[str, str]:
     mgr = get_manager()
@@ -53,6 +70,9 @@ async def create_session(req: CreateSessionRequest) -> dict[str, str]:
         target_format=req.target_format,
         existing_doc_id=req.existing_doc_id,
         profile=req.profile,
+        model=req.model,
+        stage_models=req.stage_models,
+        writer_mode=req.writer_mode,
     )
     return {"session_id": session_id, "status": "running"}
 
@@ -79,7 +99,12 @@ async def resume_session(
     profile = req.profile if req else None
     try:
         sid = await mgr.resume_session(
-            session_id, from_stage=from_stage, profile=profile
+            session_id,
+            from_stage=from_stage,
+            profile=profile,
+            model=req.model if req else None,
+            stage_models=req.stage_models if req else None,
+            writer_mode=req.writer_mode if req else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

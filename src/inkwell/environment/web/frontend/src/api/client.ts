@@ -1,6 +1,8 @@
 import type {
   FormatOption,
   GoogleStatus,
+  ModelConfig,
+  ModelOptions,
   ProfileResponse,
   ServerCapabilities,
   SessionDetail,
@@ -15,11 +17,18 @@ export async function fetchFormats(): Promise<FormatOption[]> {
   return res.json();
 }
 
+export async function fetchModelOptions(): Promise<ModelOptions> {
+  const res = await fetch(`${BASE}/model-options`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function createSession(
   sources: string[],
   targetFormat: string = "auto",
   refs: string[] = [],
   profile?: string,
+  modelConfig?: ModelConfig,
 ): Promise<{ session_id: string; status: string }> {
   const res = await fetch(`${BASE}/sessions`, {
     method: "POST",
@@ -29,6 +38,9 @@ export async function createSession(
       target_format: targetFormat,
       refs,
       profile: profile || null,
+      model: modelConfig?.model || null,
+      stage_models: modelConfig?.stage_models || {},
+      writer_mode: modelConfig?.writer_mode || null,
     }),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -51,6 +63,7 @@ export async function resumeSession(
   id: string,
   fromStage?: string,
   profile?: string,
+  modelConfig?: ModelConfig,
 ): Promise<{ session_id: string; status: string }> {
   const res = await fetch(`${BASE}/sessions/${id}/resume`, {
     method: "POST",
@@ -58,6 +71,9 @@ export async function resumeSession(
     body: JSON.stringify({
       from_stage: fromStage ?? null,
       profile: profile ?? null,
+      model: modelConfig?.model || null,
+      stage_models: modelConfig?.stage_models || {},
+      writer_mode: modelConfig?.writer_mode || null,
     }),
   });
   if (!res.ok) throw new Error(await res.text());

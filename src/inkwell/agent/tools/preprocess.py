@@ -41,6 +41,14 @@ class PreprocessResult(BaseModel):
             "what they want done, stripped of URLs. Empty if input was bare URLs."
         ),
     )
+    deliverables: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Concrete outputs the instructions ask for, one per item, "
+            "preserving the author's own terms (scope, setting, format). "
+            "Empty when the instructions name none."
+        ),
+    )
     classified: list[ClassifiedSource] = Field(
         description="Each source with its classified role"
     )
@@ -99,7 +107,13 @@ target. Look for "see also", "related", "for reference".
 
 Also extract the user's INSTRUCTIONS — what they want done with the material. \
 This is the prose around the URLs, preserving their exact wording. If the input \
-is just a bare URL with no surrounding text, instructions should be empty."""
+is just a bare URL with no surrounding text, instructions should be empty.
+
+From the instructions, also list the DELIVERABLES: each concrete output the \
+user asked for, one item per deliverable, in the user's own terms. Keep their \
+scope words exactly (a requested setting, logic, audience, or format is part \
+of the deliverable, not a suggestion). Empty list if no concrete outputs are \
+named."""
 
 
 class ClassifyOutput(BaseModel):
@@ -108,6 +122,13 @@ class ClassifyOutput(BaseModel):
             "The user's directions extracted from the text — "
             "what they want done. Empty string if input is just bare URLs."
         )
+    )
+    deliverables: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Concrete outputs the instructions ask for, one per item, "
+            "preserving the author's own terms"
+        ),
     )
     classified: list[ClassifiedSource] = Field(
         description="Each source with its classified role"
@@ -163,6 +184,7 @@ async def preprocess_sources(sources: list[str]) -> PreprocessResult:
     return PreprocessResult(
         raw_inputs=sources,
         instructions=result.instructions,
+        deliverables=result.deliverables,
         classified=result.classified,
     )
 

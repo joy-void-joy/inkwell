@@ -212,7 +212,9 @@ class BackgroundAgent:
                 await client.disconnect()
         except asyncio.CancelledError:
             pass
-        except Exception as exc:  # claude: ignore — SDK raises generic Exception for exit codes
+        except (
+            Exception
+        ) as exc:  # claude: ignore — SDK raises generic Exception for exit codes
             if "exit code -2" in str(exc):
                 logger.info("Background agent '%s' stopped (interrupted)", self.name)
             else:

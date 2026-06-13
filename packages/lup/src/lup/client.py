@@ -99,8 +99,8 @@ from lup.trace import TraceLogger, active_agents, print_message
 type HeartbeatCallback = Callable[[float], Coroutine[None, None, None]]
 type BlockCallback = Callable[[ContentBlock, str], Coroutine[None, None, None]]
 
-active_block_callback: contextvars.ContextVar[BlockCallback | None] = contextvars.ContextVar(
-    "active_block_callback", default=None
+active_block_callback: contextvars.ContextVar[BlockCallback | None] = (
+    contextvars.ContextVar("active_block_callback", default=None)
 )
 
 

@@ -1329,7 +1329,8 @@ async def review_facts(
 
     task = (
         f"Fact-check every verifiable claim in the article draft.\n\n"
-        f"Draft: {draft_path}\n\n"
+        f"Draft: {draft_path}\n"
+        f"Plan (includes the deliverable contract): {notes.artifact_path('plan')}\n\n"
         f"{render_source_lines(notes)}"
         f"Read the draft. Use list_research to see all research findings, "
         f"then read_finding for details on specific ones. Cross-reference "
@@ -2427,6 +2428,7 @@ class PipelineRunner:
 
         self.snapshot.raw_sources = result.raw_inputs
         self.snapshot.author_instructions = result.instructions
+        self.snapshot.author_deliverables = result.deliverables
         self.snapshot.runtime_style_refs = result.style_refs
         self.snapshot.stage = "preprocess"
 
@@ -2722,6 +2724,12 @@ class PipelineRunner:
             )
             directions = (
                 f"{author_intent}\n\n{directions}" if directions else author_intent
+            )
+        if self.snapshot.author_deliverables:
+            items = "\n".join(f"- {d}" for d in self.snapshot.author_deliverables)
+            directions = (
+                f"{directions}\n\nDeliverables (the contract — copy into "
+                f"set_plan_header verbatim):\n{items}"
             )
 
         plan = await plan_article(

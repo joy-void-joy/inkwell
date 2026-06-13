@@ -40,7 +40,9 @@ def main(
     host: str = typer.Option("127.0.0.1", help="Bind host"),
     port: int = typer.Option(DEFAULT_PORT, help="Bind port (0 = random available)"),
     reload: bool = typer.Option(False, help="Enable auto-reload for development"),
-    skip_build: bool = typer.Option(False, "--skip-build", help="Skip frontend rebuild"),
+    skip_build: bool = typer.Option(
+        False, "--skip-build", help="Skip frontend rebuild"
+    ),
 ) -> None:
     """Start the Inkwell web server."""
     if not skip_build:

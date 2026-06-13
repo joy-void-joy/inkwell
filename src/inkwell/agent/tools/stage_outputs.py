@@ -87,6 +87,14 @@ class SetPlanHeaderInput(BaseModel):
     author_direction: str = Field(
         description="General direction, constraints, or preferences from the author"
     )
+    deliverables: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The author's contract: concrete requested outputs in their own "
+            "terms, copied from the brief. Do not widen, narrow, or reword "
+            "the author's scope."
+        ),
+    )
     voice_notes: str = Field(
         description="Observations about the author's tone, style, and voice"
     )

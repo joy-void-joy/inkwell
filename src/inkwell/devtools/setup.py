@@ -82,9 +82,7 @@ def list_profiles() -> list[str]:
     if not PROFILES_DIR.exists():
         return []
     return sorted(
-        p.name
-        for p in PROFILES_DIR.iterdir()
-        if p.is_dir() and (p / "env").exists()
+        p.name for p in PROFILES_DIR.iterdir() if p.is_dir() and (p / "env").exists()
     )
 
 
@@ -376,7 +374,7 @@ def setup_google() -> dict[str, str]:
     else:
         console.print(f"  Using existing credentials at [bold]{creds_path}[/]")
         console.print(
-            "\n  [bold yellow]Note:[/] If you see [dim]\"app not verified\"[/] or [dim]\"access denied\"[/],\n"
+            '\n  [bold yellow]Note:[/] If you see [dim]"app not verified"[/] or [dim]"access denied"[/],\n'
             "  make sure the account you're signing in with is listed as a test user\n"
             "  on the project (this can differ from the project owner):\n"
             "  https://console.cloud.google.com/auth/audience\n"
@@ -391,9 +389,7 @@ def setup_google() -> dict[str, str]:
         from inkwell.agent.google_auth import run_oauth_flow
 
         run_oauth_flow(str(creds_path), str(token_path))
-        console.print(
-            f"[green]Google authorized![/] Token saved to {token_path}"
-        )
+        console.print(f"[green]Google authorized![/] Token saved to {token_path}")
     except FileNotFoundError as e:
         console.print(f"[red]Error:[/] {e}")
         return {}
@@ -569,7 +565,9 @@ def setup_claude_login() -> dict[str, str]:
     if existing_dir and Path(existing_dir).exists():
         creds_path = Path(existing_dir) / ".credentials.json"
         if creds_path.exists():
-            console.print(f"[green]Already configured.[/] Using [bold]{existing_dir}[/]")
+            console.print(
+                f"[green]Already configured.[/] Using [bold]{existing_dir}[/]"
+            )
             if not typer.confirm("Re-login?", default=False):
                 return {}
 
@@ -597,7 +595,9 @@ def setup_claude_login() -> dict[str, str]:
     try:
         claude("/login", _env=login_env, _fg=True)
     except sh.ErrorReturnCode:
-        console.print("[red]Login failed.[/] Retry with: [bold]uv run lup-devtools setup claude-login[/]")
+        console.print(
+            "[red]Login failed.[/] Retry with: [bold]uv run lup-devtools setup claude-login[/]"
+        )
         return {}
 
     console.print("[green]Logged in![/]")
@@ -628,7 +628,9 @@ INTEGRATION_FUNCS: list[SetupFunc] = [
 def claude_login_cmd(
     profile: Annotated[
         str | None,
-        typer.Option("--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"),
+        typer.Option(
+            "--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"
+        ),
     ] = None,
 ) -> None:
     """Set up a separate Claude login for the writing agent."""
@@ -641,7 +643,9 @@ def claude_login_cmd(
 def google_cmd(
     profile: Annotated[
         str | None,
-        typer.Option("--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"),
+        typer.Option(
+            "--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"
+        ),
     ] = None,
 ) -> None:
     """Set up Google (Docs + Drive) OAuth."""
@@ -654,7 +658,9 @@ def google_cmd(
 def exa_cmd(
     profile: Annotated[
         str | None,
-        typer.Option("--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"),
+        typer.Option(
+            "--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"
+        ),
     ] = None,
 ) -> None:
     """Set up Exa API key."""
@@ -667,7 +673,9 @@ def exa_cmd(
 def claude_cmd(
     profile: Annotated[
         str | None,
-        typer.Option("--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"),
+        typer.Option(
+            "--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"
+        ),
     ] = None,
 ) -> None:
     """Set up Claude.ai session for conversation extraction."""
@@ -680,7 +688,9 @@ def claude_cmd(
 def fred_cmd(
     profile: Annotated[
         str | None,
-        typer.Option("--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"),
+        typer.Option(
+            "--profile", "-p", help="Configuration profile", envvar="INKWELL_PROFILE"
+        ),
     ] = None,
 ) -> None:
     """Set up FRED API key."""
@@ -725,7 +735,8 @@ def main(
     profile: Annotated[
         str | None,
         typer.Option(
-            "--profile", "-p",
+            "--profile",
+            "-p",
             help="Configuration profile to set up",
             envvar="INKWELL_PROFILE",
         ),

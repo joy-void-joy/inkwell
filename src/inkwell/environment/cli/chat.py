@@ -72,7 +72,12 @@ def build_toolbar(listener: InteractiveListener | None = None):
         stage = listener.current_stage if listener else ""
         label = STAGE_LABELS.get(stage, "")
         if label or active_agents:
-            parts.append(("class:toolbar.spinner", f" {SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} "))
+            parts.append(
+                (
+                    "class:toolbar.spinner",
+                    f" {SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} ",
+                )
+            )
             frame += 1
         if label:
             parts.append(("class:toolbar.stage", f"{label} "))
@@ -279,9 +284,13 @@ async def fetch_and_queue_comments(
 
         already_seen = set[str]()
         if session_state:
-            already_seen = session_state.seen_comment_ids | session_state.agent_comment_ids
+            already_seen = (
+                session_state.seen_comment_ids | session_state.agent_comment_ids
+            )
 
-        comments = await do_fetch_comments(doc_id, exclude_ids=already_seen, include_resolved=True)
+        comments = await do_fetch_comments(
+            doc_id, exclude_ids=already_seen, include_resolved=True
+        )
     except (RuntimeError, OSError, ValueError) as exc:
         console.print(f"  [red]Failed to fetch comments: {exc}[/red]")
         return
@@ -361,7 +370,9 @@ async def read_terminal_input(
         if stripped == "/sync":
             if listener:
                 listener.request_sync()
-                console.print("  [yellow]Sync requested — polling comments + edits[/yellow]")
+                console.print(
+                    "  [yellow]Sync requested — polling comments + edits[/yellow]"
+                )
             else:
                 console.print("  [dim]No active pipeline to sync.[/dim]")
             continue
@@ -478,9 +489,7 @@ async def chat_session(
                         grouped[group][0] += data.get("cost_usd", 0)
                         grouped[group][1] += data.get("duration_s", 0)
                         grouped[group][2] += data.get("calls", 0)
-                    for name, vals in sorted(
-                        grouped.items(), key=lambda kv: -kv[1][0]
-                    ):
+                    for name, vals in sorted(grouped.items(), key=lambda kv: -kv[1][0]):
                         cost, dur, calls = vals[0], vals[1], int(vals[2])
                         pct = (cost / result.cost_usd * 100) if result.cost_usd else 0
                         label = f"{name} ({calls})" if calls > 1 else name

@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 class FormatOption(BaseModel):
     key: str = Field(description="Format identifier (e.g. 'lesswrong', 'custom')")
     label: str = Field(description="Human-readable label")
-    accepts_description: bool = Field(default=False, description="Whether this format takes a freeform description")
+    accepts_description: bool = Field(
+        default=False, description="Whether this format takes a freeform description"
+    )
 
 
 class UploadResult(BaseModel):
@@ -18,21 +20,36 @@ class UploadResult(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    sources: list[str] = Field(description="Source materials: URLs, Claude share links, file paths, or freeform text")
-    refs: list[str] = Field(default_factory=list, description="Supplementary reference URLs or file paths")
+    sources: list[str] = Field(
+        description="Source materials: URLs, Claude share links, file paths, or freeform text"
+    )
+    refs: list[str] = Field(
+        default_factory=list, description="Supplementary reference URLs or file paths"
+    )
     target_format: str = Field(default="auto", description="Output format")
-    existing_doc_id: str | None = Field(default=None, description="Google Doc ID to write into")
-    profile: str | None = Field(default=None, description="Configuration profile to use for this session")
+    existing_doc_id: str | None = Field(
+        default=None, description="Google Doc ID to write into"
+    )
+    profile: str | None = Field(
+        default=None, description="Configuration profile to use for this session"
+    )
 
 
 class SessionAction(BaseModel):
-    action: Literal["sync", "done", "quit", "feedback"] = Field(description="Action to perform")
+    action: Literal["sync", "done", "quit", "feedback"] = Field(
+        description="Action to perform"
+    )
     text: str | None = Field(default=None, description="Text for feedback action")
 
 
 class ResumeSessionRequest(BaseModel):
-    from_stage: str | None = Field(default=None, description="Resume from after this stage")
-    profile: str | None = Field(default=None, description="Override profile (required if original profile is unknown)")
+    from_stage: str | None = Field(
+        default=None, description="Resume from after this stage"
+    )
+    profile: str | None = Field(
+        default=None,
+        description="Override profile (required if original profile is unknown)",
+    )
 
 
 class StageCostSummary(BaseModel):

@@ -199,6 +199,9 @@ Read the draft and plan files from the paths in your task.
 
 ## What to Check
 
+- Does the draft deliver every item in the plan's deliverables list? \
+A missing, widened, or reworded deliverable (different scope, setting, \
+or output than the author asked for) is severity='critical'.
 - Does the opening create a question the reader needs answered?
 - Does each paragraph earn the next — or does interest drop?
 - Is the thesis clear and does the argument build progressively?
@@ -230,6 +233,11 @@ Read the draft and the research findings from the file paths in your task.
 - Causal claims — does the evidence actually support the causal direction stated?
 - Named entities — are names, titles, affiliations correct?
 - Distortions — did the draft misrepresent what a research finding actually said?
+- Source fidelity — when the piece is built on a source document, do \
+the draft's definitions, conventions, and technical statements match \
+what the document actually says? Verify against the document itself \
+(consult_source, find_in_source, Read), not against research summaries \
+or other papers; internal consistency of the draft is not evidence.
 
 ## Approach
 
@@ -279,13 +287,24 @@ text_excerpt, quoting the exact passage verbatim."""
 
 
 PLANNER_SYSTEM = """\
-You extract an initial writing plan from source material. Read the \
-source conversation from the file path in your task.
+You plan a piece of writing. Your task gives you two different kinds of \
+input — never conflate them:
+
+- **The brief**: the author's instructions, deliverables, and comments. \
+This defines what to PRODUCE — scope, setting, format, outputs. It is \
+the contract.
+- **The source material**: conversations and documents to draw FROM. \
+This is reference, not the assignment. When the source is broader than \
+the brief (a whole thesis behind one requested result, a long \
+conversation behind one requested post), plan the piece the brief asks \
+for and select from the source — never widen the piece to match the \
+source's generality.
 
 Build the plan incrementally using your tools:
 
 1. Call set_plan_header with the title, thesis, target format, author \
-direction, and voice notes
+direction, deliverables (copied from the brief in the author's own \
+terms), and voice notes
 2. Call add_section for each planned section (title, summary, key points)
 3. Call add_research_question for each question to investigate
 4. Call add_source_quote for important verbatim quotes worth preserving

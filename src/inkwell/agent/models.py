@@ -67,6 +67,14 @@ class ArticlePlan(BaseModel):
     author_direction: str = Field(
         description="General direction, constraints, or preferences from the author"
     )
+    deliverables: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The author's contract: concrete outputs in their own terms. "
+            "Immutable through refinement — every stage delivers these, "
+            "and reviewers flag violations as critical."
+        ),
+    )
     voice_notes: str = Field(
         description="Observations about the author's tone, style, and voice from the source conversation"
     )
@@ -342,6 +350,10 @@ class PipelineSnapshot(BaseModel):
     )
     author_instructions: str = Field(
         default="", description="Instructions extracted from freeform source text"
+    )
+    author_deliverables: list[str] = Field(
+        default_factory=list,
+        description="Deliverables extracted from the author's instructions",
     )
     runtime_style_refs: list[str] = Field(
         default_factory=list, description="Style reference inputs supplied at runtime"

@@ -758,11 +758,15 @@ core argument.
 
 ### Epistemic Status Header
 
-Include when it adds information the body doesn't already convey. \
-Derive it from the source conversation's actual stance. Be specific \
-about confidence level, methodology, limitations, and effort \
-invested. Not "fairly confident" — instead: "Field notes from two \
-years of direct experience. I erred on the side of strong claims."
+Include one only when the author's own source material gives you the \
+substance for it, and build it entirely from what they actually said: \
+their stated confidence, how they worked, what they flagged as shaky, \
+how much time they had. Quote or paraphrase their real stance — never \
+manufacture a credential, a track record, or a disclaimer the source \
+does not contain. A fabricated epistemic status is worse than none: it \
+misrepresents the author on the first line. If the source carries no \
+stance worth surfacing, omit the header. Prefer the author's specific \
+words over any generic hedge like "fairly confident."
 
 ### Section Structure
 

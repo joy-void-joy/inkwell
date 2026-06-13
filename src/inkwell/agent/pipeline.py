@@ -2367,6 +2367,30 @@ class PipelineRunner:
         slug = slug.strip("-")
         return self.ensure_notes().drafts_dir / f"{slug}.md"
 
+    def rehydrate_draft_files(self) -> None:
+        """Project the snapshot's draft content back onto disk for a resume.
+
+        Section, merged, and final drafts are working files under ``drafts/``,
+        not persisted artifacts: a resumed process starts without them. Stages
+        downstream of ``write`` read these drafts as files, so a resume that
+        skipped their producing stage would hand the reader a path to nothing.
+        Restoring them from the snapshot keeps disk and snapshot in step no
+        matter which stage the resume picks up from.
+        """
+
+        def restore(label: str, content: str) -> None:
+            path = self.get_draft_path(label)
+            if content and not path.exists():
+                path.write_text(content, encoding="utf-8")
+
+        for title, draft in self.snapshot.section_drafts.items():
+            if not draft.content.startswith("[Section failed"):
+                restore(title, draft.content)
+        if self.snapshot.merged is not None:
+            restore("merged", self.snapshot.merged.content)
+        if self.snapshot.output is not None:
+            restore("final", self.snapshot.output.content)
+
     async def save_snapshot(self) -> None:
         self.snapshot.doc_id = self.state.doc_id
         self.snapshot.doc_url = self.state.doc_url
@@ -2478,6 +2502,7 @@ class PipelineRunner:
         self.state.seen_comment_ids = set(snapshot.seen_comment_ids)
         self.state.agent_comment_ids.update(snapshot.agent_comment_ids)
         self.ensure_notes()
+        self.rehydrate_draft_files()
         self.state.seen_source_comment_ids = set(snapshot.seen_source_comment_ids)
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)

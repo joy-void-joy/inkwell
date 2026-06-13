@@ -110,7 +110,7 @@ async def gdoc_nonfatal(operation: str) -> AsyncGenerator[None]:
     """
     try:
         yield
-    except (HttpError, OSError, TimeoutError) as exc:
+    except (HttpError, OSError, TimeoutError, ToolError) as exc:
         logger.warning("GDoc %s failed (non-fatal): %s", operation, exc)
 
 

@@ -86,6 +86,39 @@ Trace review + author interview decisions. Work lands directly on `dev` (explici
 
 - [x] LaTeX-first output for academic format: produce `paper.tex`, compile to PDF in the sandbox (tectonic), upload PDF to Drive and link it from the GDoc; GDoc remains the comment/review surface
 
+### 0b. Post-merge hardening (integrate-fidelity)
+
+`feat-source-fidelity` and `fix-pipeline-wiring` were merged here. The merge
+also closes gaps the two branches each left open against the "dropping the
+ball" trace review:
+
+- [x] Source registry built from the **extracted** source text, not only
+  local-file `sources[]` — so URL / Google-Doc / Claude-share inputs (the
+  common case) get the source-fidelity reviewer, resolve stage, and
+  `consult_source` / `find_in_source` instead of an empty registry
+- [x] Epistemic status: removed the copyable sample sentence from the
+  lesswrong writer guidance; the model must build the status from the
+  author's real stance or omit it (no fabricated credential)
+- [x] `extract_author_text`: keep a document author's prose (untagged text +
+  their `<user>` turns) instead of discarding the draft when the source
+  carries incidental speaker tags; only `<claude>` turns are dropped
+- [x] Pre-existing comments: the author's reply resolves a thread and
+  outranks a reviewer's contrary suggestion (no more siding against the
+  author on a contested cut)
+- [x] Resume past merge: `draft_tab_id` / `final_tab_id` rederived in
+  `setup_doc`, Draft tab ensured in `stage_rewrite`, `ToolError` made
+  non-fatal in `gdoc_nonfatal` — the "Tab '' not found" rewrite crash
+- [x] Inline author markers (`TODO`/`FIXME`/`BOTEC`) lifted from the source
+  body into questions + planner instructions instead of silently dropped
+
+Deferred (not regressions; lower value than the trace warranted):
+
+- [ ] Actionable failure logging: capture subprocess stderr/exit detail when
+  a stage dies (the voice-stage "exit code -2" deaths logged nothing usable)
+- [ ] Oversized output Doc: the single Doc carries every tab + 100+ comments
+  and overwhelmed an external fetch; consider a publish/export path or
+  splitting working tabs from the deliverable
+
 ### 1. ~~Terminal Input During Sleep~~ Interactive Chat CLI
 
 - [x] Interactive chat as default (`inkwell` opens chat, subcommands pre-seed it)

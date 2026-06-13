@@ -1,5 +1,6 @@
 """Configuration for the inkwell writing agent."""
 
+import contextvars
 import logging
 import os
 from typing import Self
@@ -282,10 +283,33 @@ def load_settings(profile: str | None = None) -> Settings:
 
 settings = Settings.model_validate({})
 
+active_settings: contextvars.ContextVar[Settings | None] = contextvars.ContextVar(
+    "active_settings", default=None
+)
+"""Session-scoped settings override.
+
+Each asyncio task tree gets its own contextvar copy, so concurrent
+sessions launched with different profiles or model configurations read
+their own Settings instead of racing on the module global. Set it at
+the root of a session task (see the web SessionManager); everything the
+session spawns inherits it.
+"""
+
+
+def current_settings() -> Settings:
+    """Settings for the current execution context.
+
+    Session-scoped code must read configuration through this — the
+    module-level ``settings`` is only the process default and is wrong
+    whenever sessions run concurrently with different configurations.
+    """
+    override = active_settings.get()
+    return override if override is not None else settings
+
 
 def stage_model(stage: str) -> str:
     """Model for a pipeline stage from the active settings."""
-    return settings.model_for(stage)
+    return current_settings().model_for(stage)
 
 
 if settings.openrouter_api_key:

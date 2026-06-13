@@ -11,7 +11,7 @@ from typing import TypedDict
 import httpx
 from pydantic import BaseModel, Field
 
-import inkwell.agent.config as config_mod
+from inkwell.agent.config import current_settings
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ class ExaSearchOutput(BaseModel):
     "Use fetch_url to read the full text of interesting results."
 )
 async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
-    api_key = config_mod.settings.exa_api_key
+    api_key = current_settings().exa_api_key
     if not api_key:
         raise ToolError("EXA_API_KEY not configured. Run `inkwell setup exa`.")
 

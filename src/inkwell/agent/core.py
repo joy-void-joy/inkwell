@@ -58,6 +58,7 @@ from lup.sandbox import Sandbox
 from lup.trace import TraceLogger
 
 import inkwell.agent.config as config_mod
+from inkwell.agent.config import current_settings
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot, WritingOutput
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
@@ -81,7 +82,7 @@ logger = logging.getLogger(__name__)
 
 
 def notes_path() -> Path:
-    return Path(config_mod.settings.notes_path)
+    return Path(current_settings().notes_path)
 
 
 def traces_path() -> Path:
@@ -188,7 +189,7 @@ def setup_session(
     sandbox = Sandbox(
         session_id=session_id,
         shared_dir=notes.session / "sandbox_shared",
-        timeout_seconds=config_mod.settings.sandbox_timeout_seconds,
+        timeout_seconds=current_settings().sandbox_timeout_seconds,
     )
 
     if session_state is None:
@@ -333,13 +334,13 @@ def build_options(
             hooks = merge_hooks(hooks, layer)
 
     env: dict[str, str] = {}
-    if config_mod.settings.claude_config_dir:
-        env["CLAUDE_CONFIG_DIR"] = config_mod.settings.claude_config_dir
+    if current_settings().claude_config_dir:
+        env["CLAUDE_CONFIG_DIR"] = current_settings().claude_config_dir
 
     return ClaudeAgentOptions(
-        model=config_mod.settings.model,
-        system_prompt=get_system_prompt(author_email=config_mod.settings.author_email),
-        max_thinking_tokens=config_mod.settings.max_thinking_tokens or (128_000 - 1),
+        model=current_settings().model,
+        system_prompt=get_system_prompt(author_email=current_settings().author_email),
+        max_thinking_tokens=current_settings().max_thinking_tokens or (128_000 - 1),
         permission_mode="bypassPermissions",
         extra_args={"no-session-persistence": None},
         hooks=hooks,
@@ -560,7 +561,7 @@ async def run_session(
         if cost_acc.call_count
         else None,
         tool_metrics=get_metrics_summary(),
-        profile=config_mod.settings.profile,
+        profile=current_settings().profile,
     )
 
     save_session(result, session_id=result.session_id)

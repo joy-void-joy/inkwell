@@ -124,7 +124,9 @@ class ServiceFactory:
 
 def get_service_factory() -> ServiceFactory:
     """Create a ServiceFactory from application settings."""
-    from inkwell.agent.config import settings
+    from inkwell.agent.config import current_settings
+
+    settings = current_settings()
 
     if not settings.google_credentials_path:
         msg = (

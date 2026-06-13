@@ -502,7 +502,9 @@ async def do_create_doc(
     - Anyone in the Google Workspace domain can edit (if domain configured)
     - Named user gets editor access (if share_with provided)
     """
-    from inkwell.agent.config import settings
+    from inkwell.agent.config import current_settings
+
+    settings = current_settings()
 
     svc = services()
     docs = svc.docs_service()

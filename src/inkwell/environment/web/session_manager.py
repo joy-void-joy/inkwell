@@ -137,45 +137,48 @@ class SessionManager:
         stage_models: dict[str, str] | None = None,
         writer_mode: str | None = None,
     ) -> str:
-        import os
+        from inkwell.agent.config import active_settings, load_settings
 
-        import inkwell.agent.config as config_mod
-        from inkwell.agent.config import load_settings
-
-        if profile:
-            os.environ["INKWELL_PROFILE"] = profile
-        else:
-            os.environ.pop("INKWELL_PROFILE", None)
-        config_mod.settings = load_settings(profile)
+        session_settings = load_settings(profile)
         if model:
-            config_mod.settings.model = model
+            session_settings.model = model
         if stage_models:
-            config_mod.settings.stage_models = {
-                **config_mod.settings.stage_models,
+            session_settings.stage_models = {
+                **session_settings.stage_models,
                 **stage_models,
             }
         if writer_mode:
-            config_mod.settings.writer_mode = writer_mode
+            session_settings.writer_mode = writer_mode
 
         state = WritingSessionState()
         cost = CostAccumulator()
         listener = WebListener(session_id, self)
         trace_holder: list[SessionTrace] = []
 
+        async def run_in_session_context() -> AgentSessionResult:
+            # Each task owns a contextvar copy, so this scopes the
+            # configuration to this session and everything it spawns —
+            # concurrent sessions with different configs don't race.
+            token = active_settings.set(session_settings)
+            try:
+                return await run_session(
+                    sources=sources or [],
+                    refs=refs,
+                    target_format=target_format,
+                    existing_doc_id=existing_doc_id,
+                    resume_session_id=resume_session_id,
+                    resume_from_stage=resume_from_stage,
+                    session_id=session_id,
+                    listener=listener,
+                    session_state=state,
+                    cost_accumulator=cost,
+                    trace_holder=trace_holder,
+                )
+            finally:
+                active_settings.reset(token)
+
         task = asyncio.create_task(
-            run_session(
-                sources=sources or [],
-                refs=refs,
-                target_format=target_format,
-                existing_doc_id=existing_doc_id,
-                resume_session_id=resume_session_id,
-                resume_from_stage=resume_from_stage,
-                session_id=session_id,
-                listener=listener,
-                session_state=state,
-                cost_accumulator=cost,
-                trace_holder=trace_holder,
-            ),
+            run_in_session_context(),
             name=f"inkwell-session-{session_id}",
         )
 

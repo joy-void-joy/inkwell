@@ -27,8 +27,7 @@ from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
 from lup.sandbox import Sandbox
 from lup.trace import TraceLogger, extract_block_info
 
-import inkwell.agent.config as config_mod
-from inkwell.agent.config import stage_model
+from inkwell.agent.config import current_settings, stage_model
 from inkwell.agent.models import (
     AddAction,
     ArticlePlan,
@@ -2229,7 +2228,7 @@ class PipelineRunner:
     async def run(self) -> WritingOutput:
         """Execute the full pipeline with restart support."""
         self.install_block_callback()
-        self.snapshot.profile = config_mod.settings.profile
+        self.snapshot.profile = current_settings().profile
         configure_session_state(self.state)
         await self.setup_doc()
         self.start_sandbox()
@@ -2395,7 +2394,7 @@ class PipelineRunner:
         else:
             self.doc_id, self.doc_url = await do_create_doc(
                 f"Inkwell — {', '.join(s[:30] for s in self.sources)[:60]}",
-                share_with=config_mod.settings.author_email,
+                share_with=current_settings().author_email,
                 session_state=self.state,
             )
             await self.hooks.on_progress(f"Google Doc: {self.doc_url}")
@@ -3106,7 +3105,7 @@ class PipelineRunner:
         if plan is None or research is None:
             raise PipelineError("Cannot write without plan and research")
 
-        if config_mod.settings.writer_mode == "single":
+        if current_settings().writer_mode == "single":
             await self.write_single_draft()
             return
 
@@ -3276,7 +3275,7 @@ class PipelineRunner:
         if plan is None:
             raise PipelineError("Cannot merge without a plan")
 
-        if config_mod.settings.writer_mode == "single" and self.snapshot.merged:
+        if current_settings().writer_mode == "single" and self.snapshot.merged:
             self.snapshot.stage = "merge"
             await self.save_snapshot()
             return

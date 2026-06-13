@@ -5,7 +5,7 @@
 - [x] Package renamed from `lup_template` to `inkwell`, all checks green
 - [x] Domain models: `ArticlePlan`, `ResearchCompilation`, `SectionDraft`, `ReviewFinding`, `WritingOutput`
 - [x] System prompt with voice matching, Google Doc protocol, writing guidelines
-- [x] 8 subagent definitions: planner, researcher, section_writer, coherence_editor, narrative_reviewer, fact_checker, style_reviewer, rewriter
+- [x] 8 subagent definitions: planner, researcher, section_writer, reconcile, narrative_reviewer, fact_checker, style_reviewer, rewriter
 - [x] Config with Google OAuth, Exa, FRED, Claude cookie, style corpus settings
 - [x] Tool policy with Google Docs + extraction + research tool sets, API key gating
 - [x] Claude conversation extractor (fully implemented)
@@ -69,7 +69,7 @@ Trace review + author interview decisions. Work lands directly on `dev` (explici
 **Phase C — pipeline shape + models:**
 
 - [x] Per-stage model config (stage→model map in settings; `claude-fable-5` usable)
-- [x] Single-writer mode as an orthogonal pipeline option (not tied to model): one writer drafts the whole piece with `consult_source` + research tools; no merge stage
+- [x] Single-writer mode as an orthogonal pipeline option (not tied to model): one writer drafts the whole piece with `consult_source` + research tools; no reconcile pass
 - [x] Compaction resilience: reading pass via nested readers writing per-chapter notes (verbatim key passages + page refs) to disk; no stage depends on holding the whole source in context
 
 **Phase D — review + coherence:**
@@ -146,7 +146,7 @@ warning:
   from "bold every paragraph's first sentence" to "bold sparingly" (source
   of the bolded-recipient-list tell)
 - [x] Voice + raw author directions routed to the structural chokepoints
-  (merge planner, coherence editor, narrative reviewer, rewriter) instead of
+  (reconcile, narrative reviewer, rewriter) instead of
   only the planner's distillation
 - [x] Epistemic-status humility preserved (no upgrading the author's
   self-deprecation into confident self-promotion); rewriter attribution
@@ -154,9 +154,15 @@ warning:
 - [x] Assumptions stage surfaces conflicting author instructions (a
   structural deliverable that fights a voice constraint) instead of
   executing the literal half
-- [x] `writer_mode: auto` defaults voice-driven formats to single-writer
-  (no merge — eliminates the merge-smoothing and merge-planner failure
-  classes by construction); academic stays parallel
+- [x] Shared cross-writer glossary (`define_term`/`lookup_terms` over a seeded
+  `glossary.json`): parallel section writers converge on one name per concept
+  instead of flagging coined terms to the author only
+- [x] Two-phase merge replaced by a voice-safe `reconcile` pass (glossary
+  enforcement, seam stitching, redundant-opening cuts — no structural rewrite
+  or voice smoothing)
+- [x] `writer_mode: auto` resolves to parallel for every format; the glossary
+  and reconcile keep terminology and voice intact, so academic and
+  voice-driven formats share one path (`single` remains an explicit override)
 
 ### 1. ~~Terminal Input During Sleep~~ Interactive Chat CLI
 

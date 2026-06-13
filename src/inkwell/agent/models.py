@@ -13,6 +13,7 @@ from typing import Annotated, Literal, TypedDict, Union
 
 from pydantic import BaseModel, Field, field_validator
 
+from lup.client import CostState
 from lup.history import SessionResult
 
 from inkwell.agent.tools.stage_outputs import AuthorNote
@@ -306,8 +307,29 @@ class PipelineSnapshot(BaseModel):
 
     generation: int = Field(default=0, description="Incremented on each restart")
     stage: str = Field(default="init", description="Current pipeline stage")
+    profile: str | None = Field(
+        default=None, description="Config profile active when the session started"
+    )
     conversation: str = Field(default="", description="Extracted source text")
+    raw_sources: list[str] = Field(
+        default_factory=list, description="Original source inputs before preprocessing"
+    )
+    author_instructions: str = Field(
+        default="", description="Instructions extracted from freeform source text"
+    )
+    runtime_style_refs: list[str] = Field(
+        default_factory=list, description="Style reference inputs supplied at runtime"
+    )
+    source_file_paths: list[str] = Field(
+        default_factory=list, description="Extracted source file paths"
+    )
     voice_profile: str | None = Field(default=None)
+    voice_fingerprint: str = Field(
+        default="", description="Hash of voice inputs, used to skip re-analysis"
+    )
+    voice_file_paths: list[str] = Field(
+        default_factory=list, description="Voice analysis artifact paths"
+    )
     plan: ArticlePlan | None = Field(default=None)
     research: ResearchCompilation | None = Field(default=None)
     section_drafts: dict[str, SectionDraft] = Field(
@@ -325,8 +347,18 @@ class PipelineSnapshot(BaseModel):
     agent_comment_ids: set[str] = Field(
         default_factory=set, description="Comment IDs posted by the agent"
     )
+    seen_source_comment_ids: set[str] = Field(
+        default_factory=set, description="Source-doc comment IDs already processed"
+    )
+    source_doc_id: str = Field(
+        default="", description="Google Doc ID of the source document, if any"
+    )
     pending_questions: list[str] = Field(
         default_factory=list, description="Unanswered questions for the author"
+    )
+    cost_state: CostState | None = Field(
+        default=None,
+        description="Accumulated cost/token state, carried across process restarts",
     )
 
 

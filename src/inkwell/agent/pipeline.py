@@ -1943,6 +1943,7 @@ class PipelineRunner:
         self.snapshot.agent_comment_ids = set(self.state.agent_comment_ids)
         self.snapshot.seen_source_comment_ids = set(self.state.seen_source_comment_ids)
         self.snapshot.pending_questions = list(self.state.pending_questions)
+        self.snapshot.cost_state = self.cost_accumulator.state_dict()
 
         notes = self.ensure_notes()
         data = self.snapshot.model_dump_json()
@@ -2036,6 +2037,8 @@ class PipelineRunner:
         self.state.seen_source_comment_ids = set(snapshot.seen_source_comment_ids)
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
+        if snapshot.cost_state is not None:
+            self.cost_accumulator.load_state(snapshot.cost_state)
 
         await self.setup_doc()
         self.start_sandbox()

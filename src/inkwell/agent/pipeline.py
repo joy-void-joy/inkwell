@@ -66,8 +66,10 @@ from inkwell.agent.stages import (
     REFINER_SYSTEM,
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
+    RESOLVER_PROMPT,
     SECTION_WRITER_PROMPT,
     SINGLE_WRITER_PROMPT,
+    SOURCE_FIDELITY_REVIEWER_PROMPT,
     STYLE_REVIEWER_PROMPT,
     get_format_guidance,
 )
@@ -1522,6 +1524,69 @@ async def review_style(
     return ReviewOutput(findings=findings)
 
 
+async def review_source_fidelity(
+    notes: PipelineNotes,
+    draft_path: Path,
+    *,
+    author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> ReviewOutput:
+    """Verify the draft against the registered source documents."""
+    review_path = notes.artifacts_dir / "review_source_fidelity.json"
+    collector = ReviewCollector(review_path, "source_fidelity")
+    output_servers, output_tool_names = build_output_server(
+        "output", make_review_output_tools(collector)
+    )
+    note_collector = author_notes if author_notes is not None else []
+    note_servers, note_tool_names = build_note_server("review:source", note_collector)
+    all_servers = {
+        **output_servers,
+        **note_servers,
+        **(source_servers or {}),
+        **(compute_servers or {}),
+    }
+    all_tools = (
+        output_tool_names
+        + note_tool_names
+        + (source_tool_names_list or [])
+        + (compute_tool_names or [])
+    )
+
+    task = (
+        f"Verify the draft against the source documents.\n\n"
+        f"Draft: {draft_path}\n"
+        f"Plan: {notes.artifact_path('plan')}\n\n"
+        f"{render_source_lines(notes)}"
+        f"Check every source-derived definition, convention, named "
+        f"structure, and argument outline against the document itself. "
+        f"Call record_finding for each issue."
+    )
+    await query(
+        task,
+        model=stage_model("review"),
+        system_prompt=SOURCE_FIDELITY_REVIEWER_PROMPT,
+        tools=BUILTIN_READ_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
+        trace_logger=trace_logger,
+        prefix="[review:source] ",
+        cost_accumulator=cost_accumulator,
+    )
+    if review_path.exists():
+        data = json.loads(review_path.read_text(encoding="utf-8"))
+        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
+    else:
+        findings = []
+    return ReviewOutput(findings=findings)
+
+
 async def review_all(
     notes: PipelineNotes,
     draft_path: Path,
@@ -1536,7 +1601,8 @@ async def review_all(
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> list[ReviewFinding]:
-    """Stage 5: Run all three reviewers in parallel."""
+    """Stage 5: Run the reviewers in parallel (plus source fidelity when
+    source documents are registered)."""
     narrative_task = review_narrative(
         notes,
         draft_path,
@@ -1573,12 +1639,23 @@ async def review_all(
         cost_accumulator=cost_accumulator,
     )
 
-    results = await asyncio.gather(
-        narrative_task,
-        facts_task,
-        style_task,
-        return_exceptions=True,
-    )
+    review_tasks = [narrative_task, facts_task, style_task]
+    if load_source_registry(registry_path_for(notes.artifacts_dir)):
+        review_tasks.append(
+            review_source_fidelity(
+                notes,
+                draft_path,
+                author_notes=author_notes,
+                source_servers=source_servers,
+                source_tool_names_list=source_tool_names_list,
+                compute_servers=compute_servers,
+                compute_tool_names=compute_tool_names,
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+            )
+        )
+
+    results = await asyncio.gather(*review_tasks, return_exceptions=True)
 
     all_findings: list[ReviewFinding] = []
     for result in results:
@@ -1701,6 +1778,17 @@ async def rewrite_final(
     )
     manifest.add(plan_path, "plan", "Article plan")
     manifest.add(review_summary_path, "review", "Review summary")
+    resolutions_path = notes.artifacts_dir / "resolutions.md"
+    if resolutions_path.exists():
+        manifest.add(
+            resolutions_path,
+            "review",
+            "Source resolutions",
+            instruction=(
+                "answers read from the source document — apply as "
+                "corrections; they outrank other inputs on correctness"
+            ),
+        )
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
     if feedback_path:
@@ -2173,6 +2261,7 @@ class PipelineRunner:
                 await self.check_and_maybe_restart()
                 await self.sync_if_requested()
 
+                await self.stage_resolve()
                 await self.stage_rewrite()
                 await self.sync_if_requested()
                 await self.stage_format()
@@ -2230,6 +2319,7 @@ class PipelineRunner:
                 "write",
                 "merge",
                 "review",
+                "resolve",
                 "rewrite",
                 "format",
             ]
@@ -3257,7 +3347,7 @@ class PipelineRunner:
         if plan is None or merged is None:
             raise PipelineError("Cannot review without plan and merged draft")
 
-        await self.announce_stage("review", "Reviewing draft (3 reviewers in parallel)")
+        await self.announce_stage("review", "Reviewing draft (parallel reviewers)")
         self.state.set_stage("reviewing")
         await self.update_overview(active_stage="review")
 
@@ -3291,6 +3381,54 @@ class PipelineRunner:
         )
         await self.write_review_tab(findings)
         await self.update_overview()
+
+    async def stage_resolve(self) -> None:
+        """Answer source-answerable open questions before the rewrite.
+
+        Writers and reviewers leave questions; the ones a source document
+        can answer get answered here by reading it, so only judgment calls
+        reach the author and the rewrite corrects from evidence instead of
+        guessing.
+        """
+        notes = self.ensure_notes()
+        if not load_source_registry(registry_path_for(notes.artifacts_dir)):
+            return
+        questions = list(dict.fromkeys(self.state.pending_questions))
+        if not questions:
+            return
+
+        await self.announce_stage(
+            "resolve",
+            f"Resolving {len(questions)} open questions against the source",
+        )
+        resolutions_path = notes.artifacts_dir / "resolutions.md"
+        items = "\n".join(f"- {q}" for q in questions)
+        task = (
+            f"Open questions left by writers and reviewers:\n\n{items}\n\n"
+            f"{render_source_lines(notes)}"
+            f"Resolve every source-answerable question from the document "
+            f"itself; mark the rest author-only.\n\n"
+            f"Write the resolutions to: {resolutions_path}"
+        )
+        await query(
+            task,
+            model=stage_model("review"),
+            system_prompt=RESOLVER_PROMPT,
+            tools=BUILTIN_WRITE_TOOLS,
+            max_thinking_tokens=128_000 - 1,
+            permission_mode="bypassPermissions",
+            mcp_servers={**self.source_servers, **self.compute_servers},
+            allowed_tools=self.source_tool_names + self.compute_tool_names,
+            prefix="[resolve] ",
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        if resolutions_path.exists():
+            resolved = resolutions_path.read_text(encoding="utf-8").count("\n  A:")
+            await self.hooks.on_progress(
+                f"Resolved {resolved} question(s) from the source; "
+                f"resolutions saved for the rewrite"
+            )
 
     async def stage_rewrite(self) -> None:
         plan = self.snapshot.plan
@@ -3929,6 +4067,7 @@ class PipelineRunner:
                 "write",
                 "merge",
                 "review",
+                "resolve",
                 "rewrite",
                 "format",
             ]

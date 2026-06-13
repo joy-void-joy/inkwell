@@ -55,7 +55,7 @@ class ArticlePlan(BaseModel):
     title: str = Field(description="Working title for the article")
     thesis: str = Field(description="Core argument or insight in one sentence")
     target_format: str = Field(
-        description="Output format: 'lesswrong', 'twitter', 'blog', 'dialog', 'memo', or 'custom:<description>'. Choose based on what best fits the content."
+        description="Output format: 'academic', 'lesswrong', 'twitter', 'blog', 'dialog', 'memo', or 'custom:<description>'. Choose based on what best fits the content."
     )
     sections: list[SectionPlan] = Field(description="Ordered list of planned sections")
     research_questions: list[ResearchQuestion] = Field(
@@ -174,7 +174,7 @@ class ReviewFinding(BaseModel):
     """A finding from one of the reviewer agents."""
 
     reviewer: str = Field(
-        description="Which reviewer: 'narrative', 'factcheck', or 'style'"
+        description="Which reviewer: 'narrative', 'factcheck', 'style', or 'source_fidelity'"
     )
     severity: Literal["critical", "suggestion", "praise"] = Field(
         description="'critical', 'suggestion', or 'praise'"

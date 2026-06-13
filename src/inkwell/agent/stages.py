@@ -854,7 +854,6 @@ questions, no engagement devices.
 - State a fact once, where it belongs. Repetition is a defect, not \
 emphasis.
 - Hedge only where the mathematics or evidence is genuinely open.""",
-
     "blog": """\
 ## Format: Blog Post
 

@@ -581,3 +581,143 @@ def make_note_tool(notes_collector: list[AuthorNote], stage: str) -> LupMcpTool:
         NoteForAuthorInput,
         handle_note,
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared glossary (cross-writer term ledger)
+# ---------------------------------------------------------------------------
+
+
+class GlossaryEntry(BaseModel):
+    """One shared term: a name, symbol, or abbreviation and the single meaning
+    every section must use for it."""
+
+    term: str = Field(description="The term, name, symbol, or abbreviation")
+    meaning: str = Field(description="Its canonical meaning/usage for this piece")
+
+
+class DefineTermResult(BaseModel):
+    """Result of define_term — the canonical entry the caller should conform to."""
+
+    term: str
+    meaning: str
+    already_defined: bool = Field(
+        description=(
+            "True when a sibling writer already defined this term; the returned "
+            "meaning is the canonical one — conform to it rather than your own."
+        )
+    )
+
+
+class DefineTermInput(BaseModel):
+    term: str = Field(
+        description="The term, name, symbol, or abbreviation you are introducing"
+    )
+    meaning: str = Field(description="Its definition — how every section should use it")
+
+
+class LookupTermsInput(BaseModel):
+    contains: str = Field(
+        default="",
+        description=(
+            "Optional substring filter over terms; empty returns the whole "
+            "shared glossary."
+        ),
+    )
+
+
+class GlossaryView(BaseModel):
+    conventions: list[str] = Field(
+        description="Plan-level conventions seeded before writing"
+    )
+    terms: list[GlossaryEntry] = Field(
+        description="Terms coined by section writers so far"
+    )
+
+
+def load_glossary(path: Path) -> tuple[list[str], list[GlossaryEntry]]:
+    """Read the shared glossary file: (seeded conventions, coined terms)."""
+    if not path.exists():
+        return [], []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    conventions = [str(c) for c in data.get("conventions", [])]
+    terms = [GlossaryEntry.model_validate(e) for e in data.get("terms", [])]
+    return conventions, terms
+
+
+def write_glossary(
+    path: Path, conventions: list[str], terms: list[GlossaryEntry]
+) -> None:
+    """Persist the shared glossary file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"conventions": conventions, "terms": [e.model_dump() for e in terms]}
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def seed_glossary(path: Path, conventions: list[str]) -> None:
+    """Seed the glossary with the plan's conventions, preserving coined terms."""
+    _, terms = load_glossary(path)
+    write_glossary(path, conventions, terms)
+
+
+def define_term_in_glossary(path: Path, term: str, meaning: str) -> DefineTermResult:
+    """Register a term unless a sibling already defined it — first definition wins."""
+    conventions, terms = load_glossary(path)
+    for entry in terms:
+        if entry.term.casefold() == term.casefold():
+            return DefineTermResult(
+                term=entry.term, meaning=entry.meaning, already_defined=True
+            )
+    terms.append(GlossaryEntry(term=term, meaning=meaning))
+    write_glossary(path, conventions, terms)
+    return DefineTermResult(term=term, meaning=meaning, already_defined=False)
+
+
+def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
+    """MCP tools for the shared cross-writer glossary.
+
+    Parallel section writers share only the filesystem, so both tools read the
+    glossary file fresh on every call. A term, once defined, is never
+    overwritten — the first definition wins and later writers are handed it,
+    which keeps independently-written sections from coining rival names for the
+    same thing.
+    """
+
+    async def handle_define(inp: DefineTermInput) -> DefineTermResult:
+        return define_term_in_glossary(glossary_path, inp.term, inp.meaning)
+
+    async def handle_lookup(inp: LookupTermsInput) -> GlossaryView:
+        conventions, terms = load_glossary(glossary_path)
+        if inp.contains:
+            needle = inp.contains.casefold()
+            terms = [e for e in terms if needle in e.term.casefold()]
+        return GlossaryView(conventions=conventions, terms=terms)
+
+    return [
+        build_stage_tool(
+            "define_term",
+            (
+                "Register a term, name, symbol, or abbreviation in the shared "
+                "glossary so the section writers working in parallel use it the "
+                "same way. Call this the moment you coin anything the plan's "
+                "conventions don't already cover. If a sibling already defined "
+                "the term, the tool returns their canonical meaning instead of "
+                "overwriting it — adopt it so the assembled piece stays "
+                "consistent."
+            ),
+            DefineTermInput,
+            handle_define,
+        ),
+        build_stage_tool(
+            "lookup_terms",
+            (
+                "Read the shared glossary: the plan's conventions plus every "
+                "term sibling writers have coined so far. Call this before "
+                "naming a key concept or introducing notation, so you reuse an "
+                "existing term instead of inventing a rival one for the same "
+                "thing."
+            ),
+            LookupTermsInput,
+            handle_lookup,
+        ),
+    ]

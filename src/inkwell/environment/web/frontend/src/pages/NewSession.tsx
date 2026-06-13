@@ -121,6 +121,10 @@ export function NewSession() {
     ? `${format}:${customFormat}`
     : format;
 
+  const selectedProfileLogin = profiles
+    .find((p) => p.name === selectedProfile)
+    ?.integrations.find((i) => i.name === "Claude login");
+
   const handleFiles = useCallback(async (fileList: FileList) => {
     setUploading(true);
     setError(null);
@@ -180,7 +184,7 @@ export function NewSession() {
         sources,
         resolvedFormat,
         refList,
-        selectedProfile,
+        selectedProfile || profiles[0]?.name,
         {
           model: defaultModel.trim() || undefined,
           writer_mode: writerMode || undefined,
@@ -213,6 +217,18 @@ export function NewSession() {
                 </option>
               ))}
             </select>
+            {selectedProfileLogin && !selectedProfileLogin.configured && (
+              <p className="form-note warning" style={{ color: "#c0392b" }}>
+                ⚠ This profile has no separate Claude login — inference will bill
+                the server's default account, not this profile. Add one under
+                Settings → {selectedProfile} → Claude login.
+              </p>
+            )}
+            {selectedProfileLogin?.configured && (
+              <p className="form-note" style={{ opacity: 0.7 }}>
+                Inference billed to this profile's Claude login.
+              </p>
+            )}
           </div>
         )}
 

@@ -29,7 +29,6 @@ function ResumeControls() {
   const [error, setError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileResponse[]>([]);
   const [overrideProfile, setOverrideProfile] = useState("");
-  const [needsProfile, setNeedsProfile] = useState(false);
 
   useEffect(() => {
     fetchProfiles().then(setProfiles).catch(() => {});
@@ -50,11 +49,9 @@ function ResumeControls() {
     try {
       const profileArg = overrideProfile || undefined;
       await resume(resumeStage || undefined, profileArg);
-      setNeedsProfile(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Resume failed";
       if (msg.includes("no profile found") || msg.includes("specify a profile")) {
-        setNeedsProfile(true);
         setError("This session needs a profile to resume. Please select one.");
       } else {
         setError(msg);
@@ -71,7 +68,7 @@ function ResumeControls() {
         <button
           className="btn-primary"
           onClick={handleResume}
-          disabled={resuming || (needsProfile && !overrideProfile)}
+          disabled={resuming || (!hasKnownProfile && !overrideProfile)}
         >
           {resuming ? "Resuming..." : "Resume Session"}
         </button>
@@ -89,13 +86,14 @@ function ResumeControls() {
             ))}
           </select>
         )}
-        {(needsProfile || !hasKnownProfile) && profiles.length > 0 && (
+        {profiles.length > 0 && (
           <select
             value={overrideProfile}
             onChange={(e) => setOverrideProfile(e.target.value)}
             className="resume-stage-select"
+            title="Profile whose account is billed for the resumed run"
           >
-            <option value="">Select profile...</option>
+            <option value="">{hasKnownProfile ? `Keep current (${state.profile})` : "Select profile (account billed)..."}</option>
             {profiles.map((p) => (
               <option key={p.name} value={p.name}>{p.name}</option>
             ))}

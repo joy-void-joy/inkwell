@@ -137,12 +137,12 @@ def spill_field(tool_name: str, label: str, content: str, directory: Path) -> st
     )
 
 
-def spill_oversized_result(
+def spill_oversized_result[T: BaseModel](
     tool_name: str,
     label: str,
-    result: BaseModel,
+    result: T,
     directory: Path,
-) -> BaseModel:
+) -> T:
     """Walk a BaseModel's fields and spill oversized strings to disk.
 
     Returns a copy of the model with large string fields replaced by

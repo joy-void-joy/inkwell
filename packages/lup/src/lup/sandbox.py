@@ -625,6 +625,23 @@ class Sandbox:
                 duration_ms=0,
             )
 
+    def run_shell(self, command: str | list[str]) -> ExecuteCodeResult:
+        """Run a shell command in the container.
+
+        For container-level tooling (system packages, compilers,
+        converters) that the Python REPL can't provide. Blocking; use
+        ``asyncio.to_thread`` from async code.
+        """
+        start = time.monotonic()
+        cmd = command if isinstance(command, list) else ["sh", "-lc", command]
+        result: ExecResult = self.container.exec_run(cmd, demux=False)
+        return ExecuteCodeResult(
+            exit_code=int(result.exit_code or 0),
+            stdout=decode_output(result.output),
+            stderr="",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+
     def run_install(self, packages: list[str]) -> InstallPackageResult:
         """Install Python packages using uv.
 

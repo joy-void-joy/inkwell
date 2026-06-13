@@ -960,9 +960,48 @@ async def do_insert_image(
 
     Returns (drive_file_id, image_url).
     """
+    return await do_insert_image_impl(doc_id, tab_id, host_path, width_pts)
+
+
+async def do_upload_artifact(
+    host_path: str,
+    mime_type: str,
+) -> tuple[str, str]:
+    """Upload a file to Drive with link-sharing. Returns (file_id, view_url)."""
     from pathlib import Path
 
     from googleapiclient.http import MediaFileUpload
+
+    path = Path(host_path)
+    if not path.exists():
+        raise ToolError(f"File not found: {host_path}")
+
+    svc = services()
+    drive = svc.drive_service()
+    file_metadata: dict[str, str] = {"name": path.name, "mimeType": mime_type}
+    media = MediaFileUpload(str(path), mimetype=mime_type, resumable=False)
+    uploaded = await execute_with_retry(
+        drive.files().create(body=file_metadata, media_body=media, fields="id")
+    )
+    file_id: str = uploaded["id"]
+    await execute_with_retry(
+        drive.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+            sendNotificationEmail=False,
+        )
+    )
+    return file_id, f"https://drive.google.com/file/d/{file_id}/view"
+
+
+async def do_insert_image_impl(
+    doc_id: str,
+    tab_id: str,
+    host_path: str,
+    width_pts: int = 400,
+) -> tuple[str, str]:
+    from pathlib import Path
+
     from PIL import Image
 
     path = Path(host_path)
@@ -973,26 +1012,10 @@ async def do_insert_image(
         w, h = img.size
     height_pts = int(width_pts * h / w) if w > 0 else width_pts
 
-    svc = services()
-    drive = svc.drive_service()
-
-    file_metadata: dict[str, str] = {"name": path.name, "mimeType": "image/png"}
-    media = MediaFileUpload(str(path), mimetype="image/png", resumable=False)
-    uploaded = await execute_with_retry(
-        drive.files().create(body=file_metadata, media_body=media, fields="id")
-    )
-    drive_file_id: str = uploaded["id"]
-
-    await execute_with_retry(
-        drive.permissions().create(
-            fileId=drive_file_id,
-            body={"type": "anyone", "role": "reader"},
-            sendNotificationEmail=False,
-        )
-    )
-
+    drive_file_id, _ = await do_upload_artifact(host_path, "image/png")
     image_url = f"https://drive.google.com/uc?id={drive_file_id}"
 
+    svc = services()
     docs = svc.docs_service()
     doc = await execute_with_retry(
         docs.documents().get(documentId=doc_id, includeTabsContent=True)

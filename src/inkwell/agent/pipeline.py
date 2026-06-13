@@ -3495,6 +3495,43 @@ class PipelineRunner:
         article_text = output.content or output.summary
         final_content = await apply_format(article_text, plan.title, chosen_format)
 
+        if chosen_format == "academic" and self.sandbox is not None:
+            from inkwell.agent.tools.google_docs import do_upload_artifact
+            from inkwell.agent.tools.latex import (
+                build_latex_artifacts,
+                latex_artifacts_note,
+                save_artifacts_to,
+            )
+
+            await self.hooks.on_progress("Building LaTeX artifacts (pandoc + tectonic)")
+            artifacts = await build_latex_artifacts(
+                final_content, self.sandbox, title=plan.title
+            )
+            artifacts = save_artifacts_to(
+                artifacts, self.ensure_notes().artifacts_dir / "latex"
+            )
+            links: list[str] = []
+            if artifacts.pdf_path:
+                async with gdoc_nonfatal("upload paper.pdf"):
+                    _, pdf_url = await do_upload_artifact(
+                        artifacts.pdf_path, "application/pdf"
+                    )
+                    links.append(f"Compiled PDF: {pdf_url}")
+            if artifacts.tex_path:
+                async with gdoc_nonfatal("upload paper.tex"):
+                    _, tex_url = await do_upload_artifact(
+                        artifacts.tex_path, "application/x-tex"
+                    )
+                    links.append(f"LaTeX source: {tex_url}")
+            if links:
+                final_content += latex_artifacts_note(artifacts, links)
+                await self.hooks.on_progress("LaTeX: " + "; ".join(links))
+            else:
+                logger.warning("LaTeX build incomplete: %s", artifacts.log[-300:])
+                await self.hooks.on_progress(
+                    "LaTeX build incomplete — shipping markdown only"
+                )
+
         async with gdoc_nonfatal("write final tab"):
             from inkwell.agent.tools.google_docs import write_with_continuation
 

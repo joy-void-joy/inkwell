@@ -1,10 +1,10 @@
 """Tests for pipeline stage prompts and tool list consistency."""
 
 from inkwell.agent.stages import (
-    COHERENCE_EDITOR_PROMPT,
     FACT_CHECKER_PROMPT,
     NARRATIVE_REVIEWER_PROMPT,
     PLANNER_SYSTEM,
+    RECONCILE_PROMPT,
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
     SECTION_WRITER_PROMPT,
@@ -21,7 +21,7 @@ ALL_PROMPTS = {
     "planner": PLANNER_SYSTEM,
     "researcher": RESEARCHER_PROMPT,
     "section_writer": SECTION_WRITER_PROMPT,
-    "coherence_editor": COHERENCE_EDITOR_PROMPT,
+    "reconcile": RECONCILE_PROMPT,
     "narrative_reviewer": NARRATIVE_REVIEWER_PROMPT,
     "fact_checker": FACT_CHECKER_PROMPT,
     "style_reviewer": STYLE_REVIEWER_PROMPT,
@@ -39,7 +39,7 @@ class TestStagePrompts:
         prompts_with_output = {
             "researcher",
             "section_writer",
-            "coherence_editor",
+            "reconcile",
             "narrative_reviewer",
             "fact_checker",
             "style_reviewer",

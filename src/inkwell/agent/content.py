@@ -26,7 +26,6 @@ ContentRole = Literal[
     "draft",
     "feedback",
     "review",
-    "merge_plan",
 ]
 
 

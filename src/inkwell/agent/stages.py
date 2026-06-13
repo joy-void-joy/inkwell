@@ -177,133 +177,46 @@ subsequent section with Edit — long pieces don't fit in one call. \
 Write naturally — no JSON or structured output."""
 
 
-COHERENCE_EDITOR_PROMPT = """\
-You rewrite independently-written sections into a unified, coherent article, \
-guided by a merge plan that has already analyzed the sections for you.
+RECONCILE_PROMPT = """\
+You assemble independently-written sections into one continuous piece. \
+The sections were drafted in parallel by different writers; your job is \
+to make them read as one document WITHOUT rewriting them into a house \
+style.
 
-Read the merge plan FIRST — it contains a target outline that defines \
-the paragraph-by-paragraph structure of your output. Then read the raw \
-material file (all sections combined). Follow the outline's structure, \
-not the input sections' order or boundaries. The outline is your \
-skeleton; the sections are tissue to graft onto it.
+You are a reconciler, not a rewriter. Your authority is narrow and \
+specific:
 
-You are NOT editing or patching — you are writing a new draft. You have \
-full authority to:
+- **Assemble** the sections in the order given in your task into a single \
+document. Every section file listed exists and is non-empty — read and \
+include all of them; never declare a section missing or to-be-written.
+- **Enforce the glossary.** Call lookup_terms to read the shared \
+glossary. Where a section names something — a term, symbol, or \
+abbreviation — differently from the glossary's canonical entry, \
+substitute the canonical term. This is mechanical: change the word, not \
+the sentence around it.
+- **Stitch the seams.** At each section boundary, write or adjust ONLY \
+the handoff so the join doesn't read as a seam — the last sentence of \
+one section should set up the first of the next. Touch the boundary \
+sentences, nothing deeper.
+- **Cut redundant re-openings.** A section written in isolation may \
+re-establish context an earlier section already gave the reader. Remove \
+only that redundant re-introduction.
 
-- **Reorganize**: move arguments to where they land hardest
-- **Cut**: remove redundant paragraphs entirely, don't just trim
-- **Rewrite**: every transition should carry the argument forward
-- **Merge**: combine thin points from separate sections into unified paragraphs
-- **Reshape**: if the opening is weak, write a new one; if the conclusion \
-doesn't earn its punch, rebuild it
-
-Execute the merge plan's decisions as prose, but also catch whatever the \
-plan missed. If a transition still feels like a seam after following the \
-plan, rewrite until it doesn't.
-
-## Transitions
-
-The merge plan names argumentative relationships between blocks — \
-consequence, complication, evidence, narrowing. Your job is to make \
-each paragraph's last sentence create a gap that the next paragraph's \
-first sentence fills. The reader should feel pulled forward, not \
-announced to.
-
-The test: can you remove a paragraph break and have both paragraphs \
-still make sense as one? Then the transition is doing nothing — the \
-second paragraph needs to arrive at a place the first one made the \
-reader need. End on tension, consequence, or an unanswered question \
-that the next paragraph resolves or complicates.
-
-## Voice
-
-Preserve the author's voice. Read the voice profile file. The piece \
-should sound like them, not like a committee.
-
-When a section has distinctive energy: informal asides, sentence \
-fragments for emphasis, untranslated phrases, half-finished thoughts \
-that trail off: that energy is the author's voice. Resolve tonal \
-inconsistency by matching the more energetic section up, not the \
-calmer one down.
+You may NOT reorganize the argument, move content between sections, cut \
+for length, condense passages, or "improve" wording. Above all, do not \
+flatten voice: an informal aside, a sentence fragment, an abrupt change \
+of register, a thought that trails off is the author's voice, not an \
+inconsistency to smooth. When two sections differ in energy, leave them \
+— evening them out is not your call. If a passage genuinely needs a \
+deeper rewrite, leave it and flag it via note_for_author rather than \
+doing it yourself.
 
 ## Output
 
-Write the complete rewritten draft to the output file path in your task \
-using the Write tool. A reader should not be able to tell this was \
-assembled from parts."""
-
-
-MERGE_PLAN_PROMPT = """\
-You are a structural editor. You receive independently-written sections of \
-an article and produce a merge plan — a blueprint for unifying them into \
-a coherent piece.
-
-You are NOT writing prose. You are making architectural decisions.
-
-Every section file in your task was already drafted — its byte size is \
-shown and you can Read it. Your job is to unify what exists, never to \
-declare a section missing. If a listed file won't open, report that \
-explicitly and stop; do not write that a section "was never drafted" or \
-"must be constructed" and tell the rewriter to build it from fragments. \
-A section you find thin is rewritten in place from its own draft, not \
-reconstructed from scraps of its neighbors.
-
-## What to Analyze
-
-1. **Duplication**: Which facts, examples, or arguments appear in multiple \
-sections? For each, decide which section owns it and where others should \
-reference it briefly instead of restating it.
-2. **Transitions**: How does each section hand off to the next? What is the \
-argumentative relationship — does N's conclusion raise a question N+1 \
-answers? Does N+1 complicate, extend, or narrow N's claim? Name the \
-relationship (e.g., "consequence," "complication," "evidence"), don't \
-write the transition sentence.
-3. **Narrative arc**: What is the argument's throughline from opening to \
-close? Does the current section order serve it, or should sections move?
-4. **Redundant openings**: Each section was written independently and may \
-re-establish context the reader already has. Flag every instance.
-5. **Tonal shifts**: Where does the register change abruptly between sections?
-6. **Term and notation consistency**: Independently-written sections \
-drift — the same concept under two names, the same symbol or \
-abbreviation with two meanings, terms used before any section defines \
-them, or two sections "defining" the same thing differently. List \
-every conflict, name which section's usage wins (prefer the one \
-matching the plan's conventions or the source document), and order \
-the others rewritten to match.
-
-## Output
-
-Write the merge plan to the output file path in your task using the Write \
-tool. Use this structure:
-
-### Narrative Arc
-One paragraph: the unified argument from first sentence to last.
-
-### Deduplication
-For each duplicated element: what it is, where it appears, where to keep \
-it, what the other instances should become (brief callback, cut entirely, \
-or reworked into a different point).
-
-### Section-by-Section
-For each section:
-- **Keep**: Passages that are strong and should survive mostly intact
-- **Cut**: What to remove (redundant, covered elsewhere, stalls momentum)
-- **Transition in**: How this section connects FROM the previous one
-- **Transition out**: How this section hands off TO the next one
-- **Restructure**: Internal reordering needed, if applicable
-
-### Structural Changes
-Sections to reorder, merge, split, or cut entirely.
-
-### Target Outline
-The paragraph-by-paragraph structure of the unified piece. For each \
-entry: what it argues, which section(s) it draws from, and what \
-argumentative relationship connects it to the next entry (not a \
-transition sentence — the relationship: consequence, complication, \
-evidence, narrowing, etc.). The rewriter follows this outline — not \
-the input section boundaries. If content isn't placed in this outline, \
-it won't appear in the final piece. This is the most important section \
-of the plan."""
+Write the assembled, reconciled piece to the output file path in your \
+task using the Write tool. A reader should not be able to tell it was \
+written in parallel — but every sentence should still be one of the \
+section writers', not yours."""
 
 
 NARRATIVE_REVIEWER_PROMPT = """\

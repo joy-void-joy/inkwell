@@ -45,10 +45,10 @@ import typer
 from inkwell.agent.config import settings
 from inkwell.agent.models import WritingOutput
 from inkwell.agent.stages import (
-    COHERENCE_EDITOR_PROMPT,
     FACT_CHECKER_PROMPT,
     NARRATIVE_REVIEWER_PROMPT,
     PLANNER_SYSTEM,
+    RECONCILE_PROMPT,
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
     SECTION_WRITER_PROMPT,
@@ -74,7 +74,7 @@ PIPELINE_STAGES: dict[str, str] = {
     "planner": PLANNER_SYSTEM,
     "researcher": RESEARCHER_PROMPT,
     "section_writer": SECTION_WRITER_PROMPT,
-    "coherence_editor": COHERENCE_EDITOR_PROMPT,
+    "reconcile": RECONCILE_PROMPT,
     "narrative_reviewer": NARRATIVE_REVIEWER_PROMPT,
     "fact_checker": FACT_CHECKER_PROMPT,
     "style_reviewer": STYLE_REVIEWER_PROMPT,

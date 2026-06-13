@@ -58,14 +58,13 @@ from inkwell.agent.watcher import (
 from inkwell.agent.session import AuthorComment, WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
-    COHERENCE_EDITOR_PROMPT,
     COMMENT_CLASSIFIER_PROMPT,
     COVERAGE_REVIEWER_PROMPT,
     FACT_CHECKER_PROMPT,
-    MERGE_PLAN_PROMPT,
     NARRATIVE_REVIEWER_PROMPT,
     ORCHESTRATOR_PROMPT,
     PLANNER_SYSTEM,
+    RECONCILE_PROMPT,
     REFINER_SYSTEM,
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
@@ -1314,75 +1313,7 @@ async def write_full_draft(
     return output_path.read_text(encoding="utf-8")
 
 
-async def plan_merge(
-    section_draft_paths: dict[str, Path],
-    *,
-    notes: PipelineNotes,
-    output_path: Path,
-    voice_file_paths: list[str] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
-    source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
-    compute_tool_names: list[str] | None = None,
-    trace_logger: TraceLogger | None = None,
-    cost_accumulator: CostAccumulator | None = None,
-) -> Path:
-    """Phase 1 of merge: produce a structural plan (deduplication, transitions, cuts)."""
-
-    def inventory_line(title: str, path: Path) -> str:
-        size = path.stat().st_size if path.exists() else 0
-        return f"- {title} ({size} bytes on disk): {path}"
-
-    drafts_list = "\n".join(
-        inventory_line(title, path) for title, path in section_draft_paths.items()
-    )
-
-    plan_path = notes.artifact_path("plan")
-    voice_manifest = ContentManifest()
-    add_voice_refs(voice_manifest, voice_file_paths or [])
-    voice_block = f"{voice_manifest.render()}\n\n" if voice_file_paths else ""
-    task = (
-        f"Analyze these independently-written sections and produce a merge plan.\n\n"
-        f"Section draft files (every one already drafted; byte size shown):\n"
-        f"{drafts_list}\n"
-        f"Article plan: {plan_path}\n\n"
-        f"{voice_block}"
-        f"{directions_block(notes)}"
-        f"Read each section draft and the article plan. Identify duplication, "
-        f"missing transitions, redundant openings, and structural issues.\n"
-        f"Every file listed above exists and is non-empty — Read and account "
-        f"for all of them. If a file will not open, say so explicitly; never "
-        f"treat a listed section as 'not drafted' or 'to be constructed'.\n"
-        f"Your structural decisions must preserve the author's voice — read "
-        f"the voice files before planning cuts, and never dedupe away an "
-        f"author's deliberate repetition or flatten a distinctive register.\n"
-        f"Use list_research to browse all findings, then read_finding for details on any section.\n\n"
-        f"Write the merge plan to: {output_path}"
-    )
-
-    all_servers = {**(source_servers or {}), **(compute_servers or {})}
-    all_tools = (source_tool_names_list or []) + (compute_tool_names or [])
-
-    await query(
-        task,
-        model=stage_model("merge"),
-        system_prompt=MERGE_PLAN_PROMPT,
-        tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
-        mcp_servers=all_servers,
-        allowed_tools=all_tools,
-        trace_logger=trace_logger,
-        prefix="[merge:plan] ",
-        cost_accumulator=cost_accumulator,
-    )
-
-    if not output_path.exists():
-        raise PipelineError("Merge planner produced no output")
-    return output_path
-
-
-async def merge_sections(
+async def reconcile_sections(
     section_draft_paths: dict[str, Path],
     *,
     notes: PipelineNotes,
@@ -1391,6 +1322,8 @@ async def merge_sections(
     feedback_path: Path | None = None,
     target_format: str = "auto",
     author_notes: list[AuthorNote] | None = None,
+    glossary_servers: dict[str, McpServerConfig] | None = None,
+    glossary_tool_names: list[str] | None = None,
     source_servers: dict[str, McpServerConfig] | None = None,
     source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
@@ -1399,42 +1332,35 @@ async def merge_sections(
     heartbeat: HeartbeatCallback | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> MergedDraft:
-    """Stage 4: Two-phase merge of independently-written sections.
+    """Stage 4: Assemble parallel sections into one draft via a voice-safe pass.
 
-    Phase 1: Structural plan — identify duplication, plan transitions, decide cuts.
-    Phase 2: Rewrite — execute the plan as unified prose.
+    Enforces the shared glossary, stitches seams, and cuts redundant openings —
+    no structural rewrite, no voice smoothing. There is no separate planning
+    phase: the glossary already carries the cross-section term decisions.
     """
-    merge_plan_path = notes.artifacts_dir / "merge_plan.md"
-    await plan_merge(
-        section_draft_paths,
-        notes=notes,
-        output_path=merge_plan_path,
-        voice_file_paths=voice_file_paths,
-        source_servers=source_servers,
-        source_tool_names_list=source_tool_names_list,
-        compute_servers=compute_servers,
-        compute_tool_names=compute_tool_names,
-        trace_logger=trace_logger,
-        cost_accumulator=cost_accumulator,
-    )
-
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("merge", note_collector)
-    merge_servers = {
+    reconcile_servers = {
         **note_servers,
+        **(glossary_servers or {}),
         **(source_servers or {}),
         **(compute_servers or {}),
     }
-    merge_tools = (
-        note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
+    reconcile_tools = (
+        note_tool_names
+        + (glossary_tool_names or [])
+        + (source_tool_names_list or [])
+        + (compute_tool_names or [])
     )
 
     plan_path = notes.artifact_path("plan")
-    manifest = ContentManifest()
-    manifest.add(
-        merge_plan_path, "merge_plan", "Merge plan", instruction="read this FIRST"
+    ordered = list(section_draft_paths.items())
+    drafts_list = "\n".join(
+        f"{i + 1}. {title}: {path}" for i, (title, path) in enumerate(ordered)
     )
-    for title, path in section_draft_paths.items():
+
+    manifest = ContentManifest()
+    for title, path in ordered:
         manifest.add(
             path, "draft", f"Section: {title}", instruction="read each individually"
         )
@@ -1445,30 +1371,34 @@ async def merge_sections(
         manifest.add(feedback_path, "feedback", "Author feedback")
 
     format_guidance = get_format_guidance(target_format)
-    task = f"Rewrite these sections into a unified piece.\n\n{manifest.render()}\n\n"
+    task = (
+        f"Assemble these independently-written sections into one continuous "
+        f"piece, in this order:\n{drafts_list}\n\n"
+        f"{manifest.render()}\n\n"
+    )
     task += directions_block(notes)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
-        f"Read the merge plan FIRST — it contains a target outline that "
-        f"defines your output's structure paragraph by paragraph. Then read "
-        f"each section draft file individually. Follow the outline, not the "
-        f"input section boundaries. Read each voice and style reference file "
-        f"to match the author's voice and apply hard editing rules.\n\n"
-        f"Write the complete merged draft to: {output_path}"
+        f"Call lookup_terms to read the shared glossary, then read each "
+        f"section draft in order. Assemble them into one document: enforce the "
+        f"glossary's canonical terms, stitch the seams between sections, and "
+        f"cut only redundant re-openings. Do not rewrite, reorganize, or "
+        f"smooth the author's voice.\n\n"
+        f"Write the assembled piece to: {output_path}"
     )
 
     await query(
         task,
         model=stage_model("merge"),
-        system_prompt=COHERENCE_EDITOR_PROMPT,
+        system_prompt=RECONCILE_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        mcp_servers=merge_servers,
-        allowed_tools=merge_tools,
+        mcp_servers=reconcile_servers,
+        allowed_tools=reconcile_tools,
         trace_logger=trace_logger,
-        prefix="[merge:rewrite] ",
+        prefix="[reconcile] ",
         heartbeat=heartbeat,
         cost_accumulator=cost_accumulator,
     )
@@ -1476,7 +1406,7 @@ async def merge_sections(
     if output_path.exists():
         content = output_path.read_text(encoding="utf-8")
     else:
-        raise PipelineError("Coherence editor produced no output")
+        raise PipelineError("Reconciler produced no output")
 
     return MergedDraft(content=content, changes_made=[])
 
@@ -3614,15 +3544,18 @@ class PipelineRunner:
             await self.save_snapshot()
             return
 
-        await self.announce_stage("merge", "Merging sections into coherent draft")
+        await self.announce_stage("merge", "Reconciling sections into one draft")
         self.state.set_stage("merging")
         await self.update_overview(active_stage="merge")
         feedback_path = await self.prepare_feedback("merge")
         notes = self.ensure_notes()
+        glossary_servers, glossary_tool_names = build_glossary_server(
+            notes.artifacts_dir / "glossary.json"
+        )
 
         async def merge_heartbeat(elapsed: float) -> None:
             mins, secs = divmod(int(elapsed), 60)
-            await self.hooks.on_progress(f"Merging... ({mins}m{secs:02d}s elapsed)")
+            await self.hooks.on_progress(f"Reconciling... ({mins}m{secs:02d}s elapsed)")
 
         section_paths = {
             title: self.get_draft_path(title)
@@ -3647,7 +3580,7 @@ class PipelineRunner:
         )
         await syncer.start()
         try:
-            merged = await merge_sections(
+            merged = await reconcile_sections(
                 section_paths,
                 notes=notes,
                 output_path=output_path,
@@ -3655,6 +3588,8 @@ class PipelineRunner:
                 feedback_path=feedback_path,
                 target_format=self.effective_format,
                 author_notes=self.author_notes,
+                glossary_servers=glossary_servers,
+                glossary_tool_names=glossary_tool_names,
                 source_servers=self.source_servers,
                 source_tool_names_list=self.source_tool_names,
                 compute_servers=self.compute_servers,

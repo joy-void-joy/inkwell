@@ -67,6 +67,7 @@ from inkwell.agent.stages import (
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
     SECTION_WRITER_PROMPT,
+    SINGLE_WRITER_PROMPT,
     STYLE_REVIEWER_PROMPT,
     get_format_guidance,
 )
@@ -1076,6 +1077,90 @@ async def write_section(
         word_count=len(content.split()),
         questions_for_author=note_collector,
     )
+
+
+async def write_full_draft(
+    *,
+    notes: PipelineNotes,
+    output_path: Path,
+    voice_file_paths: list[str] | None = None,
+    feedback_path: Path | None = None,
+    target_format: str = "auto",
+    servers: dict[str, McpServerConfig] | None = None,
+    author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
+    trace_logger: TraceLogger | None = None,
+    heartbeat: HeartbeatCallback | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> str:
+    """Write the whole piece with one writer (writer_mode='single').
+
+    One context drafts every section in order, so notation, terminology,
+    and framing stay consistent by construction — there is no merge stage.
+    """
+    if servers is None:
+        servers = build_research_servers()
+
+    note_collector = author_notes if author_notes is not None else []
+    note_servers, note_tool_names = build_note_server("write", note_collector)
+    all_servers = {
+        **servers,
+        **note_servers,
+        **(source_servers or {}),
+        **(compute_servers or {}),
+    }
+    all_tools = (
+        research_tool_names()
+        + note_tool_names
+        + (source_tool_names_list or [])
+        + (compute_tool_names or [])
+    )
+
+    manifest = ContentManifest()
+    manifest.add(notes.artifact_path("plan"), "plan", "Article plan")
+    add_source_refs(manifest, notes)
+    add_voice_refs(manifest, voice_file_paths or [])
+    if feedback_path:
+        manifest.add(feedback_path, "feedback", "Author feedback")
+
+    format_guidance = get_format_guidance(target_format)
+    task = (
+        f"Write the complete piece — every section of the plan, in order, "
+        f"as one coherent document.\n\n"
+        f"{manifest.render()}\n"
+        f"Use list_research to browse all research findings, then "
+        f"read_finding for details.\n\n"
+    )
+    if format_guidance:
+        task += f"{format_guidance}\n\n"
+    task += (
+        f"Write the draft to: {output_path}\n\n"
+        f"Build it incrementally: Write the file with the opening, then "
+        f"append each subsequent section with Edit. If you have questions "
+        f"for the author, call note_for_author."
+    )
+
+    await query(
+        task,
+        model=stage_model("write"),
+        system_prompt=SINGLE_WRITER_PROMPT,
+        tools=BUILTIN_WRITE_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
+        prefix="[write] ",
+        trace_logger=trace_logger,
+        heartbeat=heartbeat,
+        cost_accumulator=cost_accumulator,
+    )
+
+    if not output_path.exists():
+        raise PipelineError("Single writer produced no output (draft not written)")
+    return output_path.read_text(encoding="utf-8")
 
 
 async def plan_merge(
@@ -2897,6 +2982,10 @@ class PipelineRunner:
         if plan is None or research is None:
             raise PipelineError("Cannot write without plan and research")
 
+        if config_mod.settings.writer_mode == "single":
+            await self.write_single_draft()
+            return
+
         await self.announce_stage(
             "write",
             f"Writing {len(plan.sections)} sections in parallel",
@@ -2996,10 +3085,77 @@ class PipelineRunner:
         await self.save_snapshot()
         await self.update_overview()
 
+    async def write_single_draft(self) -> None:
+        """writer_mode='single': one writer drafts the whole piece, no merge."""
+        await self.announce_stage("write", "Writing the full draft (single writer)")
+        self.state.set_stage("writing")
+        await self.update_overview(active_stage="write")
+        feedback_path = await self.prepare_feedback("write")
+        notes = self.ensure_notes()
+        output_path = self.get_draft_path("merged")
+
+        if "Draft" not in self.known_tabs:
+            self.known_tabs["Draft"] = await do_create_tab(
+                self.doc_id, "Draft", session_state=self.state
+            )
+        self.draft_tab_id = self.known_tabs["Draft"]
+
+        async def write_heartbeat(elapsed: float) -> None:
+            mins, secs = divmod(int(elapsed), 60)
+            await self.hooks.on_progress(f"Writing... ({mins}m{secs:02d}s elapsed)")
+
+        syncer = DraftSyncer(
+            self.doc_id,
+            self.draft_tab_id,
+            output_path,
+            tab_name="Draft",
+            session_state=self.state,
+            interval=8.0,
+        )
+        await syncer.start()
+        try:
+            content = await write_full_draft(
+                notes=notes,
+                output_path=output_path,
+                voice_file_paths=self.snapshot.voice_file_paths,
+                feedback_path=feedback_path,
+                target_format=self.effective_format,
+                servers=self.research_servers,
+                author_notes=self.author_notes,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                compute_servers=self.compute_servers,
+                compute_tool_names=self.compute_tool_names,
+                trace_logger=self.trace_logger,
+                heartbeat=write_heartbeat,
+                cost_accumulator=self.cost_accumulator,
+            )
+        finally:
+            await syncer.stop()
+
+        await self.post_author_notes()
+        self.snapshot.merged = MergedDraft(
+            content=content,
+            changes_made=["written in one pass by a single writer"],
+        )
+        self.snapshot.stage = "write"
+        await self.save_snapshot()
+        assert self.tabs is not None
+        await self.tabs.record_from_doc(self.draft_tab_id, "Draft")
+        await self.hooks.on_message(
+            "write", f"Full draft complete ({len(content.split())} words)"
+        )
+        await self.update_overview()
+
     async def stage_merge(self) -> None:
         plan = self.snapshot.plan
         if plan is None:
             raise PipelineError("Cannot merge without a plan")
+
+        if config_mod.settings.writer_mode == "single" and self.snapshot.merged:
+            self.snapshot.stage = "merge"
+            await self.save_snapshot()
+            return
 
         await self.announce_stage("merge", "Merging sections into coherent draft")
         self.state.set_stage("merging")

@@ -103,6 +103,20 @@ active_block_callback: contextvars.ContextVar[BlockCallback | None] = (
     contextvars.ContextVar("active_block_callback", default=None)
 )
 
+client_env: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.ContextVar(
+    "client_env", default=None
+)
+"""Environment variables injected into every spawned client subprocess.
+
+The Agent SDK launches the ``claude`` CLI as a subprocess that authenticates
+from its own environment (``CLAUDE_CONFIG_DIR``, ``ANTHROPIC_*``), so the
+account billed for inference is decided by that env — not by anything passed
+to ``query()``. Set this at the root of a session task to route the subprocess
+to session-specific credentials (e.g. a per-profile ``CLAUDE_CONFIG_DIR``).
+``build_client`` merges it into ``ClaudeAgentOptions.env``; each asyncio task
+tree gets its own contextvar copy, so concurrent sessions don't race.
+"""
+
 
 class TokenUsage(TypedDict, total=False):
     """Token usage from Claude API responses."""
@@ -528,6 +542,9 @@ async def build_client(
         )
 
     options.env.setdefault("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "128000")
+
+    for key, value in (client_env.get() or {}).items():
+        options.env[key] = value
 
     async with ClaudeSDKClient(options=options) as client:
         yield client

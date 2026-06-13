@@ -787,9 +787,11 @@ descriptive headings). Each part covers one topic. Headings should \
 tell the reader what the section concludes, not what it discusses. \
 "The Open-Weight Window Is Closing" is better than "Background."
 
-3. **Bold topic sentences.** The first sentence of every paragraph \
-should be in bold and should state the paragraph's main claim. A \
-reader skimming only the bold sentences should get the full argument.
+3. **Bold the load-bearing claims, sparingly.** Bold the few key \
+claims and data points a skimmer must catch. Do not bold the first \
+sentence of every paragraph or open a run of paragraphs with parallel \
+bolded labels — uniform bolding reads as a template and buries the \
+signal it is meant to surface.
 
 4. **Bullet points for lists and action items.** When you have 3+ \
 parallel items, use bullets. Never bury action items in prose.
@@ -1016,6 +1018,27 @@ FORMAT_KEYS: list[str] = [
 ]
 
 
+VOICE_PRECEDENCE_NOTE = """\
+## The author's voice outranks this format guidance
+
+The structure above is the format's default shape. The author's voice \
+profile and the plan's voice_notes outrank every tonal and formatting \
+instruction here. Where this format's defaults fight how the author \
+actually writes — their self-implication, hedges, asides, first-person \
+reasoning, sentence rhythm, register — keep the author. This guidance \
+shapes structure; it never licenses flattening a distinctive author into \
+a house style. A recommendation delivered in the author's own prose \
+always beats the same content forced into a bolded, segmented template."""
+
+
 def get_format_guidance(target_format: str) -> str:
-    """Return structural guidance for a target format, or empty string."""
-    return FORMAT_GUIDANCE.get(target_format, "")
+    """Return structural guidance for a target format, or empty string.
+
+    Format guidance always defers to the author's voice — the precedence
+    note travels with every non-empty block so no stage reads the structural
+    rules without the reminder that the voice profile outranks them.
+    """
+    guidance = FORMAT_GUIDANCE.get(target_format, "")
+    if not guidance:
+        return ""
+    return f"{guidance}\n\n{VOICE_PRECEDENCE_NOTE}"

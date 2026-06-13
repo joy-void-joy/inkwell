@@ -56,6 +56,7 @@ class WritingSessionState:
         self.directions_tab_id: str = ""
         self.last_directions_content: str = ""
         self.shared_dir: Path | None = None
+        self.agent_ids_path: Path | None = None
 
     def set_doc(self, doc_id: str, doc_url: str) -> None:
         self.doc_id = doc_id
@@ -95,7 +96,7 @@ class WritingSessionState:
             result = await execute_with_retry(
                 drive.comments().list(
                     fileId=self.doc_id,
-                    fields="comments(id,replies/content,resolved)",
+                    fields="comments(id,replies(id,content),resolved)",
                     pageSize=100,
                 )
             )
@@ -112,9 +113,13 @@ class WritingSessionState:
 
                 is_agent_comment = comment_id in self.agent_comment_ids
                 reply_list = item.get("replies", [])
-                has_replies = isinstance(reply_list, list) and bool(reply_list)
+                has_author_reply = isinstance(reply_list, list) and any(
+                    isinstance(r, dict)
+                    and str(r.get("id", "")) not in self.agent_comment_ids
+                    for r in reply_list
+                )
 
-                if has_replies and is_agent_comment:
+                if has_author_reply and is_agent_comment:
                     unread += 1
                 elif not is_agent_comment:
                     unread += 1
@@ -124,8 +129,27 @@ class WritingSessionState:
             logger.warning("Failed to check unread comments", exc_info=True)
             return 0
 
+    def attach_agent_ids_registry(self, path: Path) -> None:
+        """Persist agent-authored comment/reply IDs across process restarts.
+
+        Snapshots can lag behind comment posting; a resumed process that
+        trusts only the snapshot will re-ingest the agent's own comments
+        as author feedback. The registry file is append-only and survives
+        crashes between snapshot saves.
+        """
+        self.agent_ids_path = path
+        if path.exists():
+            self.agent_comment_ids.update(
+                line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+
     def mark_agent_comment(self, comment_id: str) -> None:
         self.agent_comment_ids.add(comment_id)
+        if self.agent_ids_path is not None and comment_id:
+            with self.agent_ids_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"{comment_id}\n")
 
     def mark_comments_seen(self, comment_ids: list[str]) -> None:
         self.seen_comment_ids.update(comment_ids)
@@ -144,7 +168,7 @@ class WritingSessionState:
             result = await execute_with_retry(
                 drive.comments().list(
                     fileId=self.doc_id,
-                    fields="comments(id,content,quotedFileContent/value,replies/content,resolved)",
+                    fields="comments(id,content,quotedFileContent/value,replies(id,content),resolved)",
                     pageSize=100,
                 )
             )
@@ -169,7 +193,7 @@ class WritingSessionState:
                 drive.comments()
                 .list(
                     fileId=self.doc_id,
-                    fields="comments(id,content,quotedFileContent/value,replies/content,resolved)",
+                    fields="comments(id,content,quotedFileContent/value,replies(id,content),resolved)",
                     pageSize=100,
                 )
                 .execute()
@@ -195,7 +219,7 @@ class WritingSessionState:
                 drive.comments()
                 .list(
                     fileId=self.source_doc_id,
-                    fields="comments(id,content,quotedFileContent/value,replies/content,resolved)",
+                    fields="comments(id,content,quotedFileContent/value,replies(id,content),resolved)",
                     pageSize=100,
                 )
                 .execute()
@@ -271,13 +295,19 @@ class WritingSessionState:
 
             is_agent_comment = comment_id in self.agent_comment_ids
             reply_list = item.get("replies", [])
-            has_replies = isinstance(reply_list, list) and bool(reply_list)
+            author_replies = (
+                [
+                    r
+                    for r in reply_list
+                    if isinstance(r, dict)
+                    and str(r.get("id", "")) not in self.agent_comment_ids
+                ]
+                if isinstance(reply_list, list)
+                else []
+            )
 
-            if has_replies:
-                last_reply = reply_list[-1]
-                if not isinstance(last_reply, dict):
-                    continue
-                reply_text = str(last_reply.get("content", ""))
+            if author_replies:
+                reply_text = str(author_replies[-1].get("content", ""))
             elif not is_agent_comment:
                 reply_text = ""
             else:

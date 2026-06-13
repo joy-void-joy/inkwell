@@ -139,6 +139,7 @@ def create_watcher_tools(
                 session_state.doc_id,
                 inp.comment_id,
                 reply_text,
+                session_state=session_state,
             )
         except (RuntimeError, OSError):
             logger.warning("Failed to acknowledge comment %s", inp.comment_id)

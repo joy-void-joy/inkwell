@@ -1887,6 +1887,8 @@ class PipelineRunner:
         from lup.content_safety import configure_content_safety
 
         configure_content_safety(self.notes.base_dir / "content")
+        if self.state.agent_ids_path is None:
+            self.state.attach_agent_ids_registry(self.notes.base_dir / "agent_ids.txt")
         return self.notes
 
     def start_sandbox(self) -> None:
@@ -2033,7 +2035,8 @@ class PipelineRunner:
             self.existing_doc_id = snapshot.output.google_doc_id
 
         self.state.seen_comment_ids = set(snapshot.seen_comment_ids)
-        self.state.agent_comment_ids = set(snapshot.agent_comment_ids)
+        self.state.agent_comment_ids.update(snapshot.agent_comment_ids)
+        self.ensure_notes()
         self.state.seen_source_comment_ids = set(snapshot.seen_source_comment_ids)
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
@@ -2167,7 +2170,7 @@ class PipelineRunner:
 
         notes = self.ensure_notes()
         for fb in gdoc:
-            await notes.add_terminal_input(fb)
+            await notes.add_terminal_input(fb, tag="gdoc")
         for fb in terminal:
             await self.classify_and_record_terminal(fb)
 

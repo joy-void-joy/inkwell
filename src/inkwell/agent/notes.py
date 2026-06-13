@@ -104,15 +104,20 @@ class PipelineNotes:
             path = self.comments_dir / f"{self.comment_counter:04d}.json"
             path.write_text(classified.model_dump_json(indent=2), encoding="utf-8")
 
-    async def add_terminal_input(self, text: str) -> None:
-        """Write terminal input as a clarification-level note."""
+    async def add_terminal_input(self, text: str, *, tag: str = "terminal") -> None:
+        """Write author input as a clarification-level note.
+
+        ``tag`` records the channel the input arrived through (``terminal``
+        for typed input, ``gdoc`` for Google Doc comments) so downstream
+        stages see true provenance.
+        """
         async with self.lock:
             self.terminal_counter += 1
             comment = ClassifiedComment(
-                comment_id=f"terminal-{self.terminal_counter}",
+                comment_id=f"{tag}-{self.terminal_counter}",
                 content=text,
                 impact="stage_local",
-                tags=["terminal"],
+                tags=[tag],
             )
             path = self.terminal_dir / f"{self.terminal_counter:04d}.json"
             path.write_text(comment.model_dump_json(indent=2), encoding="utf-8")

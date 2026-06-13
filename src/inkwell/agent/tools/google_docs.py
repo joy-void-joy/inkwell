@@ -895,6 +895,7 @@ async def do_reply_to_comment(
     doc_id: str,
     comment_id: str,
     reply_text: str,
+    session_state: WritingSessionState | None = None,
 ) -> str:
     """Post a reply to an existing comment. Returns reply ID."""
     svc = services()
@@ -907,7 +908,12 @@ async def do_reply_to_comment(
             fields="id",
         )
     )
-    return str(result.get("id", ""))
+    reply_id = str(result.get("id", ""))
+
+    if session_state is not None:
+        session_state.mark_agent_comment(reply_id)
+
+    return reply_id
 
 
 async def do_read_tab(

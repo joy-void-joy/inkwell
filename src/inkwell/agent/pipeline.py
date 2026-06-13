@@ -251,6 +251,26 @@ def slugify(label: str) -> str:
     return slug.strip("-")[:80]
 
 
+AUTHOR_MARKERS = ("TODO", "FIXME", "BOTEC", "XXX")
+
+
+def extract_author_markers(text: str) -> list[str]:
+    """Pull inline author markers (TODO/FIXME/BOTEC/...) out of source text.
+
+    Authors leave these in drafts to flag unfinished work — a number to fill,
+    an estimate to run, a passage to rewrite. They must surface as explicit
+    tasks; otherwise the pipeline treats the surrounding prose as finished and
+    the flagged work silently disappears.
+    """
+    found: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("#-*>").strip()
+        upper = line.upper()
+        if any(marker in upper for marker in AUTHOR_MARKERS) and line not in found:
+            found.append(line)
+    return found
+
+
 def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
     """List the session's authoritative source documents in a stage manifest."""
     for doc in load_source_registry(registry_path_for(notes.artifacts_dir)):
@@ -2475,6 +2495,10 @@ class PipelineRunner:
                 self.known_tabs[tab_name] = tid
 
         self.overview_tab_id = self.known_tabs["Overview"]
+        if "Draft" in self.known_tabs:
+            self.draft_tab_id = self.known_tabs["Draft"]
+        if "Final" in self.known_tabs:
+            self.final_tab_id = self.known_tabs["Final"]
         self.tabs = TabTracker(self.doc_id)
 
         async with gdoc_nonfatal("write initial overview"):
@@ -2711,9 +2735,14 @@ class PipelineRunner:
 
         lines: list[str] = ["# Author Directions", ""]
         lines.append(
-            "Pre-existing comments from the source document. "
-            "Treat these as author directions that should guide "
-            "the article's structure, tone, and content.\n"
+            "Pre-existing comments from the source document. They come from "
+            "the document's author and from reviewers, who often disagree. A "
+            "reviewer's comment is input, not a settled decision: when a "
+            "thread has a reply, the reply is the later word and resolves it "
+            "— follow the reply over the comment it answers. Never cut or "
+            "rewrite something a reviewer flags if the author defends keeping "
+            "it in a reply. Weigh the author's own stated positions above any "
+            "single reviewer's suggestion.\n"
         )
 
         for comment in comments:
@@ -2819,6 +2848,8 @@ class PipelineRunner:
         registry_candidates = [
             s for s in self.sources if Path(s).expanduser().is_file()
         ]
+        if conversation.strip():
+            registry_candidates.append(str(output_path))
         registered = await build_source_registry_async(
             registry_candidates, notes.artifacts_dir
         )
@@ -2833,6 +2864,23 @@ class PipelineRunner:
 
         self.snapshot.conversation = conversation
         self.snapshot.source_file_paths = all_source_paths
+
+        markers = extract_author_markers(conversation)
+        if markers:
+            marker_block = "\n".join(f"- {m}" for m in markers)
+            self.snapshot.author_instructions = (
+                f"{self.snapshot.author_instructions}\n\n"
+                f"Unresolved markers the author left in the source — resolve "
+                f"each (fill the number, run the estimate, rewrite the passage) "
+                f"or surface it as a question, never silently drop it:\n"
+                f"{marker_block}"
+            ).strip()
+            for m in markers:
+                self.state.add_question(f"Unresolved source marker: {m}")
+            await self.hooks.on_progress(
+                f"Surfaced {len(markers)} unresolved author marker(s) from the source"
+            )
+
         self.snapshot.stage = "extract"
         await notes.save_content(
             "conversation",
@@ -3554,6 +3602,12 @@ class PipelineRunner:
 
         draft_path = self.get_draft_path("merged")
         output_path = self.get_draft_path("final")
+
+        if "Draft" not in self.known_tabs:
+            self.known_tabs["Draft"] = await do_create_tab(
+                self.doc_id, "Draft", session_state=self.state
+            )
+        self.draft_tab_id = self.known_tabs["Draft"]
 
         syncer = DraftSyncer(
             self.doc_id,

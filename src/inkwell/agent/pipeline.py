@@ -136,10 +136,12 @@ from inkwell.agent.tools.stage_outputs import (
     ResearchCollector,
     ReviewCollector,
     make_assumptions_tools,
+    make_glossary_tools,
     make_note_tool,
     make_plan_tools,
     make_research_output_tools,
     make_review_output_tools,
+    seed_glossary,
 )
 from inkwell.agent.tools.query_artifacts import make_query_tools
 from inkwell.agent.tools.voice import (
@@ -689,6 +691,13 @@ def build_note_server(
     return build_output_server("notes", [note_tool])
 
 
+def build_glossary_server(
+    glossary_path: Path,
+) -> tuple[dict[str, McpServerConfig], list[str]]:
+    """Build an MCP server with the shared glossary tools bound to a file."""
+    return build_output_server("glossary", make_glossary_tools(glossary_path))
+
+
 # ---------------------------------------------------------------------------
 # Pipeline stages — each reads from files, outputs via tools or Write
 # ---------------------------------------------------------------------------
@@ -1137,6 +1146,8 @@ async def write_section(
     source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
     compute_tool_names: list[str] | None = None,
+    glossary_servers: dict[str, McpServerConfig] | None = None,
+    glossary_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> SectionDraft:
@@ -1153,12 +1164,14 @@ async def write_section(
         **note_servers,
         **(source_servers or {}),
         **(compute_servers or {}),
+        **(glossary_servers or {}),
     }
     all_tools = (
         research_tool_names()
         + note_tool_names
         + (source_tool_names_list or [])
         + (compute_tool_names or [])
+        + (glossary_tool_names or [])
     )
 
     plan_path = notes.artifact_path("plan")
@@ -3448,6 +3461,9 @@ class PipelineRunner:
 
         feedback_path = await self.prepare_feedback("write")
         notes = self.ensure_notes()
+        glossary_path = notes.artifacts_dir / "glossary.json"
+        seed_glossary(glossary_path, plan.conventions)
+        glossary_servers, glossary_tool_names = build_glossary_server(glossary_path)
 
         async def write_and_publish(section: SectionPlan, idx: int) -> SectionDraft:
             tid = self.tab_ids.get(section.title, "")
@@ -3476,6 +3492,8 @@ class PipelineRunner:
                     author_notes=self.author_notes,
                     compute_servers=self.compute_servers,
                     compute_tool_names=self.compute_tool_names,
+                    glossary_servers=glossary_servers,
+                    glossary_tool_names=glossary_tool_names,
                     trace_logger=self.trace_logger,
                     cost_accumulator=self.cost_accumulator,
                 )
@@ -4033,6 +4051,9 @@ class PipelineRunner:
             )
 
         feedback_path = await self.prepare_feedback("restart")
+        glossary_servers, glossary_tool_names = build_glossary_server(
+            notes.artifacts_dir / "glossary.json"
+        )
 
         def rewrite_coro(section_plan: SectionPlan):
             return write_section(
@@ -4049,6 +4070,8 @@ class PipelineRunner:
                 author_notes=self.author_notes,
                 compute_servers=self.compute_servers,
                 compute_tool_names=self.compute_tool_names,
+                glossary_servers=glossary_servers,
+                glossary_tool_names=glossary_tool_names,
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
             )

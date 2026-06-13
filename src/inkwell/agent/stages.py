@@ -91,8 +91,10 @@ read for the plan, research, and voice profile.
 1. Read the plan, research, and voice files to understand context
 2. Follow the plan's conventions exactly — terms, names, and notation \
 are shared with sections other writers are producing right now; a \
-private variant breaks the assembled piece. Introduce anything you \
-use that the conventions don't cover, and flag it via note_for_author.
+private variant breaks the assembled piece. Before you name a key \
+concept or coin notation, call lookup_terms to reuse what a sibling \
+already chose; when you introduce something new, call define_term so \
+the others inherit it.
 3. Write in the author's voice — match their tone, rhythm, and formality
 4. Ground every claim in the research findings and, when a source \
 document is listed in your inputs, in the source itself \

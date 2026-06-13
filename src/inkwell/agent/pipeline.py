@@ -333,6 +333,26 @@ def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> No
             manifest.add(p, "voice_analysis", name)
 
 
+def directions_block(notes: PipelineNotes) -> str:
+    """Render the source-document author comments for a stage task, or ''.
+
+    The planner distills these into plan.author_direction, but the raw
+    comments — and the author's replies, which outrank the original comment —
+    carry nuance the distillation drops. Stages that decide structure or
+    final wording read them directly so an author instruction can't go
+    invisible after planning.
+    """
+    directions = notes.load_directions()
+    if not directions:
+        return ""
+    return (
+        "The author left comments on the source document. Treat each as a "
+        "direction; where the author replied to a comment, the reply outranks "
+        "it. Never cut what the author asked to keep:\n\n"
+        f"{directions}\n\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline listener — override for interactive behavior
 # ---------------------------------------------------------------------------
@@ -1272,6 +1292,7 @@ async def plan_merge(
     *,
     notes: PipelineNotes,
     output_path: Path,
+    voice_file_paths: list[str] | None = None,
     source_servers: dict[str, McpServerConfig] | None = None,
     source_tool_names_list: list[str] | None = None,
     compute_servers: dict[str, McpServerConfig] | None = None,
@@ -1290,16 +1311,24 @@ async def plan_merge(
     )
 
     plan_path = notes.artifact_path("plan")
+    voice_manifest = ContentManifest()
+    add_voice_refs(voice_manifest, voice_file_paths or [])
+    voice_block = f"{voice_manifest.render()}\n\n" if voice_file_paths else ""
     task = (
         f"Analyze these independently-written sections and produce a merge plan.\n\n"
         f"Section draft files (every one already drafted; byte size shown):\n"
         f"{drafts_list}\n"
         f"Article plan: {plan_path}\n\n"
+        f"{voice_block}"
+        f"{directions_block(notes)}"
         f"Read each section draft and the article plan. Identify duplication, "
         f"missing transitions, redundant openings, and structural issues.\n"
         f"Every file listed above exists and is non-empty — Read and account "
         f"for all of them. If a file will not open, say so explicitly; never "
         f"treat a listed section as 'not drafted' or 'to be constructed'.\n"
+        f"Your structural decisions must preserve the author's voice — read "
+        f"the voice files before planning cuts, and never dedupe away an "
+        f"author's deliberate repetition or flatten a distinctive register.\n"
         f"Use list_research to browse all findings, then read_finding for details on any section.\n\n"
         f"Write the merge plan to: {output_path}"
     )
@@ -1353,6 +1382,7 @@ async def merge_sections(
         section_draft_paths,
         notes=notes,
         output_path=merge_plan_path,
+        voice_file_paths=voice_file_paths,
         source_servers=source_servers,
         source_tool_names_list=source_tool_names_list,
         compute_servers=compute_servers,
@@ -1389,6 +1419,7 @@ async def merge_sections(
 
     format_guidance = get_format_guidance(target_format)
     task = f"Rewrite these sections into a unified piece.\n\n{manifest.render()}\n\n"
+    task += directions_block(notes)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
@@ -1427,6 +1458,7 @@ async def review_narrative(
     notes: PipelineNotes,
     draft_path: Path,
     *,
+    voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
     source_servers: dict[str, McpServerConfig] | None = None,
     source_tool_names_list: list[str] | None = None,
@@ -1459,12 +1491,20 @@ async def review_narrative(
         + (compute_tool_names or [])
     )
 
+    voice_manifest = ContentManifest()
+    add_voice_refs(voice_manifest, voice_file_paths or [])
+    voice_block = f"{voice_manifest.render()}\n\n" if voice_file_paths else ""
     task = (
         f"Review the article draft for narrative coherence.\n\n"
         f"Draft: {draft_path}\n"
         f"Plan: {plan_path}\n\n"
+        f"{voice_block}"
         f"{render_source_lines(notes)}"
-        f"Read both files, then call record_finding for each issue."
+        f"{directions_block(notes)}"
+        f"Read both files. When you recommend a structural change, it must "
+        f"not flatten the author's voice — read the voice files first, and "
+        f"don't trade the author's self-implication, hedges, or asides for "
+        f"conventional momentum. Call record_finding for each issue."
     )
     await query(
         task,
@@ -1775,6 +1815,7 @@ async def review_all(
     narrative_task = review_narrative(
         notes,
         draft_path,
+        voice_file_paths=voice_file_paths,
         author_notes=author_notes,
         source_servers=source_servers,
         source_tool_names_list=source_tool_names_list,
@@ -1983,6 +2024,7 @@ async def rewrite_final(
     )
     if format_guidance:
         task += f"{format_guidance}\n\n"
+    task += directions_block(notes)
     task += (
         f"{manifest.render()}\n\n"
         f"Read the annotated draft — review findings are marked inline. "

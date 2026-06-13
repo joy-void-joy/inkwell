@@ -544,27 +544,40 @@ async def merge_voice_analyses(
 
 
 def extract_author_text(conversation: str) -> str:
-    """Extract only the author's (<user>) blocks from a tagged conversation.
+    """Reduce a tagged conversation to the author's own writing.
 
-    If the text has no <user>/<claude> tags, returns it unchanged.
+    The author's voice lives in the untagged prose (their own draft) and in
+    their <user> turns; the assistant's <claude> turns are not their voice. So
+    the claude blocks are dropped and everything else is kept. This preserves a
+    document's prose even when it is concatenated with a feedback conversation
+    that carries speaker tags — the failure mode where a whole draft was
+    discarded and only a few stray instruction lines survived. Text with no
+    speaker tags is returned unchanged.
     """
-    if "<user>" not in conversation:
+    if "<user>" not in conversation and "<claude>" not in conversation:
         return conversation
-    blocks: list[str] = []
-    remaining = conversation
-    while "<user>" in remaining:
-        start = remaining.index("<user>") + len("<user>")
-        end_tag = "</user>"
-        end = (
-            remaining.index(end_tag, start)
-            if end_tag in remaining[start:]
-            else len(remaining)
-        )
-        block = remaining[start:end].strip()
-        if block:
-            blocks.append(block)
-        remaining = remaining[end + len(end_tag) :] if end < len(remaining) else ""
-    return "\n\n---\n\n".join(blocks) if blocks else conversation
+    kept: list[str] = []
+    i = 0
+    while i < len(conversation):
+        claude_at = conversation.find("<claude>", i)
+        user_at = conversation.find("<user>", i)
+        starts = [p for p in (claude_at, user_at) if p != -1]
+        if not starts:
+            kept.append(conversation[i:])
+            break
+        nxt = min(starts)
+        if nxt > i:
+            kept.append(conversation[i:nxt])
+        if nxt == claude_at:
+            close = conversation.find("</claude>", nxt)
+            i = close + len("</claude>") if close != -1 else len(conversation)
+        else:
+            body_start = nxt + len("<user>")
+            close = conversation.find("</user>", body_start)
+            body_end = close if close != -1 else len(conversation)
+            kept.append(conversation[body_start:body_end])
+            i = body_end + len("</user>") if close != -1 else len(conversation)
+    return "\n\n".join(part.strip() for part in kept if part.strip())
 
 
 async def do_analyze_voice(

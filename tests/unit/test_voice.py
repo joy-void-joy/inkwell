@@ -130,6 +130,19 @@ class TestExtractAuthorText:
         assert "Real content." in result
         assert result.strip() == "Real content."
 
+    def test_document_with_feedback_conversation_keeps_draft(self) -> None:
+        conversation = (
+            "--- Source: gdoc ---\n\n"
+            "The draft's real thesis is that political will is the bottleneck.\n\n"
+            "--- Source: claude-share ---\n\n"
+            "<user>\nmake it punchier\n</user>\n\n"
+            "<claude>\nA punchier rewrite that is not the author's voice.\n</claude>"
+        )
+        result = extract_author_text(conversation)
+        assert "political will is the bottleneck" in result
+        assert "make it punchier" in result
+        assert "not the author's voice" not in result
+
 
 class TestAddStyleReference:
     def test_add_file(self, style_dir: Path, tmp_path: Path) -> None:

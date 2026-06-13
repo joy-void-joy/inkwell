@@ -25,7 +25,6 @@ class TestSlugify:
         assert len(result) <= 80
 
 
-
 class TestAddVoiceRefs:
     def test_empty_list(self) -> None:
         manifest = ContentManifest()
@@ -54,11 +53,14 @@ class TestAddVoiceRefs:
 
     def test_mixed_files(self) -> None:
         manifest = ContentManifest()
-        add_voice_refs(manifest, [
-            "/tmp/voice_0_conversation.md",
-            "/tmp/corpus_0_skill.md",
-            "/tmp/prescriptive_0_guide.md",
-        ])
+        add_voice_refs(
+            manifest,
+            [
+                "/tmp/voice_0_conversation.md",
+                "/tmp/corpus_0_skill.md",
+                "/tmp/prescriptive_0_guide.md",
+            ],
+        )
         rendered = manifest.render()
         assert "voice_analysis" in rendered
         assert "style_reference" in rendered

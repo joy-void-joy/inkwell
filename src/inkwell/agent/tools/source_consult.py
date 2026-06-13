@@ -59,10 +59,11 @@ def extract_pdf_text_layer(pdf_path: Path, text_dir: Path) -> int:
 
     text_dir.mkdir(parents=True, exist_ok=True)
     with pymupdf.open(pdf_path) as doc:
-        for index, page in enumerate(doc, start=1):
-            page_text = page.get_text()
-            (text_dir / f"{index:04d}.txt").write_text(page_text, encoding="utf-8")
-        return doc.page_count
+        page_count = int(doc.page_count)
+        for index in range(page_count):
+            page_text = str(doc.load_page(index).get_text())
+            (text_dir / f"{index + 1:04d}.txt").write_text(page_text, encoding="utf-8")
+        return page_count
 
 
 def build_source_registry(

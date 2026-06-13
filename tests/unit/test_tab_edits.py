@@ -21,7 +21,9 @@ class TestNormalizeGdocText:
         assert normalize_gdoc_text(smart) == normalize_gdoc_text(plain)
 
     def test_whitespace_collapsed(self) -> None:
-        assert normalize_gdoc_text("hello   world\n\nfoo") == normalize_gdoc_text("hello world foo")
+        assert normalize_gdoc_text("hello   world\n\nfoo") == normalize_gdoc_text(
+            "hello world foo"
+        )
 
     def test_em_dash_normalized(self) -> None:
         assert normalize_gdoc_text(f"a {EM_DASH} b") == normalize_gdoc_text("a -- b")
@@ -67,9 +69,7 @@ class TestExtractEditSummary:
 
 class TestHasMeaningfulDiff:
     def test_gdoc_whitespace_not_meaningful(self) -> None:
-        assert not TabTracker.has_meaningful_diff(
-            "Hello  world", "Hello world"
-        )
+        assert not TabTracker.has_meaningful_diff("Hello  world", "Hello world")
 
     def test_gdoc_smart_quotes_not_meaningful(self) -> None:
         plain = 'it\'s a "test"'
@@ -77,9 +77,7 @@ class TestHasMeaningfulDiff:
         assert not TabTracker.has_meaningful_diff(plain, smart)
 
     def test_real_content_change_is_meaningful(self) -> None:
-        assert TabTracker.has_meaningful_diff(
-            "The original text", "The modified text"
-        )
+        assert TabTracker.has_meaningful_diff("The original text", "The modified text")
 
     def test_empty_current_not_meaningful(self) -> None:
         assert not TabTracker.has_meaningful_diff("some content", "   ")

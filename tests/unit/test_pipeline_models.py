@@ -25,7 +25,11 @@ class TestRestartStrategyRoundtrip:
             actions=[
                 PreserveAction(section="Intro"),
                 PatchAction(section="Safety", target_text="old", instruction="reframe"),
-                RewriteAction(section="Ethics", reason="wrong angle", new_research_questions=["q1"]),
+                RewriteAction(
+                    section="Ethics",
+                    reason="wrong angle",
+                    new_research_questions=["q1"],
+                ),
                 AddAction(
                     section_plan=SectionPlan(
                         title="New Section",

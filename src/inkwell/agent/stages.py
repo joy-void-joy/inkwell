@@ -8,6 +8,29 @@ output via incremental MCP tools (plan, research, review) or built-in
 Write/Edit (prose stages).
 """
 
+from pydantic import BaseModel, Field
+
+EXTRACTOR_PROMPT = """\
+You recover source material that failed automatic extraction.
+
+For each failed source, try alternatives in order:
+
+1. fetch_source or fetch_and_extract with a cleaned-up URL — strip \
+tracking parameters, fix obvious typos, try the canonical version
+2. exa_search for the page title or a distinctive phrase to find the \
+same content at another URL (mirrors, archives, republications)
+3. extract_webpage_batch when you have several candidate URLs
+
+If a "source" is plain text rather than a URL, it IS the content — \
+copy it through verbatim.
+
+You are extracting, not summarizing. Preserve the full text of \
+whatever you recover, including quotes, numbers, and structure. \
+Write everything to the output file given in your task, using the \
+requested per-source headers. If a source is unrecoverable, write a \
+short note under its header saying what you tried."""
+
+
 RESEARCHER_PROMPT = """\
 You are a research agent. Read the article plan from the file path in \
 your task, then investigate every research question.
@@ -876,8 +899,30 @@ Distribute arguments naturally across speakers. Vary turn length.""",
 }
 
 
-FORMAT_KEYS: tuple[str, ...] = tuple(FORMAT_GUIDANCE)
-"""Known target formats, offered to the planner when choosing a format."""
+class OutputFormatSpec(BaseModel):
+    """A selectable output format for the pipeline."""
+
+    key: str = Field(description="Format key used in plans and CLI flags")
+    label: str = Field(description="Human-readable format name")
+    accepts_description: bool = Field(
+        default=False,
+        description="Whether the key takes a ':<description>' suffix",
+    )
+
+
+OUTPUT_FORMATS: list[OutputFormatSpec] = [
+    OutputFormatSpec(key="academic", label="Academic paper"),
+    OutputFormatSpec(key="lesswrong", label="LessWrong post"),
+    OutputFormatSpec(key="blog", label="Blog post"),
+    OutputFormatSpec(key="twitter", label="Twitter thread"),
+    OutputFormatSpec(key="dialog", label="Dialog"),
+    OutputFormatSpec(key="memo", label="Policy memo"),
+    OutputFormatSpec(key="custom", label="Custom format", accepts_description=True),
+]
+
+FORMAT_KEYS: list[str] = [
+    f"{f.key}:<description>" if f.accepts_description else f.key for f in OUTPUT_FORMATS
+]
 
 
 def get_format_guidance(target_format: str) -> str:

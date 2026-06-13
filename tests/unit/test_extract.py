@@ -80,5 +80,7 @@ class TestMessageText:
         assert message_text(msg) == ""
 
     def test_non_dict_blocks_skipped(self) -> None:
-        msg: dict[str, object] = {"content": ["not a dict", {"type": "text", "text": "ok"}]}
+        msg: dict[str, object] = {
+            "content": ["not a dict", {"type": "text", "text": "ok"}]
+        }
         assert message_text(msg) == "ok"

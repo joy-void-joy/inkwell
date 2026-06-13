@@ -1956,6 +1956,16 @@ class PipelineRunner:
             data, encoding="utf-8"
         )
 
+    async def announce_stage(self, stage: str, description: str) -> None:
+        """Notify the listener and write a stage boundary into the trace.
+
+        Trace files interleave every agent's blocks; without explicit
+        markers, stage extents must be reverse-engineered from content.
+        """
+        if self.trace_logger is not None:
+            self.trace_logger.log_text(description, heading=f"🚩 Stage: {stage}")
+        await self.hooks.on_stage(stage, description)
+
     def install_block_callback(self) -> None:
         """Set the contextvar so all query() calls forward blocks to the listener."""
         from claude_agent_sdk import ContentBlock
@@ -2345,7 +2355,7 @@ class PipelineRunner:
 
     async def stage_preprocess(self) -> None:
         """Classify sources by role and extract author instructions."""
-        await self.hooks.on_stage("preprocess", "Classifying sources")
+        await self.announce_stage("preprocess", "Classifying sources")
 
         from inkwell.agent.tools.preprocess import preprocess_sources
 
@@ -2376,7 +2386,7 @@ class PipelineRunner:
         await self.hooks.on_progress(f"Preprocess: {', '.join(parts)}")
 
     async def stage_extract(self) -> None:
-        await self.hooks.on_stage("extract", "Extracting source material")
+        await self.announce_stage("extract", "Extracting source material")
         await self.update_overview(active_stage="extract")
 
         notes = self.ensure_notes()
@@ -2458,7 +2468,7 @@ class PipelineRunner:
             await self.hooks.on_progress(f"Extract: {n_files} source file(s) saved")
 
     async def stage_voice(self) -> None:
-        await self.hooks.on_stage("voice", "Analyzing author's writing voice")
+        await self.announce_stage("voice", "Analyzing author's writing voice")
         await self.update_overview(active_stage="voice")
         corpus_samples, corpus_sources, corpus_types = await load_style_corpus()
         notes = self.ensure_notes()
@@ -2613,7 +2623,7 @@ class PipelineRunner:
         await self.update_overview()
 
     async def stage_plan(self) -> None:
-        await self.hooks.on_stage("plan", "Planning article structure")
+        await self.announce_stage("plan", "Planning article structure")
         await self.update_overview(active_stage="plan")
         notes = self.ensure_notes()
         plan_path = notes.artifact_path("plan")
@@ -2670,7 +2680,7 @@ class PipelineRunner:
         plan = self.snapshot.plan
         if plan is None:
             return
-        await self.hooks.on_stage("assumptions", "Surfacing questions for the author")
+        await self.announce_stage("assumptions", "Surfacing questions for the author")
         await self.update_overview(active_stage="assumptions")
         notes = self.ensure_notes()
 
@@ -2699,7 +2709,7 @@ class PipelineRunner:
         if plan is None:
             raise PipelineError("Cannot research without a plan")
 
-        await self.hooks.on_stage(
+        await self.announce_stage(
             "research",
             f"Researching {len(plan.research_questions)} questions",
         )
@@ -2749,7 +2759,7 @@ class PipelineRunner:
         if plan is None or research is None:
             return
 
-        await self.hooks.on_stage(
+        await self.announce_stage(
             "refine",
             f"Refining plan with {len(research.findings)} research findings",
         )
@@ -2801,7 +2811,7 @@ class PipelineRunner:
         if plan is None or research is None:
             raise PipelineError("Cannot write without plan and research")
 
-        await self.hooks.on_stage(
+        await self.announce_stage(
             "write",
             f"Writing {len(plan.sections)} sections in parallel",
         )
@@ -2905,7 +2915,7 @@ class PipelineRunner:
         if plan is None:
             raise PipelineError("Cannot merge without a plan")
 
-        await self.hooks.on_stage("merge", "Merging sections into coherent draft")
+        await self.announce_stage("merge", "Merging sections into coherent draft")
         self.state.set_stage("merging")
         await self.update_overview(active_stage="merge")
         feedback_path = await self.prepare_feedback("merge")
@@ -2971,7 +2981,7 @@ class PipelineRunner:
         if plan is None or merged is None:
             raise PipelineError("Cannot review without plan and merged draft")
 
-        await self.hooks.on_stage("review", "Reviewing draft (3 reviewers in parallel)")
+        await self.announce_stage("review", "Reviewing draft (3 reviewers in parallel)")
         self.state.set_stage("reviewing")
         await self.update_overview(active_stage="review")
 
@@ -3012,7 +3022,7 @@ class PipelineRunner:
         if plan is None or merged is None:
             raise PipelineError("Cannot rewrite without plan and merged draft")
 
-        await self.hooks.on_stage("rewrite", "Producing final version")
+        await self.announce_stage("rewrite", "Producing final version")
         self.state.set_stage("rewriting")
         await self.update_overview(active_stage="rewrite")
         feedback_path = await self.prepare_feedback("rewrite")
@@ -3066,7 +3076,7 @@ class PipelineRunner:
             raise PipelineError("Cannot format without output and plan")
 
         chosen_format = self.effective_format
-        await self.hooks.on_stage("format", f"Applying {chosen_format} formatting")
+        await self.announce_stage("format", f"Applying {chosen_format} formatting")
         await self.update_overview(active_stage="format")
         article_text = output.content or output.summary
         final_content = await apply_format(article_text, plan.title, chosen_format)
@@ -3096,7 +3106,7 @@ class PipelineRunner:
             return
         self.hooks.sync_requested.clear()
         logger.info("Sync requested — gathering feedback")
-        await self.hooks.on_stage("sync", "Polling comments, edits, and terminal input")
+        await self.announce_stage("sync", "Polling comments, edits, and terminal input")
         feedback = await self.gather_feedback()
         n = len(feedback)
         if n:
@@ -3122,7 +3132,7 @@ class PipelineRunner:
             return
 
         logger.info("Plan-breaking feedback detected — running orchestrator")
-        await self.hooks.on_stage(
+        await self.announce_stage(
             "restart",
             f"Replanning (restart {self.restart_count + 1}/{self.max_restarts})",
         )
@@ -3317,7 +3327,7 @@ class PipelineRunner:
                 except asyncio.TimeoutError:
                     pass
 
-            await self.hooks.on_stage(
+            await self.announce_stage(
                 "sync" if from_sync and not batch else "revise",
                 "Syncing feedback"
                 if from_sync and not batch

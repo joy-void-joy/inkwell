@@ -177,11 +177,10 @@ class Settings(BaseSettings):
         validation_alias="AGENT_WRITER_MODE",
         description=(
             "Draft production mode: 'parallel' = one writer per section "
-            "plus a merge stage; 'single' = one writer drafts the whole "
-            "piece in order (no merge stage, no cross-section drift); "
-            "'auto' = single for voice-driven formats, parallel for "
-            "academic (where length and cross-section consistency make the "
-            "merge worth its voice-smoothing cost)"
+            "sharing a glossary, assembled by a voice-safe reconcile pass; "
+            "'single' = one writer drafts the whole piece in order (no "
+            "reconcile pass); 'auto' = parallel for every format (the "
+            "reconcile pass keeps the author's voice intact)"
         ),
     )
 

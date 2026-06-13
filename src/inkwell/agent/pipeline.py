@@ -354,18 +354,18 @@ def directions_block(notes: PipelineNotes) -> str:
     )
 
 
-def resolve_writer_mode(mode: str, target_format: str) -> str:
-    """Resolve writer_mode='auto' to a concrete mode for the target format.
+def resolve_writer_mode(mode: str) -> str:
+    """Resolve writer_mode='auto' to a concrete mode.
 
-    'single' drafts the whole piece in one context — voice-coherent, with no
-    merge stage to smooth the author's register or drop a section. 'parallel'
-    writes sections independently and then merges them. Voice-driven formats
-    default to single; academic pieces, where length and cross-section
-    consistency make the merge worth its voice-smoothing cost, stay parallel.
+    'parallel' writes each section independently and assembles them with a
+    voice-safe reconcile pass; the shared glossary keeps terminology aligned
+    and the reconcile pass never rewrites the author's register, so it suits
+    every format. 'single' drafts the whole piece in one context, with no
+    reconcile pass. 'auto' resolves to parallel.
     """
     if mode != "auto":
         return mode
-    return "parallel" if target_format == "academic" else "single"
+    return "parallel"
 
 
 # ---------------------------------------------------------------------------
@@ -3375,10 +3375,7 @@ class PipelineRunner:
         if plan is None or research is None:
             raise PipelineError("Cannot write without plan and research")
 
-        if (
-            resolve_writer_mode(current_settings().writer_mode, self.effective_format)
-            == "single"
-        ):
+        if resolve_writer_mode(current_settings().writer_mode) == "single":
             await self.write_single_draft()
             return
 
@@ -3536,8 +3533,7 @@ class PipelineRunner:
             raise PipelineError("Cannot merge without a plan")
 
         if (
-            resolve_writer_mode(current_settings().writer_mode, self.effective_format)
-            == "single"
+            resolve_writer_mode(current_settings().writer_mode) == "single"
             and self.snapshot.merged
         ):
             self.snapshot.stage = "merge"

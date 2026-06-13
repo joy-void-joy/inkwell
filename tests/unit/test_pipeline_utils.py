@@ -72,17 +72,12 @@ class TestAddVoiceRefs:
 
 
 class TestResolveWriterMode:
-    def test_auto_uses_single_for_voice_formats(self) -> None:
-        assert resolve_writer_mode("auto", "lesswrong") == "single"
-        assert resolve_writer_mode("auto", "blog") == "single"
-        assert resolve_writer_mode("auto", "twitter") == "single"
+    def test_auto_resolves_to_parallel(self) -> None:
+        assert resolve_writer_mode("auto") == "parallel"
 
-    def test_auto_uses_parallel_for_academic(self) -> None:
-        assert resolve_writer_mode("auto", "academic") == "parallel"
-
-    def test_explicit_mode_overrides_format(self) -> None:
-        assert resolve_writer_mode("parallel", "lesswrong") == "parallel"
-        assert resolve_writer_mode("single", "academic") == "single"
+    def test_explicit_mode_passes_through(self) -> None:
+        assert resolve_writer_mode("single") == "single"
+        assert resolve_writer_mode("parallel") == "parallel"
 
 
 class TestConsolidateFindingsCoverage:

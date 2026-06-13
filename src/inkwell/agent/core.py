@@ -333,14 +333,15 @@ def build_options(
         ]:
             hooks = merge_hooks(hooks, layer)
 
+    active = current_settings()
     env: dict[str, str] = {}
-    if current_settings().claude_config_dir:
-        env["CLAUDE_CONFIG_DIR"] = current_settings().claude_config_dir
+    if active.claude_config_dir:
+        env["CLAUDE_CONFIG_DIR"] = active.claude_config_dir
 
     return ClaudeAgentOptions(
-        model=current_settings().model,
-        system_prompt=get_system_prompt(author_email=current_settings().author_email),
-        max_thinking_tokens=current_settings().max_thinking_tokens or (128_000 - 1),
+        model=active.model,
+        system_prompt=get_system_prompt(author_email=active.author_email),
+        max_thinking_tokens=active.max_thinking_tokens or (128_000 - 1),
         permission_mode="bypassPermissions",
         extra_args={"no-session-persistence": None},
         hooks=hooks,

@@ -151,13 +151,15 @@ class ContentManifest(BaseModel):
         word_count: int = 0,
         instruction: str = "",
     ) -> None:
-        self.refs.append(ContentRef(
-            path=str(path),
-            role=role,
-            label=label,
-            word_count=word_count,
-            instruction=instruction,
-        ))
+        self.refs.append(
+            ContentRef(
+                path=str(path),
+                role=role,
+                label=label,
+                word_count=word_count,
+                instruction=instruction,
+            )
+        )
 
     def render(self) -> str:
         if not self.refs:

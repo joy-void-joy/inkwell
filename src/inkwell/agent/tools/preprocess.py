@@ -125,9 +125,7 @@ async def preprocess_sources(sources: list[str]) -> PreprocessResult:
 
     all_simple = all(is_bare_url_or_path(s) for s in sources)
     if all_simple:
-        classified = [
-            ClassifiedSource(value=s, role="source") for s in sources
-        ]
+        classified = [ClassifiedSource(value=s, role="source") for s in sources]
         return PreprocessResult(
             raw_inputs=sources, instructions="", classified=classified
         )
@@ -181,9 +179,7 @@ def is_bare_url_or_path(s: str) -> bool:
     return False
 
 
-def build_source_descriptions(
-    sources: list[str], links: list[DiscoveredLink]
-) -> str:
+def build_source_descriptions(sources: list[str], links: list[DiscoveredLink]) -> str:
     """Build a description of sources for the classifier prompt."""
     lines: list[str] = []
     for i, src in enumerate(sources, 1):

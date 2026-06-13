@@ -553,7 +553,6 @@ story.
 if possible. Every paragraph must earn its place.
 - Cut any paragraph that repeats a point already made elsewhere.
 - If a section runs over 800 words, split it or cut.""",
-
     "lesswrong": """\
 ## Format: LessWrong
 
@@ -653,14 +652,12 @@ must earn its place.
 Remove any paragraph that repeats a point made elsewhere.
 - Dense supplementary material goes in footnotes or collapsible \
 sections, not the main body.""",
-
     "blog": """\
 ## Format: Blog Post
 
 Write for a general audience. Hook the reader in the first paragraph. \
 Use subheadings every 300-400 words for scannability. Paragraphs \
 should be short (3-5 sentences). Conversational but substantive.""",
-
     "twitter": """\
 ## Format: Twitter Thread
 
@@ -668,7 +665,6 @@ Each point must be self-contained within ~260 characters. The first \
 tweet is the hook — it must grab attention without context. Build \
 a thread that rewards sequential reading but where each tweet \
 also works standalone.""",
-
     "dialog": """\
 ## Format: Dialog
 

@@ -83,6 +83,12 @@ from inkwell.agent.tools.extract import (
     parse_gdoc_id,
 )
 from inkwell.agent.tools.research.fetch import do_fetch_source
+from inkwell.agent.tools.source_consult import (
+    build_source_registry_async,
+    load_source_registry,
+    make_source_consult_tools,
+    registry_path_for,
+)
 from inkwell.agent.tools.formats import (
     FormatBlogInput,
     FormatDialogInput,
@@ -234,6 +240,36 @@ def slugify(label: str) -> str:
     while "--" in slug:
         slug = slug.replace("--", "-")
     return slug.strip("-")[:80]
+
+
+def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
+    """List the session's authoritative source documents in a stage manifest."""
+    for doc in load_source_registry(registry_path_for(notes.artifacts_dir)):
+        pages = f", {doc.page_count} pages" if doc.page_count else ""
+        manifest.add(
+            doc.path,
+            "source",
+            doc.label,
+            instruction=(
+                f"authoritative source document ({doc.kind}{pages}) — verify "
+                "claims against it via consult_source/find_in_source or Read"
+            ),
+        )
+
+
+def render_source_lines(notes: PipelineNotes) -> str:
+    """Render source-document references for stages that use plain file refs."""
+    docs = load_source_registry(registry_path_for(notes.artifacts_dir))
+    if not docs:
+        return ""
+    lines = [
+        "Authoritative source documents (verify claims against these via "
+        "consult_source/find_in_source or Read):"
+    ]
+    for doc in docs:
+        pages = f" ({doc.page_count} pages)" if doc.page_count else ""
+        lines.append(f"- {doc.label}: {doc.path}{pages}")
+    return "\n".join(lines) + "\n"
 
 
 def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> None:
@@ -498,9 +534,18 @@ def build_research_tools() -> list[LupMcpTool]:
     ]
 
 
-def build_source_server() -> tuple[dict[str, McpServerConfig], list[str]]:
-    """MCP server for source fetching/extraction — available to ALL pipeline stages."""
+def build_source_server(
+    registry_provider: Callable[[], Path] | None = None,
+) -> tuple[dict[str, McpServerConfig], list[str]]:
+    """MCP server for source fetching/extraction — available to ALL pipeline stages.
+
+    With ``registry_provider``, also exposes the source-document tools
+    (find_in_source, consult_source, list_source_documents) bound to the
+    session's source registry.
+    """
     tools = [*FETCH_TOOLS, *EXTRACT_MCP_TOOLS]
+    if registry_provider is not None:
+        tools.extend(make_source_consult_tools(registry_provider))
     server = create_mcp_server(
         name="source",
         version="1.0.0",
@@ -980,6 +1025,7 @@ async def write_section(
 
     manifest = ContentManifest()
     manifest.add(plan_path, "plan", "Article plan")
+    add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
@@ -1136,6 +1182,7 @@ async def merge_sections(
         manifest.add(
             path, "draft", f"Section: {title}", instruction="read each individually"
         )
+    add_source_refs(manifest, notes)
     manifest.add(plan_path, "plan", "Article plan")
     add_voice_refs(manifest, voice_file_paths or [])
     if feedback_path:
@@ -1217,6 +1264,7 @@ async def review_narrative(
         f"Review the article draft for narrative coherence.\n\n"
         f"Draft: {draft_path}\n"
         f"Plan: {plan_path}\n\n"
+        f"{render_source_lines(notes)}"
         f"Read both files, then call record_finding for each issue."
     )
     await query(
@@ -1282,6 +1330,7 @@ async def review_facts(
     task = (
         f"Fact-check every verifiable claim in the article draft.\n\n"
         f"Draft: {draft_path}\n\n"
+        f"{render_source_lines(notes)}"
         f"Read the draft. Use list_research to see all research findings, "
         f"then read_finding for details on specific ones. Cross-reference "
         f"the draft against research findings, then verify remaining claims "
@@ -1552,6 +1601,7 @@ async def rewrite_final(
     )
     manifest.add(plan_path, "plan", "Article plan")
     manifest.add(review_summary_path, "review", "Review summary")
+    add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
@@ -1862,7 +1912,9 @@ class PipelineRunner:
 
         self.author_notes: list[AuthorNote] = []
         self.research_servers = build_research_servers()
-        self.source_servers, self.source_tool_names = build_source_server()
+        self.source_servers, self.source_tool_names = build_source_server(
+            lambda: registry_path_for(self.ensure_notes().artifacts_dir)
+        )
 
         self.sandbox: Sandbox | None = None
         self.compute_servers: dict[str, McpServerConfig] = {}
@@ -2444,6 +2496,21 @@ class PipelineRunner:
         output_path.write_text(conversation, encoding="utf-8")
 
         all_source_paths = [str(p) for p in sorted(source_dir.glob("*")) if p.is_file()]
+
+        registry_candidates = [
+            s for s in self.sources if Path(s).expanduser().is_file()
+        ]
+        registered = await build_source_registry_async(
+            registry_candidates, notes.artifacts_dir
+        )
+        if registered:
+            await self.hooks.on_progress(
+                "Source registry: "
+                + ", ".join(
+                    f"{d.label} ({d.page_count}p)" if d.page_count else d.label
+                    for d in registered
+                )
+            )
 
         self.snapshot.conversation = conversation
         self.snapshot.source_file_paths = all_source_paths

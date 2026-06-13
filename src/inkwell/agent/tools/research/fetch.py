@@ -266,10 +266,7 @@ async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:
         )
 
     result = await query(
-        (
-            f"Focus: {focus}\n\n"
-            f"Read the page content from: {content_path}"
-        ),
+        (f"Focus: {focus}\n\nRead the page content from: {content_path}"),
         model="claude-opus-4-6",
         system_prompt=FOCUSED_EXTRACT_SYSTEM,
         output_type=FocusedExtract,

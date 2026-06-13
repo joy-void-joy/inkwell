@@ -321,7 +321,9 @@ async def polymarket_price(
                 if isinstance(point, dict):
                     ts = point.get("t", 0)
                     price = point.get("p", 0)
-                    day = datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+                    day = datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime(
+                        "%Y-%m-%d"
+                    )
                     by_day[day] = float(price)
 
             history = [

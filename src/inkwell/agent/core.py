@@ -60,7 +60,12 @@ from lup.trace import TraceLogger
 import inkwell.agent.config as config_mod
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot, WritingOutput
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.pipeline import PipelineError, PipelineListener, PipelineRunner, run_pipeline
+from inkwell.agent.pipeline import (
+    PipelineError,
+    PipelineListener,
+    PipelineRunner,
+    run_pipeline,
+)
 from inkwell.agent.prompts import get_system_prompt
 from inkwell.agent.session import WritingContext, WritingSessionState
 from inkwell.agent.tool_policy import ToolPolicy
@@ -74,8 +79,10 @@ from inkwell.agent.tools.voice import VOICE_TOOLS
 
 logger = logging.getLogger(__name__)
 
+
 def notes_path() -> Path:
     return Path(config_mod.settings.notes_path)
+
 
 def traces_path() -> Path:
     return notes_path() / "traces"
@@ -135,7 +142,10 @@ def create_writing_stop_guard(
         last_block_time = now
 
         if rapid_block_count >= 3:
-            logger.warning("Stop guard: allowing stop after %d rapid attempts (likely stuck)", rapid_block_count)
+            logger.warning(
+                "Stop guard: allowing stop after %d rapid attempts (likely stuck)",
+                rapid_block_count,
+            )
             rapid_block_count = 0
             return SyncHookJSONOutput()
 

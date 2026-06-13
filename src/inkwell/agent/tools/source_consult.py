@@ -1,0 +1,348 @@
+"""Source-document access tools — locate and read the authoritative inputs.
+
+The pipeline's plan and research notes are lossy summaries of the source
+documents. These tools give every stage direct access to the originals,
+so claims get verified by reading rather than reconstructed from memory.
+
+The per-page text layer extracted for searching is NAVIGATION ONLY:
+PDF text extraction garbles mathematical notation and layout, so a
+match tells you which page to read, never what the page says.
+"""
+
+import asyncio
+import json
+import logging
+import re
+from collections.abc import Callable
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from lup.client import query
+from lup.mcp import LupMcpTool, ToolError, lup_tool
+
+logger = logging.getLogger(__name__)
+
+REGISTRY_FILENAME = "sources.json"
+TEXT_LAYER_DIRNAME = "source_text"
+MAX_MATCHES = 25
+SNIPPET_CHARS = 160
+
+
+class SourceDocument(BaseModel):
+    """One registered source document."""
+
+    label: str = Field(description="Short identifier (file stem)")
+    path: str = Field(description="Absolute path to the original document")
+    kind: Literal["pdf", "text"] = Field(description="Document type")
+    page_count: int = Field(default=0, description="Number of pages (PDFs)")
+    text_dir: str = Field(
+        default="",
+        description="Directory of per-page extracted text (navigation only)",
+    )
+
+
+def registry_path_for(artifacts_dir: Path) -> Path:
+    return artifacts_dir / REGISTRY_FILENAME
+
+
+def extract_pdf_text_layer(pdf_path: Path, text_dir: Path) -> int:
+    """Write one text file per PDF page for grep-style navigation.
+
+    Returns the page count. The extracted text is never treated as
+    document content — only as a way to find page numbers.
+    """
+    import pymupdf
+
+    text_dir.mkdir(parents=True, exist_ok=True)
+    with pymupdf.open(pdf_path) as doc:
+        for index, page in enumerate(doc, start=1):
+            page_text = page.get_text()
+            (text_dir / f"{index:04d}.txt").write_text(page_text, encoding="utf-8")
+        return doc.page_count
+
+
+def build_source_registry(
+    source_paths: list[str], artifacts_dir: Path
+) -> list[SourceDocument]:
+    """Register source documents and build their navigation text layers.
+
+    Skips paths that don't exist as local files. Persists the registry
+    to ``artifacts_dir/sources.json`` so tools in any later stage (or a
+    resumed process) can load it.
+    """
+    documents: list[SourceDocument] = []
+    for raw in source_paths:
+        path = Path(raw).expanduser()
+        if not path.is_file():
+            continue
+        label = path.stem
+        if path.suffix.lower() == ".pdf":
+            text_dir = artifacts_dir / TEXT_LAYER_DIRNAME / label
+            try:
+                page_count = extract_pdf_text_layer(path, text_dir)
+            except (ImportError, RuntimeError, OSError, ValueError):
+                logger.warning(
+                    "Text-layer extraction failed for %s; registering without "
+                    "search support",
+                    path,
+                    exc_info=True,
+                )
+                page_count = 0
+                text_dir = Path("")
+            documents.append(
+                SourceDocument(
+                    label=label,
+                    path=str(path.resolve()),
+                    kind="pdf",
+                    page_count=page_count,
+                    text_dir=str(text_dir) if str(text_dir) else "",
+                )
+            )
+        else:
+            documents.append(
+                SourceDocument(
+                    label=label,
+                    path=str(path.resolve()),
+                    kind="text",
+                )
+            )
+
+    registry = registry_path_for(artifacts_dir)
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        json.dumps([d.model_dump() for d in documents], indent=2),
+        encoding="utf-8",
+    )
+    return documents
+
+
+async def build_source_registry_async(
+    source_paths: list[str], artifacts_dir: Path
+) -> list[SourceDocument]:
+    """Thread-offloaded ``build_source_registry`` (PDF extraction is CPU-bound)."""
+    return await asyncio.to_thread(build_source_registry, source_paths, artifacts_dir)
+
+
+def load_source_registry(registry: Path) -> list[SourceDocument]:
+    if not registry.exists():
+        return []
+    try:
+        data = json.loads(registry.read_text(encoding="utf-8"))
+        return [SourceDocument.model_validate(item) for item in data]
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Unreadable source registry at %s", registry)
+        return []
+
+
+SOURCE_READER_PROMPT = """\
+You answer one focused question about a source document by reading the
+document itself.
+
+The Read tool accepts pages='N-M' for PDFs (at most 20 pages per call).
+Use the page hints in your task; if the answer isn't there, widen the
+range or jump to where the document's structure says it should be
+(table of contents, index, chapter headings).
+
+Your final message IS the answer that gets returned to the caller:
+1. Verbatim quotes from the document, each with its page number
+2. A brief synthesis after the quotes
+
+Never paraphrase where a quote will do — the caller needs the
+document's exact words, not your summary of them. If the document does
+not answer the question, say exactly that; do not fill the gap from
+general knowledge."""
+
+
+class FindInSourceInput(BaseModel):
+    pattern: str = Field(
+        description="Case-insensitive regular expression to locate in the text layer"
+    )
+    label: str = Field(
+        default="",
+        description="Restrict the search to one document label (default: all)",
+    )
+
+
+class SourceMatch(BaseModel):
+    label: str = Field(description="Document the match is in")
+    page: int = Field(description="1-based page number")
+    snippet: str = Field(description="Surrounding text (garbled-math caveat applies)")
+
+
+class FindInSourceOutput(BaseModel):
+    matches: list[SourceMatch] = Field(description="Up to 25 matches")
+    truncated: bool = Field(
+        default=False, description="True when more matches were dropped"
+    )
+
+
+class ConsultSourceInput(BaseModel):
+    question: str = Field(
+        description="The focused question the reader should answer from the document"
+    )
+    label: str = Field(
+        default="",
+        description="Which document to consult (required when several are registered)",
+    )
+    pages: str = Field(
+        default="",
+        description=(
+            "Page range hint like '105-124' — usually from a find_in_source "
+            "match. The reader starts there and widens if needed."
+        ),
+    )
+
+
+class ConsultSourceOutput(BaseModel):
+    answer: str = Field(description="Verbatim quotes with page numbers + synthesis")
+    label: str = Field(description="Document consulted")
+
+
+class ListSourceDocumentsInput(BaseModel):
+    pass
+
+
+class ListSourceDocumentsOutput(BaseModel):
+    documents: list[SourceDocument] = Field(description="Registered source documents")
+
+
+def make_source_consult_tools(
+    registry_provider: Callable[[], Path],
+    *,
+    reader_model: str = "claude-opus-4-6",
+) -> list[LupMcpTool]:
+    """Build the source-document tools bound to a session's registry.
+
+    ``registry_provider`` is called lazily at tool-call time so the
+    tools can be constructed before the session's notes directory exists.
+    """
+
+    def load_registry() -> list[SourceDocument]:
+        documents = load_source_registry(registry_provider())
+        if not documents:
+            raise ToolError(
+                "No source documents registered for this session. "
+                "The piece may have purely web/text sources; use the research "
+                "findings and fetch tools instead."
+            )
+        return documents
+
+    def resolve(label: str) -> SourceDocument:
+        documents = load_registry()
+        if label:
+            for doc in documents:
+                if doc.label == label:
+                    return doc
+            known = ", ".join(d.label for d in documents)
+            raise ToolError(f"No source document labeled {label!r}. Known: {known}")
+        if len(documents) == 1:
+            return documents[0]
+        known = ", ".join(d.label for d in documents)
+        raise ToolError(f"Several documents are registered ({known}); pass label.")
+
+    @lup_tool(
+        "Search the source documents' extracted text layer for a regular "
+        "expression. Returns page numbers and short snippets. Use this to "
+        "LOCATE where the source defines or discusses something — a symbol, "
+        "a definition, a convention, a theorem — before reading the real "
+        "pages. The text layer is navigation only: PDF extraction garbles "
+        "mathematical notation, so always confirm a match by reading the "
+        "actual page (consult_source, or Read with pages).",
+        name="find_in_source",
+    )
+    async def find_in_source(inp: FindInSourceInput) -> FindInSourceOutput:
+        documents = load_registry()
+        if inp.label:
+            documents = [d for d in documents if d.label == inp.label]
+            if not documents:
+                raise ToolError(f"No source document labeled {inp.label!r}")
+        try:
+            pattern = re.compile(inp.pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ToolError(f"Invalid regular expression: {exc}") from exc
+
+        matches: list[SourceMatch] = []
+        truncated = False
+        for doc in documents:
+            pages: list[tuple[int, Path]]
+            if doc.kind == "pdf" and doc.text_dir:
+                text_dir = Path(doc.text_dir)
+                pages = [(int(p.stem), p) for p in sorted(text_dir.glob("[0-9]*.txt"))]
+            else:
+                pages = [(1, Path(doc.path))]
+            for page_number, page_path in pages:
+                try:
+                    text = page_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for m in pattern.finditer(text):
+                    if len(matches) >= MAX_MATCHES:
+                        truncated = True
+                        break
+                    start = max(0, m.start() - SNIPPET_CHARS // 2)
+                    snippet = " ".join(
+                        text[start : m.end() + SNIPPET_CHARS // 2].split()
+                    )
+                    matches.append(
+                        SourceMatch(label=doc.label, page=page_number, snippet=snippet)
+                    )
+                if truncated:
+                    break
+            if truncated:
+                break
+        return FindInSourceOutput(matches=matches, truncated=truncated)
+
+    @lup_tool(
+        "Ask a focused question of a source document. A nested reader agent "
+        "opens the actual document (not the extracted text) at the relevant "
+        "pages and answers with verbatim quotes and page citations. Use this "
+        "whenever a claim, definition, theorem statement, notation, or "
+        "convention must come from the source itself — plan key points and "
+        "research summaries are lossy, and external papers may use opposite "
+        "conventions. Pair with find_in_source: locate the pages cheaply, "
+        "then consult exactly those pages.",
+        name="consult_source",
+    )
+    async def consult_source(inp: ConsultSourceInput) -> ConsultSourceOutput:
+        doc = resolve(inp.label)
+        page_note = ""
+        if doc.kind == "pdf":
+            page_note = f" The document has {doc.page_count} pages."
+            if inp.pages:
+                page_note += f" Start with pages {inp.pages}."
+        task = (
+            f"Document: {doc.path}{page_note}\n\n"
+            f"Question: {inp.question}\n\n"
+            f"Read the document and answer with verbatim quotes and page numbers."
+        )
+        collector = await query(
+            task,
+            model=reader_model,
+            system_prompt=SOURCE_READER_PROMPT,
+            tools=["Read"],
+            max_thinking_tokens=128_000 - 1,
+            permission_mode="bypassPermissions",
+            prefix=f"[consult:{doc.label}] ",
+        )
+        answer = collector.text
+        if not answer:
+            raise ToolError(
+                "The reader produced no answer; retry with a narrower question "
+                "or an explicit page range."
+            )
+        return ConsultSourceOutput(answer=answer, label=doc.label)
+
+    @lup_tool(
+        "List the source documents registered for this session, with labels, "
+        "kinds, and page counts. Use the labels with find_in_source and "
+        "consult_source.",
+        name="list_source_documents",
+    )
+    async def list_source_documents(
+        _inp: ListSourceDocumentsInput,
+    ) -> ListSourceDocumentsOutput:
+        return ListSourceDocumentsOutput(documents=load_registry())
+
+    return [find_in_source, consult_source, list_source_documents]

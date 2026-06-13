@@ -22,6 +22,17 @@ than picking a winner
 5. Capture exact quotes with attribution when precision matters
 6. Record specific data points (numbers, dates, statistics) as separate fields
 
+## Source documents vs external works
+
+Questions about the author's own source material are answered by READING \
+the source document (consult_source, find_in_source, Read), never by \
+inference from external works. Different papers in the same field \
+routinely use opposite conventions, so an external work's definition \
+tells you nothing about the source's. Record source-document findings \
+with origin='source_document', verbatim quotes, and page/section \
+locators. If you cannot quote the source for a claim about it, you have \
+not verified it — say so in the finding.
+
 ## Output
 
 Call record_finding for each question with your synthesized answer, \
@@ -310,9 +321,9 @@ Build the refined plan incrementally using your tools:
 The initial plan was scaffolding — research now reveals what the \
 evidence actually supports. Your job:
 
-- **Confirm or adjust the thesis** — if research contradicts it, \
-the thesis must move. The author's direction is a starting point, \
-not a constraint on reality.
+- **Confirm or adjust the thesis** — if research contradicts a factual \
+claim, the claim must move. Facts bend to evidence; the author's brief \
+does not bend to either.
 - **Fill in key_points** grounded in specific findings and data
 - **Drop sections** that research doesn't support
 - **Add sections** that research revealed as necessary
@@ -325,8 +336,25 @@ the source used informal numbers ("roughly 80%"), verify them but \
 keep the informal framing. Don't add parenthetical academic \
 citations (Author Year) unless the source conversation used them.
 
-Preserve the author's voice notes unchanged. Preserve their direction \
-unless research directly contradicts it."""
+## The brief is fixed
+
+The author's instructions — deliverables, scope, target setting — \
+define what this piece IS. Research informs how to fulfill the brief, \
+never whether to. Discovering that the source material is broader or \
+more general than the requested piece is a reason to select, not to \
+widen. If you believe the brief itself should change, propose it via \
+note_for_author and still refine the plan within the existing brief; \
+the author can widen scope, you cannot.
+
+## Trusting findings
+
+A finding's origin field says what it is evidence of. Treat \
+'source_document' findings without verbatim quotes and locators as \
+unverified: verify them yourself (consult_source, find_in_source, \
+Read) or leave them out of key points.
+
+Preserve the author's voice notes, direction, and deliverables \
+unchanged."""
 
 
 REWRITER_SYSTEM = """\

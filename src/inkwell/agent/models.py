@@ -76,10 +76,17 @@ class ResearchSource(BaseModel):
     """A source found during research."""
 
     title: str = Field(description="Source title")
-    url: str = Field(description="Source URL")
+    url: str = Field(description="Source URL, or file path for source documents")
     relevance: str = Field(description="Why this source matters")
     key_excerpt: str = Field(
         description="Most relevant excerpt (exact quote with attribution)"
+    )
+    locator: str = Field(
+        default="",
+        description=(
+            "Where the excerpt lives: page number(s) for documents "
+            "('p. 142'), chapter/section, or URL fragment"
+        ),
     )
 
 
@@ -88,6 +95,17 @@ class ResearchFinding(BaseModel):
 
     question: str = Field(description="The original research question")
     answer: str = Field(description="Synthesized answer based on sources")
+    origin: Literal["source_document", "external", "mixed"] = Field(
+        default="external",
+        description=(
+            "Provenance of the answer. 'source_document': the author's own "
+            "source material — every such claim must carry a verbatim quote "
+            "with a locator in sources. 'external': other works (papers, "
+            "web). 'mixed': both. A claim about what the source document "
+            "says, backed only by external works, is 'external' — never "
+            "blend an external convention into a source_document claim."
+        ),
+    )
     sources: list[ResearchSource] = Field(description="Sources consulted")
     confidence: float = Field(
         ge=0.0, le=1.0, description="Confidence in the finding (0-1)"

@@ -225,14 +225,32 @@ def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
 
 class ResearchSourceInput(BaseModel):
     title: str = Field(description="Source title")
-    url: str = Field(description="Source URL")
+    url: str = Field(description="Source URL, or file path for source documents")
     relevance: str = Field(description="Why this source matters")
     key_excerpt: str = Field(description="Most relevant excerpt (exact quote)")
+    locator: str = Field(
+        default="",
+        description=(
+            "Where the excerpt lives: page number(s) for documents "
+            "('p. 142'), chapter/section, or URL fragment. Required when "
+            "the source is the author's source document."
+        ),
+    )
 
 
 class RecordFindingInput(BaseModel):
     question: str = Field(description="The original research question")
     answer: str = Field(description="Synthesized answer based on sources")
+    origin: Literal["source_document", "external", "mixed"] = Field(
+        default="external",
+        description=(
+            "'source_document' = answered from the author's own source "
+            "material (every claim needs a verbatim quote + locator); "
+            "'external' = answered from other works; 'mixed' = both. "
+            "Never record a claim about what the source document says "
+            "based on external works."
+        ),
+    )
     confidence: float = Field(ge=0.0, le=1.0, description="Confidence (0-1)")
     sources: list[ResearchSourceInput] = Field(description="Sources consulted")
     data_points: list[str] = Field(
@@ -312,7 +330,11 @@ def make_research_output_tools(collector: ResearchCollector) -> list[LupMcpTool]
                 "Record a research finding for one question. Call once per "
                 "research question after investigating it. Include all "
                 "sources with URLs and key excerpts, your synthesized answer, "
-                "and confidence level."
+                "and confidence level. Set origin honestly: claims about the "
+                "author's source document require origin='source_document' "
+                "with a verbatim quote and locator (page/section) from that "
+                "document — an external paper's convention is not evidence "
+                "of what the source document does."
             ),
             RecordFindingInput,
             handle_finding,

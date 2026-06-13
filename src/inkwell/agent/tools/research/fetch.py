@@ -14,6 +14,7 @@ import httpx
 import trafilatura
 from pydantic import BaseModel, Field
 
+from inkwell.agent.config import stage_model
 from lup.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
@@ -267,7 +268,7 @@ async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:
 
     result = await query(
         (f"Focus: {focus}\n\nRead the page content from: {content_path}"),
-        model="claude-opus-4-6",
+        model=stage_model("extract"),
         system_prompt=FOCUSED_EXTRACT_SYSTEM,
         output_type=FocusedExtract,
         tools=["Read"],

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from inkwell.agent.config import stage_model
 from lup.mcp import lup_tool
 
 logger = logging.getLogger(__name__)
@@ -289,7 +290,7 @@ async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
             f"Read the content from: {content_path}"
         ),
         output_type=DialogTurns,
-        model="claude-opus-4-6",
+        model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
@@ -406,7 +407,7 @@ async def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
             f"Read the content from: {content_path}"
         ),
         output_type=MemoContent,
-        model="claude-opus-4-6",
+        model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
@@ -470,7 +471,7 @@ async def do_format_academic(params: FormatAcademicInput) -> FormatAcademicOutpu
             + f"\nRead the content from: {content_path}"
         ),
         output_type=AcademicContent,
-        model="claude-opus-4-6",
+        model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
@@ -559,7 +560,7 @@ async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
     result = await query(
         prompt,
         output_type=FormattedContent,
-        model="claude-opus-4-6",
+        model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",

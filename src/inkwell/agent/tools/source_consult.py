@@ -19,6 +19,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from inkwell.agent.config import stage_model
 from lup.client import query
 from lup.mcp import LupMcpTool, ToolError, lup_tool
 
@@ -211,7 +212,7 @@ class ListSourceDocumentsOutput(BaseModel):
 def make_source_consult_tools(
     registry_provider: Callable[[], Path],
     *,
-    reader_model: str = "claude-opus-4-6",
+    reader_model: str | None = None,
 ) -> list[LupMcpTool]:
     """Build the source-document tools bound to a session's registry.
 
@@ -319,7 +320,7 @@ def make_source_consult_tools(
         )
         collector = await query(
             task,
-            model=reader_model,
+            model=reader_model or stage_model("reader"),
             system_prompt=SOURCE_READER_PROMPT,
             tools=["Read"],
             max_thinking_tokens=128_000 - 1,

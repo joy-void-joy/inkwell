@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from inkwell.agent.tools.extract import DiscoveredLink, discover_links
+from inkwell.agent.config import stage_model
 from lup.client import query
 
 
@@ -160,7 +161,7 @@ async def preprocess_sources(sources: list[str]) -> PreprocessResult:
         f"User inputs:\n\n{combined}\n\n"
         f"Discovered sources:\n{source_descriptions}\n\n"
         f"Classify each source's role and extract the user's instructions.",
-        model="claude-opus-4-6",
+        model=stage_model("preprocess"),
         system_prompt=CLASSIFY_SYSTEM,
         output_type=ClassifyOutput,
         max_thinking_tokens=128_000 - 1,

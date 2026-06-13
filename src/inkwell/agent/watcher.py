@@ -18,6 +18,7 @@ from lup.background import BackgroundAgent
 from lup.client import query
 from lup.mcp import LupMcpTool, ToolError, extract_sdk_tools, lup_tool
 
+from inkwell.agent.config import stage_model
 from inkwell.agent.models import ClassifiedComment
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.session import WritingSessionState
@@ -105,7 +106,7 @@ def create_watcher_tools(
         classified = await query(
             task,
             output_type=ClassifiedComment,
-            model="claude-opus-4-6",
+            model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
@@ -219,7 +220,7 @@ def create_comment_watcher(
         tools=extract_sdk_tools(tools),
         build_message=build_message,
         start_message="[Comment watcher started — monitoring Google Doc for author feedback]",
-        model="claude-opus-4-6",
+        model=stage_model("classify"),
         debounce_seconds=5.0,
         allowed_tools=[
             "mcp__watcher__poll_and_classify",
@@ -274,7 +275,7 @@ def create_source_watcher_tools(
         classified = await query(
             task,
             output_type=ClassifiedComment,
-            model="claude-opus-4-6",
+            model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
@@ -367,7 +368,7 @@ def create_source_watcher(
         tools=extract_sdk_tools(tools),
         build_message=build_message,
         start_message="[Source watcher started — monitoring source Google Doc for author comments]",
-        model="claude-opus-4-6",
+        model=stage_model("classify"),
         debounce_seconds=5.0,
         allowed_tools=[
             "mcp__source-watcher__poll_and_classify",

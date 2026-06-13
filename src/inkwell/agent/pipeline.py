@@ -28,6 +28,7 @@ from lup.sandbox import Sandbox
 from lup.trace import TraceLogger, extract_block_info
 
 import inkwell.agent.config as config_mod
+from inkwell.agent.config import stage_model
 from inkwell.agent.models import (
     AddAction,
     ArticlePlan,
@@ -716,7 +717,7 @@ async def extract_with_agent_fallback(
     )
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("extract"),
         system_prompt=EXTRACTOR_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -816,7 +817,7 @@ async def plan_article(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("plan"),
         system_prompt=PLANNER_SYSTEM,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -883,7 +884,7 @@ async def refine_plan(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("refine"),
         system_prompt=REFINER_SYSTEM,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -964,7 +965,7 @@ async def research_plan(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("research"),
         system_prompt=RESEARCHER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1052,7 +1053,7 @@ async def write_section(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("write"),
         system_prompt=SECTION_WRITER_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1110,7 +1111,7 @@ async def plan_merge(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("merge"),
         system_prompt=MERGE_PLAN_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1203,7 +1204,7 @@ async def merge_sections(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("merge"),
         system_prompt=COHERENCE_EDITOR_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1269,7 +1270,7 @@ async def review_narrative(
     )
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("review"),
         system_prompt=NARRATIVE_REVIEWER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1339,7 +1340,7 @@ async def review_facts(
     )
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("review"),
         system_prompt=FACT_CHECKER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1404,7 +1405,7 @@ async def review_style(
     )
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("review"),
         system_prompt=STYLE_REVIEWER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1628,7 +1629,7 @@ async def rewrite_final(
 
     collector = await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("rewrite"),
         system_prompt=REWRITER_SYSTEM,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1777,7 +1778,7 @@ async def surface_assumptions(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("assumptions"),
         system_prompt=ASSUMPTIONS_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -1858,7 +1859,7 @@ async def plan_restart(
     strategy = await query(
         task,
         output_type=RestartStrategy,
-        model="claude-opus-4-6",
+        model=stage_model("orchestrate"),
         system_prompt=ORCHESTRATOR_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -2285,7 +2286,7 @@ class PipelineRunner:
         classified = await query(
             task,
             output_type=ClassifiedComment,
-            model="claude-opus-4-6",
+            model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
@@ -2337,7 +2338,7 @@ class PipelineRunner:
         classified = await query(
             f"Classify this terminal direction from the author:\n\n{text}",
             output_type=ClassifiedComment,
-            model="claude-opus-4-6",
+            model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
@@ -3290,7 +3291,7 @@ class PipelineRunner:
         )
         await query(
             task,
-            model="claude-opus-4-6",
+            model=stage_model("write"),
             system_prompt=SECTION_WRITER_PROMPT,
             tools=BUILTIN_WRITE_TOOLS,
             max_thinking_tokens=128_000 - 1,

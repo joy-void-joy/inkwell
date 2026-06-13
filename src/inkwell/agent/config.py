@@ -125,8 +125,34 @@ class Settings(BaseSettings):
     model: str = Field(
         default="claude-opus-4-6",
         validation_alias="AGENT_MODEL",
-        description="Claude model for main agent",
+        description="Default Claude model for all pipeline stages",
     )
+
+    stage_models: dict[str, str] = Field(
+        default_factory=dict,
+        validation_alias="AGENT_STAGE_MODELS",
+        description=(
+            "Per-stage model overrides as JSON, e.g. "
+            '{"write": "claude-fable-5", "reader": "claude-haiku-4-5"}. '
+            "Stages: preprocess, extract, voice, plan, assumptions, "
+            "research, refine, write, merge, review, rewrite, classify, "
+            "orchestrate, reader, format. Unlisted stages use AGENT_MODEL."
+        ),
+    )
+
+    writer_mode: str = Field(
+        default="parallel",
+        validation_alias="AGENT_WRITER_MODE",
+        description=(
+            "Draft production mode: 'parallel' = one writer per section "
+            "plus a merge stage; 'single' = one writer drafts the whole "
+            "piece in order (no merge stage, no cross-section drift)"
+        ),
+    )
+
+    def model_for(self, stage: str) -> str:
+        """Model for a pipeline stage: stage override, else the default model."""
+        return self.stage_models.get(stage, self.model)
 
     max_thinking_tokens: int | None = Field(
         default=128_000 - 1,
@@ -224,6 +250,12 @@ def load_settings(profile: str | None = None) -> Settings:
 
 
 settings = Settings.model_validate({})
+
+
+def stage_model(stage: str) -> str:
+    """Model for a pipeline stage from the active settings."""
+    return settings.model_for(stage)
+
 
 if settings.openrouter_api_key:
     os.environ.setdefault("ANTHROPIC_BASE_URL", "https://openrouter.ai/api")

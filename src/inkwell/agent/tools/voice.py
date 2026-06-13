@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from claude_agent_sdk import McpServerConfig
 
 import inkwell.agent.config as config_mod
+from inkwell.agent.config import stage_model
 from lup.client import CostAccumulator, query
 from lup.trace import TraceLogger
 from lup.mcp import ToolError, lup_tool
@@ -436,7 +437,7 @@ async def analyze_single_source(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("voice"),
         system_prompt="You are a writing style analyst.",
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -526,7 +527,7 @@ async def merge_voice_analyses(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("voice"),
         system_prompt="You are a writing style analyst producing a unified voice guide.",
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,

@@ -634,7 +634,11 @@ fact, restate the definition as the source states it, restructure the \
 logic. When a resolution quotes the source, the source's wording wins \
 over every other consideration. Never resolve a correctness question \
 by guessing — if the inputs don't settle it, leave the question \
-standing rather than invent an answer.
+standing rather than invent an answer. When you fix an attribution, \
+never reassign authorship without support: attribute a quote as the \
+source states, or leave it unattributed — do not claim the piece's \
+author wrote something they only cited. You are the last stage; an \
+error you introduce ships uncaught.
 2. **Author preferences** override reviewer suggestions (never \
 correctness fixes).
 3. **Voice profile rules.** Read the voice profile file. If it \
@@ -675,7 +679,13 @@ Do NOT ask questions that research already answered with high confidence.
 - **direction_check**: The plan could go different ways.
 - **assumption**: Something the plan takes for granted.
 - **question**: A gap that research couldn't fill.
-- **confusion**: Contradictory or unclear information.
+- **confusion**: Contradictory or unclear information — including two \
+author instructions that pull against each other (a structural \
+deliverable that, executed literally, would violate a voice or format \
+constraint, e.g. "add next steps by audience" alongside "don't read \
+like a memo"). Name both sides and, in your best guess, propose how to \
+honor both — deliver the content in the author's prose voice rather \
+than as a bolded, segmented template.
 
 ## Output
 
@@ -854,7 +864,12 @@ manufacture a credential, a track record, or a disclaimer the source \
 does not contain. A fabricated epistemic status is worse than none: it \
 misrepresents the author on the first line. If the source carries no \
 stance worth surfacing, omit the header. Prefer the author's specific \
-words over any generic hedge like "fairly confident."
+words over any generic hedge like "fairly confident." Preserve the \
+direction of their stance: if they undersold the work (wrote it fast, \
+used AI assistance, expect some claims to shift under reflection), keep \
+that humility verbatim. "Direct and confident" governs the argument's \
+claims, not the epistemic-status line — never upgrade a self-deprecating \
+disclaimer into confident self-promotion.
 
 ### Section Structure
 

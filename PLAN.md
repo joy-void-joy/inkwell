@@ -119,6 +119,45 @@ Deferred (not regressions; lower value than the trace warranted):
   and overwhelmed an external fetch; consider a publish/export path or
   splitting working tabs from the deliverable
 
+### 0c. Voice-fidelity overhaul (fix-voice-fidelity)
+
+From the two-session feedback on "The main reason we're losing" (trace
+sessions `3c7edec171014505` + `ca74e7f7c5594103`). The pipeline turned a
+nuanced, self-implicating LessWrong essay into a depersonalized memo and
+silently stripped the author's freshest specifics. Each fix is a capability
+or a structural change at the juncture where the failure entered, not a
+warning:
+
+- [x] `author_unverified` provenance: research preserves the author's
+  unverifiable specifics (a named event, a ratio, a remembered study)
+  verbatim and flags them, instead of demoting them to open
+  research_questions that read downstream as "cut" (the path that lost
+  Mythos, the 3.6 ratio, the 84/97 + 890 lobbying numbers)
+- [x] Coverage reviewer (5th reviewer): diffs the plan's `source_quotes`,
+  `quotes_to_include`, and key-point specifics (and the source) against the
+  draft and flags each dropped/substituted/hollowed specific as critical —
+  the only reviewer that looks for what *left* the draft
+- [x] Merge planner can't declare a drafted section missing: it sees each
+  section file's on-disk byte size and is forbidden to mark a listed file
+  "not drafted" / "to be constructed" (the bug that dropped §3's Dean Ball
+  objection and rebuilt the section from neighbors' scraps)
+- [x] Format guidance defers to voice: `get_format_guidance` appends a
+  precedence clause to every non-empty block; the memo bold mandate softened
+  from "bold every paragraph's first sentence" to "bold sparingly" (source
+  of the bolded-recipient-list tell)
+- [x] Voice + raw author directions routed to the structural chokepoints
+  (merge planner, coherence editor, narrative reviewer, rewriter) instead of
+  only the planner's distillation
+- [x] Epistemic-status humility preserved (no upgrading the author's
+  self-deprecation into confident self-promotion); rewriter attribution
+  guard (last stage, no downstream check)
+- [x] Assumptions stage surfaces conflicting author instructions (a
+  structural deliverable that fights a voice constraint) instead of
+  executing the literal half
+- [x] `writer_mode: auto` defaults voice-driven formats to single-writer
+  (no merge — eliminates the merge-smoothing and merge-planner failure
+  classes by construction); academic stays parallel
+
 ### 1. ~~Terminal Input During Sleep~~ Interactive Chat CLI
 
 - [x] Interactive chat as default (`inkwell` opens chat, subcommands pre-seed it)

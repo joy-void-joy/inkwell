@@ -36,7 +36,7 @@ def test_formatting_indices_account_for_surrogates() -> None:
 
 
 def test_clamp_ranges_drops_out_of_bounds() -> None:
-    requests = [
+    requests: list[dict[str, object]] = [  # claude: ignore
         {
             "updateTextStyle": {
                 "range": {"startIndex": 100, "endIndex": 200},
@@ -49,7 +49,7 @@ def test_clamp_ranges_drops_out_of_bounds() -> None:
 
 
 def test_clamp_ranges_clamps_end() -> None:
-    requests = [
+    requests: list[dict[str, object]] = [  # claude: ignore
         {
             "updateTextStyle": {
                 "range": {"startIndex": 10, "endIndex": 200},

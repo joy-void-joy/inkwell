@@ -1,11 +1,13 @@
 """Tests for extract_tab_markdown — reconstructing markdown from GDoc API structures."""
 
+from collections.abc import Mapping
+
 from inkwell.agent.tools.google_docs import extract_tab_markdown
 
 
 def make_tab(
     paragraphs: list[dict[str, object]],  # type: ignore[type-arg]
-    lists: dict[str, object] | None = None,  # type: ignore[type-arg]
+    lists: Mapping[str, object] | None = None,
 ) -> dict[str, object]:  # type: ignore[type-arg]
     """Build a minimal GDoc tab structure for testing."""
     tab: dict[str, object] = {"documentTab": {"body": {"content": paragraphs}}}

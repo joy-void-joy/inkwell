@@ -182,7 +182,7 @@ class ReviewFinding(BaseModel):
     """A finding from one of the reviewer agents."""
 
     reviewer: str = Field(
-        description="Which reviewer: 'narrative', 'factcheck', 'style', or 'source_fidelity'"
+        description="Which reviewer: 'narrative', 'factcheck', 'style', 'source_fidelity', or 'coverage'"
     )
     severity: Literal["critical", "suggestion", "praise"] = Field(
         description="'critical', 'suggestion', or 'praise'"

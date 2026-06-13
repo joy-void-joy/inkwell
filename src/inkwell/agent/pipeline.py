@@ -60,6 +60,7 @@ from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
     COHERENCE_EDITOR_PROMPT,
     COMMENT_CLASSIFIER_PROMPT,
+    COVERAGE_REVIEWER_PROMPT,
     FACT_CHECKER_PROMPT,
     MERGE_PLAN_PROMPT,
     NARRATIVE_REVIEWER_PROMPT,
@@ -1675,6 +1676,76 @@ async def review_source_fidelity(
     return ReviewOutput(findings=findings)
 
 
+async def review_coverage(
+    notes: PipelineNotes,
+    draft_path: Path,
+    *,
+    voice_file_paths: list[str] | None = None,
+    author_notes: list[AuthorNote] | None = None,
+    source_servers: dict[str, McpServerConfig] | None = None,
+    source_tool_names_list: list[str] | None = None,
+    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_tool_names: list[str] | None = None,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> ReviewOutput:
+    """Flag the author's concrete specifics that the draft dropped or replaced."""
+    review_path = notes.artifacts_dir / "review_coverage.json"
+    collector = ReviewCollector(review_path, "coverage")
+    output_servers, output_tool_names = build_output_server(
+        "output", make_review_output_tools(collector)
+    )
+    note_collector = author_notes if author_notes is not None else []
+    note_servers, note_tool_names = build_note_server("review:coverage", note_collector)
+    all_servers = {
+        **output_servers,
+        **note_servers,
+        **(source_servers or {}),
+        **(compute_servers or {}),
+    }
+    all_tools = (
+        output_tool_names
+        + note_tool_names
+        + (source_tool_names_list or [])
+        + (compute_tool_names or [])
+    )
+
+    manifest = ContentManifest()
+    manifest.add(draft_path, "draft", "Article draft")
+    manifest.add(notes.artifact_path("plan"), "plan", "Article plan")
+    add_source_refs(manifest, notes)
+    add_voice_refs(manifest, voice_file_paths or [])
+
+    task = (
+        f"Check the draft for the author's concrete specifics that went "
+        f"missing.\n\n{manifest.render()}\n\n"
+        f"Read the plan (source_quotes, each section's quotes_to_include, and "
+        f"the concrete nouns in its key_points) and the draft. Where a source "
+        f"document is listed, scan it for named specifics too. Call "
+        f"record_finding for each specific that was dropped, substituted with "
+        f"a generic version, or hollowed out."
+    )
+    await query(
+        task,
+        model=stage_model("review"),
+        system_prompt=COVERAGE_REVIEWER_PROMPT,
+        tools=BUILTIN_READ_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        permission_mode="bypassPermissions",
+        mcp_servers=all_servers,
+        allowed_tools=all_tools,
+        trace_logger=trace_logger,
+        prefix="[review:coverage] ",
+        cost_accumulator=cost_accumulator,
+    )
+    if review_path.exists():
+        data = json.loads(review_path.read_text(encoding="utf-8"))
+        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
+    else:
+        findings = []
+    return ReviewOutput(findings=findings)
+
+
 async def review_all(
     notes: PipelineNotes,
     draft_path: Path,
@@ -1689,8 +1760,9 @@ async def review_all(
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> list[ReviewFinding]:
-    """Stage 5: Run the reviewers in parallel (plus source fidelity when
-    source documents are registered)."""
+    """Stage 5: Run the reviewers in parallel — narrative, fact-check, style,
+    and coverage (the author's dropped specifics), plus source fidelity when
+    source documents are registered."""
     narrative_task = review_narrative(
         notes,
         draft_path,
@@ -1727,7 +1799,20 @@ async def review_all(
         cost_accumulator=cost_accumulator,
     )
 
-    review_tasks = [narrative_task, facts_task, style_task]
+    coverage_task = review_coverage(
+        notes,
+        draft_path,
+        voice_file_paths=voice_file_paths,
+        author_notes=author_notes,
+        source_servers=source_servers,
+        source_tool_names_list=source_tool_names_list,
+        compute_servers=compute_servers,
+        compute_tool_names=compute_tool_names,
+        trace_logger=trace_logger,
+        cost_accumulator=cost_accumulator,
+    )
+
+    review_tasks = [narrative_task, facts_task, style_task, coverage_task]
     if load_source_registry(registry_path_for(notes.artifacts_dir)):
         review_tasks.append(
             review_source_fidelity(

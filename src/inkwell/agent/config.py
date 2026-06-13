@@ -52,7 +52,7 @@ SUGGESTED_MODELS: tuple[str, ...] = (
 )
 """Model ids offered in pickers; any model id string is accepted."""
 
-WRITER_MODES: tuple[str, ...] = ("parallel", "single")
+WRITER_MODES: tuple[str, ...] = ("auto", "parallel", "single")
 """Draft production modes for the write stage."""
 
 
@@ -173,12 +173,15 @@ class Settings(BaseSettings):
     )
 
     writer_mode: str = Field(
-        default="parallel",
+        default="auto",
         validation_alias="AGENT_WRITER_MODE",
         description=(
             "Draft production mode: 'parallel' = one writer per section "
             "plus a merge stage; 'single' = one writer drafts the whole "
-            "piece in order (no merge stage, no cross-section drift)"
+            "piece in order (no merge stage, no cross-section drift); "
+            "'auto' = single for voice-driven formats, parallel for "
+            "academic (where length and cross-section consistency make the "
+            "merge worth its voice-smoothing cost)"
         ),
     )
 

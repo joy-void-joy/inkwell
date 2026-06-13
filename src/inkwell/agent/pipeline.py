@@ -353,6 +353,20 @@ def directions_block(notes: PipelineNotes) -> str:
     )
 
 
+def resolve_writer_mode(mode: str, target_format: str) -> str:
+    """Resolve writer_mode='auto' to a concrete mode for the target format.
+
+    'single' drafts the whole piece in one context — voice-coherent, with no
+    merge stage to smooth the author's register or drop a section. 'parallel'
+    writes sections independently and then merges them. Voice-driven formats
+    default to single; academic pieces, where length and cross-section
+    consistency make the merge worth its voice-smoothing cost, stay parallel.
+    """
+    if mode != "auto":
+        return mode
+    return "parallel" if target_format == "academic" else "single"
+
+
 # ---------------------------------------------------------------------------
 # Pipeline listener — override for interactive behavior
 # ---------------------------------------------------------------------------
@@ -3418,7 +3432,10 @@ class PipelineRunner:
         if plan is None or research is None:
             raise PipelineError("Cannot write without plan and research")
 
-        if current_settings().writer_mode == "single":
+        if (
+            resolve_writer_mode(current_settings().writer_mode, self.effective_format)
+            == "single"
+        ):
             await self.write_single_draft()
             return
 
@@ -3570,7 +3587,11 @@ class PipelineRunner:
         if plan is None:
             raise PipelineError("Cannot merge without a plan")
 
-        if current_settings().writer_mode == "single" and self.snapshot.merged:
+        if (
+            resolve_writer_mode(current_settings().writer_mode, self.effective_format)
+            == "single"
+            and self.snapshot.merged
+        ):
             self.snapshot.stage = "merge"
             await self.save_snapshot()
             return

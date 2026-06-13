@@ -79,3 +79,30 @@ class TestRehydrateDraftFiles:
         runner.rehydrate_draft_files()
 
         assert not runner.get_draft_path("final").exists()
+
+
+class TestWriteStageProducedNothing:
+    """A wholly-failed write stage must be detected so the pipeline does not
+
+    advance into merge with nothing to assemble (e.g. every section writer hit
+    a usage limit and recorded a ``[Section failed: ...]`` placeholder).
+    """
+
+    def test_all_sections_failed(self, runner: PipelineRunner) -> None:
+        runner.snapshot.section_drafts = {
+            "A": SectionDraft(title="A", content="[Section failed: usage limit]"),
+            "B": SectionDraft(title="B", content="[Section failed: usage limit]"),
+        }
+
+        assert runner.write_stage_produced_nothing() is True
+
+    def test_one_section_usable(self, runner: PipelineRunner) -> None:
+        runner.snapshot.section_drafts = {
+            "A": SectionDraft(title="A", content="[Section failed: usage limit]"),
+            "B": SectionDraft(title="B", content="# B\n\nreal content"),
+        }
+
+        assert runner.write_stage_produced_nothing() is False
+
+    def test_no_sections_written_yet(self, runner: PipelineRunner) -> None:
+        assert runner.write_stage_produced_nothing() is False

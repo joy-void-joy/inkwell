@@ -2391,6 +2391,20 @@ class PipelineRunner:
         if self.snapshot.output is not None:
             restore("final", self.snapshot.output.content)
 
+    def write_stage_produced_nothing(self) -> bool:
+        """True when the write stage recorded only failure placeholders.
+
+        A transient writer failure (a usage or rate limit) records a
+        ``[Section failed: ...]`` placeholder for every section yet still
+        advances the snapshot to ``write``. Merge would then receive no
+        usable sections. Detecting this lets the writer gate halt, and a
+        resume rewind to re-run ``write`` once the limit clears.
+        """
+        drafts = self.snapshot.section_drafts
+        return bool(drafts) and all(
+            draft.content.startswith("[Section failed") for draft in drafts.values()
+        )
+
     async def save_snapshot(self) -> None:
         self.snapshot.doc_id = self.state.doc_id
         self.snapshot.doc_url = self.state.doc_url
@@ -2530,6 +2544,8 @@ class PipelineRunner:
             ]
             last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
             remaining = stages[last_idx + 1 :]
+            if "write" not in remaining and self.write_stage_produced_nothing():
+                remaining = stages[stages.index("write") :]
 
             if snapshot.plan:
                 self.start_watcher()
@@ -3486,6 +3502,12 @@ class PipelineRunner:
                 )
 
         await self.post_author_notes()
+        if self.write_stage_produced_nothing():
+            sample = next(iter(self.snapshot.section_drafts.values()), None)
+            raise PipelineError(
+                "Write stage produced no usable sections: "
+                + (sample.content if sample else "no sections")
+            )
         self.snapshot.stage = "write"
         await self.save_snapshot()
         await self.update_overview()

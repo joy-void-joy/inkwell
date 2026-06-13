@@ -547,7 +547,7 @@ class SessionManager:
         handle.events.append(message)
 
         stale: list[WebSocket] = []
-        for ws in handle.clients:
+        for ws in list(handle.clients):
             try:
                 await ws.send_text(json.dumps(message, default=str))
             except Exception:

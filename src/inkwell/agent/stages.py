@@ -56,6 +56,22 @@ with origin='source_document', verbatim quotes, and page/section \
 locators. If you cannot quote the source for a claim about it, you have \
 not verified it — say so in the finding.
 
+## The author's own specifics you cannot verify
+
+The author's draft is full of the specifics that make it theirs: a \
+named recent event, a ratio they cite, a study they remember, a \
+first-hand anecdote. Some you will not be able to confirm or refute — \
+link rot, an insider name, something too recent to be indexed. These \
+are the most current, most personal, most credibility-bearing parts of \
+the piece, and they are exactly the parts that vanish if you treat \
+"unverified" as "cut." Record each one with record_finding, \
+origin='author_unverified', the specific preserved verbatim in the \
+answer and in data_points, and a confidence that reflects the \
+uncertainty. Do NOT downgrade it into an open research_question (the \
+writers read that as "not ready, leave it out"), and do NOT substitute \
+a generic verified fact for the author's specific one. The next stages \
+keep author_unverified material and flag it to the author to source.
+
 ## Output
 
 Call record_finding for each question with your synthesized answer, \
@@ -95,6 +111,14 @@ You have full research tools — web search, arXiv, FRED, prediction \
 markets, Wikipedia, URL fetching. If a claim needs a number you don't \
 have, or the research findings don't cover your section's needs well \
 enough, look it up yourself. Never write around a gap you can fill.
+
+A finding marked origin='author_unverified' is different: it is the \
+author's own specific (a named event, ratio, study, anecdote) that \
+research could not confirm or refute. Keep it, in the author's framing — \
+do not drop it, soften it into a generic claim, or replace it with a \
+verified proxy on a different fact. Flag it once via note_for_author so \
+the author can add a source. A fillable gap, you fill; an \
+author_unverified specific, you preserve and flag.
 
 Integrate research as support for the author's existing claims, not \
 as new framing. If the author wrote "about 40%," verify it and use \
@@ -136,6 +160,12 @@ markets, Wikipedia, URL fetching, and the source-document tools. If a \
 claim needs a number or a definition you don't have, look it up. Never \
 write around a gap you can fill, and never fill a source-document gap \
 from general knowledge.
+
+A finding marked origin='author_unverified' is the author's own \
+specific that research could not confirm or refute. Keep it in the \
+author's framing and flag it once via note_for_author — don't drop it \
+or swap in a generic verified fact. A fillable gap, you fill; an \
+author_unverified specific, you preserve and flag.
 
 ## Output
 
@@ -526,6 +556,13 @@ A finding's origin field says what it is evidence of. Treat \
 'source_document' findings without verbatim quotes and locators as \
 unverified: verify them yourself (consult_source, find_in_source, \
 Read) or leave them out of key points.
+
+A finding marked origin='author_unverified' is the author's own \
+specific that research could neither confirm nor refute. It is not an \
+"unsupported section to drop" — it is load-bearing voice. Carry it into \
+the relevant section's key_points, in the author's framing, so the \
+writers keep and flag it. Only material research actively *contradicts* \
+gets dropped.
 
 Preserve the author's voice notes, direction, and deliverables \
 unchanged."""

@@ -259,15 +259,20 @@ class ResearchSourceInput(BaseModel):
 class RecordFindingInput(BaseModel):
     question: str = Field(description="The original research question")
     answer: str = Field(description="Synthesized answer based on sources")
-    origin: Literal["source_document", "external", "mixed"] = Field(
-        default="external",
-        description=(
-            "'source_document' = answered from the author's own source "
-            "material (every claim needs a verbatim quote + locator); "
-            "'external' = answered from other works; 'mixed' = both. "
-            "Never record a claim about what the source document says "
-            "based on external works."
-        ),
+    origin: Literal["source_document", "external", "mixed", "author_unverified"] = (
+        Field(
+            default="external",
+            description=(
+                "'source_document' = answered from the author's own source "
+                "material (every claim needs a verbatim quote + locator); "
+                "'external' = answered from other works; 'mixed' = both; "
+                "'author_unverified' = a specific the author asserts that you "
+                "could neither confirm nor refute — preserve it verbatim and "
+                "flag it for the author, do not drop it. "
+                "Never record a claim about what the source document says "
+                "based on external works."
+            ),
+        )
     )
     confidence: float = Field(ge=0.0, le=1.0, description="Confidence (0-1)")
     sources: list[ResearchSourceInput] = Field(description="Sources consulted")
@@ -352,7 +357,11 @@ def make_research_output_tools(collector: ResearchCollector) -> list[LupMcpTool]
                 "author's source document require origin='source_document' "
                 "with a verbatim quote and locator (page/section) from that "
                 "document — an external paper's convention is not evidence "
-                "of what the source document does."
+                "of what the source document does. When the author asserts a "
+                "specific you can neither confirm nor refute, record it with "
+                "origin='author_unverified' (preserving the specific in the "
+                "answer) instead of leaving it out — that keeps the author's "
+                "voice from being silently stripped."
             ),
             RecordFindingInput,
             handle_finding,

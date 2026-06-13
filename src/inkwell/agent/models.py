@@ -112,16 +112,24 @@ class ResearchFinding(BaseModel):
 
     question: str = Field(description="The original research question")
     answer: str = Field(description="Synthesized answer based on sources")
-    origin: Literal["source_document", "external", "mixed"] = Field(
-        default="external",
-        description=(
-            "Provenance of the answer. 'source_document': the author's own "
-            "source material — every such claim must carry a verbatim quote "
-            "with a locator in sources. 'external': other works (papers, "
-            "web). 'mixed': both. A claim about what the source document "
-            "says, backed only by external works, is 'external' — never "
-            "blend an external convention into a source_document claim."
-        ),
+    origin: Literal["source_document", "external", "mixed", "author_unverified"] = (
+        Field(
+            default="external",
+            description=(
+                "Provenance of the answer. 'source_document': the author's own "
+                "source material — every such claim must carry a verbatim quote "
+                "with a locator in sources. 'external': other works (papers, "
+                "web). 'mixed': both. A claim about what the source document "
+                "says, backed only by external works, is 'external' — never "
+                "blend an external convention into a source_document claim. "
+                "'author_unverified': a specific the author asserts (a named "
+                "event, number, ratio, study, anecdote) that research could "
+                "neither confirm nor refute. It is load-bearing voice, not a "
+                "gap to fill: preserve the author's claim verbatim in the answer "
+                "and flag it for the author — never drop it or swap in a generic "
+                "verified proxy."
+            ),
+        )
     )
     sources: list[ResearchSource] = Field(description="Sources consulted")
     confidence: float = Field(

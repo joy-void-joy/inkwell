@@ -20,8 +20,9 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import stage_model
-from lup.client import query
+from lup.client import CostAccumulator, query
 from lup.mcp import LupMcpTool, ToolError, lup_tool
+from lup.trace import TraceLogger
 
 logger = logging.getLogger(__name__)
 
@@ -347,3 +348,84 @@ def make_source_consult_tools(
         return ListSourceDocumentsOutput(documents=load_registry())
 
     return [find_in_source, consult_source, list_source_documents]
+
+
+READING_NOTES_DIRNAME = "source_notes"
+
+READING_NOTES_PROMPT = """\
+You write reading notes for one window of a source document. The notes
+are the durable memory other agents rely on when they cannot hold the
+whole document in context — they must stand alone.
+
+Read your assigned pages with the Read tool (it accepts pages='N-M',
+at most 20 pages per call — split larger windows into two calls), then
+write notes containing:
+
+- The section/chapter structure inside the window, with page numbers
+- Every formal definition VERBATIM, with its page number
+- Every theorem, proposition, and algorithm statement verbatim, with page
+- The conventions that govern reading the document — notation, symbol
+  meanings, encodings, digit order, index origins — quoted verbatim
+- A short prose summary of what the window argues
+
+Quote; don't paraphrase. A summarized definition poisons every
+downstream stage that trusts these notes. Write the notes to the output
+path given in your task using the Write tool."""
+
+
+def reading_notes_dir(artifacts_dir: Path) -> Path:
+    return artifacts_dir / READING_NOTES_DIRNAME
+
+
+async def build_reading_notes(
+    doc: SourceDocument,
+    artifacts_dir: Path,
+    *,
+    window: int = 24,
+    concurrency: int = 3,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> list[Path]:
+    """Build per-window reading notes for a PDF source document.
+
+    Parallel nested readers each cover ``window`` pages and persist
+    verbatim-quoting notes to disk, so no later stage depends on holding
+    the whole document in one context (and compaction loses nothing).
+    """
+    notes_dir = reading_notes_dir(artifacts_dir)
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def read_window(start: int, end: int) -> Path:
+        out_path = notes_dir / f"{doc.label}_p{start:04d}-{end:04d}.md"
+        if out_path.exists():
+            return out_path
+        task = (
+            f"Document: {doc.path}\n"
+            f"Assigned pages: {start}-{end} (document has {doc.page_count}).\n\n"
+            f"Write the reading notes to: {out_path}"
+        )
+        async with semaphore:
+            await query(
+                task,
+                model=stage_model("reader"),
+                system_prompt=READING_NOTES_PROMPT,
+                tools=["Read", "Write"],
+                max_thinking_tokens=128_000 - 1,
+                permission_mode="bypassPermissions",
+                prefix=f"[reading:{doc.label}:{start}-{end}] ",
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+            )
+        if not out_path.exists():
+            logger.warning(
+                "Reading notes missing for %s pages %d-%d", doc.label, start, end
+            )
+        return out_path
+
+    windows = [
+        (start, min(start + window - 1, doc.page_count))
+        for start in range(1, doc.page_count + 1, window)
+    ]
+    results = await asyncio.gather(*(read_window(a, b) for a, b in windows))
+    return [p for p in results if p.exists()]

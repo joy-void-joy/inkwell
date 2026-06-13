@@ -86,9 +86,11 @@ from inkwell.agent.tools.extract import (
 )
 from inkwell.agent.tools.research.fetch import do_fetch_source
 from inkwell.agent.tools.source_consult import (
+    build_reading_notes,
     build_source_registry_async,
     load_source_registry,
     make_source_consult_tools,
+    reading_notes_dir,
     registry_path_for,
 )
 from inkwell.agent.tools.formats import (
@@ -255,6 +257,16 @@ def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
             instruction=(
                 f"authoritative source document ({doc.kind}{pages}) — verify "
                 "claims against it via consult_source/find_in_source or Read"
+            ),
+        )
+    for notes_file in sorted(reading_notes_dir(notes.artifacts_dir).glob("*.md")):
+        manifest.add(
+            notes_file,
+            "source",
+            notes_file.stem,
+            instruction=(
+                "reading notes: verbatim definitions and statements with page "
+                "refs — cheaper than re-reading the document"
             ),
         )
 
@@ -787,6 +799,7 @@ async def plan_article(
             manifest.add(
                 p, "source", Path(p).stem, instruction="additional source material"
             )
+    add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
 
     task = (
@@ -2792,6 +2805,27 @@ class PipelineRunner:
         await self.update_overview(active_stage="plan")
         notes = self.ensure_notes()
         plan_path = notes.artifact_path("plan")
+
+        for doc in load_source_registry(registry_path_for(notes.artifacts_dir)):
+            if doc.kind != "pdf" or not doc.page_count:
+                continue
+            existing = list(
+                reading_notes_dir(notes.artifacts_dir).glob(f"{doc.label}_p*.md")
+            )
+            if existing:
+                continue
+            await self.hooks.on_progress(
+                f"Reading {doc.label} ({doc.page_count}p) — building reading notes"
+            )
+            built = await build_reading_notes(
+                doc,
+                notes.artifacts_dir,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
+            await self.hooks.on_progress(
+                f"Reading notes: {len(built)} window(s) for {doc.label}"
+            )
 
         async def sync_plan_tab() -> None:
             text = render_plan_progress(plan_path)

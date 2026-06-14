@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -75,11 +76,16 @@ def build_source_registry(
     to ``artifacts_dir/sources.json`` so tools in any later stage (or a
     resumed process) can load it.
     """
+    sources_dir = artifacts_dir / "sources"
+    sources_dir.mkdir(parents=True, exist_ok=True)
     documents: list[SourceDocument] = []
     for raw in source_paths:
-        path = Path(raw).expanduser()
-        if not path.is_file():
+        original = Path(raw).expanduser()
+        if not original.is_file():
             continue
+        path = sources_dir / original.name
+        if path.resolve() != original.resolve():
+            shutil.copy2(original, path)
         label = path.stem
         if path.suffix.lower() == ".pdf":
             text_dir = artifacts_dir / TEXT_LAYER_DIRNAME / label

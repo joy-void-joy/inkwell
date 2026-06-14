@@ -758,8 +758,9 @@ def build_compute_server(
             usage_notes=(
                 "Pipeline session data is mounted read-only at /notes: the plan at "
                 "/notes/artifacts/plan.json, research at /notes/artifacts/research.json, "
-                "section drafts under /notes/drafts/. Read these instead of retyping "
-                "values from memory."
+                "section drafts under /notes/drafts/, and the original source "
+                "documents under /notes/artifacts/sources/. Read these instead of "
+                "retyping values from memory."
             )
         ),
         *make_query_tools(artifacts_dir),

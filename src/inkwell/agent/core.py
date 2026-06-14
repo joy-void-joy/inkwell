@@ -155,42 +155,45 @@ async def run_session(
     cost_acc = cost_accumulator or CostAccumulator()
     pipeline_notes = PipelineNotes(setup.notes.session / "pipeline_notes")
 
-    if resume_session_id:
-        snapshot = load_snapshot(resume_session_id, from_stage=resume_from_stage)
-        if snapshot is None:
-            raise PipelineError(
-                f"No snapshot found for session '{resume_session_id}'. "
-                "Cannot resume without saved pipeline state."
-            )
-        if snapshot.doc_id:
-            existing_doc_id = snapshot.doc_id
-        elif snapshot.output and snapshot.output.google_doc_id:
-            existing_doc_id = snapshot.output.google_doc_id
+    try:
+        if resume_session_id:
+            snapshot = load_snapshot(resume_session_id, from_stage=resume_from_stage)
+            if snapshot is None:
+                raise PipelineError(
+                    f"No snapshot found for session '{resume_session_id}'. "
+                    "Cannot resume without saved pipeline state."
+                )
+            if snapshot.doc_id:
+                existing_doc_id = snapshot.doc_id
+            elif snapshot.output and snapshot.output.google_doc_id:
+                existing_doc_id = snapshot.output.google_doc_id
 
-        runner = PipelineRunner(
-            sources=sources or [],
-            refs=refs or [],
-            target_format=target_format,
-            existing_doc_id=existing_doc_id,
-            session_state=setup.session_state,
-            notes=pipeline_notes,
-            trace_logger=setup.trace_logger,
-            listener=listener,
-            cost_accumulator=cost_acc,
-        )
-        output = await runner.run_from(snapshot)
-    else:
-        output = await run_pipeline(
-            sources=sources or [],
-            refs=refs or [],
-            target_format=target_format,
-            existing_doc_id=existing_doc_id,
-            session_state=setup.session_state,
-            notes=pipeline_notes,
-            trace_logger=setup.trace_logger,
-            listener=listener,
-            cost_accumulator=cost_acc,
-        )
+            runner = PipelineRunner(
+                sources=sources or [],
+                refs=refs or [],
+                target_format=target_format,
+                existing_doc_id=existing_doc_id,
+                session_state=setup.session_state,
+                notes=pipeline_notes,
+                trace_logger=setup.trace_logger,
+                listener=listener,
+                cost_accumulator=cost_acc,
+            )
+            output = await runner.run_from(snapshot)
+        else:
+            output = await run_pipeline(
+                sources=sources or [],
+                refs=refs or [],
+                target_format=target_format,
+                existing_doc_id=existing_doc_id,
+                session_state=setup.session_state,
+                notes=pipeline_notes,
+                trace_logger=setup.trace_logger,
+                listener=listener,
+                cost_accumulator=cost_acc,
+            )
+    finally:
+        setup.trace_logger.save()
 
     if cost_acc.stages:
         output.stage_costs = {
@@ -204,7 +207,6 @@ async def run_session(
             for name, sc in cost_acc.stages.items()
         }
 
-    setup.trace_logger.save()
     log_metrics_summary()
 
     result = AgentSessionResult(

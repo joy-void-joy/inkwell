@@ -27,6 +27,7 @@ from lup.client import (
     HeartbeatCallback,
     SessionPolicy,
     active_block_callback,
+    is_interrupt,
     query,
     session_policy,
 )
@@ -2478,6 +2479,33 @@ class PipelineRunner:
     def stop_sandbox(self) -> None:
         if self.sandbox is not None:
             self.sandbox.stop()
+
+    async def finalize_on_interrupt(self) -> None:
+        """Ship whatever the snapshot holds when an interrupt cuts the run short.
+
+        Writes the content to a local file first — guaranteed even when the
+        interrupt struck during the Google Doc write — then attempts the Final
+        tab. A later resume re-runs format idempotently.
+        """
+        output = self.snapshot.output
+        if output is None or not output.content:
+            logger.warning(
+                "Interrupt before any output was produced; nothing to finalize"
+            )
+            return
+        notes = self.ensure_notes()
+        local_path = notes.artifacts_dir / "final_on_interrupt.md"
+        local_path.write_text(output.content, encoding="utf-8")
+        logger.info("Interrupt: saved final content to %s", local_path)
+        async with gdoc_nonfatal("write final tab on interrupt"):
+            from inkwell.agent.tools.google_docs import write_with_continuation
+
+            tab_ids = await write_with_continuation(
+                self.doc_id, "Final", output.content, session_state=self.state
+            )
+            if tab_ids:
+                self.final_tab_id = tab_ids[0]
+                self.known_tabs["Final"] = tab_ids[0]
             self.sandbox = None
             logger.info("Sandbox stopped")
 
@@ -2747,6 +2775,16 @@ class PipelineRunner:
                 await self.update_overview()
                 await self.hooks.on_complete(output)
                 await self.standby_loop()
+            except (
+                Exception
+            ) as exc:  # claude: ignore — SDK raises generic Exception for exit codes
+                if not is_interrupt(exc):
+                    raise
+                logger.info(
+                    "Pipeline interrupted during stage %r — finalizing",
+                    self.snapshot.stage,
+                )
+                await self.finalize_on_interrupt()
             finally:
                 await self.stop_watcher()
         finally:

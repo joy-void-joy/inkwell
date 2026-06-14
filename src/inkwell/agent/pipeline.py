@@ -198,6 +198,21 @@ def is_resumable_label(label: str) -> bool:
     return not label.startswith(REACTIVE_LABELS)
 
 
+def reachable_sessions(
+    snapshot: PipelineSnapshot, current_profile: str | None
+) -> dict[str, str]:
+    """Recorded session ids whose transcripts the current profile can reach.
+
+    Transcripts live under the creating profile's ``CLAUDE_CONFIG_DIR``;
+    resuming under a different profile would aim ``resume`` at a file that
+    isn't there, so only a matching profile yields resumable ids — otherwise
+    each agent simply starts fresh.
+    """
+    if current_profile == snapshot.profile:
+        return dict(snapshot.session_ids)
+    return {}
+
+
 class PipelineError(Exception):
     """Raised when a pipeline stage fails to produce valid output."""
 
@@ -2609,7 +2624,7 @@ class PipelineRunner:
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
             self.cost_accumulator.load_state(snapshot.cost_state)
-        self.pending_resume = dict(snapshot.session_ids)
+        self.pending_resume = reachable_sessions(snapshot, current_settings().profile)
 
         await self.setup_doc()
         self.start_sandbox()

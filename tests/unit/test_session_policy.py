@@ -13,8 +13,13 @@ import pytest
 
 from lup.client import stage_label
 
+from inkwell.agent.models import PipelineSnapshot
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.pipeline import PipelineRunner, is_resumable_label
+from inkwell.agent.pipeline import (
+    PipelineRunner,
+    is_resumable_label,
+    reachable_sessions,
+)
 
 
 @pytest.fixture
@@ -74,3 +79,24 @@ class TestRecordSession:
         await runner.record_session("classify-edit:Plan", "sess-9")
 
         assert runner.snapshot.session_ids == {}
+
+
+class TestReachableSessions:
+    """Resume only when the current profile matches the one that wrote the
+    transcripts; a different profile points at an unreachable config dir.
+    """
+
+    def test_matching_profile_yields_ids(self) -> None:
+        snap = PipelineSnapshot(profile="alpha", session_ids={"refine": "s1"})
+
+        assert reachable_sessions(snap, "alpha") == {"refine": "s1"}
+
+    def test_mismatched_profile_yields_empty(self) -> None:
+        snap = PipelineSnapshot(profile="alpha", session_ids={"refine": "s1"})
+
+        assert reachable_sessions(snap, "beta") == {}
+
+    def test_no_profile_on_both_sides_matches(self) -> None:
+        snap = PipelineSnapshot(profile=None, session_ids={"refine": "s1"})
+
+        assert reachable_sessions(snap, None) == {"refine": "s1"}

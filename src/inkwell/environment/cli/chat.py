@@ -31,7 +31,7 @@ from lup.trace import active_agents
 
 from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.models import WritingOutput
-from inkwell.agent.pipeline import PipelineError, PipelineListener
+from inkwell.agent.pipeline import DISPLAY_STAGES, PipelineError, PipelineListener
 from inkwell.agent.session import WritingSessionState
 from inkwell.agent.tools.google_docs import do_fetch_comments, do_insert_comment
 
@@ -39,14 +39,17 @@ logger = logging.getLogger(__name__)
 
 
 STAGE_LABELS: dict[str, str] = {
+    "preprocess": "🗂️ Classifying sources",
     "extract": "📄 Extracting source material",
     "voice": "🎙️ Analyzing author's voice",
     "plan": "🗺️ Planning article structure",
     "assumptions": "❓ Surfacing questions for author",
     "research": "🔍 Researching claims",
+    "refine": "📝 Refining the plan",
     "write": "✍️ Writing sections",
     "merge": "🧩 Merging into draft",
     "review": "🔎 Reviewing draft",
+    "resolve": "🔧 Resolving open questions",
     "rewrite": "✨ Final rewrite",
     "format": "📐 Formatting output",
     "restart": "🔁 Replanning from author feedback",
@@ -71,6 +74,8 @@ def build_toolbar(listener: InteractiveListener | None = None):
         parts: list[tuple[str, str]] = []
         stage = listener.current_stage if listener else ""
         label = STAGE_LABELS.get(stage, "")
+        if label and stage in DISPLAY_STAGES:
+            label = f"[{DISPLAY_STAGES.index(stage) + 1}/{len(DISPLAY_STAGES)}] {label}"
         if label or active_agents:
             parts.append(
                 (
@@ -109,8 +114,11 @@ class InteractiveListener(PipelineListener):
     async def on_stage(self, stage: str, description: str) -> None:
         self.current_stage = stage
         label = STAGE_LABELS.get(stage, stage)
+        counter = ""
+        if stage in DISPLAY_STAGES:
+            counter = f" [dim]\\[{DISPLAY_STAGES.index(stage) + 1}/{len(DISPLAY_STAGES)}][/dim]"
         self.console.print(
-            f"\n  [bold blue]{label}[/bold blue]  [dim]{description}[/dim]"
+            f"\n  [bold blue]{label}[/bold blue]{counter}  [dim]{description}[/dim]"
         )
 
     async def on_progress(self, message: str) -> None:

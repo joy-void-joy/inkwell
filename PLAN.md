@@ -62,16 +62,16 @@ single point of failure.
 
 **LaTeX surface — end-to-end, academic-only (capability complement)**
 
-- [ ] Writers emit `.tex` fragments; `reconcile` assembles `.tex`; `review`/`rewrite` operate
+- [x] Writers emit `.tex` fragments; `reconcile` assembles `.tex`; `review`/`rewrite` operate
   on `.tex`. Other formats stay markdown. Gives the writer a proof environment at draft time
   so "reproduce, don't cite" is possible.
-- [ ] GDoc working tabs host raw `.tex`; a read-only **Preview** tab hosts the rasterized
+- [x] GDoc working tabs host raw `.tex`; a read-only **Preview** tab hosts the rasterized
   compiled PDF (`InsertImage` from `/shared/`), refreshed at checkpoints. `stage_format`
   (`pipeline.py:3949`) rewritten for academic. Deliverable: `paper.tex` (+ PDF).
 
 **Fix #1a — academic TeX toolchain (custom image, explicit build)**
 
-- [ ] inkwell ships a Dockerfile (uv base + `apt` pandoc/poppler-utils + `tectonic` static
+- [x] inkwell ships a Dockerfile (uv base + `apt` pandoc/poppler-utils + `tectonic` static
   binary + primed tectonic cache). `lup-devtools dev build-sandbox-image` builds & tags it;
   `start_sandbox` (`pipeline.py:2405`) passes the tag and fails fast if missing.
   `ensure_tex_tooling` (`latex.py:36`) → pure probe at sandbox start. (`apt install tectonic`
@@ -79,14 +79,14 @@ single point of failure.
 
 **Fix #2 — source reachable in sandbox**
 
-- [ ] Copy file-based source originals → `notes/artifacts/sources/` at extract time (auto-
+- [x] Copy file-based source originals → `notes/artifacts/sources/` at extract time (auto-
   reachable at `/notes/artifacts/sources/` via the existing ro mount, `pipeline.py:2408`);
   name the path in compute `usage_notes` (`pipeline.py:717`). The capability half of
   reproduce-not-cite. Skip URL/conversation sources (already captured as text).
 
 **Fix #1b — interrupt grace + finalize**
 
-- [ ] Extract `is_interrupt(exc)` into `lup` (from `background.py:215`), shared with the main
+- [x] Extract `is_interrupt(exc)` into `lup` (from `background.py:215`), shared with the main
   client. Catch around the stage loop (`pipeline.py:2689`); finalize writes `snapshot.output`
   to a local `.md/.tex` first, then best-effort Final-tab write; log the interrupt with stage
   context. Verify `write_with_continuation` reuses the `Final` tab → idempotent resume.

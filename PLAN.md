@@ -45,18 +45,18 @@ single point of failure.
 
 **Fix #3 — directives bind (propagation spine + soft checklist)**
 
-- [ ] Propagate the immutable brief + author direction + verbatim feedback into every
+- [x] Propagate the immutable brief + author direction + verbatim feedback into every
   deciding stage's context — `write` (`pipeline.py:1209`), `reconcile`, `review`, `resolve`
   (`pipeline.py:3842`), `rewrite` — not plan-only (today `collect_preexisting_directions`,
   `pipeline.py:2992`, injects them into `plan` alone).
-- [ ] Soft `ArticlePlan.constraints: list[str]` (`models.py:52`) — a *derived, advisory*
+- [x] Soft `ArticlePlan.constraints: list[str]` (`models.py:52`) — a *derived, advisory*
   checklist the planner distills from the direction; **not** the immutable `deliverables`
   contract. The reviewer's systematic checklist; authority stays in the propagated direction,
   so a misclassified item is backstopped rather than lost.
-- [ ] Reviewer (`stages.py:229`) checks the draft against the propagated direction + the
+- [x] Reviewer (`stages.py:229`) checks the draft against the propagated direction + the
   checklist; a clear contradiction of an explicit direction is a serious finding routing
   `resolve → rewrite`.
-- [ ] `stage_resolve`: the direction is *privileged evidence* (outranks the source) for
+- [x] `stage_resolve`: the direction is *privileged evidence* (outranks the source) for
   directive-questions, so "cite vs. reproduce" is pre-answered, never escalated; conservative
   default when genuinely open (no fail-open).
 

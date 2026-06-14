@@ -1,177 +1,109 @@
 # Inkwell — Implementation Plan
 
-## What Exists
+## Current state
 
-- [x] Package renamed from `lup_template` to `inkwell`, all checks green
-- [x] Domain models: `ArticlePlan`, `ResearchCompilation`, `SectionDraft`, `ReviewFinding`, `WritingOutput`
-- [x] System prompt with voice matching, Google Doc protocol, writing guidelines
-- [x] 8 subagent definitions: planner, researcher, section_writer, reconcile, narrative_reviewer, fact_checker, style_reviewer, rewriter
-- [x] Config with Google OAuth, Exa, FRED, Claude cookie, style corpus settings
-- [x] Tool policy with Google Docs + extraction + research tool sets, API key gating
-- [x] Claude conversation extractor (fully implemented)
-- [x] URL extractor (trafilatura-based web page text extraction)
-- [x] File extractor (local markdown/text files)
-- [x] Google Docs MCP tools (8 tools, fully implemented with real API calls)
-- [x] Markdown-to-native-Docs converter (`markdown_to_docs.py`, headings/bold/italic/links/lists)
-- [x] Google OAuth flow + ServiceFactory (`google_auth.py`)
-- [x] Author interaction tools: `ask_author`, `check_author_feedback`, `update_progress`
-- [x] Writing-specific reflection tool (voice assessment, section status, research gaps)
-- [x] Research tools: Exa search, arXiv search/fetch, URL fetch
-- [x] Research tools: FRED search/series (economic data)
-- [x] Research tools: Polymarket, Manifold, cross-platform market search
-- [x] Research tools: Wikipedia search/fetch with section extraction
-- [x] Voice analysis: `VoiceProfile` model, style corpus loader (`load_corpus` tool)
-- [x] Format adapters: LessWrong (epistemic status, footnotes), Twitter thread, blog (SEO)
-- [x] Persistent agent mode: `WritingSessionState`, `Scheduler`, stop/meta/event guards
-- [x] Live GDoc state in `build_context`: sections, comments, terminal messages
-- [x] `check_unread` wired to real Drive API comment polling
-- [x] CLI: `inkwell write`, `inkwell style add/list`, `inkwell run`, `inkwell setup`
-- [x] Setup wizard: Google OAuth, Exa, Claude cookie, FRED, status table
-- [x] `on_action` callback wired from CLI for terminal output
-- [x] CLAUDE.md updated for inkwell
-- [x] Upstream sync baselined
-- [x] Unified pipeline: batch and interactive share `run_pipeline()` via `PipelineListener`
-- [x] Voice analysis integrated into pipeline (structured `VoiceProfile` passed to writers)
-- [x] Format adapters wired into pipeline (auto-applied after rewrite stage)
-- [x] Author feedback collected at every stage boundary (Google Doc comments + terminal input)
-- [x] Stage prompts consolidated in `stages.py` (renamed from `agents.py`)
-- [x] `do_*` shared functions: Google Docs, voice analysis, source extraction (pipeline + MCP tools share code)
-- [x] Single source of truth for tool lists (`research_tool_names()`, `review_tool_names()` in tool_policy.py)
-- [x] `max_budget_usd` wired through all pipeline stages and `run_batch()`
-- [x] Post-pipeline revision loop via `PipelineListener.collect_revision()`
-- [x] Dead code removed (duplicate prompts, shadow PipelineError, unused vars, double ToolPolicy)
+Inkwell runs the full pipeline (preprocess → extract → voice → plan → assumptions →
+research → refine → write → reconcile → review → resolve → rewrite → format), with batch
+and interactive sharing one path (`run_pipeline()` via `PipelineListener`). Three efforts
+have shipped:
+
+- **Source-fidelity** (session `1b4114eeabf24695`): immutable Brief vs `sources[]`; the
+  `deliverables` contract reviewers enforce; `consult_source` / `find_in_source`
+  nested-reader tools on every stage; source-fidelity + fact-check reviewers;
+  resolve-against-source stage; `ResearchFinding` provenance discriminator; per-stage
+  model config; single-writer mode; Docker sandbox with `/notes` mounted; academic LaTeX
+  output (pandoc + tectonic).
+- **Voice-fidelity** (sessions `3c7edec171014505` / `ca74e7f7c5594103`):
+  `author_unverified` provenance; coverage reviewer; format-guidance-defers-to-voice
+  precedence; author directions routed to reconcile / reviewers / rewriter; shared
+  cross-writer glossary; voice-safe `reconcile` pass replacing the two-phase merge;
+  `writer_mode: auto`.
+- **Interactive chat CLI**: chat as default; concurrent stdin + agent response; in-chat
+  slash commands; Ctrl+C interrupt. Research tools: Exa, arXiv, FRED, Polymarket/Manifold,
+  Wikipedia. Formats: academic, LessWrong, Twitter, blog, memo, dialog.
 
 ## What Remains
 
-### 0. Source-Fidelity Overhaul (decisions from session 1b4114eeabf24695 review)
+### 0. Author-constraint enforcement (session `b78c80527a464a38`)
 
-Trace review + author interview decisions. Work lands directly on `dev` (explicit override of the worktree rule for this effort).
+Asked to rewrite the author's **own** PhD thesis as an independent, simplified arXiv
+paper, the pipeline instead cited the thesis (`[Mil16]`) 29× and delegated every proof
+back to it — plus reused the private abbreviations (TOP 342×, QUAD 57×) and repeated the
+dim-1 trivia, the exact defects the author flagged. Root cause: author directives are
+consumed once at planning and are **never the evidence base for any downstream decision** —
+they appear 0× across the entire write/review/rewrite trace. The writer reasoned from a
+vacuum and defaulted to the academic norm (you *do* cite your own thesis); "cite vs.
+reproduce" was re-litigated and failed open at every stage.
 
-**Phase A — wiring bugfixes** (existing capabilities, stranded):
+Full diagnosis: `notes/diagnoses/2026-06-14-author-directives-dont-bind.md`.
+Fix design + locked decisions: `notes/diagnoses/2026-06-14-fix-design.md`.
 
-- [x] `apply_format`: dispatch `academic` → `do_format_academic` (today falls through to identity while events log "Applying academic formatting")
-- [x] Feedback round-trip: agent-authored GDoc comments re-ingested as `[GDoc Comment]` author feedback — tag via `agent_comment_ids`, never present pipeline output as author input
-- [x] Cost accumulator: every `cost_update` was 0.0 for the full session
-- [x] Sandbox mounts: `execute_code` cannot see `pipeline_notes/artifacts` (researcher hit FileNotFoundError, retyped data from memory)
-- [x] `fetch_and_extract`: detect anti-bot/challenge pages (Anubis page was accepted as content)
-- [x] Trace markdown: emit stage-boundary markers (stage attribution had to be reverse-engineered)
+The fix makes the author's direction **present everywhere a decision is made**
+(propagation), not a new rule or gate. Authority lives in the raw direction; a
+planner-derived soft checklist makes the reviewer systematic without becoming a brittle
+single point of failure.
 
-**Phase B — source as a first-class citizen:**
+**Fix #3 — directives bind (propagation spine + soft checklist)**
 
-- [x] Brief vs sources split: preprocess emits an immutable Brief (instructions, author comments, deliverable criteria) separate from `sources[]`; the planner plans the brief's deliverable using sources as reference — not "distill the source"
-- [x] Deliverable contract: plan carries explicit criteria from the brief (e.g. self-contained proofs, single logic) that reviewers check the draft against
-- [x] Scope gate: brief is immutable; refiner may record proposed deviations but the pipeline proceeds with the author's stated scope unless approved
-- [x] `consult_source(question, pages?)` nested-reader tool: subagent reads the actual PDF (visual Read — no text-extraction-as-content), returns answers with page refs; available to every stage
-- [x] `find_in_source(pattern)` locator: greps a throwaway text layer, returns page numbers only (navigation, never content)
-- [x] Source listed in every stage manifest (write, merge, review, rewrite)
-- [x] `ResearchFinding` provenance: origin discriminator — `source_document` (requires verbatim quote + page locator) vs `external` (URL); unquoted source claims are unverified
+- [ ] Propagate the immutable brief + author direction + verbatim feedback into every
+  deciding stage's context — `write` (`pipeline.py:1209`), `reconcile`, `review`, `resolve`
+  (`pipeline.py:3842`), `rewrite` — not plan-only (today `collect_preexisting_directions`,
+  `pipeline.py:2992`, injects them into `plan` alone).
+- [ ] Soft `ArticlePlan.constraints: list[str]` (`models.py:52`) — a *derived, advisory*
+  checklist the planner distills from the direction; **not** the immutable `deliverables`
+  contract. The reviewer's systematic checklist; authority stays in the propagated direction,
+  so a misclassified item is backstopped rather than lost.
+- [ ] Reviewer (`stages.py:229`) checks the draft against the propagated direction + the
+  checklist; a clear contradiction of an explicit direction is a serious finding routing
+  `resolve → rewrite`.
+- [ ] `stage_resolve`: the direction is *privileged evidence* (outranks the source) for
+  directive-questions, so "cite vs. reproduce" is pre-answered, never escalated; conservative
+  default when genuinely open (no fail-open).
 
-**Phase C — pipeline shape + models:**
+**LaTeX surface — end-to-end, academic-only (capability complement)**
 
-- [x] Per-stage model config (stage→model map in settings; `claude-fable-5` usable)
-- [x] Single-writer mode as an orthogonal pipeline option (not tied to model): one writer drafts the whole piece with `consult_source` + research tools; no reconcile pass
-- [x] Compaction resilience: reading pass via nested readers writing per-chapter notes (verbatim key passages + page refs) to disk; no stage depends on holding the whole source in context
+- [ ] Writers emit `.tex` fragments; `reconcile` assembles `.tex`; `review`/`rewrite` operate
+  on `.tex`. Other formats stay markdown. Gives the writer a proof environment at draft time
+  so "reproduce, don't cite" is possible.
+- [ ] GDoc working tabs host raw `.tex`; a read-only **Preview** tab hosts the rasterized
+  compiled PDF (`InsertImage` from `/shared/`), refreshed at checkpoints. `stage_format`
+  (`pipeline.py:3949`) rewritten for academic. Deliverable: `paper.tex` (+ PDF).
 
-**Phase D — review + coherence:**
+**Fix #1a — academic TeX toolchain (custom image, explicit build)**
 
-- [x] New source-fidelity reviewer (4th reviewer): verifies definitions, theorem statements, and proof structure against cited source pages via `consult_source`
-- [x] Fact-checker: keep web + compute duties; recompute examples from the source's definitions (not the draft's premises); port aib REPL improvements (persistent session, `install_package`)
-- [x] Resolve-against-source stage before rewrite: triage pending questions — source-answerable ones get answered from the source; only author-judgment questions reach the author
-- [x] Generic `conventions` field on `ArticlePlan` dispatched to all writers (shared terms/concepts/conventions; domain-agnostic)
-- [x] Merge plan: terminology/notation-consistency analysis dimension (generic, alongside duplication/transitions)
-- [x] Severity split: correctness-critical vs style-critical; rewriter hierarchy puts correctness above voice rules
-- [x] `FORMAT_GUIDANCE` `academic` entry (define before use, self-containment, notation conventions)
+- [ ] inkwell ships a Dockerfile (uv base + `apt` pandoc/poppler-utils + `tectonic` static
+  binary + primed tectonic cache). `lup-devtools dev build-sandbox-image` builds & tags it;
+  `start_sandbox` (`pipeline.py:2405`) passes the tag and fails fast if missing.
+  `ensure_tex_tooling` (`latex.py:36`) → pure probe at sandbox start. (`apt install tectonic`
+  can never work — not an apt package on `bookworm-slim`.)
 
-**Phase E — academic deliverable:**
+**Fix #2 — source reachable in sandbox**
 
-- [x] LaTeX-first output for academic format: produce `paper.tex`, compile to PDF in the sandbox (tectonic), upload PDF to Drive and link it from the GDoc; GDoc remains the comment/review surface
+- [ ] Copy file-based source originals → `notes/artifacts/sources/` at extract time (auto-
+  reachable at `/notes/artifacts/sources/` via the existing ro mount, `pipeline.py:2408`);
+  name the path in compute `usage_notes` (`pipeline.py:717`). The capability half of
+  reproduce-not-cite. Skip URL/conversation sources (already captured as text).
 
-### 0b. Post-merge hardening (integrate-fidelity)
+**Fix #1b — interrupt grace + finalize**
 
-`feat-source-fidelity` and `fix-pipeline-wiring` were merged here. The merge
-also closes gaps the two branches each left open against the "dropping the
-ball" trace review:
+- [ ] Extract `is_interrupt(exc)` into `lup` (from `background.py:215`), shared with the main
+  client. Catch around the stage loop (`pipeline.py:2689`); finalize writes `snapshot.output`
+  to a local `.md/.tex` first, then best-effort Final-tab write; log the interrupt with stage
+  context. Verify `write_with_continuation` reuses the `Final` tab → idempotent resume.
+  *(Supersedes the deferred "actionable failure logging" item.)*
 
-- [x] Source registry built from the **extracted** source text, not only
-  local-file `sources[]` — so URL / Google-Doc / Claude-share inputs (the
-  common case) get the source-fidelity reviewer, resolve stage, and
-  `consult_source` / `find_in_source` instead of an empty registry
-- [x] Epistemic status: removed the copyable sample sentence from the
-  lesswrong writer guidance; the model must build the status from the
-  author's real stance or omit it (no fabricated credential)
-- [x] `extract_author_text`: keep a document author's prose (untagged text +
-  their `<user>` turns) instead of discarding the draft when the source
-  carries incidental speaker tags; only `<claude>` turns are dropped
-- [x] Pre-existing comments: the author's reply resolves a thread and
-  outranks a reviewer's contrary suggestion (no more siding against the
-  author on a contested cut)
-- [x] Resume past merge: `draft_tab_id` / `final_tab_id` rederived in
-  `setup_doc`, Draft tab ensured in `stage_rewrite`, `ToolError` made
-  non-fatal in `gdoc_nonfatal` — the "Tab '' not found" rewrite crash
-- [x] Inline author markers (`TODO`/`FIXME`/`BOTEC`) lifted from the source
-  body into questions + planner instructions instead of silently dropped
+**Validation:** targeted tests (direction reaches each deciding stage; reviewer flags a draft
+contradicting an explicit direction); re-run session `b78c80527a464a38` from `plan` as the
+end-to-end proof.
 
-Deferred (not regressions; lower value than the trace warranted):
+**Build order:** Fix #3 propagation + soft checklist → LaTeX surface (writers `.tex`, Preview
+tab, custom image, source-in-sandbox) → interrupt grace.
 
-- [ ] Actionable failure logging: capture subprocess stderr/exit detail when
-  a stage dies (the voice-stage "exit code -2" deaths logged nothing usable)
-- [ ] Oversized output Doc: the single Doc carries every tab + 100+ comments
-  and overwhelmed an external fetch; consider a publish/export path or
-  splitting working tabs from the deliverable
+### 1. Deferred hardening
 
-### 0c. Voice-fidelity overhaul (fix-voice-fidelity)
-
-From the two-session feedback on "The main reason we're losing" (trace
-sessions `3c7edec171014505` + `ca74e7f7c5594103`). The pipeline turned a
-nuanced, self-implicating LessWrong essay into a depersonalized memo and
-silently stripped the author's freshest specifics. Each fix is a capability
-or a structural change at the juncture where the failure entered, not a
-warning:
-
-- [x] `author_unverified` provenance: research preserves the author's
-  unverifiable specifics (a named event, a ratio, a remembered study)
-  verbatim and flags them, instead of demoting them to open
-  research_questions that read downstream as "cut" (the path that lost
-  Mythos, the 3.6 ratio, the 84/97 + 890 lobbying numbers)
-- [x] Coverage reviewer (5th reviewer): diffs the plan's `source_quotes`,
-  `quotes_to_include`, and key-point specifics (and the source) against the
-  draft and flags each dropped/substituted/hollowed specific as critical —
-  the only reviewer that looks for what *left* the draft
-- [x] Merge planner can't declare a drafted section missing: it sees each
-  section file's on-disk byte size and is forbidden to mark a listed file
-  "not drafted" / "to be constructed" (the bug that dropped §3's Dean Ball
-  objection and rebuilt the section from neighbors' scraps)
-- [x] Format guidance defers to voice: `get_format_guidance` appends a
-  precedence clause to every non-empty block; the memo bold mandate softened
-  from "bold every paragraph's first sentence" to "bold sparingly" (source
-  of the bolded-recipient-list tell)
-- [x] Voice + raw author directions routed to the structural chokepoints
-  (reconcile, narrative reviewer, rewriter) instead of
-  only the planner's distillation
-- [x] Epistemic-status humility preserved (no upgrading the author's
-  self-deprecation into confident self-promotion); rewriter attribution
-  guard (last stage, no downstream check)
-- [x] Assumptions stage surfaces conflicting author instructions (a
-  structural deliverable that fights a voice constraint) instead of
-  executing the literal half
-- [x] Shared cross-writer glossary (`define_term`/`lookup_terms` over a seeded
-  `glossary.json`): parallel section writers converge on one name per concept
-  instead of flagging coined terms to the author only
-- [x] Two-phase merge replaced by a voice-safe `reconcile` pass (glossary
-  enforcement, seam stitching, redundant-opening cuts — no structural rewrite
-  or voice smoothing)
-- [x] `writer_mode: auto` resolves to parallel for every format; the glossary
-  and reconcile keep terminology and voice intact, so academic and
-  voice-driven formats share one path (`single` remains an explicit override)
-
-### 1. ~~Terminal Input During Sleep~~ Interactive Chat CLI
-
-- [x] Interactive chat as default (`inkwell` opens chat, subcommands pre-seed it)
-- [x] Concurrent stdin + agent response collection (`collect_with_stdin()`)
-- [x] Terminal input during sleep wakes scheduler
-- [x] Terminal input during thinking surfaced via PreToolUse hook
-- [x] In-chat slash commands: `/status`, `/doc`, `/style add|list`, `/help`, `/quit`
-- [x] Ctrl+C interrupts agent, double-tap exits
+- [ ] Oversized output Doc: the single Doc carries every tab + 100+ comments and
+  overwhelmed an external fetch; consider a publish/export path or splitting working tabs
+  from the deliverable.
 
 ### 2. Additional Extractors
 
@@ -192,7 +124,6 @@ Lower-priority research tools not yet ported:
 
 - [ ] Unit tests for Claude conversation extractor (mock HTTP responses)
 - [ ] Unit tests for URL/file extractors
-- [x] Unit tests for format adapters (LessWrong, Twitter, blog)
 - [ ] Unit tests for research tools (mock API responses)
 - [ ] Integration test for Google Docs tools (requires credentials)
 - [ ] Integration test for full pipeline (end-to-end with a sample conversation)
@@ -211,9 +142,9 @@ Lower-priority research tools not yet ported:
 
 ## Priority Order
 
-0. **Source-fidelity overhaul** — Phases A→E in order; A is independent quick wins, B unblocks C/D/E
-1. **Terminal input during sleep** — Enables the interactive revision workflow
-2. **Testing** — Build alongside each feature
-3. **Additional extractors** — Expands input sources
-4. **Additional research tools** — Nice-to-have breadth
-5. **Feedback loop** — Iterate after running real sessions
+0. **Author-constraint enforcement** — Fix #3 (constraints channel) first; then
+   interrupt grace + finalize; then academic TeX + source-in-sandbox.
+1. **Testing** — Build alongside each feature
+2. **Additional extractors** — Expands input sources
+3. **Additional research tools** — Nice-to-have breadth
+4. **Feedback loop** — Iterate after running real sessions

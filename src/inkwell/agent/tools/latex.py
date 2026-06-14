@@ -18,11 +18,6 @@ from lup.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 TEX_TOOLING_PROBE = "command -v pandoc >/dev/null && command -v tectonic >/dev/null"
-TEX_TOOLING_INSTALL = (
-    "apt-get update -qq && "
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-    "--no-install-recommends pandoc tectonic"
-)
 
 
 class LatexArtifacts(BaseModel):
@@ -34,15 +29,7 @@ class LatexArtifacts(BaseModel):
 
 
 def ensure_tex_tooling(sandbox: Sandbox) -> bool:
-    """Install pandoc + tectonic in the container if missing."""
-    probe = sandbox.run_shell(TEX_TOOLING_PROBE)
-    if probe["exit_code"] == 0:
-        return True
-    logger.info("Installing TeX tooling in sandbox (pandoc, tectonic)")
-    install = sandbox.run_shell(TEX_TOOLING_INSTALL)
-    if install["exit_code"] != 0:
-        logger.warning("TeX tooling install failed: %s", install["stdout"][-500:])
-        return False
+    """Probe for pandoc + tectonic, provisioned in the sandbox image."""
     return sandbox.run_shell(TEX_TOOLING_PROBE)["exit_code"] == 0
 
 

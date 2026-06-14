@@ -98,6 +98,10 @@ from inkwell.agent.tools.extract import (
     fetch_gdoc_comments,
     parse_gdoc_id,
 )
+from inkwell.agent.sandbox_image import (
+    INKWELL_SANDBOX_IMAGE,
+    sandbox_image_available,
+)
 from inkwell.agent.tools.research.fetch import do_fetch_source
 from inkwell.agent.tools.source_consult import (
     build_reading_notes,
@@ -2450,9 +2454,19 @@ class PipelineRunner:
         notes = self.ensure_notes()
         shared_dir = notes.artifacts_dir / "shared"
         shared_dir.mkdir(parents=True, exist_ok=True)
+        docker_image = Sandbox.DEFAULT_DOCKER_IMAGE
+        if sandbox_image_available():
+            docker_image = INKWELL_SANDBOX_IMAGE
+        elif self.effective_format == "academic":
+            raise PipelineError(
+                f"Academic format needs the '{INKWELL_SANDBOX_IMAGE}' sandbox image "
+                "(pandoc + tectonic, not apt-installable). Build it once: "
+                "uv run lup-devtools dev build-sandbox-image"
+            )
         self.sandbox = Sandbox(
             session_id=f"inkwell-{id(self)}",
             shared_dir=shared_dir,
+            docker_image=docker_image,
             read_only_mounts={notes.base_dir: "/notes"},
         )
         try:

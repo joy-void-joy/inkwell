@@ -4063,54 +4063,20 @@ class PipelineRunner:
         await self.announce_stage("format", f"Applying {chosen_format} formatting")
         await self.update_overview(active_stage="format")
         article_text = output.content or output.summary
-        final_content = await apply_format(article_text, plan.title, chosen_format)
 
-        if chosen_format == "academic" and self.sandbox is not None:
-            from inkwell.agent.tools.google_docs import do_upload_artifact
-            from inkwell.agent.tools.latex import (
-                build_latex_artifacts,
-                latex_artifacts_note,
-                save_artifacts_to,
-            )
+        if chosen_format == "academic":
+            final_content = await self.finalize_academic(article_text, plan)
+        else:
+            final_content = await apply_format(article_text, plan.title, chosen_format)
+            async with gdoc_nonfatal("write final tab"):
+                from inkwell.agent.tools.google_docs import write_with_continuation
 
-            await self.hooks.on_progress("Building LaTeX artifacts (pandoc + tectonic)")
-            artifacts = await build_latex_artifacts(
-                final_content, self.sandbox, title=plan.title
-            )
-            artifacts = save_artifacts_to(
-                artifacts, self.ensure_notes().artifacts_dir / "latex"
-            )
-            links: list[str] = []
-            if artifacts.pdf_path:
-                async with gdoc_nonfatal("upload paper.pdf"):
-                    _, pdf_url = await do_upload_artifact(
-                        artifacts.pdf_path, "application/pdf"
-                    )
-                    links.append(f"Compiled PDF: {pdf_url}")
-            if artifacts.tex_path:
-                async with gdoc_nonfatal("upload paper.tex"):
-                    _, tex_url = await do_upload_artifact(
-                        artifacts.tex_path, "application/x-tex"
-                    )
-                    links.append(f"LaTeX source: {tex_url}")
-            if links:
-                final_content += latex_artifacts_note(artifacts, links)
-                await self.hooks.on_progress("LaTeX: " + "; ".join(links))
-            else:
-                logger.warning("LaTeX build incomplete: %s", artifacts.log[-300:])
-                await self.hooks.on_progress(
-                    "LaTeX build incomplete — shipping markdown only"
+                tab_ids = await write_with_continuation(
+                    self.doc_id, "Final", final_content, session_state=self.state
                 )
-
-        async with gdoc_nonfatal("write final tab"):
-            from inkwell.agent.tools.google_docs import write_with_continuation
-
-            tab_ids = await write_with_continuation(
-                self.doc_id, "Final", final_content, session_state=self.state
-            )
-            if tab_ids:
-                self.final_tab_id = tab_ids[0]
-                self.known_tabs["Final"] = tab_ids[0]
+                if tab_ids:
+                    self.final_tab_id = tab_ids[0]
+                    self.known_tabs["Final"] = tab_ids[0]
 
         output.google_doc_id = self.doc_id
         output.google_doc_url = self.doc_url
@@ -4119,6 +4085,84 @@ class PipelineRunner:
         self.state.set_stage("complete")
         await self.save_snapshot()
         await self.update_overview()
+
+    async def finalize_academic(self, body: str, plan: ArticlePlan) -> str:
+        """Assemble, compile, and publish the LaTeX paper.
+
+        The content is already LaTeX (academic writers emit it), so the paper is
+        assembled and compiled directly: the Final tab carries the raw .tex, a
+        Preview tab shows the rasterized PDF, and both .tex and .pdf upload to
+        Drive as the deliverable.
+        """
+        from inkwell.agent.tools.google_docs import (
+            do_upload_artifact,
+            write_with_continuation,
+        )
+        from inkwell.agent.tools.latex import (
+            assemble_latex_document,
+            compile_tex,
+            save_artifacts_to,
+        )
+
+        tex_source = assemble_latex_document(body, plan.title)
+        async with gdoc_nonfatal("write final tab"):
+            tab_ids = await write_with_continuation(
+                self.doc_id, "Final", tex_source, session_state=self.state, plain=True
+            )
+            if tab_ids:
+                self.final_tab_id = tab_ids[0]
+                self.known_tabs["Final"] = tab_ids[0]
+
+        if self.sandbox is None:
+            await self.hooks.on_progress("No sandbox — shipping .tex without compile")
+            return tex_source
+
+        await self.hooks.on_progress("Compiling paper.tex (tectonic)")
+        artifacts = await compile_tex(tex_source, self.sandbox)
+        artifacts = save_artifacts_to(
+            artifacts, self.ensure_notes().artifacts_dir / "latex"
+        )
+        if artifacts.tex_path:
+            async with gdoc_nonfatal("upload paper.tex"):
+                await do_upload_artifact(artifacts.tex_path, "application/x-tex")
+        if not artifacts.pdf_path:
+            logger.warning("LaTeX compile incomplete: %s", artifacts.log[-300:])
+            await self.hooks.on_progress("LaTeX compile incomplete — shipped .tex only")
+            return tex_source
+        async with gdoc_nonfatal("upload paper.pdf"):
+            await do_upload_artifact(artifacts.pdf_path, "application/pdf")
+        await self.write_preview_tab()
+        return tex_source
+
+    async def write_preview_tab(self) -> None:
+        """Render the compiled PDF to images and publish them in a Preview tab."""
+        from inkwell.agent.tools.google_docs import (
+            do_create_tab,
+            do_insert_image,
+            do_write_tab,
+            find_tab_by_title,
+        )
+        from inkwell.agent.tools.latex import render_pdf_preview
+
+        if self.sandbox is None:
+            return
+        pages = await render_pdf_preview(self.sandbox)
+        if not pages:
+            return
+        async with gdoc_nonfatal("write preview tab"):
+            tab_id = await find_tab_by_title(self.doc_id, "Preview")
+            if tab_id is None:
+                tab_id = await do_create_tab(self.doc_id, "Preview", None, self.state)
+            self.known_tabs["Preview"] = tab_id
+            await do_write_tab(
+                self.doc_id,
+                tab_id,
+                "Rendered preview of the compiled paper.\n\n",
+                session_state=self.state,
+                plain=True,
+            )
+            for page in pages:
+                await do_insert_image(self.doc_id, tab_id, str(page), width_pts=460)
 
     # -- Sync / restart logic ----------------------------------------------
 

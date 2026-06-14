@@ -21,8 +21,16 @@ from typing import NamedTuple
 from claude_agent_sdk import McpServerConfig
 from pydantic import BaseModel, Field
 
-from lup.client import CostAccumulator, HeartbeatCallback, active_block_callback, query
+from lup.client import (
+    CostAccumulator,
+    HeartbeatCallback,
+    SessionPolicy,
+    active_block_callback,
+    query,
+    session_policy,
+)
 from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
+from lup.paths import find_project_root
 from lup.sandbox import Sandbox
 from lup.trace import TraceLogger, extract_block_info
 
@@ -173,6 +181,21 @@ DISPLAY_STAGES = [
 Overview tab, and the terminal stage counter so all three agree on which
 stage is which and how many there are. ``preprocess`` is an internal
 pre-stage and is prepended where the runner needs it."""
+
+REACTIVE_LABELS = ("classify", "orchestrator")
+"""Trace-label prefixes for one-shot reactive helpers (comment classification,
+restart orchestration): persisted but never resumed, since each invocation is a
+fresh decision rather than a continuation of a prior conversation."""
+
+
+def is_resumable_label(label: str) -> bool:
+    """Whether a stage label denotes a resumable pipeline agent.
+
+    Reactive helpers fire fresh each time and would only carry stale context if
+    resumed; the linear pipeline stages and section writers are the ones a
+    resume should continue.
+    """
+    return not label.startswith(REACTIVE_LABELS)
 
 
 class PipelineError(Exception):
@@ -2293,6 +2316,7 @@ class PipelineRunner:
         self.cost_accumulator = cost_accumulator
 
         self.snapshot = PipelineSnapshot()
+        self.pending_resume: dict[str, str] = {}
         self.plan_breaking = asyncio.Event()
         self.restart_count = 0
         self.max_restarts = 2
@@ -2474,6 +2498,37 @@ class PipelineRunner:
 
         active_block_callback.set(forward_block)
 
+    def session_policy_for_run(self) -> SessionPolicy:
+        """Route nested agents through resumable, persisted SDK sessions.
+
+        Each call's session id is captured under its stage label and, on a
+        resumed run, handed back so the agent continues its own conversation
+        instead of restarting from a blank context. The cwd is pinned to the
+        project root so the transcript namespace matches across resume.
+        """
+        return SessionPolicy(
+            cwd=str(find_project_root()),
+            resume_for=self.resume_session_lookup,
+            capture=self.record_session,
+        )
+
+    def resume_session_lookup(self, label: str) -> str | None:
+        """Hand back a stored session id once, to continue an interrupted agent.
+
+        Popped so a within-process re-run (a restart or replan) starts fresh
+        rather than extending the pre-interruption conversation.
+        """
+        return self.pending_resume.pop(label, None)
+
+    async def record_session(self, label: str, session_id: str) -> None:
+        """Persist a resumable agent's SDK session id the moment it is known."""
+        if not is_resumable_label(label):
+            return
+        if self.snapshot.session_ids.get(label) == session_id:
+            return
+        self.snapshot.session_ids[label] = session_id
+        await self.save_snapshot()
+
     async def run(self) -> WritingOutput:
         """Execute the full pipeline with restart support."""
         self.install_block_callback()
@@ -2481,6 +2536,7 @@ class PipelineRunner:
         configure_session_state(self.state)
         await self.setup_doc()
         self.start_sandbox()
+        policy_token = session_policy.set(self.session_policy_for_run())
 
         try:
             await self.stage_preprocess()
@@ -2526,6 +2582,7 @@ class PipelineRunner:
                 await self.stop_watcher()
         finally:
             self.stop_sandbox()
+            session_policy.reset(policy_token)
 
         output = self.snapshot.output
         if output is None:
@@ -2552,9 +2609,11 @@ class PipelineRunner:
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
             self.cost_accumulator.load_state(snapshot.cost_state)
+        self.pending_resume = dict(snapshot.session_ids)
 
         await self.setup_doc()
         self.start_sandbox()
+        policy_token = session_policy.set(self.session_policy_for_run())
 
         try:
             stages = ["preprocess", *DISPLAY_STAGES]
@@ -2585,6 +2644,7 @@ class PipelineRunner:
                 await self.stop_watcher()
         finally:
             self.stop_sandbox()
+            session_policy.reset(policy_token)
 
         output = self.snapshot.output
         if output is None:

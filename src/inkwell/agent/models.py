@@ -415,6 +415,14 @@ class PipelineSnapshot(BaseModel):
         default=None,
         description="Accumulated cost/token state, carried across process restarts",
     )
+    session_ids: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Stage/section label -> SDK session id, so a resumed run can "
+            "continue an interrupted agent's own conversation rather than "
+            "restart it from a blank context"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

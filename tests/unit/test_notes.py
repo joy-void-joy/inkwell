@@ -149,3 +149,14 @@ class TestGetSectionFeedback:
         )
         result = await notes.get_section_feedback("nonexistent")
         assert result == ""
+
+
+class TestPipelineNotesBrief:
+    """The author's brief — persisted so every deciding stage can read it."""
+
+    def test_brief_round_trips(self, notes: PipelineNotes) -> None:
+        notes.save_brief("Self-contained; do not cite the source.")
+        assert notes.load_brief() == "Self-contained; do not cite the source."
+
+    def test_missing_brief_is_empty(self, notes: PipelineNotes) -> None:
+        assert notes.load_brief() == ""

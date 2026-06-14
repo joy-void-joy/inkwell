@@ -1,14 +1,19 @@
 """Tests for pipeline utility functions: slugify, voice refs."""
 
 from inkwell.agent.content import ContentManifest
-from inkwell.agent.models import ReviewFinding
+from inkwell.agent.models import ArticlePlan, ReviewFinding
+from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     add_voice_refs,
+    author_context_block,
+    brief_block,
     consolidate_findings,
+    render_brief,
     resolve_writer_mode,
     slugify,
 )
 from inkwell.agent.stages import get_format_guidance
+from inkwell.agent.tools.stage_outputs import PlanCollector, SetPlanHeaderInput
 
 
 class TestSlugify:
@@ -119,3 +124,55 @@ class TestFormatGuidancePrecedence:
     def test_memo_no_longer_mandates_bolding_every_sentence(self) -> None:
         guidance = get_format_guidance("memo")
         assert "sparingly" in guidance
+
+
+class TestRenderBrief:
+    def test_instructions_and_deliverables(self) -> None:
+        rendered = render_brief("Keep it short.", ["a one-pager", "a chart"])
+        assert "Keep it short." in rendered
+        assert "- a one-pager" in rendered
+        assert "- a chart" in rendered
+
+    def test_empty_inputs(self) -> None:
+        assert render_brief("", []) == ""
+
+    def test_instructions_only(self) -> None:
+        assert render_brief("Be terse.", []) == "Be terse."
+
+
+class TestBriefPropagation:
+    def test_absent_brief_renders_nothing(self, tmp_path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+        assert brief_block(notes) == ""
+
+    def test_brief_is_framed_as_the_contract(self, tmp_path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_brief("Self-contained; do not cite the source.")
+        block = brief_block(notes)
+        assert "Self-contained; do not cite the source." in block
+        assert "contract" in block.lower()
+
+    def test_author_context_carries_the_brief(self, tmp_path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_brief("Self-contained; do not cite the source.")
+        assert "Self-contained" in author_context_block(notes)
+
+
+class TestConstraintsFlowThroughPlan:
+    def test_constraints_reach_the_loaded_plan(self, tmp_path) -> None:
+        collector = PlanCollector(tmp_path / "plan.json")
+        collector.header = SetPlanHeaderInput(
+            title="T",
+            thesis="th",
+            target_format="academic",
+            author_direction="d",
+            deliverables=["the paper"],
+            constraints=["self-contained; do not cite the source"],
+            conventions=[],
+            voice_notes="v",
+        ).model_dump()
+        collector.save()
+        plan = ArticlePlan.model_validate_json(
+            (tmp_path / "plan.json").read_text(encoding="utf-8")
+        )
+        assert plan.constraints == ["self-contained; do not cite the source"]

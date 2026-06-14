@@ -69,7 +69,7 @@ import time
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal, TypedDict, overload
+from typing import Literal, NamedTuple, TypedDict, overload
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -116,6 +116,36 @@ to session-specific credentials (e.g. a per-profile ``CLAUDE_CONFIG_DIR``).
 ``build_client`` merges it into ``ClaudeAgentOptions.env``; each asyncio task
 tree gets its own contextvar copy, so concurrent sessions don't race.
 """
+
+type SessionIdCallback = Callable[[str], Coroutine[None, None, None]]
+"""Async hook fired once with a run's SDK session id as soon as it is known."""
+
+type SessionCapture = Callable[[str, str], Coroutine[None, None, None]]
+"""Async hook that records ``(stage_label, session_id)`` durably."""
+
+
+class SessionPolicy(NamedTuple):
+    """Run-scoped policy that makes nested ``query()`` calls resumable.
+
+    ``cwd`` pins the transcript namespace (it must match to resume). For each
+    call, its stage label (the ``[tag]`` prefix) maps through ``resume_for`` to
+    a prior session id to continue — or ``None`` for a fresh one — and through
+    ``capture`` the id is recorded the instant it is known, so an interrupted
+    run can be resumed later.
+    """
+
+    cwd: str | None
+    resume_for: Callable[[str], str | None]
+    capture: SessionCapture
+
+
+session_policy: contextvars.ContextVar[SessionPolicy | None] = contextvars.ContextVar(
+    "session_policy", default=None
+)
+"""Active session policy for the current task tree (see ``SessionPolicy``).
+
+Unset by default, so ``query()`` stays one-shot and non-persistent. A caller
+that wants resumable nested agents sets it once at the root of a run."""
 
 
 class TokenUsage(TypedDict, total=False):
@@ -209,6 +239,7 @@ class ResponseCollector:
         heartbeat: HeartbeatCallback | None = None,
         heartbeat_interval: float = 30.0,
         block_callback: BlockCallback | None = None,
+        on_session_id: SessionIdCallback | None = None,
     ) -> None:
         self.client = client
         self.blocks: list[ContentBlock] = []
@@ -220,6 +251,20 @@ class ResponseCollector:
         self.heartbeat = heartbeat
         self.heartbeat_interval = heartbeat_interval
         self.block_callback = block_callback
+        self.on_session_id = on_session_id
+        self.session_id_seen = False
+
+    async def note_session_id(self, session_id: str) -> None:
+        """Fire ``on_session_id`` once, the first time the id is known.
+
+        The id rides the opening stream event — well before the run finishes —
+        so persisting it here lets even an interrupted run be resumed later.
+        """
+        if self.session_id_seen or not session_id:
+            return
+        self.session_id_seen = True
+        if self.on_session_id is not None:
+            await self.on_session_id(session_id)
 
     @property
     def text(self) -> str | None:
@@ -275,6 +320,7 @@ class ResponseCollector:
         async for message in self.client.receive_response():
             match message:
                 case StreamEvent():
+                    await self.note_session_id(message.session_id)
                     continue
 
                 case AssistantMessage():
@@ -283,11 +329,15 @@ class ResponseCollector:
                         self.blocks.append(block)
 
                 case ResultMessage():
+                    await self.note_session_id(message.session_id)
                     self.result = message
                     if message.is_error:
                         raise RuntimeError(f"Agent error: {message.result}")
 
                 case SystemMessage():
+                    sid = message.data.get("session_id")
+                    if isinstance(sid, str):
+                        await self.note_session_id(sid)
                     logger.info("System [%s]: %s", message.subtype, message.data)
 
                 case UserMessage():
@@ -575,6 +625,23 @@ async def build_client(
 # ---------------------------------------------------------------------------
 
 
+def stage_label(prefix: str) -> str | None:
+    """The ``[tag]`` at the head of a trace prefix, used as a stage label."""
+    stripped = prefix.strip()
+    if stripped.startswith("[") and "]" in stripped:
+        return stripped[1 : stripped.index("]")]
+    return None
+
+
+def make_session_capture(policy: SessionPolicy, label: str) -> SessionIdCallback:
+    """Bind a policy's two-arg ``capture`` to a fixed stage label."""
+
+    async def capture(session_id: str) -> None:
+        await policy.capture(label, session_id)
+
+    return capture
+
+
 @overload
 async def query(
     prompt: str,
@@ -701,6 +768,16 @@ async def query(
         elif system_prompt is None:
             system_prompt = schema_hint.lstrip()
 
+    label = stage_label(prefix)
+    policy = session_policy.get()
+    on_session_id: SessionIdCallback | None = None
+    if policy is not None:
+        persist_session = True
+        cwd = cwd if cwd is not None else policy.cwd
+        if label is not None:
+            resume = resume if resume is not None else policy.resume_for(label)
+            on_session_id = make_session_capture(policy, label)
+
     resolved_callback = block_callback or active_block_callback.get()
 
     async with build_client(
@@ -731,16 +808,12 @@ async def query(
             heartbeat=heartbeat,
             heartbeat_interval=heartbeat_interval,
             block_callback=resolved_callback,
+            on_session_id=on_session_id,
         )
         await collector.collect()
 
     if cost_accumulator is not None and collector.result is not None:
-        stage_name: str | None = None
-        if prefix:
-            stripped = prefix.strip()
-            if stripped.startswith("[") and "]" in stripped:
-                stage_name = stripped[1 : stripped.index("]")]
-        cost_accumulator.record(collector.result, stage=stage_name)
+        cost_accumulator.record(collector.result, stage=label)
 
     if on_result is not None and collector.result is not None:
         on_result(collector.result)

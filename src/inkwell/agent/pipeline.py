@@ -2402,10 +2402,15 @@ class PipelineRunner:
         notes = self.ensure_notes()
         shared_dir = notes.artifacts_dir / "shared"
         shared_dir.mkdir(parents=True, exist_ok=True)
+        source_mounts = {
+            path: str(path)
+            for src in self.sources
+            if (path := Path(src).expanduser().resolve()).is_file()
+        }
         self.sandbox = Sandbox(
             session_id=f"inkwell-{id(self)}",
             shared_dir=shared_dir,
-            read_only_mounts={notes.base_dir: "/notes"},
+            read_only_mounts={notes.base_dir: "/notes", **source_mounts},
         )
         try:
             self.sandbox.start()

@@ -231,6 +231,16 @@ class ResponseCollector:
         texts = [b.text for b in self.blocks if isinstance(b, TextBlock)]
         return "\n\n".join(texts) if texts else None
 
+    @property
+    def session_id(self) -> str | None:
+        """SDK session id of this run, or ``None`` before a result arrives.
+
+        Stable handle for resuming this exact conversation later via
+        ``query(..., resume=session_id)`` (requires the run to have been made
+        with ``persist_session=True`` and the same ``cwd``).
+        """
+        return self.result.session_id if self.result is not None else None
+
     def output[T: BaseModel](self, output_type: type[T]) -> T | None:
         """Extract structured output as a validated Pydantic model.
 
@@ -509,19 +519,26 @@ async def build_client(
     output_format: OutputFormat | None = None,
     extra_args: dict[str, str | None] | None = None,
     hooks: dict[HookEvent, list[HookMatcher]] | None = None,
+    cwd: str | Path | None = None,
+    persist_session: bool = False,
+    resume: str | None = None,
+    fork_session: bool = False,
 ) -> AsyncIterator[ClaudeSDKClient]:
     """Return a configured ClaudeSDKClient with project-wide defaults.
 
     Pass ``options`` (pre-built) to use as-is, or keyword arguments to
-    construct ClaudeAgentOptions.  When using keyword arguments, always
-    injects ``no-session-persistence`` into extra_args (caller wins on
-    conflict).
+    construct ClaudeAgentOptions.  When using keyword arguments,
+    ``no-session-persistence`` is injected into extra_args (caller wins on
+    conflict) unless ``persist_session`` is set — which keeps the transcript
+    on disk under ``$CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/`` so the run
+    can later be continued with ``resume=<session_id>``. ``cwd`` pins that
+    encoded-cwd; it must match on the resuming call or a fresh session starts.
     """
     if options is None:
-        merged_extra: dict[str, str | None] = {
-            "no-session-persistence": None,
-            **(extra_args or {}),
-        }
+        base_extra: dict[str, str | None] = (
+            {} if persist_session else {"no-session-persistence": None}
+        )
+        merged_extra: dict[str, str | None] = {**base_extra, **(extra_args or {})}
         default_hooks = create_large_read_hook()
         merged_hooks = merge_hooks(default_hooks, hooks) if hooks else default_hooks
         options = ClaudeAgentOptions(
@@ -539,6 +556,9 @@ async def build_client(
             extra_args=merged_extra,
             hooks=merged_hooks,
             include_partial_messages=True,
+            cwd=cwd,
+            resume=resume,
+            fork_session=fork_session,
         )
 
     options.env.setdefault("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "128000")
@@ -580,6 +600,11 @@ async def query(
     heartbeat: HeartbeatCallback | None = ...,
     heartbeat_interval: float = ...,
     block_callback: BlockCallback | None = ...,
+    cwd: str | Path | None = ...,
+    persist_session: bool = ...,
+    resume: str | None = ...,
+    fork_session: bool = ...,
+    on_result: Callable[[ResultMessage], None] | None = ...,
 ) -> ResponseCollector: ...
 
 
@@ -609,6 +634,11 @@ async def query[T: BaseModel](
     heartbeat: HeartbeatCallback | None = ...,
     heartbeat_interval: float = ...,
     block_callback: BlockCallback | None = ...,
+    cwd: str | Path | None = ...,
+    persist_session: bool = ...,
+    resume: str | None = ...,
+    fork_session: bool = ...,
+    on_result: Callable[[ResultMessage], None] | None = ...,
 ) -> T | None: ...
 
 
@@ -637,6 +667,11 @@ async def query(
     heartbeat: HeartbeatCallback | None = None,
     heartbeat_interval: float = 30.0,
     block_callback: BlockCallback | None = None,
+    cwd: str | Path | None = None,
+    persist_session: bool = False,
+    resume: str | None = None,
+    fork_session: bool = False,
+    on_result: Callable[[ResultMessage], None] | None = None,
 ) -> ResponseCollector | BaseModel | None:
     """Query an SDK client and collect the full response.
 
@@ -683,6 +718,10 @@ async def query(
         output_format=output_format,
         extra_args=extra_args,
         hooks=hooks,
+        cwd=cwd,
+        persist_session=persist_session,
+        resume=resume,
+        fork_session=fork_session,
     ) as client:
         await client.query(prompt)
         collector = ResponseCollector(
@@ -702,6 +741,9 @@ async def query(
             if stripped.startswith("[") and "]" in stripped:
                 stage_name = stripped[1 : stripped.index("]")]
         cost_accumulator.record(collector.result, stage=stage_name)
+
+    if on_result is not None and collector.result is not None:
+        on_result(collector.result)
 
     if output_type is not None:
         return collector.output(output_type)

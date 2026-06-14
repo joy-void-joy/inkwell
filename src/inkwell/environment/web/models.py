@@ -101,6 +101,7 @@ class CostSnapshot(BaseModel):
 class SectionInfo(BaseModel):
     title: str
     tab_id: str
+    status: str = "planned"
 
 
 class SessionStateSnapshot(BaseModel):

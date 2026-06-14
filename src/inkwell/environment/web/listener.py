@@ -77,7 +77,7 @@ class WebListener(PipelineListener):
             title=state.title,
             stage=state.stage,
             sections=[
-                SectionInfo(title=s["title"], tab_id=s["tab_id"])
+                SectionInfo(title=s["title"], tab_id=s["tab_id"], status=s["status"])
                 for s in state.sections
             ],
             pending_questions=list(state.pending_questions),
@@ -102,6 +102,9 @@ class WebListener(PipelineListener):
 
     async def on_progress(self, message: str) -> None:
         await self.broadcast({"type": "progress", "message": message})
+
+    async def on_state_change(self) -> None:
+        await self.broadcast_state()
 
     async def on_complete(self, output: WritingOutput) -> None:
         await self.broadcast(

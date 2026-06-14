@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from "react";
 import type { ServerMessage } from "../types";
-import { STAGE_LABELS } from "../types";
+import { stageLabel } from "../types";
 
 function formatEvent(event: ServerMessage): string {
   switch (event.type) {
@@ -28,7 +28,7 @@ function formatEvent(event: ServerMessage): string {
 function eventLabel(event: ServerMessage): string {
   switch (event.type) {
     case "stage":
-      return STAGE_LABELS[event.stage] ?? event.stage;
+      return stageLabel(event.stage);
     case "message":
       return event.source;
     case "block":

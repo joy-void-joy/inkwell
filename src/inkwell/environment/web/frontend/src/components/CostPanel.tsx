@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import type { CostSnapshot } from "../types";
-import { STAGE_LABELS } from "../types";
+import { stageLabel } from "../types";
 
 function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -83,7 +83,7 @@ export function CostBreakdown({ cost }: { cost: CostSnapshot | null }) {
         <div className="cost-breakdown-body">
           {stageEntries.map(([name, sc]) => (
             <div key={name} className="cost-stage-row">
-              <span className="cost-stage-name">{STAGE_LABELS[name] ?? name}</span>
+              <span className="cost-stage-name">{stageLabel(name)}</span>
               <span className="cost-stage-detail">
                 ${sc.cost_usd.toFixed(3)} &middot; {formatDuration(sc.duration_s)}
               </span>

@@ -21,7 +21,9 @@ TEX_TOOLING_PROBE = "command -v pandoc >/dev/null && command -v tectonic >/dev/n
 TEX_TOOLING_INSTALL = (
     "apt-get update -qq && "
     "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-    "--no-install-recommends pandoc tectonic"
+    "--no-install-recommends pandoc curl ca-certificates && "
+    "cd /usr/local/bin && "
+    "curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh"
 )
 
 

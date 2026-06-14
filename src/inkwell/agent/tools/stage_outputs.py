@@ -85,7 +85,18 @@ class SetPlanHeaderInput(BaseModel):
         description="Output format: academic, lesswrong, twitter, blog, dialog, memo, or custom:<description>"
     )
     author_direction: str = Field(
-        description="General direction, constraints, or preferences from the author"
+        description="General direction and preferences from the author, in prose"
+    )
+    constraints: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The author's must/must-not statements distilled from the brief "
+            "into short, checkable items (e.g. 'self-contained proofs — do "
+            "not cite the source for deliverable content', 'define or rename "
+            "borrowed abbreviations', 'least significant digit first'). One "
+            "imperative per item, in the author's own terms. A checklist for "
+            "reviewers; the author's direction itself stays the authority."
+        ),
     )
     deliverables: list[str] = Field(
         default_factory=list,

@@ -451,7 +451,10 @@ Build the plan incrementally using your tools:
 
 1. Call set_plan_header with the title, thesis, target format, author \
 direction, deliverables (copied from the brief in the author's own \
-terms), conventions (the shared terms, names, and notational choices \
+terms), constraints (the author's must/must-not statements distilled \
+into short checkable items — what the piece must or must not do, e.g. \
+"self-contained: don't cite the source for deliverable content"), \
+conventions (the shared terms, names, and notational choices \
 all sections must use — sections are written by independent writers \
 who only stay consistent through this list), and voice notes
 2. Call add_section for each planned section (title, summary, key points)
@@ -528,8 +531,8 @@ the relevant section's key_points, in the author's framing, so the \
 writers keep and flag it. Only material research actively *contradicts* \
 gets dropped.
 
-Preserve the author's voice notes, direction, and deliverables \
-unchanged."""
+Preserve the author's voice notes, direction, deliverables, and \
+constraints unchanged."""
 
 
 REWRITER_SYSTEM = """\

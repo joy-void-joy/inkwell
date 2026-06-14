@@ -2087,8 +2087,8 @@ async def rewrite_final(
             "review",
             "Source resolutions",
             instruction=(
-                "answers read from the source document — apply as "
-                "corrections; they outrank other inputs on correctness"
+                "answers read from the author's brief and the source — apply "
+                "as corrections; they outrank other inputs on correctness"
             ),
         )
     add_source_refs(manifest, notes)
@@ -3916,8 +3916,9 @@ class PipelineRunner:
             f"Open questions left by writers and reviewers:\n\n{items}\n\n"
             f"{render_source_lines(notes)}"
             f"{author_context_block(notes)}"
-            f"Resolve every source-answerable question from the document "
-            f"itself; mark the rest author-only.\n\n"
+            f"Resolve each question from the author's brief first, then the "
+            f"source; for a genuine judgment call, mark it for the author with "
+            f"a conservative brief-honoring default.\n\n"
             f"Write the resolutions to: {resolutions_path}"
         )
         await query(

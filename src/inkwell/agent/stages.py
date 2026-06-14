@@ -879,6 +879,16 @@ This piece is a research paper for expert readers (arXiv, journal, or \
 conference register). Structural choices serve precision and \
 self-containment, not engagement.
 
+### Output: LaTeX source
+
+Write LaTeX, not markdown. Use \\section/\\subsection for structure, \
+theorem/lemma/definition/proof environments for results and their \
+arguments, and $...$ / \\[...\\] for mathematics. Cross-reference with \
+\\label and \\ref. Emit body content only — no \\documentclass or \
+preamble; the paper is assembled and compiled around your sections. A \
+real \\begin{proof} ... \\end{proof} is the point of this format: write \
+the argument out, do not defer it to a citation.
+
 ### Self-containment contract
 
 The paper must stand alone. Every claim the paper relies on is either \

@@ -10,6 +10,7 @@ import asyncio
 import difflib
 import json
 import logging
+import shutil
 import tempfile
 import unicodedata
 import uuid
@@ -34,7 +35,7 @@ from lup.paths import find_project_root
 from lup.sandbox import Sandbox
 from lup.trace import TraceLogger, extract_block_info
 
-from inkwell.agent.config import current_settings, stage_model
+from inkwell.agent.config import current_settings, load_settings, stage_model
 from inkwell.agent.models import (
     AddAction,
     ArticlePlan,
@@ -198,19 +199,37 @@ def is_resumable_label(label: str) -> bool:
     return not label.startswith(REACTIVE_LABELS)
 
 
-def reachable_sessions(
-    snapshot: PipelineSnapshot, current_profile: str | None
+def relocate_transcripts(
+    src_config: str | None,
+    dst_config: str | None,
+    session_ids: dict[str, str],
 ) -> dict[str, str]:
-    """Recorded session ids whose transcripts the current profile can reach.
+    """Mirror recorded session transcripts into the resuming profile's dir.
 
-    Transcripts live under the creating profile's ``CLAUDE_CONFIG_DIR``;
-    resuming under a different profile would aim ``resume`` at a file that
-    isn't there, so only a matching profile yields resumable ids — otherwise
-    each agent simply starts fresh.
+    A transcript is filed under the creating profile's ``CLAUDE_CONFIG_DIR``;
+    resuming under a different profile only finds it once the ``.jsonl`` is
+    copied into that profile's ``projects`` tree. The cwd is pinned, so the
+    relative path is identical and a plain copy lands where the resuming SDK
+    looks. Returns the ids whose transcript was found and placed — the only
+    ones safe to resume; the rest fall back to a fresh session.
     """
-    if current_profile == snapshot.profile:
-        return dict(snapshot.session_ids)
-    return {}
+    if not src_config or not dst_config:
+        return {}
+    if src_config == dst_config:
+        return dict(session_ids)
+    src, dst = Path(src_config), Path(dst_config)
+    label_for = {sid: label for label, sid in session_ids.items()}
+    placed: dict[str, str] = {}
+    for transcript in (src / "projects").glob("**/*.jsonl"):
+        label = label_for.get(transcript.stem)
+        if label is None:
+            continue
+        target = dst / transcript.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            shutil.copy2(transcript, target)
+        placed[label] = transcript.stem
+    return placed
 
 
 class PipelineError(Exception):
@@ -2544,6 +2563,33 @@ class PipelineRunner:
         self.snapshot.session_ids[label] = session_id
         await self.save_snapshot()
 
+    def prepare_resumable_sessions(self, snapshot: PipelineSnapshot) -> dict[str, str]:
+        """Session ids to resume, mirroring transcripts across a profile switch.
+
+        Same profile: transcripts already sit under the active config dir.
+        Different profile (e.g. resuming on another account after the first ran
+        out of credit): the recorded transcripts are copied from the original
+        profile's config dir into the current one, so the new login continues
+        each conversation rather than restarting it.
+        """
+        if not snapshot.session_ids:
+            return {}
+        current = current_settings()
+        if current.profile == snapshot.profile:
+            return dict(snapshot.session_ids)
+        placed = relocate_transcripts(
+            load_settings(snapshot.profile).claude_config_dir,
+            current.claude_config_dir,
+            snapshot.session_ids,
+        )
+        if placed:
+            logger.info(
+                "Relocated %d session transcript(s) from profile %r for resume",
+                len(placed),
+                snapshot.profile,
+            )
+        return placed
+
     async def run(self) -> WritingOutput:
         """Execute the full pipeline with restart support."""
         self.install_block_callback()
@@ -2624,7 +2670,7 @@ class PipelineRunner:
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
             self.cost_accumulator.load_state(snapshot.cost_state)
-        self.pending_resume = reachable_sessions(snapshot, current_settings().profile)
+        self.pending_resume = self.prepare_resumable_sessions(snapshot)
 
         await self.setup_doc()
         self.start_sandbox()

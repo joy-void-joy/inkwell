@@ -18,7 +18,7 @@ from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     PipelineRunner,
     is_resumable_label,
-    reachable_sessions,
+    relocate_transcripts,
 )
 
 
@@ -81,22 +81,48 @@ class TestRecordSession:
         assert runner.snapshot.session_ids == {}
 
 
-class TestReachableSessions:
-    """Resume only when the current profile matches the one that wrote the
-    transcripts; a different profile points at an unreachable config dir.
+class TestRelocateTranscripts:
+    """A cross-profile resume copies each session's transcript into the new
+    profile's config dir, matched by session id and keeping the projects path.
     """
 
-    def test_matching_profile_yields_ids(self) -> None:
-        snap = PipelineSnapshot(profile="alpha", session_ids={"refine": "s1"})
+    def test_found_transcript_is_copied(self, tmp_path: Path) -> None:
+        src = tmp_path / "old-config"
+        dst = tmp_path / "new-config"
+        subdir = src / "projects" / "-home-proj"
+        subdir.mkdir(parents=True)
+        (subdir / "sess-1.jsonl").write_text("turn", encoding="utf-8")
 
-        assert reachable_sessions(snap, "alpha") == {"refine": "s1"}
+        placed = relocate_transcripts(str(src), str(dst), {"refine": "sess-1"})
 
-    def test_mismatched_profile_yields_empty(self) -> None:
-        snap = PipelineSnapshot(profile="alpha", session_ids={"refine": "s1"})
+        assert placed == {"refine": "sess-1"}
+        copied = dst / "projects" / "-home-proj" / "sess-1.jsonl"
+        assert copied.read_text(encoding="utf-8") == "turn"
 
-        assert reachable_sessions(snap, "beta") == {}
+    def test_missing_transcript_is_skipped(self, tmp_path: Path) -> None:
+        src = tmp_path / "old-config"
+        (src / "projects").mkdir(parents=True)
+        dst = tmp_path / "new-config"
 
-    def test_no_profile_on_both_sides_matches(self) -> None:
+        assert relocate_transcripts(str(src), str(dst), {"refine": "absent"}) == {}
+
+    def test_same_config_dir_returns_all(self, tmp_path: Path) -> None:
+        same = str(tmp_path / "config")
+
+        assert relocate_transcripts(same, same, {"refine": "s1"}) == {"refine": "s1"}
+
+    def test_missing_config_yields_empty(self, tmp_path: Path) -> None:
+        assert relocate_transcripts(None, str(tmp_path), {"a": "s1"}) == {}
+        assert relocate_transcripts(str(tmp_path), None, {"a": "s1"}) == {}
+
+
+class TestPrepareResumableSessions:
+    def test_matching_profile_returns_recorded_ids(
+        self, runner: PipelineRunner
+    ) -> None:
         snap = PipelineSnapshot(profile=None, session_ids={"refine": "s1"})
 
-        assert reachable_sessions(snap, None) == {"refine": "s1"}
+        assert runner.prepare_resumable_sessions(snap) == {"refine": "s1"}
+
+    def test_no_sessions_returns_empty(self, runner: PipelineRunner) -> None:
+        assert runner.prepare_resumable_sessions(PipelineSnapshot(profile=None)) == {}

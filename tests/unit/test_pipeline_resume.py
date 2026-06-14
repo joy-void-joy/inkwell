@@ -106,3 +106,28 @@ class TestWriteStageProducedNothing:
 
     def test_no_sections_written_yet(self, runner: PipelineRunner) -> None:
         assert runner.write_stage_produced_nothing() is False
+
+
+class TestSectionAlreadyDrafted:
+    """A resumed write stage skips sections already drafted and retries the
+
+    rest, so an interrupted run neither pays to redraft finished sections nor
+    strands the ones that failed.
+    """
+
+    def test_usable_draft_is_already_drafted(self, runner: PipelineRunner) -> None:
+        runner.snapshot.section_drafts = {
+            "A": SectionDraft(title="A", content="# A\n\nreal content"),
+        }
+
+        assert runner.section_already_drafted("A") is True
+
+    def test_failed_placeholder_is_not_drafted(self, runner: PipelineRunner) -> None:
+        runner.snapshot.section_drafts = {
+            "A": SectionDraft(title="A", content="[Section failed: usage limit]"),
+        }
+
+        assert runner.section_already_drafted("A") is False
+
+    def test_missing_section_is_not_drafted(self, runner: PipelineRunner) -> None:
+        assert runner.section_already_drafted("A") is False

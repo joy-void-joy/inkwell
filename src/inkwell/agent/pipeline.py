@@ -155,6 +155,25 @@ logger = logging.getLogger(__name__)
 BUILTIN_READ_TOOLS = ["Read", "Grep", "Glob", "Agent"]
 BUILTIN_WRITE_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Agent"]
 
+DISPLAY_STAGES = [
+    "extract",
+    "voice",
+    "plan",
+    "research",
+    "assumptions",
+    "refine",
+    "write",
+    "merge",
+    "review",
+    "resolve",
+    "rewrite",
+    "format",
+]
+"""Ordered author-facing pipeline backbone, shared by the resume loop, the
+Overview tab, and the terminal stage counter so all three agree on which
+stage is which and how many there are. ``preprocess`` is an internal
+pre-stage and is prepended where the runner needs it."""
+
 
 class PipelineError(Exception):
     """Raised when a pipeline stage fails to produce valid output."""
@@ -2405,6 +2424,17 @@ class PipelineRunner:
             draft.content.startswith("[Section failed") for draft in drafts.values()
         )
 
+    def section_already_drafted(self, title: str) -> bool:
+        """True when a section already has a usable draft in the snapshot.
+
+        Section writers persist each finished draft as they go, so a resumed
+        write stage can skip the sections that completed before the
+        interruption instead of paying to redraft them. A
+        ``[Section failed: ...]`` placeholder does not count — those retry.
+        """
+        draft = self.snapshot.section_drafts.get(title)
+        return draft is not None and not draft.content.startswith("[Section failed")
+
     async def save_snapshot(self) -> None:
         self.snapshot.doc_id = self.state.doc_id
         self.snapshot.doc_url = self.state.doc_url
@@ -2527,21 +2557,7 @@ class PipelineRunner:
         self.start_sandbox()
 
         try:
-            stages = [
-                "preprocess",
-                "extract",
-                "voice",
-                "plan",
-                "research",
-                "assumptions",
-                "refine",
-                "write",
-                "merge",
-                "review",
-                "resolve",
-                "rewrite",
-                "format",
-            ]
+            stages = ["preprocess", *DISPLAY_STAGES]
             last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
             remaining = stages[last_idx + 1 :]
             if "write" not in remaining and self.write_stage_produced_nothing():
@@ -3420,10 +3436,14 @@ class PipelineRunner:
             await self.write_single_draft()
             return
 
-        await self.announce_stage(
-            "write",
-            f"Writing {len(plan.sections)} sections in parallel",
-        )
+        pending = [
+            s for s in plan.sections if not self.section_already_drafted(s.title)
+        ]
+        already = len(plan.sections) - len(pending)
+        detail = f"Writing {len(pending)} sections in parallel"
+        if already:
+            detail = f"Writing {len(pending)} remaining ({already} already drafted)"
+        await self.announce_stage("write", detail)
         self.state.set_stage("writing")
         await self.update_overview(active_stage="write")
 
@@ -3433,7 +3453,10 @@ class PipelineRunner:
         seed_glossary(glossary_path, plan.conventions)
         glossary_servers, glossary_tool_names = build_glossary_server(glossary_path)
 
-        async def write_and_publish(section: SectionPlan, idx: int) -> SectionDraft:
+        completed = already
+
+        async def write_and_publish(section: SectionPlan) -> SectionDraft:
+            nonlocal completed
             tid = self.tab_ids.get(section.title, "")
             draft_path = self.get_draft_path(section.title)
             syncer: DraftSyncer | None = None
@@ -3469,6 +3492,8 @@ class PipelineRunner:
                 if syncer is not None:
                     await syncer.stop()
             self.snapshot.section_drafts[section.title] = draft
+            await self.save_snapshot()
+            completed += 1
 
             if (
                 tid
@@ -3481,22 +3506,22 @@ class PipelineRunner:
 
             await self.hooks.on_message(
                 "write",
-                f"Section '{draft.title}' complete ({draft.word_count} words)",
+                f"[{completed}/{len(plan.sections)}] "
+                f"'{draft.title}' complete ({draft.word_count} words)",
             )
             await self.update_overview(active_stage="write")
             return draft
 
         results = await asyncio.gather(
-            *(write_and_publish(s, i) for i, s in enumerate(plan.sections)),
+            *(write_and_publish(s) for s in pending),
             return_exceptions=True,
         )
 
-        for i, result in enumerate(results):
+        for section, result in zip(pending, results):
             if isinstance(result, BaseException):
-                title = plan.sections[i].title
-                logger.error("Section '%s' failed: %s", title, result)
-                self.snapshot.section_drafts[title] = SectionDraft(
-                    title=title,
+                logger.error("Section '%s' failed: %s", section.title, result)
+                self.snapshot.section_drafts[section.title] = SectionDraft(
+                    title=section.title,
                     content=f"[Section failed: {result}]",
                     word_count=0,
                 )
@@ -4413,20 +4438,7 @@ class PipelineRunner:
 
             parts: list[str] = [f"# {plan.title if plan else 'Inkwell Pipeline'}\n"]
 
-            all_stages = [
-                "extract",
-                "voice",
-                "plan",
-                "research",
-                "assumptions",
-                "refine",
-                "write",
-                "merge",
-                "review",
-                "resolve",
-                "rewrite",
-                "format",
-            ]
+            all_stages = DISPLAY_STAGES
             completed_idx = (
                 all_stages.index(completed_stage)
                 if completed_stage in all_stages

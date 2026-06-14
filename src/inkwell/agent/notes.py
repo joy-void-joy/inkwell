@@ -97,6 +97,24 @@ class PipelineNotes:
             return ""
         return path.read_text(encoding="utf-8")
 
+    def save_brief(self, rendered: str) -> Path:
+        """Save the author's brief — their instructions and requested outputs.
+
+        The brief is the contract. The planner distills it into the plan, but
+        every deciding stage reads the brief directly so an imperative the
+        distillation softened or dropped still binds.
+        """
+        path = self.directions_dir / "author_brief.md"
+        path.write_text(rendered, encoding="utf-8")
+        return path
+
+    def load_brief(self) -> str:
+        """Load the author's brief, or empty string if none exists."""
+        path = self.directions_dir / "author_brief.md"
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
+
     async def add_comment(self, classified: ClassifiedComment) -> None:
         """Write a classified comment to notes/comments/."""
         async with self.lock:

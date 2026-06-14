@@ -430,6 +430,46 @@ def directions_block(notes: PipelineNotes) -> str:
     )
 
 
+def brief_block(notes: PipelineNotes) -> str:
+    """Render the author's brief — instructions and requested outputs — or ''.
+
+    The brief is the contract. The planner distills it into the plan, but the
+    distillation can soften or drop an imperative, so every deciding stage reads
+    the brief directly: a writer choosing how to handle the source, a reviewer
+    judging the draft, the rewriter finalizing.
+    """
+    brief = notes.load_brief()
+    if not brief:
+        return ""
+    return (
+        "The author's brief — their own instructions and the outputs they "
+        "asked for. This is the contract: honor it over any genre, format, or "
+        "convention default. Where the brief and a default disagree, the brief "
+        "wins:\n\n"
+        f"{brief}\n\n"
+    )
+
+
+def author_context_block(notes: PipelineNotes) -> str:
+    """The author's brief plus source-document directions, for a stage task.
+
+    Every stage that decides content or wording reads this so an author
+    instruction can never go invisible after planning.
+    """
+    return brief_block(notes) + directions_block(notes)
+
+
+def render_brief(instructions: str, deliverables: list[str]) -> str:
+    """Format the author's instructions and deliverables as a brief block."""
+    parts: list[str] = []
+    if instructions.strip():
+        parts.append(instructions.strip())
+    if deliverables:
+        items = "\n".join(f"- {d}" for d in deliverables)
+        parts.append(f"Requested deliverables:\n{items}")
+    return "\n\n".join(parts)
+
+
 def resolve_writer_mode(mode: str) -> str:
     """Resolve writer_mode='auto' to a concrete mode.
 
@@ -1264,6 +1304,7 @@ async def write_section(
         f"{manifest.render()}\n"
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
     )
+    task += author_context_block(notes)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     if section_context:
@@ -1360,6 +1401,7 @@ async def write_full_draft(
         f"Use list_research to browse all research findings, then "
         f"read_finding for details.\n\n"
     )
+    task += author_context_block(notes)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
@@ -1452,7 +1494,7 @@ async def reconcile_sections(
         f"piece, in this order:\n{drafts_list}\n\n"
         f"{manifest.render()}\n\n"
     )
-    task += directions_block(notes)
+    task += author_context_block(notes)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
@@ -1604,6 +1646,7 @@ async def review_facts(
         f"Draft: {draft_path}\n"
         f"Plan (includes the deliverable contract): {notes.artifact_path('plan')}\n\n"
         f"{render_source_lines(notes)}"
+        f"{author_context_block(notes)}"
         f"Read the draft. Use list_research to see all research findings, "
         f"then read_finding for details on specific ones. Cross-reference "
         f"the draft against research findings, then verify remaining claims "
@@ -1671,6 +1714,7 @@ async def review_style(
     task = (
         f"Review the article draft for writing quality and style.\n\n"
         f"{manifest.render()}\n\n"
+        f"{author_context_block(notes)}"
         f"Read each voice and style reference file, then read the draft. "
         f"Call record_finding for each issue."
     )
@@ -1733,6 +1777,7 @@ async def review_source_fidelity(
         f"Draft: {draft_path}\n"
         f"Plan: {notes.artifact_path('plan')}\n\n"
         f"{render_source_lines(notes)}"
+        f"{author_context_block(notes)}"
         f"Check every source-derived definition, convention, named "
         f"structure, and argument outline against the document itself. "
         f"Call record_finding for each issue."
@@ -1801,6 +1846,7 @@ async def review_coverage(
     task = (
         f"Check the draft for the author's concrete specifics that went "
         f"missing.\n\n{manifest.render()}\n\n"
+        f"{author_context_block(notes)}"
         f"Read the plan (source_quotes, each section's quotes_to_include, and "
         f"the concrete nouns in its key_points) and the draft. Where a source "
         f"document is listed, scan it for named specifics too. Call "
@@ -2057,7 +2103,7 @@ async def rewrite_final(
     )
     if format_guidance:
         task += f"{format_guidance}\n\n"
-    task += directions_block(notes)
+    task += author_context_block(notes)
     task += (
         f"{manifest.render()}\n\n"
         f"Read the annotated draft — review findings are marked inline. "
@@ -3389,6 +3435,12 @@ class PipelineRunner:
                 f"set_plan_header verbatim):\n{items}"
             )
 
+        brief = render_brief(
+            self.snapshot.author_instructions, self.snapshot.author_deliverables
+        )
+        if brief:
+            notes.save_brief(brief)
+
         plan = await plan_article(
             notes,
             target_format=self.target_format,
@@ -3863,6 +3915,7 @@ class PipelineRunner:
         task = (
             f"Open questions left by writers and reviewers:\n\n{items}\n\n"
             f"{render_source_lines(notes)}"
+            f"{author_context_block(notes)}"
             f"Resolve every source-answerable question from the document "
             f"itself; mark the rest author-only.\n\n"
             f"Write the resolutions to: {resolutions_path}"

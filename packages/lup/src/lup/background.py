@@ -63,6 +63,7 @@ from claude_agent_sdk.types import (
     ResultMessage,
 )
 
+from lup.client import is_interrupt
 from lup.trace import print_message
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,7 @@ class BackgroundAgent:
         except (
             Exception
         ) as exc:  # claude: ignore — SDK raises generic Exception for exit codes
-            if "exit code -2" in str(exc):
+            if is_interrupt(exc):
                 logger.info("Background agent '%s' stopped (interrupted)", self.name)
             else:
                 logger.exception("Background agent '%s' crashed", self.name)

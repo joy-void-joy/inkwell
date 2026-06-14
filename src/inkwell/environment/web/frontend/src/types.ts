@@ -40,6 +40,7 @@ export interface CostSnapshot {
 export interface SectionInfo {
   title: string;
   tab_id: string;
+  status: string;
 }
 
 export interface SessionStateSnapshot {
@@ -122,30 +123,45 @@ export interface ServerCapabilities {
   is_local: boolean;
 }
 
-export const PIPELINE_STAGES = [
-  "extract",
-  "voice",
-  "plan",
-  "assumptions",
-  "research",
-  "write",
-  "merge",
-  "review",
-  "rewrite",
-  "format",
-] as const;
-
+// The ordered stage backbone is fetched from GET /api/pipeline-stages so it
+// always mirrors the pipeline. STAGE_LABELS only supplies display text; any
+// stage without an entry falls back to a title-cased key, so a backbone stage
+// added on the server still renders rather than blanking the bar.
 export const STAGE_LABELS: Record<string, string> = {
   starting: "Starting",
+  preprocess: "Classify",
   extract: "Extract",
   voice: "Voice",
   plan: "Plan",
-  assumptions: "Questions",
   research: "Research",
+  assumptions: "Questions",
+  refine: "Refine",
   write: "Write",
   merge: "Merge",
   review: "Review",
+  resolve: "Resolve",
   rewrite: "Rewrite",
   format: "Format",
+  sync: "Standby",
+  revise: "Revise",
   done: "Complete",
+  complete: "Complete",
 };
+
+export function stageLabel(stage: string): string {
+  return STAGE_LABELS[stage] ?? stage.charAt(0).toUpperCase() + stage.slice(1);
+}
+
+// Stages that sit past the linear backbone: map them onto a full bar so a
+// finished or standby session reads as all-complete instead of going blank.
+const TERMINAL_STAGES = new Set(["done", "complete", "sync", "revise"]);
+
+// Index of the active stage within `stages`; everything before it is complete.
+// Off-backbone stages resolve to an end (terminal) or the start (lead-ins like
+// preprocess/starting, and anything unrecognized) so the bar never blanks.
+export function stageProgressIndex(stage: string, stages: string[]): number {
+  if (stages.length === 0) return -1;
+  const idx = stages.indexOf(stage);
+  if (idx !== -1) return idx;
+  return TERMINAL_STAGES.has(stage) ? stages.length : 0;
+}

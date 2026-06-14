@@ -1,6 +1,6 @@
 import { createContext, useContext, useReducer, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useSessionWebSocket } from "../api/ws";
-import { getSession, resumeSession } from "../api/client";
+import { getSession, resumeSession, fetchPipelineStages } from "../api/client";
 import type {
   CostSnapshot,
   SessionStateSnapshot,
@@ -104,6 +104,7 @@ function initialState(sessionId: string): SessionState {
 
 interface SessionContextValue {
   state: SessionState;
+  pipelineStages: string[];
   send: (text: string) => void;
   sendAction: (action: string) => void;
   resume: (fromStage?: string, profile?: string) => Promise<void>;
@@ -121,6 +122,11 @@ export function SessionProvider({
   const [state, dispatch] = useReducer(reducer, sessionId, initialState);
   const seededRef = useRef(false);
   const [wsSessionId, setWsSessionId] = useState<string | undefined>(undefined);
+  const [pipelineStages, setPipelineStages] = useState<string[]>([]);
+
+  useEffect(() => {
+    fetchPipelineStages().then(setPipelineStages).catch(() => {});
+  }, []);
 
   const onMessage = useCallback((msg: ServerMessage) => {
     dispatch({ type: "EVENT", event: msg });
@@ -188,7 +194,7 @@ export function SessionProvider({
   );
 
   return (
-    <SessionContext.Provider value={{ state, send: sendText, sendAction, resume }}>
+    <SessionContext.Provider value={{ state, pipelineStages, send: sendText, sendAction, resume }}>
       {children}
     </SessionContext.Provider>
   );

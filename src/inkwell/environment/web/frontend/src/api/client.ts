@@ -23,6 +23,12 @@ export async function fetchModelOptions(): Promise<ModelOptions> {
   return res.json();
 }
 
+export async function fetchPipelineStages(): Promise<string[]> {
+  const res = await fetch(`${BASE}/pipeline-stages`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function createSession(
   sources: string[],
   targetFormat: string = "auto",

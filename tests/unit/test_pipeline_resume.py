@@ -11,9 +11,29 @@ from pathlib import Path
 
 import pytest
 
-from inkwell.agent.models import MergedDraft, SectionDraft, WritingOutput
+from inkwell.agent.models import (
+    ArticlePlan,
+    MergedDraft,
+    SectionDraft,
+    SectionPlan,
+    WritingOutput,
+)
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import PipelineRunner
+from inkwell.agent.tools.google_docs import truncate_tab_title
+
+
+def make_plan(titles: list[str]) -> ArticlePlan:
+    return ArticlePlan(
+        title="T",
+        thesis="t",
+        target_format="blog",
+        author_direction="",
+        voice_notes="",
+        sections=[SectionPlan(title=t, summary="s", key_points=["k"]) for t in titles],
+        research_questions=[],
+        source_quotes=[],
+    )
 
 
 @pytest.fixture
@@ -131,3 +151,51 @@ class TestSectionAlreadyDrafted:
 
     def test_missing_section_is_not_drafted(self, runner: PipelineRunner) -> None:
         assert runner.section_already_drafted("A") is False
+
+
+class TestRehydrateSections:
+    """A resume that skips plan/refine must still rebuild the section→tab map
+
+    and the section roster from the snapshot's plan, or section writers get no
+    tab to sync into and the progress badge is stuck on a polluted total.
+    """
+
+    def test_rebuilds_tab_map_and_roster_from_plan(
+        self, runner: PipelineRunner
+    ) -> None:
+        titles = ["Introduction", "Methods", "Results"]
+        runner.snapshot.plan = make_plan(titles)
+        runner.known_tabs = {
+            truncate_tab_title(f"§{i + 1} {t}"): f"tab{i + 1}"
+            for i, t in enumerate(titles)
+        }
+        runner.snapshot.section_drafts = {
+            "Introduction": SectionDraft(title="Introduction", content="# I\n\nx"),
+        }
+
+        runner.rehydrate_sections()
+
+        assert [s["title"] for s in runner.state.sections] == titles
+        assert runner.tab_ids == {
+            "Introduction": "tab1",
+            "Methods": "tab2",
+            "Results": "tab3",
+        }
+        status = {s["title"]: s["status"] for s in runner.state.sections}
+        assert status["Introduction"] == "drafted"
+        assert status["Methods"] == "planned"
+
+    def test_section_without_a_tab_still_joins_roster(
+        self, runner: PipelineRunner
+    ) -> None:
+        runner.snapshot.plan = make_plan(["Orphan"])
+
+        runner.rehydrate_sections()
+
+        assert len(runner.state.sections) == 1
+        assert runner.state.sections[0]["tab_id"] == ""
+        assert "Orphan" not in runner.tab_ids
+
+    def test_no_plan_is_a_noop(self, runner: PipelineRunner) -> None:
+        runner.rehydrate_sections()
+        assert runner.state.sections == []

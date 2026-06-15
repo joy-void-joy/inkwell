@@ -582,7 +582,6 @@ async def do_create_tab(
     doc_id: str,
     name: str,
     parent_tab_id: str | None = None,
-    session_state: WritingSessionState | None = None,
 ) -> str:
     """Create a tab in a Google Doc. Returns the tab ID.
 
@@ -607,8 +606,6 @@ async def do_create_tab(
             tab_id = await find_tab_by_title(doc_id, name)
             if tab_id:
                 logger.info("Tab '%s' already exists (id=%s), reusing", name, tab_id)
-                if session_state is not None:
-                    session_state.add_section(name, tab_id)
                 return tab_id
         raise
     replies = result.get("replies", [])
@@ -627,9 +624,6 @@ async def do_create_tab(
             f"Failed to extract tab ID after creating tab '{name}': "
             f"unexpected API response: {result!r}"
         )
-
-    if session_state is not None:
-        session_state.add_section(name, tab_id)
 
     return tab_id
 
@@ -730,7 +724,7 @@ async def write_with_continuation(
     if plain or len(content) <= TAB_CONTINUATION_CHARS:
         tab_id = await find_tab_by_title(doc_id, tab_name)
         if tab_id is None:
-            tab_id = await do_create_tab(doc_id, tab_name, parent_tab_id, session_state)
+            tab_id = await do_create_tab(doc_id, tab_name, parent_tab_id)
         await do_write_tab(doc_id, tab_id, content, session_state, plain=plain)
         return [tab_id]
 
@@ -775,7 +769,7 @@ async def write_with_continuation(
 
         tab_id = await find_tab_by_title(doc_id, name)
         if tab_id is None:
-            tab_id = await do_create_tab(doc_id, name, parent_tab_id, session_state)
+            tab_id = await do_create_tab(doc_id, name, parent_tab_id)
         await do_write_tab(doc_id, tab_id, chunk_content, session_state)
         tab_ids.append(tab_id)
 
@@ -1103,9 +1097,7 @@ async def create_doc(params: CreateDocInput) -> CreateDocOutput:
 )
 async def create_tab(params: CreateTabInput) -> CreateTabOutput:
     doc_id = require_doc_id()
-    tab_id = await do_create_tab(
-        doc_id, params.tab_name, session_state=get_session_state()
-    )
+    tab_id = await do_create_tab(doc_id, params.tab_name)
     return CreateTabOutput(doc_id=doc_id, tab_id=tab_id, tab_name=params.tab_name)
 
 

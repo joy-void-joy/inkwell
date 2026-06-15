@@ -2568,6 +2568,30 @@ class PipelineRunner:
         if self.snapshot.output is not None:
             restore("final", self.snapshot.output.content)
 
+    def rehydrate_sections(self) -> None:
+        """Rebuild the section→tab map and section roster when resuming.
+
+        create_section_tabs runs inside the plan and refine stages; a resume
+        that picks up at or after write skips them, so self.tab_ids and the
+        section roster would start empty — leaving section writers with no tab
+        to sync into and the progress badge stuck at zero. setup_doc has
+        already listed the doc's tabs into known_tabs, so the map is rebuilt
+        from the snapshot's plan, with each section's drafted status read back
+        from the persisted drafts.
+        """
+        plan = self.snapshot.plan
+        if plan is None:
+            return
+        for i, section in enumerate(plan.sections):
+            tab_name = truncate_tab_title(f"§{i + 1} {section.title}")
+            tid = self.known_tabs.get(tab_name, "")
+            if tid:
+                self.tab_ids[section.title] = tid
+            drafted = self.section_already_drafted(section.title)
+            self.state.add_section(
+                section.title, tid, status="drafted" if drafted else "planned"
+            )
+
     def write_stage_produced_nothing(self) -> bool:
         """True when the write stage recorded only failure placeholders.
 
@@ -2773,6 +2797,7 @@ class PipelineRunner:
         self.pending_resume = self.prepare_resumable_sessions(snapshot)
 
         await self.setup_doc()
+        self.rehydrate_sections()
         self.start_sandbox()
         policy_token = session_policy.set(self.session_policy_for_run())
 
@@ -2870,9 +2895,7 @@ class PipelineRunner:
 
         for tab_name in ("Overview", "Source", "Voice", "Plan", "Research"):
             if tab_name not in self.known_tabs:
-                tid = await do_create_tab(
-                    self.doc_id, tab_name, session_state=self.state
-                )
+                tid = await do_create_tab(self.doc_id, tab_name)
                 self.known_tabs[tab_name] = tid
 
         self.overview_tab_id = self.known_tabs["Overview"]
@@ -3785,9 +3808,7 @@ class PipelineRunner:
         output_path = self.get_draft_path("merged")
 
         if "Draft" not in self.known_tabs:
-            self.known_tabs["Draft"] = await do_create_tab(
-                self.doc_id, "Draft", session_state=self.state
-            )
+            self.known_tabs["Draft"] = await do_create_tab(self.doc_id, "Draft")
         self.draft_tab_id = self.known_tabs["Draft"]
 
         async def write_heartbeat(elapsed: float) -> None:
@@ -3871,9 +3892,7 @@ class PipelineRunner:
         output_path = self.get_draft_path("merged")
 
         if "Draft" not in self.known_tabs:
-            self.known_tabs["Draft"] = await do_create_tab(
-                self.doc_id, "Draft", session_state=self.state
-            )
+            self.known_tabs["Draft"] = await do_create_tab(self.doc_id, "Draft")
         self.draft_tab_id = self.known_tabs["Draft"]
 
         syncer = DraftSyncer(
@@ -4022,9 +4041,7 @@ class PipelineRunner:
         output_path = self.get_draft_path("final")
 
         if "Draft" not in self.known_tabs:
-            self.known_tabs["Draft"] = await do_create_tab(
-                self.doc_id, "Draft", session_state=self.state
-            )
+            self.known_tabs["Draft"] = await do_create_tab(self.doc_id, "Draft")
         self.draft_tab_id = self.known_tabs["Draft"]
 
         syncer = DraftSyncer(
@@ -4164,7 +4181,7 @@ class PipelineRunner:
         async with gdoc_nonfatal("write preview tab"):
             tab_id = await find_tab_by_title(self.doc_id, "Preview")
             if tab_id is None:
-                tab_id = await do_create_tab(self.doc_id, "Preview", None, self.state)
+                tab_id = await do_create_tab(self.doc_id, "Preview")
             self.known_tabs["Preview"] = tab_id
             await do_write_tab(
                 self.doc_id,
@@ -4612,28 +4629,23 @@ class PipelineRunner:
                 await do_rename_doc(self.doc_id, plan.title)
 
         if "Sections" not in self.known_tabs:
-            sections_parent_id = await do_create_tab(
-                self.doc_id, "Sections", session_state=self.state
-            )
+            sections_parent_id = await do_create_tab(self.doc_id, "Sections")
             self.known_tabs["Sections"] = sections_parent_id
         sections_parent_id = self.known_tabs["Sections"]
 
         self.tab_ids = {}
         for i, section in enumerate(plan.sections):
             tab_name = truncate_tab_title(f"§{i + 1} {section.title}")
-            if tab_name in self.known_tabs:
-                self.tab_ids[section.title] = self.known_tabs[tab_name]
-                self.state.add_section(tab_name, self.known_tabs[tab_name])
-            else:
+            tid = self.known_tabs.get(tab_name, "")
+            if not tid:
                 async with gdoc_nonfatal(f"create tab '{tab_name}'"):
                     tid = await do_create_tab(
-                        self.doc_id,
-                        tab_name,
-                        parent_tab_id=sections_parent_id,
-                        session_state=self.state,
+                        self.doc_id, tab_name, parent_tab_id=sections_parent_id
                     )
-                    self.tab_ids[section.title] = tid
                     self.known_tabs[tab_name] = tid
+            if tid:
+                self.tab_ids[section.title] = tid
+                self.state.add_section(section.title, tid)
 
         async with gdoc_nonfatal("write sections index"):
             sections_summary = "\n".join(
@@ -4675,9 +4687,7 @@ class PipelineRunner:
     async def write_review_tab(self, findings: list[ReviewFinding]) -> None:
         async with gdoc_nonfatal("write review tab"):
             if "Review" not in self.known_tabs:
-                self.known_tabs["Review"] = await do_create_tab(
-                    self.doc_id, "Review", session_state=self.state
-                )
+                self.known_tabs["Review"] = await do_create_tab(self.doc_id, "Review")
 
             review_text = f"# Review Findings\n\n{len(findings)} total findings\n"
             critical_specs: list[CommentSpec] = []

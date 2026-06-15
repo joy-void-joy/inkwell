@@ -38,11 +38,19 @@ def get_manager() -> SessionManager:
 
 @formats_router.get("/formats")
 async def get_formats() -> list[FormatOption]:
+    auto = FormatOption(
+        key="auto",
+        label="Auto — agent picks the best format",
+        accepts_description=False,
+    )
     return [
-        FormatOption(
-            key=f.key, label=f.label, accepts_description=f.accepts_description
-        )
-        for f in OUTPUT_FORMATS
+        auto,
+        *(
+            FormatOption(
+                key=f.key, label=f.label, accepts_description=f.accepts_description
+            )
+            for f in OUTPUT_FORMATS
+        ),
     ]
 
 

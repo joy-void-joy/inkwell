@@ -2469,11 +2469,16 @@ class PipelineRunner:
             ensure_sandbox_image()
         if sandbox_image_available():
             docker_image = INKWELL_SANDBOX_IMAGE
+        source_mounts = {
+            path: str(path)
+            for src in self.sources
+            if (path := Path(src).expanduser().resolve()).is_file()
+        }
         self.sandbox = Sandbox(
             session_id=f"inkwell-{id(self)}",
             shared_dir=shared_dir,
             docker_image=docker_image,
-            read_only_mounts={notes.base_dir: "/notes"},
+            read_only_mounts={notes.base_dir: "/notes", **source_mounts},
         )
         try:
             self.sandbox.start()

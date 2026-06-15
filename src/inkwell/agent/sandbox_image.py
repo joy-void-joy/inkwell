@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 import docker
+import sh
 from docker.errors import DockerException
 
 logger = logging.getLogger(__name__)
@@ -30,8 +31,6 @@ def sandbox_image_available(tag: str = INKWELL_SANDBOX_IMAGE) -> bool:
 
 def build_sandbox_image(tag: str = INKWELL_SANDBOX_IMAGE) -> None:
     """Build the academic sandbox image from ``sandbox.Dockerfile``."""
-    import sh
-
     logger.info("Building %s — downloads tectonic, takes a few minutes", tag)
     docker_cmd = sh.Command("docker")
     docker_cmd(
@@ -43,3 +42,20 @@ def build_sandbox_image(tag: str = INKWELL_SANDBOX_IMAGE) -> None:
         str(SANDBOX_DOCKERFILE.parent),
         _fg=True,
     )
+
+
+def ensure_sandbox_image(tag: str = INKWELL_SANDBOX_IMAGE) -> bool:
+    """Build the sandbox image if it is missing; return whether it is available.
+
+    Called at app and web-server startup so the academic LaTeX toolchain is
+    ready without a manual build. Best-effort: a build failure (Docker down,
+    no network) is logged, not raised, so callers fall back to the base image.
+    """
+    if sandbox_image_available(tag):
+        return True
+    try:
+        build_sandbox_image(tag)
+    except (sh.ErrorReturnCode, sh.CommandNotFound, DockerException, OSError) as exc:
+        logger.warning("Could not build sandbox image %s: %s", tag, exc)
+        return False
+    return sandbox_image_available(tag)

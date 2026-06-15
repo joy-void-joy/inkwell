@@ -100,6 +100,7 @@ from inkwell.agent.tools.extract import (
 )
 from inkwell.agent.sandbox_image import (
     INKWELL_SANDBOX_IMAGE,
+    ensure_sandbox_image,
     sandbox_image_available,
 )
 from inkwell.agent.tools.research.fetch import do_fetch_source
@@ -2455,14 +2456,11 @@ class PipelineRunner:
         shared_dir = notes.artifacts_dir / "shared"
         shared_dir.mkdir(parents=True, exist_ok=True)
         docker_image = Sandbox.DEFAULT_DOCKER_IMAGE
+        if self.effective_format == "academic" and not sandbox_image_available():
+            logger.info("Academic format — building the sandbox image (one-time)")
+            ensure_sandbox_image()
         if sandbox_image_available():
             docker_image = INKWELL_SANDBOX_IMAGE
-        elif self.effective_format == "academic":
-            raise PipelineError(
-                f"Academic format needs the '{INKWELL_SANDBOX_IMAGE}' sandbox image "
-                "(pandoc + tectonic, not apt-installable). Build it once: "
-                "uv run lup-devtools dev build-sandbox-image"
-            )
         self.sandbox = Sandbox(
             session_id=f"inkwell-{id(self)}",
             shared_dir=shared_dir,

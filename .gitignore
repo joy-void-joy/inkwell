@@ -211,6 +211,8 @@ marimo/_lsp/
 __marimo__/
 
 # Project-specific
+# Session traces are local-only dev artifacts and are never committed
+notes/traces/
 worktrees/
 tmp/
 downstream.json.local

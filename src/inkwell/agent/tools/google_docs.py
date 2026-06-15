@@ -639,8 +639,13 @@ async def do_write_tab(
     tab_id: str,
     markdown: str,
     session_state: WritingSessionState | None = None,
+    plain: bool = False,
 ) -> None:
-    """Write markdown content to a tab (replaces existing content)."""
+    """Write content to a tab (replaces existing content).
+
+    ``plain=True`` inserts the text verbatim, with no markdown rendering — for
+    raw LaTeX source and other content that must not be reinterpreted.
+    """
     svc = services()
     docs = svc.docs_service()
 
@@ -650,26 +655,39 @@ async def do_write_tab(
     _, tab = find_tab_by_id(doc, tab_id)
     end_index = get_tab_end_index(tab)
 
-    all_requests = markdown_to_requests(markdown, tab_id=tab_id)
-    batch = split_markdown_batch(all_requests)
+    if plain:
+        content_requests: list[dict[str, object]] = [
+            {
+                "insertText": {
+                    "location": {"index": 1, "tabId": tab_id},
+                    "text": markdown,
+                }
+            }
+        ]
+        formatting_requests: list[dict[str, object]] = []
+    else:
+        all_requests = markdown_to_requests(markdown, tab_id=tab_id)
+        batch = split_markdown_batch(all_requests)
+        content_requests = batch["content"]
+        formatting_requests = batch["formatting"]
 
     phase1: list[dict[str, object]] = []
     if end_index > 2:
         phase1.append(clear_tab_request(end_index, tab_id=tab_id))
-    phase1.extend(batch["content"])
+    phase1.extend(content_requests)
 
     if phase1:
         await execute_with_retry(
             docs.documents().batchUpdate(documentId=doc_id, body={"requests": phase1})
         )
 
-    if batch["formatting"]:
+    if formatting_requests:
         doc = await execute_with_retry(
             docs.documents().get(documentId=doc_id, includeTabsContent=True)
         )
         _, tab = find_tab_by_id(doc, tab_id)
         actual_end = get_tab_end_index(tab)
-        clamped = clamp_ranges(batch["formatting"], actual_end)
+        clamped = clamp_ranges(formatting_requests, actual_end)
         if clamped:
             await execute_with_retry(
                 docs.documents().batchUpdate(
@@ -697,6 +715,7 @@ async def write_with_continuation(
     content: str,
     parent_tab_id: str | None = None,
     session_state: WritingSessionState | None = None,
+    plain: bool = False,
 ) -> list[str]:
     """Write content to one or more tabs, splitting at heading boundaries when large.
 
@@ -708,11 +727,11 @@ async def write_with_continuation(
     """
     from lup.content_safety import split_on_headings
 
-    if len(content) <= TAB_CONTINUATION_CHARS:
+    if plain or len(content) <= TAB_CONTINUATION_CHARS:
         tab_id = await find_tab_by_title(doc_id, tab_name)
         if tab_id is None:
             tab_id = await do_create_tab(doc_id, tab_name, parent_tab_id, session_state)
-        await do_write_tab(doc_id, tab_id, content, session_state)
+        await do_write_tab(doc_id, tab_id, content, session_state, plain=plain)
         return [tab_id]
 
     chunks = split_on_headings(content)

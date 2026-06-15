@@ -45,48 +45,48 @@ single point of failure.
 
 **Fix #3 — directives bind (propagation spine + soft checklist)**
 
-- [ ] Propagate the immutable brief + author direction + verbatim feedback into every
+- [x] Propagate the immutable brief + author direction + verbatim feedback into every
   deciding stage's context — `write` (`pipeline.py:1209`), `reconcile`, `review`, `resolve`
   (`pipeline.py:3842`), `rewrite` — not plan-only (today `collect_preexisting_directions`,
   `pipeline.py:2992`, injects them into `plan` alone).
-- [ ] Soft `ArticlePlan.constraints: list[str]` (`models.py:52`) — a *derived, advisory*
+- [x] Soft `ArticlePlan.constraints: list[str]` (`models.py:52`) — a *derived, advisory*
   checklist the planner distills from the direction; **not** the immutable `deliverables`
   contract. The reviewer's systematic checklist; authority stays in the propagated direction,
   so a misclassified item is backstopped rather than lost.
-- [ ] Reviewer (`stages.py:229`) checks the draft against the propagated direction + the
+- [x] Reviewer (`stages.py:229`) checks the draft against the propagated direction + the
   checklist; a clear contradiction of an explicit direction is a serious finding routing
   `resolve → rewrite`.
-- [ ] `stage_resolve`: the direction is *privileged evidence* (outranks the source) for
+- [x] `stage_resolve`: the direction is *privileged evidence* (outranks the source) for
   directive-questions, so "cite vs. reproduce" is pre-answered, never escalated; conservative
   default when genuinely open (no fail-open).
 
 **LaTeX surface — end-to-end, academic-only (capability complement)**
 
-- [ ] Writers emit `.tex` fragments; `reconcile` assembles `.tex`; `review`/`rewrite` operate
+- [x] Writers emit `.tex` fragments; `reconcile` assembles `.tex`; `review`/`rewrite` operate
   on `.tex`. Other formats stay markdown. Gives the writer a proof environment at draft time
   so "reproduce, don't cite" is possible.
-- [ ] GDoc working tabs host raw `.tex`; a read-only **Preview** tab hosts the rasterized
+- [x] GDoc working tabs host raw `.tex`; a read-only **Preview** tab hosts the rasterized
   compiled PDF (`InsertImage` from `/shared/`), refreshed at checkpoints. `stage_format`
   (`pipeline.py:3949`) rewritten for academic. Deliverable: `paper.tex` (+ PDF).
 
 **Fix #1a — academic TeX toolchain (custom image, explicit build)**
 
-- [ ] inkwell ships a Dockerfile (uv base + `apt` pandoc/poppler-utils + `tectonic` static
-  binary + primed tectonic cache). `lup-devtools dev build-sandbox-image` builds & tags it;
-  `start_sandbox` (`pipeline.py:2405`) passes the tag and fails fast if missing.
-  `ensure_tex_tooling` (`latex.py:36`) → pure probe at sandbox start. (`apt install tectonic`
+- [x] inkwell ships a Dockerfile (uv base + `apt` pandoc/poppler-utils + `tectonic` static
+  binary + primed tectonic cache). `lup-devtools dev build-sandbox-image` builds & tags it,
+  but `ensure_sandbox_image` also builds it on demand if missing — at academic `start_sandbox`
+  and at web-server startup (`lifespan`). `ensure_tex_tooling` (`latex.py:36`) → pure probe. (`apt install tectonic`
   can never work — not an apt package on `bookworm-slim`.)
 
 **Fix #2 — source reachable in sandbox**
 
-- [ ] Copy file-based source originals → `notes/artifacts/sources/` at extract time (auto-
+- [x] Copy file-based source originals → `notes/artifacts/sources/` at extract time (auto-
   reachable at `/notes/artifacts/sources/` via the existing ro mount, `pipeline.py:2408`);
   name the path in compute `usage_notes` (`pipeline.py:717`). The capability half of
   reproduce-not-cite. Skip URL/conversation sources (already captured as text).
 
 **Fix #1b — interrupt grace + finalize**
 
-- [ ] Extract `is_interrupt(exc)` into `lup` (from `background.py:215`), shared with the main
+- [x] Extract `is_interrupt(exc)` into `lup` (from `background.py:215`), shared with the main
   client. Catch around the stage loop (`pipeline.py:2689`); finalize writes `snapshot.output`
   to a local `.md/.tex` first, then best-effort Final-tab write; log the interrupt with stage
   context. Verify `write_with_continuation` reuses the `Final` tab → idempotent resume.

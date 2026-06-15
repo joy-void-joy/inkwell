@@ -66,6 +66,16 @@ class TestSourceRegistry:
         assert docs[0].kind == "text"
         assert docs[0].page_count == 0
 
+    def test_original_is_copied_into_the_sandbox_reachable_tree(
+        self, tmp_path: Path, artifacts_dir: Path
+    ) -> None:
+        note = tmp_path / "thesis.md"
+        note.write_text("proof content", encoding="utf-8")
+        docs = build_source_registry([str(note)], artifacts_dir)
+        registered = Path(docs[0].path)
+        assert registered.parent == artifacts_dir / "sources"
+        assert registered.read_text(encoding="utf-8") == "proof content"
+
 
 class TestFindInSource:
     async def test_finds_pattern_with_page_number(

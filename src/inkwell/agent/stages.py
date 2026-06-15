@@ -229,6 +229,10 @@ Read the draft and plan files from the paths in your task.
 - Does the draft deliver every item in the plan's deliverables list? \
 A missing, widened, or reworded deliverable (different scope, setting, \
 or output than the author asked for) is severity='critical'.
+- Does the draft honor the author's brief and the plan's constraints — \
+the must/must-not statements the author stated? A draft that contradicts \
+an explicit author direction (does what they said not to, or drops what \
+they required) is severity='critical', even when it reads well.
 - Does the opening create a question the reader needs answered?
 - Does each paragraph earn the next — or does interest drop?
 - Is the thesis clear and does the argument build progressively?
@@ -331,33 +335,43 @@ you checked against in the issue text."""
 
 
 RESOLVER_PROMPT = """\
-You resolve open questions against the source document before the \
-final rewrite. Writers and reviewers left questions they could not \
-answer; many of them are answerable by reading the source — that is \
-your job. Only questions requiring the author's judgment should remain \
-with the author.
+You resolve open questions before the final rewrite. Writers and \
+reviewers left questions; most are answerable from evidence you already \
+have, so they should not wait on the absent author.
+
+You have two evidence bases, in priority order:
+
+1. **The author's brief and constraints** outrank everything for \
+directive questions — what to produce, what to include or omit, how to \
+treat the source. If the brief or the plan's constraints settle a \
+question (e.g. "reproduce the argument vs. cite the source" when the \
+brief says "self-contained"), the brief decides it. Do not re-open what \
+the author already settled, and do not send it to the author.
+2. **The source document** answers questions of fact: definitions, \
+exact statements, conventions, page references, "does the source do X".
 
 For each question in your task:
 
-1. Decide: can the source document answer this? (Definitions, exact \
-statements, conventions, page references, "does the source do X" — \
-yes. Taste, scope preferences, publication choices — no.)
-2. If yes: find the answer (find_in_source to locate, consult_source \
-or Read to verify) and write the resolution with verbatim quotes and \
-page numbers.
-3. If no: mark it author-only, one line of why.
+1. Does the brief or a constraint settle it? Resolve from the brief, \
+quoting the instruction it rests on.
+2. Else, can the source answer it? Find the answer (find_in_source, \
+consult_source, Read) and resolve with verbatim quotes and page numbers.
+3. Else it is a genuine judgment call. Mark it for the author — and \
+still give a conservative interim default that honors the brief, so the \
+rewrite never falls back to the draft's status quo while waiting.
 
 ## Output
 
 Write all resolutions to the output file path in your task using the \
 Write tool, in this format:
 
-## Resolved from the source
+## Resolved
 - Q: <question>
-  A: <answer with verbatim quote and page>
+  A: <answer — from the brief or the source — with the quote/page it rests on>
 
 ## For the author
-- <question> — <why the source can't answer it>
+- Q: <question>
+  Default: <the brief-honoring choice the rewrite should apply for now>
 
 The rewrite stage applies your resolutions as corrections; be exact."""
 
@@ -451,7 +465,10 @@ Build the plan incrementally using your tools:
 
 1. Call set_plan_header with the title, thesis, target format, author \
 direction, deliverables (copied from the brief in the author's own \
-terms), conventions (the shared terms, names, and notational choices \
+terms), constraints (the author's must/must-not statements distilled \
+into short checkable items — what the piece must or must not do, e.g. \
+"self-contained: don't cite the source for deliverable content"), \
+conventions (the shared terms, names, and notational choices \
 all sections must use — sections are written by independent writers \
 who only stay consistent through this list), and voice notes
 2. Call add_section for each planned section (title, summary, key points)
@@ -528,8 +545,8 @@ the relevant section's key_points, in the author's framing, so the \
 writers keep and flag it. Only material research actively *contradicts* \
 gets dropped.
 
-Preserve the author's voice notes, direction, and deliverables \
-unchanged."""
+Preserve the author's voice notes, direction, deliverables, and \
+constraints unchanged."""
 
 
 REWRITER_SYSTEM = """\
@@ -861,6 +878,16 @@ sections, not the main body.""",
 This piece is a research paper for expert readers (arXiv, journal, or \
 conference register). Structural choices serve precision and \
 self-containment, not engagement.
+
+### Output: LaTeX source
+
+Write LaTeX, not markdown. Use \\section/\\subsection for structure, \
+theorem/lemma/definition/proof environments for results and their \
+arguments, and $...$ / \\[...\\] for mathematics. Cross-reference with \
+\\label and \\ref. Emit body content only — no \\documentclass or \
+preamble; the paper is assembled and compiled around your sections. A \
+real \\begin{proof} ... \\end{proof} is the point of this format: write \
+the argument out, do not defer it to a citation.
 
 ### Self-containment contract
 

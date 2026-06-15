@@ -160,6 +160,16 @@ class TokenUsage(TypedDict, total=False):
 logger = logging.getLogger(__name__)
 
 
+def is_interrupt(exc: BaseException) -> bool:
+    """True when an exception is the Agent SDK subprocess interrupted by SIGINT.
+
+    The SDK runs the CLI in a subprocess; a SIGINT surfaces as a generic
+    exception whose message carries 'exit code -2'. Background agents and the
+    main pipeline client both treat this as a benign stop, not a crash.
+    """
+    return "exit code -2" in str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Output format types
 # ---------------------------------------------------------------------------

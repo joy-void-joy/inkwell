@@ -27,6 +27,7 @@ from lup.client import (
     HeartbeatCallback,
     SessionPolicy,
     active_block_callback,
+    is_interrupt,
     query,
     session_policy,
 )
@@ -96,6 +97,11 @@ from inkwell.agent.tools.extract import (
     extract_source_tab_only,
     fetch_gdoc_comments,
     parse_gdoc_id,
+)
+from inkwell.agent.sandbox_image import (
+    INKWELL_SANDBOX_IMAGE,
+    ensure_sandbox_image,
+    sandbox_image_available,
 )
 from inkwell.agent.tools.research.fetch import do_fetch_source
 from inkwell.agent.tools.source_consult import (
@@ -430,6 +436,46 @@ def directions_block(notes: PipelineNotes) -> str:
     )
 
 
+def brief_block(notes: PipelineNotes) -> str:
+    """Render the author's brief — instructions and requested outputs — or ''.
+
+    The brief is the contract. The planner distills it into the plan, but the
+    distillation can soften or drop an imperative, so every deciding stage reads
+    the brief directly: a writer choosing how to handle the source, a reviewer
+    judging the draft, the rewriter finalizing.
+    """
+    brief = notes.load_brief()
+    if not brief:
+        return ""
+    return (
+        "The author's brief — their own instructions and the outputs they "
+        "asked for. This is the contract: honor it over any genre, format, or "
+        "convention default. Where the brief and a default disagree, the brief "
+        "wins:\n\n"
+        f"{brief}\n\n"
+    )
+
+
+def author_context_block(notes: PipelineNotes) -> str:
+    """The author's brief plus source-document directions, for a stage task.
+
+    Every stage that decides content or wording reads this so an author
+    instruction can never go invisible after planning.
+    """
+    return brief_block(notes) + directions_block(notes)
+
+
+def render_brief(instructions: str, deliverables: list[str]) -> str:
+    """Format the author's instructions and deliverables as a brief block."""
+    parts: list[str] = []
+    if instructions.strip():
+        parts.append(instructions.strip())
+    if deliverables:
+        items = "\n".join(f"- {d}" for d in deliverables)
+        parts.append(f"Requested deliverables:\n{items}")
+    return "\n\n".join(parts)
+
+
 def resolve_writer_mode(mode: str) -> str:
     """Resolve writer_mode='auto' to a concrete mode.
 
@@ -725,8 +771,9 @@ def build_compute_server(
             usage_notes=(
                 "Pipeline session data is mounted read-only at /notes: the plan at "
                 "/notes/artifacts/plan.json, research at /notes/artifacts/research.json, "
-                "section drafts under /notes/drafts/. Read these instead of retyping "
-                "values from memory."
+                "section drafts under /notes/drafts/, and the original source "
+                "documents under /notes/artifacts/sources/. Read these instead of "
+                "retyping values from memory."
             )
         ),
         *make_query_tools(artifacts_dir),
@@ -1272,6 +1319,7 @@ async def write_section(
         f"{manifest.render()}\n"
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
     )
+    task += author_context_block(notes)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     if section_context:
@@ -1368,6 +1416,7 @@ async def write_full_draft(
         f"Use list_research to browse all research findings, then "
         f"read_finding for details.\n\n"
     )
+    task += author_context_block(notes)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
@@ -1460,7 +1509,7 @@ async def reconcile_sections(
         f"piece, in this order:\n{drafts_list}\n\n"
         f"{manifest.render()}\n\n"
     )
-    task += directions_block(notes)
+    task += author_context_block(notes)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
@@ -1612,6 +1661,7 @@ async def review_facts(
         f"Draft: {draft_path}\n"
         f"Plan (includes the deliverable contract): {notes.artifact_path('plan')}\n\n"
         f"{render_source_lines(notes)}"
+        f"{author_context_block(notes)}"
         f"Read the draft. Use list_research to see all research findings, "
         f"then read_finding for details on specific ones. Cross-reference "
         f"the draft against research findings, then verify remaining claims "
@@ -1679,6 +1729,7 @@ async def review_style(
     task = (
         f"Review the article draft for writing quality and style.\n\n"
         f"{manifest.render()}\n\n"
+        f"{author_context_block(notes)}"
         f"Read each voice and style reference file, then read the draft. "
         f"Call record_finding for each issue."
     )
@@ -1741,6 +1792,7 @@ async def review_source_fidelity(
         f"Draft: {draft_path}\n"
         f"Plan: {notes.artifact_path('plan')}\n\n"
         f"{render_source_lines(notes)}"
+        f"{author_context_block(notes)}"
         f"Check every source-derived definition, convention, named "
         f"structure, and argument outline against the document itself. "
         f"Call record_finding for each issue."
@@ -1809,6 +1861,7 @@ async def review_coverage(
     task = (
         f"Check the draft for the author's concrete specifics that went "
         f"missing.\n\n{manifest.render()}\n\n"
+        f"{author_context_block(notes)}"
         f"Read the plan (source_quotes, each section's quotes_to_include, and "
         f"the concrete nouns in its key_points) and the draft. Where a source "
         f"document is listed, scan it for named specifics too. Call "
@@ -2049,8 +2102,8 @@ async def rewrite_final(
             "review",
             "Source resolutions",
             instruction=(
-                "answers read from the source document — apply as "
-                "corrections; they outrank other inputs on correctness"
+                "answers read from the author's brief and the source — apply "
+                "as corrections; they outrank other inputs on correctness"
             ),
         )
     add_source_refs(manifest, notes)
@@ -2065,7 +2118,7 @@ async def rewrite_final(
     )
     if format_guidance:
         task += f"{format_guidance}\n\n"
-    task += directions_block(notes)
+    task += author_context_block(notes)
     task += (
         f"{manifest.render()}\n\n"
         f"Read the annotated draft — review findings are marked inline. "
@@ -2410,9 +2463,16 @@ class PipelineRunner:
         notes = self.ensure_notes()
         shared_dir = notes.artifacts_dir / "shared"
         shared_dir.mkdir(parents=True, exist_ok=True)
+        docker_image = Sandbox.DEFAULT_DOCKER_IMAGE
+        if self.effective_format == "academic" and not sandbox_image_available():
+            logger.info("Academic format — building the sandbox image (one-time)")
+            ensure_sandbox_image()
+        if sandbox_image_available():
+            docker_image = INKWELL_SANDBOX_IMAGE
         self.sandbox = Sandbox(
             session_id=f"inkwell-{id(self)}",
             shared_dir=shared_dir,
+            docker_image=docker_image,
             read_only_mounts={notes.base_dir: "/notes"},
         )
         try:
@@ -2440,6 +2500,33 @@ class PipelineRunner:
     def stop_sandbox(self) -> None:
         if self.sandbox is not None:
             self.sandbox.stop()
+
+    async def finalize_on_interrupt(self) -> None:
+        """Ship whatever the snapshot holds when an interrupt cuts the run short.
+
+        Writes the content to a local file first — guaranteed even when the
+        interrupt struck during the Google Doc write — then attempts the Final
+        tab. A later resume re-runs format idempotently.
+        """
+        output = self.snapshot.output
+        if output is None or not output.content:
+            logger.warning(
+                "Interrupt before any output was produced; nothing to finalize"
+            )
+            return
+        notes = self.ensure_notes()
+        local_path = notes.artifacts_dir / "final_on_interrupt.md"
+        local_path.write_text(output.content, encoding="utf-8")
+        logger.info("Interrupt: saved final content to %s", local_path)
+        async with gdoc_nonfatal("write final tab on interrupt"):
+            from inkwell.agent.tools.google_docs import write_with_continuation
+
+            tab_ids = await write_with_continuation(
+                self.doc_id, "Final", output.content, session_state=self.state
+            )
+            if tab_ids:
+                self.final_tab_id = tab_ids[0]
+                self.known_tabs["Final"] = tab_ids[0]
             self.sandbox = None
             logger.info("Sandbox stopped")
 
@@ -2709,6 +2796,16 @@ class PipelineRunner:
                 await self.update_overview()
                 await self.hooks.on_complete(output)
                 await self.standby_loop()
+            except (
+                Exception
+            ) as exc:  # claude: ignore — SDK raises generic Exception for exit codes
+                if not is_interrupt(exc):
+                    raise
+                logger.info(
+                    "Pipeline interrupted during stage %r — finalizing",
+                    self.snapshot.stage,
+                )
+                await self.finalize_on_interrupt()
             finally:
                 await self.stop_watcher()
         finally:
@@ -3397,6 +3494,12 @@ class PipelineRunner:
                 f"set_plan_header verbatim):\n{items}"
             )
 
+        brief = render_brief(
+            self.snapshot.author_instructions, self.snapshot.author_deliverables
+        )
+        if brief:
+            notes.save_brief(brief)
+
         plan = await plan_article(
             notes,
             target_format=self.target_format,
@@ -3872,8 +3975,10 @@ class PipelineRunner:
         task = (
             f"Open questions left by writers and reviewers:\n\n{items}\n\n"
             f"{render_source_lines(notes)}"
-            f"Resolve every source-answerable question from the document "
-            f"itself; mark the rest author-only.\n\n"
+            f"{author_context_block(notes)}"
+            f"Resolve each question from the author's brief first, then the "
+            f"source; for a genuine judgment call, mark it for the author with "
+            f"a conservative brief-honoring default.\n\n"
             f"Write the resolutions to: {resolutions_path}"
         )
         await query(
@@ -3965,54 +4070,20 @@ class PipelineRunner:
         await self.announce_stage("format", f"Applying {chosen_format} formatting")
         await self.update_overview(active_stage="format")
         article_text = output.content or output.summary
-        final_content = await apply_format(article_text, plan.title, chosen_format)
 
-        if chosen_format == "academic" and self.sandbox is not None:
-            from inkwell.agent.tools.google_docs import do_upload_artifact
-            from inkwell.agent.tools.latex import (
-                build_latex_artifacts,
-                latex_artifacts_note,
-                save_artifacts_to,
-            )
+        if chosen_format == "academic":
+            final_content = await self.finalize_academic(article_text, plan)
+        else:
+            final_content = await apply_format(article_text, plan.title, chosen_format)
+            async with gdoc_nonfatal("write final tab"):
+                from inkwell.agent.tools.google_docs import write_with_continuation
 
-            await self.hooks.on_progress("Building LaTeX artifacts (pandoc + tectonic)")
-            artifacts = await build_latex_artifacts(
-                final_content, self.sandbox, title=plan.title
-            )
-            artifacts = save_artifacts_to(
-                artifacts, self.ensure_notes().artifacts_dir / "latex"
-            )
-            links: list[str] = []
-            if artifacts.pdf_path:
-                async with gdoc_nonfatal("upload paper.pdf"):
-                    _, pdf_url = await do_upload_artifact(
-                        artifacts.pdf_path, "application/pdf"
-                    )
-                    links.append(f"Compiled PDF: {pdf_url}")
-            if artifacts.tex_path:
-                async with gdoc_nonfatal("upload paper.tex"):
-                    _, tex_url = await do_upload_artifact(
-                        artifacts.tex_path, "application/x-tex"
-                    )
-                    links.append(f"LaTeX source: {tex_url}")
-            if links:
-                final_content += latex_artifacts_note(artifacts, links)
-                await self.hooks.on_progress("LaTeX: " + "; ".join(links))
-            else:
-                logger.warning("LaTeX build incomplete: %s", artifacts.log[-300:])
-                await self.hooks.on_progress(
-                    "LaTeX build incomplete — shipping markdown only"
+                tab_ids = await write_with_continuation(
+                    self.doc_id, "Final", final_content, session_state=self.state
                 )
-
-        async with gdoc_nonfatal("write final tab"):
-            from inkwell.agent.tools.google_docs import write_with_continuation
-
-            tab_ids = await write_with_continuation(
-                self.doc_id, "Final", final_content, session_state=self.state
-            )
-            if tab_ids:
-                self.final_tab_id = tab_ids[0]
-                self.known_tabs["Final"] = tab_ids[0]
+                if tab_ids:
+                    self.final_tab_id = tab_ids[0]
+                    self.known_tabs["Final"] = tab_ids[0]
 
         output.google_doc_id = self.doc_id
         output.google_doc_url = self.doc_url
@@ -4021,6 +4092,84 @@ class PipelineRunner:
         self.state.set_stage("complete")
         await self.save_snapshot()
         await self.update_overview()
+
+    async def finalize_academic(self, body: str, plan: ArticlePlan) -> str:
+        """Assemble, compile, and publish the LaTeX paper.
+
+        The content is already LaTeX (academic writers emit it), so the paper is
+        assembled and compiled directly: the Final tab carries the raw .tex, a
+        Preview tab shows the rasterized PDF, and both .tex and .pdf upload to
+        Drive as the deliverable.
+        """
+        from inkwell.agent.tools.google_docs import (
+            do_upload_artifact,
+            write_with_continuation,
+        )
+        from inkwell.agent.tools.latex import (
+            assemble_latex_document,
+            compile_tex,
+            save_artifacts_to,
+        )
+
+        tex_source = assemble_latex_document(body, plan.title)
+        async with gdoc_nonfatal("write final tab"):
+            tab_ids = await write_with_continuation(
+                self.doc_id, "Final", tex_source, session_state=self.state, plain=True
+            )
+            if tab_ids:
+                self.final_tab_id = tab_ids[0]
+                self.known_tabs["Final"] = tab_ids[0]
+
+        if self.sandbox is None:
+            await self.hooks.on_progress("No sandbox — shipping .tex without compile")
+            return tex_source
+
+        await self.hooks.on_progress("Compiling paper.tex (tectonic)")
+        artifacts = await compile_tex(tex_source, self.sandbox)
+        artifacts = save_artifacts_to(
+            artifacts, self.ensure_notes().artifacts_dir / "latex"
+        )
+        if artifacts.tex_path:
+            async with gdoc_nonfatal("upload paper.tex"):
+                await do_upload_artifact(artifacts.tex_path, "application/x-tex")
+        if not artifacts.pdf_path:
+            logger.warning("LaTeX compile incomplete: %s", artifacts.log[-300:])
+            await self.hooks.on_progress("LaTeX compile incomplete — shipped .tex only")
+            return tex_source
+        async with gdoc_nonfatal("upload paper.pdf"):
+            await do_upload_artifact(artifacts.pdf_path, "application/pdf")
+        await self.write_preview_tab()
+        return tex_source
+
+    async def write_preview_tab(self) -> None:
+        """Render the compiled PDF to images and publish them in a Preview tab."""
+        from inkwell.agent.tools.google_docs import (
+            do_create_tab,
+            do_insert_image,
+            do_write_tab,
+            find_tab_by_title,
+        )
+        from inkwell.agent.tools.latex import render_pdf_preview
+
+        if self.sandbox is None:
+            return
+        pages = await render_pdf_preview(self.sandbox)
+        if not pages:
+            return
+        async with gdoc_nonfatal("write preview tab"):
+            tab_id = await find_tab_by_title(self.doc_id, "Preview")
+            if tab_id is None:
+                tab_id = await do_create_tab(self.doc_id, "Preview", None, self.state)
+            self.known_tabs["Preview"] = tab_id
+            await do_write_tab(
+                self.doc_id,
+                tab_id,
+                "Rendered preview of the compiled paper.\n\n",
+                session_state=self.state,
+                plain=True,
+            )
+            for page in pages:
+                await do_insert_image(self.doc_id, tab_id, str(page), width_pts=460)
 
     # -- Sync / restart logic ----------------------------------------------
 

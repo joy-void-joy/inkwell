@@ -230,6 +230,17 @@ def check_cmd(
     check.run_checks(fix, no_test)
 
 
+# -- sandbox image command --
+
+
+@app.command("build-sandbox-image")
+def build_sandbox_image_cmd() -> None:
+    """Build the academic sandbox image (pandoc + tectonic + poppler)."""
+    from inkwell.agent.sandbox_image import build_sandbox_image
+
+    build_sandbox_image()
+
+
 # -- init commands --
 
 

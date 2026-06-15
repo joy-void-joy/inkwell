@@ -18,11 +18,6 @@ from lup.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 TEX_TOOLING_PROBE = "command -v pandoc >/dev/null && command -v tectonic >/dev/null"
-TEX_TOOLING_INSTALL = (
-    "apt-get update -qq && "
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-    "--no-install-recommends pandoc tectonic"
-)
 
 
 class LatexArtifacts(BaseModel):
@@ -34,15 +29,7 @@ class LatexArtifacts(BaseModel):
 
 
 def ensure_tex_tooling(sandbox: Sandbox) -> bool:
-    """Install pandoc + tectonic in the container if missing."""
-    probe = sandbox.run_shell(TEX_TOOLING_PROBE)
-    if probe["exit_code"] == 0:
-        return True
-    logger.info("Installing TeX tooling in sandbox (pandoc, tectonic)")
-    install = sandbox.run_shell(TEX_TOOLING_INSTALL)
-    if install["exit_code"] != 0:
-        logger.warning("TeX tooling install failed: %s", install["stdout"][-500:])
-        return False
+    """Probe for pandoc + tectonic, provisioned in the sandbox image."""
     return sandbox.run_shell(TEX_TOOLING_PROBE)["exit_code"] == 0
 
 
@@ -125,3 +112,119 @@ def save_artifacts_to(artifacts: LatexArtifacts, target_dir: Path) -> LatexArtif
             destination.write_bytes(source.read_bytes())
             setattr(copied, attr, str(destination))
     return copied
+
+
+LATEX_PREAMBLE = r"""\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+"""
+
+
+LATEX_ESCAPES = {
+    "\\": "\\textbackslash{}",
+    "&": "\\&",
+    "%": "\\%",
+    "$": "\\$",
+    "#": "\\#",
+    "_": "\\_",
+    "{": "\\{",
+    "}": "\\}",
+    "~": "\\textasciitilde{}",
+    "^": "\\textasciicircum{}",
+}
+LATEX_ESCAPE_TABLE = str.maketrans(LATEX_ESCAPES)
+
+
+def escape_latex(text: str) -> str:
+    """Escape the LaTeX special characters that appear in a plain title.
+
+    Single pass via ``str.translate`` so the braces a replacement introduces
+    (e.g. ``\\textbackslash{}``) are not themselves re-escaped.
+    """
+    return text.translate(LATEX_ESCAPE_TABLE)
+
+
+def assemble_latex_document(body: str, title: str) -> str:
+    """Wrap LaTeX body content (sections, environments) in a compilable paper.
+
+    The academic writers emit body content only; this adds the preamble,
+    title, and document environment so the result compiles as a standalone
+    paper. If the body already carries a preamble it is returned unchanged.
+    """
+    if "\\documentclass" in body:
+        return body
+    title_cmd = ""
+    if title.strip():
+        title_cmd = "\\title{" + escape_latex(title) + "}\n\\maketitle\n\n"
+    return (
+        LATEX_PREAMBLE
+        + "\\begin{document}\n"
+        + title_cmd
+        + body
+        + "\n\\end{document}\n"
+    )
+
+
+def compile_tex_sync(tex_source: str, sandbox: Sandbox) -> LatexArtifacts:
+    """Write paper.tex and compile paper.pdf with tectonic (no pandoc).
+
+    For LaTeX-authored content the source is already a document, so this skips
+    the markdown conversion. Best-effort: a missing ``pdf_path`` with a log
+    means compilation failed and the .tex is still shippable.
+    """
+    shared = sandbox.shared_dir
+    tex_host = shared / "paper.tex"
+    tex_host.write_text(tex_source, encoding="utf-8")
+
+    if not ensure_tex_tooling(sandbox):
+        return LatexArtifacts(
+            tex_path=str(tex_host), log="TeX tooling unavailable in sandbox"
+        )
+
+    tectonic = sandbox.run_shell("cd /shared && tectonic paper.tex")
+    pdf_host = shared / "paper.pdf"
+    if tectonic["exit_code"] != 0 or not pdf_host.exists():
+        return LatexArtifacts(
+            tex_path=str(tex_host), log="tectonic failed:\n" + tectonic["stdout"]
+        )
+    return LatexArtifacts(
+        tex_path=str(tex_host), pdf_path=str(pdf_host), log=tectonic["stdout"]
+    )
+
+
+async def compile_tex(tex_source: str, sandbox: Sandbox) -> LatexArtifacts:
+    """Thread-offloaded ``compile_tex_sync`` (compile is blocking)."""
+    return await asyncio.to_thread(compile_tex_sync, tex_source, sandbox)
+
+
+def render_pdf_preview_sync(sandbox: Sandbox, *, max_pages: int = 20) -> list[Path]:
+    """Rasterize paper.pdf to per-page PNGs in /shared via pdftoppm.
+
+    Returns the host paths of the page images (empty if there is no PDF or
+    pdftoppm fails) for insertion into the rendered Preview tab.
+    """
+    shared = sandbox.shared_dir
+    if not (shared / "paper.pdf").exists():
+        return []
+    result = sandbox.run_shell(
+        "cd /shared && rm -f preview-*.png && "
+        f"pdftoppm -png -r 150 -l {max_pages} paper.pdf preview"
+    )
+    if result["exit_code"] != 0:
+        logger.warning("pdftoppm failed: %s", result["stdout"][-300:])
+        return []
+    return sorted(shared.glob("preview-*.png"))
+
+
+async def render_pdf_preview(sandbox: Sandbox, *, max_pages: int = 20) -> list[Path]:
+    """Thread-offloaded ``render_pdf_preview_sync`` (rasterization is blocking)."""
+    return await asyncio.to_thread(
+        render_pdf_preview_sync, sandbox, max_pages=max_pages
+    )

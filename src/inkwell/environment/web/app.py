@@ -1,5 +1,6 @@
 """FastAPI application factory for the Inkwell web environment."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from inkwell.agent.sandbox_image import ensure_sandbox_image
 from inkwell.environment.web.routes import profiles as profiles_route
 from inkwell.environment.web.routes import sessions as sessions_route
 from inkwell.environment.web.routes import ws as ws_route
@@ -62,6 +64,7 @@ setTimeout(() => {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await asyncio.to_thread(ensure_sandbox_image)
     manager = SessionManager()
     sessions_route.set_manager(manager)
     ws_route.set_manager(manager)

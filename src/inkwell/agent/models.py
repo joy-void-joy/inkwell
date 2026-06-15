@@ -65,7 +65,19 @@ class ArticlePlan(BaseModel):
         description="Exact quotes from source material to preserve"
     )
     author_direction: str = Field(
-        description="General direction, constraints, or preferences from the author"
+        description="General direction and preferences from the author, in prose"
+    )
+    constraints: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Soft checklist distilled from author_direction: the author's "
+            "must/must-not statements as short, checkable items (e.g. "
+            "'self-contained proofs — do not cite the source for deliverable "
+            "content', 'define or rename borrowed abbreviations', 'least "
+            "significant digit first'). Advisory, not the deliverables "
+            "contract — the propagated author direction stays the authority; "
+            "this list helps reviewers check the draft systematically."
+        ),
     )
     deliverables: list[str] = Field(
         default_factory=list,

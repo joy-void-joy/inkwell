@@ -1,5 +1,7 @@
 """Branch analysis: containment, PR status, base detection, PR body generation."""
 
+import csv
+import io
 import json
 import logging
 from collections import defaultdict
@@ -10,7 +12,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-git = sh.Command("git").bake("--no-pager")
+git = sh.Command("git").bake("--no-pager", _tty_out=False)
 gh = sh.Command("gh").bake(_tty_out=False)
 
 
@@ -40,35 +42,26 @@ class SurveyResult(BaseModel):
 
 
 def parse_branches() -> list[dict[str, str | bool]]:
-    """Parse ``git branch -vv`` into structured data."""
-    output = str(git("branch", "-vv")).strip()
+    """List local branches with short commit, upstream, and current-branch flag.
+
+    Reads ``git for-each-ref`` (plumbing) rather than ``git branch -vv`` so the
+    output carries no terminal decorations: no ``*``/``+`` markers for the
+    current and worktree-checked-out branches, and no color escapes that would
+    otherwise leak into branch names and break downstream containment queries.
+    """
+    current = str(git("branch", "--show-current")).strip()
+    fmt = "%(refname:short)%09%(objectname:short)%09%(upstream:short)"
+    output = str(git("for-each-ref", "--format", fmt, "refs/heads/"))
+    rows = csv.reader(io.StringIO(output), delimiter="\t", quoting=csv.QUOTE_NONE)
+
     results: list[dict[str, str | bool]] = []
-
-    for line in output.splitlines():
-        is_current = line.startswith("*")
-        line = line.lstrip("* ").strip()
-        parts = line.split(maxsplit=2)
-        if len(parts) < 2:
-            continue
-
-        name = parts[0]
-        commit = parts[1]
-        tracking: str | None = None
-
-        if len(parts) > 2:
-            rest = parts[2]
-            if rest.startswith("["):
-                bracket_end = rest.find("]")
-                if bracket_end != -1:
-                    tracking_info = rest[1:bracket_end]
-                    tracking = tracking_info.split(":")[0].strip()
-
+    for name, commit, upstream in rows:
         results.append(
             {
                 "name": name,
                 "commit": commit,
-                "tracking": tracking or "",
-                "is_current": is_current,
+                "tracking": upstream,
+                "is_current": name == current,
             }
         )
 

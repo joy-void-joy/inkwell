@@ -74,7 +74,7 @@ from inkwell.agent.stages import (
     NARRATIVE_REVIEWER_PROMPT,
     ORCHESTRATOR_PROMPT,
     PLANNER_SYSTEM,
-    RECONCILE_PROMPT,
+    MERGE_PROMPT,
     REFINER_SYSTEM,
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
@@ -1446,7 +1446,7 @@ async def write_full_draft(
     return output_path.read_text(encoding="utf-8")
 
 
-async def reconcile_sections(
+async def merge_sections(
     section_draft_paths: dict[str, Path],
     *,
     notes: PipelineNotes,
@@ -1473,13 +1473,13 @@ async def reconcile_sections(
     """
     note_collector = author_notes if author_notes is not None else []
     note_servers, note_tool_names = build_note_server("merge", note_collector)
-    reconcile_servers = {
+    merge_servers = {
         **note_servers,
         **(glossary_servers or {}),
         **(source_servers or {}),
         **(compute_servers or {}),
     }
-    reconcile_tools = (
+    merge_tools = (
         note_tool_names
         + (glossary_tool_names or [])
         + (source_tool_names_list or [])
@@ -1524,14 +1524,14 @@ async def reconcile_sections(
     await query(
         task,
         model=stage_model("merge"),
-        system_prompt=RECONCILE_PROMPT,
+        system_prompt=MERGE_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
         permission_mode="bypassPermissions",
-        mcp_servers=reconcile_servers,
-        allowed_tools=reconcile_tools,
+        mcp_servers=merge_servers,
+        allowed_tools=merge_tools,
         trace_logger=trace_logger,
-        prefix="[reconcile] ",
+        prefix="[merge] ",
         heartbeat=heartbeat,
         cost_accumulator=cost_accumulator,
     )
@@ -1539,7 +1539,7 @@ async def reconcile_sections(
     if output_path.exists():
         content = output_path.read_text(encoding="utf-8")
     else:
-        raise PipelineError("Reconciler produced no output")
+        raise PipelineError("Merge stage produced no output")
 
     return MergedDraft(content=content, changes_made=[])
 
@@ -3871,7 +3871,7 @@ class PipelineRunner:
             await self.save_snapshot()
             return
 
-        await self.announce_stage("merge", "Reconciling sections into one draft")
+        await self.announce_stage("merge", "Merging sections into one draft")
         self.state.set_stage("merging")
         await self.update_overview(active_stage="merge")
         feedback_path = await self.prepare_feedback("merge")
@@ -3882,7 +3882,7 @@ class PipelineRunner:
 
         async def merge_heartbeat(elapsed: float) -> None:
             mins, secs = divmod(int(elapsed), 60)
-            await self.hooks.on_progress(f"Reconciling... ({mins}m{secs:02d}s elapsed)")
+            await self.hooks.on_progress(f"Merging... ({mins}m{secs:02d}s elapsed)")
 
         section_paths = {
             title: self.get_draft_path(title)
@@ -3905,7 +3905,7 @@ class PipelineRunner:
         )
         await syncer.start()
         try:
-            merged = await reconcile_sections(
+            merged = await merge_sections(
                 section_paths,
                 notes=notes,
                 output_path=output_path,

@@ -177,7 +177,7 @@ subsequent section with Edit — long pieces don't fit in one call. \
 Write naturally — no JSON or structured output."""
 
 
-RECONCILE_PROMPT = """\
+MERGE_PROMPT = """\
 You assemble independently-written sections into one continuous piece. \
 The sections were drafted in parallel by different writers; your job is \
 to make them read as one document WITHOUT rewriting them into a house \

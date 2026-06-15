@@ -16,7 +16,7 @@ Built with Python 3.13+ and the Claude Agent SDK. Uses `uv` as the package manag
 2. **Plan** — Extract article outline, research questions, preservable quotes, voice notes
 3. **Research** — Deep research with web search, arXiv, prediction markets, economic data
 4. **Write** — Parallel section writers sharing a glossary, each in their own Google Doc tab
-5. **Reconcile** — A voice-safe pass assembles the parallel sections into one draft
+5. **Merge** — A voice-safe pass assembles the parallel sections into one draft
 6. **Review** — Parallel reviewers (narrative, fact-check, style) leave Google Doc comments
 7. **Rewrite** — Final pass incorporating all reviewer + author feedback
 
@@ -40,7 +40,7 @@ The agent writes into a Google Doc that the author follows in real time:
 - **Inkwell Package** (`src/inkwell/`): The writing agent application.
   - **Agent** (`src/inkwell/agent/`): Pipeline orchestration, nested agents, tools, models. Improved via the feedback loop.
   - **Environment** (`src/inkwell/environment/`): CLI interface for user interaction.
-- **Pipeline stages**: planner, researcher, section_writer, reconcile, narrative_reviewer, fact_checker, style_reviewer, rewriter (defined in `stages.py`, executed by `pipeline.py`)
+- **Pipeline stages**: planner, researcher, section_writer, merge, narrative_reviewer, fact_checker, style_reviewer, rewriter (defined in `stages.py`, executed by `pipeline.py`)
 - **Three-Level Meta Analysis**: Object (agent behavior), Meta (agent self-tracking), Meta-Meta (feedback loop process).
 
 ---

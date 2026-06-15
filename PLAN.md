@@ -3,7 +3,7 @@
 ## Current state
 
 Inkwell runs the full pipeline (preprocess → extract → voice → plan → assumptions →
-research → refine → write → reconcile → review → resolve → rewrite → format), with batch
+research → refine → write → merge → review → resolve → rewrite → format), with batch
 and interactive sharing one path (`run_pipeline()` via `PipelineListener`). Three efforts
 have shipped:
 
@@ -15,8 +15,8 @@ have shipped:
   output (pandoc + tectonic).
 - **Voice-fidelity** (sessions `3c7edec171014505` / `ca74e7f7c5594103`):
   `author_unverified` provenance; coverage reviewer; format-guidance-defers-to-voice
-  precedence; author directions routed to reconcile / reviewers / rewriter; shared
-  cross-writer glossary; voice-safe `reconcile` pass replacing the two-phase merge;
+  precedence; author directions routed to merge / reviewers / rewriter; shared
+  cross-writer glossary; voice-safe `merge` pass replacing the two-phase merge;
   `writer_mode: auto`.
 - **Interactive chat CLI**: chat as default; concurrent stdin + agent response; in-chat
   slash commands; Ctrl+C interrupt. Research tools: Exa, arXiv, FRED, Polymarket/Manifold,
@@ -46,7 +46,7 @@ single point of failure.
 **Fix #3 — directives bind (propagation spine + soft checklist)**
 
 - [x] Propagate the immutable brief + author direction + verbatim feedback into every
-  deciding stage's context — `write` (`pipeline.py:1209`), `reconcile`, `review`, `resolve`
+  deciding stage's context — `write` (`pipeline.py:1209`), `merge`, `review`, `resolve`
   (`pipeline.py:3842`), `rewrite` — not plan-only (today `collect_preexisting_directions`,
   `pipeline.py:2992`, injects them into `plan` alone).
 - [x] Soft `ArticlePlan.constraints: list[str]` (`models.py:52`) — a *derived, advisory*
@@ -62,7 +62,7 @@ single point of failure.
 
 **LaTeX surface — end-to-end, academic-only (capability complement)**
 
-- [x] Writers emit `.tex` fragments; `reconcile` assembles `.tex`; `review`/`rewrite` operate
+- [x] Writers emit `.tex` fragments; `merge` assembles `.tex`; `review`/`rewrite` operate
   on `.tex`. Other formats stay markdown. Gives the writer a proof environment at draft time
   so "reproduce, don't cite" is possible.
 - [x] GDoc working tabs host raw `.tex`; a read-only **Preview** tab hosts the rasterized

@@ -24,10 +24,20 @@ SCOPES = [
 ]
 
 
-def load_credentials(credentials_path: str, token_path: str) -> Credentials:
+class GoogleAuthError(RuntimeError):
+    """Stored Google OAuth credentials are absent or no longer refreshable.
+
+    Raised when the token is missing, carries no refresh token, or the refresh
+    is rejected (expired or revoked). A distinct type lets callers surface a
+    re-authorize prompt instead of treating it as an opaque runtime failure.
+    """
+
+
+def load_credentials(token_path: str) -> Credentials:
     """Load and refresh stored OAuth credentials.
 
-    Raises RuntimeError if no token exists — the user must run `inkwell setup` first.
+    Raises GoogleAuthError if no token exists, it has no refresh token, or the
+    refresh is rejected — the user must run `inkwell setup` to re-authenticate.
     """
     token = Path(token_path)
     if not token.exists():
@@ -35,7 +45,7 @@ def load_credentials(credentials_path: str, token_path: str) -> Credentials:
             f"No Google token found at {token_path}. "
             "Run `inkwell setup` to authenticate with Google."
         )
-        raise RuntimeError(msg)
+        raise GoogleAuthError(msg)
 
     creds = Credentials.from_authorized_user_file(str(token), SCOPES)
 
@@ -47,7 +57,7 @@ def load_credentials(credentials_path: str, token_path: str) -> Credentials:
             f"Token at {token_path} has no refresh token. "
             "Run `inkwell setup` to re-authenticate."
         )
-        raise RuntimeError(msg)
+        raise GoogleAuthError(msg)
 
     try:
         creds.refresh(Request())
@@ -56,7 +66,7 @@ def load_credentials(credentials_path: str, token_path: str) -> Credentials:
             f"Failed to refresh Google token: {exc}. "
             "Run `inkwell setup` to re-authenticate."
         )
-        raise RuntimeError(msg) from exc
+        raise GoogleAuthError(msg) from exc
 
     token.write_text(creds.to_json())
     logger.info("Refreshed Google OAuth token at %s", token_path)
@@ -92,15 +102,14 @@ def run_oauth_flow(credentials_path: str, token_path: str) -> Credentials:
 class ServiceFactory:
     """Lazy-initializing factory for Google API service clients."""
 
-    def __init__(self, credentials_path: str, token_path: str) -> None:
-        self.credentials_path = credentials_path
+    def __init__(self, token_path: str) -> None:
         self.token_path = token_path
         self.cached_docs: DocsService | None = None
         self.cached_drive: DriveService | None = None
 
     def credentials(self) -> Credentials:
         """Load credentials, refreshing if expired."""
-        return load_credentials(self.credentials_path, self.token_path)
+        return load_credentials(self.token_path)
 
     def docs_service(self) -> DocsService:
         """Google Docs API v1 service (lazy, cached)."""
@@ -142,7 +151,4 @@ def get_service_factory() -> ServiceFactory:
         )
         raise RuntimeError(msg)
 
-    return ServiceFactory(
-        credentials_path=settings.google_credentials_path,
-        token_path=settings.google_token_path,
-    )
+    return ServiceFactory(token_path=settings.google_token_path)

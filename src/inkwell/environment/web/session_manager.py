@@ -22,6 +22,7 @@ from inkwell.environment.web.listener import WebListener
 from inkwell.environment.web.models import (
     CompletionOutput,
     CostSnapshot,
+    GeneratingPrompt,
     HistorySessionData,
     SectionInfo,
     SessionDetail,
@@ -41,6 +42,7 @@ class SessionHandle:
     cost: CostAccumulator
     listener: WebListener
     profile: str | None = None
+    sources: list[str] = field(default_factory=list)
     trace_holder: list[SessionTrace] = field(default_factory=list)
     clients: set[WebSocket] = field(default_factory=set)
     status: str = "running"
@@ -187,6 +189,7 @@ class SessionManager:
             cost=cost,
             listener=listener,
             profile=profile,
+            sources=sources or [],
             trace_holder=trace_holder,
         )
         self.sessions[session_id] = handle
@@ -283,6 +286,19 @@ class SessionManager:
         from inkwell.agent.core import load_snapshot
 
         return load_snapshot(session_id)
+
+    def get_generating_prompt(self, session_id: str) -> GeneratingPrompt | None:
+        snapshot = self.load_snapshot(session_id)
+        if snapshot and (snapshot.raw_sources or snapshot.author_instructions):
+            return GeneratingPrompt(
+                raw_sources=snapshot.raw_sources,
+                author_instructions=snapshot.author_instructions,
+                author_deliverables=snapshot.author_deliverables,
+            )
+        handle = self.sessions.get(session_id)
+        if handle and handle.sources:
+            return GeneratingPrompt(raw_sources=list(handle.sources))
+        return None
 
     def snapshot_checkpoints(self, session_id: str) -> list[str]:
         notes_dir = sessions_dir() / session_id / "pipeline_notes"

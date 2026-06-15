@@ -1,5 +1,6 @@
 import type {
   FormatOption,
+  GeneratingPrompt,
   GoogleStatus,
   ModelConfig,
   ModelOptions,
@@ -55,6 +56,12 @@ export async function listSessions(): Promise<SessionSummary[]> {
 
 export async function getSession(id: string): Promise<SessionDetail> {
   const res = await fetch(`${BASE}/sessions/${id}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getSessionPrompt(id: string): Promise<GeneratingPrompt> {
+  const res = await fetch(`${BASE}/sessions/${id}/prompt`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

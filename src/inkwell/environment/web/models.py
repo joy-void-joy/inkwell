@@ -167,3 +167,19 @@ class SessionDetail(BaseModel):
     events: list[dict[str, object]] = Field(default_factory=list)
     output: CompletionOutput | None = None
     checkpoints: list[str] = Field(default_factory=list)
+
+
+class GeneratingPrompt(BaseModel):
+    """The original inputs that produced a session, recovered from its snapshot."""
+
+    raw_sources: list[str] = Field(
+        default_factory=list,
+        description="Source inputs the author supplied: links, file paths, or freeform text",
+    )
+    author_instructions: str = Field(
+        default="", description="Instructions extracted from freeform source text"
+    )
+    author_deliverables: list[str] = Field(
+        default_factory=list,
+        description="Deliverables extracted from the author's instructions",
+    )

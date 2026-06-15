@@ -85,6 +85,12 @@ export interface CompletionOutput {
   review_findings_count: number;
 }
 
+export interface GeneratingPrompt {
+  raw_sources: string[];
+  author_instructions: string;
+  author_deliverables: string[];
+}
+
 // WebSocket message types
 export type ServerMessage =
   | { type: "stage"; stage: string; description: string; timestamp: string }

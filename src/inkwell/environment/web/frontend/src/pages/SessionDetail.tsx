@@ -7,6 +7,7 @@ import { LogStream } from "../components/LogStream";
 import { CostInfo, CostBreakdown } from "../components/CostPanel";
 import { DocLink } from "../components/DocEmbed";
 import { ActionBar } from "../components/ActionBar";
+import { PromptPanel } from "../components/PromptPanel";
 import { PIPELINE_STAGES, STAGE_LABELS } from "../types";
 import type { ProfileResponse } from "../types";
 
@@ -135,6 +136,8 @@ function SessionDetailInner() {
         />
         <DocLink docUrl={docUrl} />
       </div>
+
+      <PromptPanel sessionId={state.sessionId} />
 
       {state.error && (
         <div className="error-banner">{state.error}</div>

@@ -478,6 +478,14 @@ class PipelineListener:
     async def on_message(self, source: str, message: str) -> None:
         logger.info("[%s] %s", source, message)
 
+    async def on_state_change(self) -> None:
+        """Session state changed mid-stage (e.g. a section finished drafting).
+
+        Stage boundaries already refresh listeners; this fires for the
+        finer-grained transitions inside a stage so a live UI can reflect
+        per-section progress without waiting for the next stage.
+        """
+
     async def collect_author_input(self, state: WritingSessionState) -> list[str]:
         """Return new author directions typed in the environment."""
         return []
@@ -3631,6 +3639,7 @@ class PipelineRunner:
                 f"'{draft.title}' complete ({draft.word_count} words)",
             )
             await self.update_overview(active_stage="write")
+            await self.hooks.on_state_change()
             return draft
 
         results = await asyncio.gather(

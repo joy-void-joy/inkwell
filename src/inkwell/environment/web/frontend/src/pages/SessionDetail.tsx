@@ -8,7 +8,7 @@ import { CostInfo, CostBreakdown } from "../components/CostPanel";
 import { DocLink } from "../components/DocEmbed";
 import { ActionBar } from "../components/ActionBar";
 import { PromptPanel } from "../components/PromptPanel";
-import { PIPELINE_STAGES, STAGE_LABELS } from "../types";
+import { stageLabel, stageProgressIndex } from "../types";
 import type { ProfileResponse } from "../types";
 
 function formatSessionTitle(sessionId: string): string {
@@ -24,7 +24,7 @@ function formatSessionTitle(sessionId: string): string {
 }
 
 function ResumeControls() {
-  const { state, resume } = useSession();
+  const { state, pipelineStages, resume } = useSession();
   const [resumeStage, setResumeStage] = useState("");
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,11 +37,9 @@ function ResumeControls() {
 
   const hasKnownProfile = !!state.profile;
 
-  const currentIdx = PIPELINE_STAGES.indexOf(
-    state.stage as (typeof PIPELINE_STAGES)[number],
-  );
+  const currentIdx = stageProgressIndex(state.stage, pipelineStages);
   const completedStages = currentIdx > 0
-    ? PIPELINE_STAGES.slice(0, currentIdx)
+    ? pipelineStages.slice(0, currentIdx)
     : [];
 
   const handleResume = async () => {
@@ -82,7 +80,7 @@ function ResumeControls() {
             <option value="">From where it stopped</option>
             {completedStages.map((s) => (
               <option key={s} value={s}>
-                Redo from {STAGE_LABELS[s]}
+                Redo from {stageLabel(s)}
               </option>
             ))}
           </select>
@@ -106,12 +104,15 @@ function ResumeControls() {
 }
 
 function SessionDetailInner() {
-  const { state, send, sendAction } = useSession();
+  const { state, pipelineStages, send, sendAction } = useSession();
   const isRunning = state.status === "running";
   const isEnded = state.status !== "running" && state.status !== "resuming";
   const docUrl = state.sessionState?.doc_url ?? "";
-  const stageLabel = STAGE_LABELS[state.stage] ?? state.stage;
+  const currentStageLabel = stageLabel(state.stage);
   const inStandby = isRunning && state.output != null;
+  // A cleanly completed run reads as all-complete even if its last stage event
+  // was a backbone stage rather than the standby poll.
+  const barStage = state.status === "completed" ? "done" : state.stage;
 
   return (
     <div className="page session-detail">
@@ -121,12 +122,16 @@ function SessionDetailInner() {
           <h1>{state.title || formatSessionTitle(state.sessionId)}</h1>
           <span className="profile-badge">{state.profile}</span>
           <span className={`status-badge status-${state.status}`}>
-            {inStandby ? "Standby" : stageLabel}
+            {inStandby ? "Standby" : currentStageLabel}
           </span>
         </div>
       </div>
 
-      <StageProgress currentStage={state.stage} />
+      <StageProgress
+        currentStage={barStage}
+        stages={pipelineStages}
+        sections={state.sessionState?.sections ?? []}
+      />
 
       <div className="info-bar">
         <CostInfo

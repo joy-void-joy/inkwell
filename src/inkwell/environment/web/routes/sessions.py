@@ -62,6 +62,18 @@ async def get_model_options() -> ModelOptions:
     )
 
 
+@formats_router.get("/pipeline-stages")
+async def get_pipeline_stages() -> list[str]:
+    """The ordered author-facing stage backbone the progress bar renders.
+
+    Served from the pipeline's own ``DISPLAY_STAGES`` so the UI mirrors the
+    real stage sequence instead of a hand-maintained copy that drifts.
+    """
+    from inkwell.agent.pipeline import DISPLAY_STAGES
+
+    return list(DISPLAY_STAGES)
+
+
 @router.post("", status_code=201)
 async def create_session(req: CreateSessionRequest) -> dict[str, str]:
     mgr = get_manager()

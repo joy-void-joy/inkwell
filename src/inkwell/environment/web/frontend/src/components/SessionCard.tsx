@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import type { SessionSummary } from "../types";
-import { STAGE_LABELS } from "../types";
+import { stageLabel } from "../types";
 
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds.toFixed(0)}s`;
@@ -25,8 +25,7 @@ function formatSessionTitle(createdAt: string): string {
 function statusLabel(session: SessionSummary): string {
   if (session.status === "running" && session.stage === "complete") return "standby";
   if (session.status === "interrupted") {
-    const stage = STAGE_LABELS[session.stage] ?? session.stage;
-    return `interrupted at ${stage}`;
+    return `interrupted at ${stageLabel(session.stage)}`;
   }
   return session.status;
 }

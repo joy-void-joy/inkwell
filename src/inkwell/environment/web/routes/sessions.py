@@ -9,6 +9,7 @@ from inkwell.agent.stages import OUTPUT_FORMATS
 from inkwell.environment.web.models import (
     CreateSessionRequest,
     FormatOption,
+    GeneratingPrompt,
     ModelOptions,
     ResumeSessionRequest,
     SessionAction,
@@ -88,6 +89,16 @@ async def get_session(session_id: str) -> SessionDetail:
     if detail is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return detail
+
+
+@router.get("/{session_id}/prompt")
+async def get_session_prompt(session_id: str) -> GeneratingPrompt:
+    prompt = get_manager().get_generating_prompt(session_id)
+    if prompt is None:
+        raise HTTPException(
+            status_code=404, detail="No source prompt recorded for this session"
+        )
+    return prompt
 
 
 @router.post("/{session_id}/resume")

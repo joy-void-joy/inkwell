@@ -72,9 +72,9 @@ single point of failure.
 **Fix #1a — academic TeX toolchain (custom image, explicit build)**
 
 - [x] inkwell ships a Dockerfile (uv base + `apt` pandoc/poppler-utils + `tectonic` static
-  binary + primed tectonic cache). `lup-devtools dev build-sandbox-image` builds & tags it;
-  `start_sandbox` (`pipeline.py:2405`) passes the tag and fails fast if missing.
-  `ensure_tex_tooling` (`latex.py:36`) → pure probe at sandbox start. (`apt install tectonic`
+  binary + primed tectonic cache). `lup-devtools dev build-sandbox-image` builds & tags it,
+  but `ensure_sandbox_image` also builds it on demand if missing — at academic `start_sandbox`
+  and at web-server startup (`lifespan`). `ensure_tex_tooling` (`latex.py:36`) → pure probe. (`apt install tectonic`
   can never work — not an apt package on `bookworm-slim`.)
 
 **Fix #2 — source reachable in sandbox**

@@ -59,10 +59,12 @@ class WritingSessionState:
     def set_stage(self, stage: str) -> None:
         self.stage = stage
 
-    def add_section(self, title: str, tab_id: str) -> None:
-        self.sections.append(
-            SectionStatus(title=title, tab_id=tab_id, status="planned")
-        )
+    def add_section(self, title: str, tab_id: str, status: str = "planned") -> None:
+        for section in self.sections:
+            if section["title"] == title:
+                section["tab_id"] = tab_id
+                return
+        self.sections.append(SectionStatus(title=title, tab_id=tab_id, status=status))
 
     def update_section_status(self, title: str, status: str) -> None:
         for section in self.sections:

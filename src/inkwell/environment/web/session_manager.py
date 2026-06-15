@@ -16,6 +16,7 @@ from lup.history import list_all_sessions, get_latest_session_json
 from lup.paths import sessions_dir, trace_logs_dir
 
 from inkwell.agent.core import SessionTrace, run_session
+from inkwell.agent.google_auth import GoogleAuthError
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot
 from inkwell.agent.session import WritingSessionState
 from inkwell.environment.web.listener import WebListener
@@ -192,6 +193,8 @@ class SessionManager:
             sources=sources or [],
             trace_holder=trace_holder,
         )
+        if resume_session_id:
+            handle.events = self.load_events(resume_session_id)
         self.sessions[session_id] = handle
 
         task.add_done_callback(
@@ -225,6 +228,35 @@ class SessionManager:
                 {
                     "type": "session_ended",
                     "status": "cancelled",
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+        except GoogleAuthError:
+            handle.status = "failed"
+            profile = handle.profile or "default"
+            logger.warning(
+                "Session %s halted: Google auth expired for profile %s",
+                session_id,
+                profile,
+            )
+            message = (
+                f"Google access for the '{profile}' profile has expired or been "
+                "revoked. Re-authorize it under Settings → Profiles → "
+                "Google, then resume this session."
+            )
+            await self.broadcast(
+                session_id,
+                {
+                    "type": "error",
+                    "message": message,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            await self.broadcast(
+                session_id,
+                {
+                    "type": "session_ended",
+                    "status": "failed",
                     "timestamp": datetime.now().isoformat(),
                 },
             )

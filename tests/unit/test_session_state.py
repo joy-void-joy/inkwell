@@ -34,6 +34,22 @@ class TestWritingSessionState:
         state.update_section_status("Nonexistent", "writing")
         assert state.sections[0]["status"] == "planned"
 
+    def test_add_section_is_idempotent_by_title(self) -> None:
+        state = WritingSessionState()
+        state.add_section("Introduction", "tab1")
+        state.add_section("Introduction", "tab1-renamed")
+
+        assert len(state.sections) == 1
+        assert state.sections[0]["tab_id"] == "tab1-renamed"
+
+    def test_re_adding_section_preserves_status(self) -> None:
+        state = WritingSessionState()
+        state.add_section("Introduction", "tab1")
+        state.update_section_status("Introduction", "drafted")
+        state.add_section("Introduction", "tab1", status="planned")
+
+        assert state.sections[0]["status"] == "drafted"
+
     def test_pending_questions(self) -> None:
         state = WritingSessionState()
         state.add_question("What about X?")

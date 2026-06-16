@@ -1334,19 +1334,36 @@ async def write_section(
         f"in one call. If you have questions for the author, call note_for_author."
     )
 
-    await query(
-        task,
-        model=stage_model("write"),
-        system_prompt=SECTION_WRITER_PROMPT,
-        tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
-        mcp_servers=all_servers,
-        allowed_tools=all_tools,
-        trace_logger=trace_logger,
-        prefix=f"[write:{section_title}] ",
-        cost_accumulator=cost_accumulator,
-    )
+    try:
+        await query(
+            task,
+            model=stage_model("write"),
+            system_prompt=SECTION_WRITER_PROMPT,
+            tools=BUILTIN_WRITE_TOOLS,
+            max_thinking_tokens=128_000 - 1,
+            permission_mode="bypassPermissions",
+            mcp_servers=all_servers,
+            allowed_tools=all_tools,
+            trace_logger=trace_logger,
+            prefix=f"[write:{section_title}] ",
+            cost_accumulator=cost_accumulator,
+        )
+    except (
+        Exception
+    ) as exc:  # claude: ignore — SDK raises generic Exception for usage limits
+        # A usage or rate limit can land on the writer's final turn, after the
+        # section was already written to disk. The file is the real output, so
+        # only a genuine interrupt or an empty/absent draft counts as failure.
+        if is_interrupt(exc) or not (
+            draft_path.exists() and draft_path.read_text(encoding="utf-8").strip()
+        ):
+            raise
+        logger.warning(
+            "Section writer for '%s' raised after producing its draft; "
+            "keeping the on-disk content: %s",
+            section_title,
+            exc,
+        )
 
     if draft_path.exists():
         content = draft_path.read_text(encoding="utf-8")

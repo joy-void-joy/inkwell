@@ -93,6 +93,27 @@ export async function resumeSession(
   return res.json();
 }
 
+export async function restartSession(
+  id: string,
+  fromStage: string,
+  profile?: string,
+  modelConfig?: ModelConfig,
+): Promise<{ session_id: string; status: string }> {
+  const res = await fetch(`${BASE}/sessions/${id}/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from_stage: fromStage,
+      profile: profile ?? null,
+      model: modelConfig?.model || null,
+      stage_models: modelConfig?.stage_models || {},
+      writer_mode: modelConfig?.writer_mode || null,
+    }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export interface UploadResult {
   path: string;
   filename: string;

@@ -24,6 +24,7 @@ import inkwell.agent.config as config_mod
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
+    DISPLAY_STAGES,
     PipelineError,
     PipelineListener,
     PipelineRunner,
@@ -104,6 +105,28 @@ def load_snapshot(
     )
 
 
+def checkpoint_before(session_id: str, redo_stage: str) -> str | None:
+    """The latest persisted checkpoint stage strictly before ``redo_stage``.
+
+    Restarting a stage rewinds to the snapshot saved when an earlier stage
+    finished, so ``redo_stage`` and everything after it regenerate from clean
+    upstream state with fresh agents — that checkpoint carries no SDK session
+    ids for the rewound stages, so none of them resume a prior conversation.
+    Walks back past stages that never checkpointed (``resolve``, or a stage the
+    run never reached). Returns None when nothing earlier was checkpointed.
+    """
+    from lup.paths import sessions_dir
+
+    backbone = ["preprocess", *DISPLAY_STAGES]
+    if redo_stage not in backbone:
+        return None
+    base = sessions_dir() / session_id / "pipeline_notes"
+    for stage in reversed(backbone[: backbone.index(redo_stage)]):
+        if (base / f"snapshot_{stage}.json").exists():
+            return stage
+    return None
+
+
 class SessionTrace:
     """Holds trace state so callers can save on interrupt."""
 
@@ -120,6 +143,7 @@ async def run_session(
     refs: list[str] | None = None,
     resume_session_id: str | None = None,
     resume_from_stage: str | None = None,
+    restart_from_stage: str | None = None,
     target_format: str = "auto",
     existing_doc_id: str | None = None,
     session_id: str | None = None,
@@ -134,6 +158,9 @@ async def run_session(
     Either sources or resume_session_id must be provided:
     - sources: One or more source materials (URLs, files, share links, freeform text)
     - resume_session_id: Resume from a saved pipeline snapshot
+    - restart_from_stage: With resume_session_id, rewind to before this stage and
+      regenerate it (and everything after) from scratch with fresh agents,
+      discarding their prior output rather than resuming an interrupted agent
     """
     if session_id is None:
         session_id = resume_session_id or uuid.uuid4().hex[:16]
@@ -157,7 +184,18 @@ async def run_session(
 
     try:
         if resume_session_id:
-            snapshot = load_snapshot(resume_session_id, from_stage=resume_from_stage)
+            if restart_from_stage:
+                checkpoint = checkpoint_before(resume_session_id, restart_from_stage)
+                if checkpoint is None:
+                    raise PipelineError(
+                        f"Cannot restart from '{restart_from_stage}': no earlier "
+                        "checkpoint to rewind to."
+                    )
+                snapshot = load_snapshot(resume_session_id, from_stage=checkpoint)
+            else:
+                snapshot = load_snapshot(
+                    resume_session_id, from_stage=resume_from_stage
+                )
             if snapshot is None:
                 raise PipelineError(
                     f"No snapshot found for session '{resume_session_id}'. "
@@ -179,7 +217,7 @@ async def run_session(
                 listener=listener,
                 cost_accumulator=cost_acc,
             )
-            output = await runner.run_from(snapshot)
+            output = await runner.run_from(snapshot, restart=bool(restart_from_stage))
         else:
             output = await run_pipeline(
                 sources=sources or [],

@@ -2585,6 +2585,21 @@ class PipelineRunner:
         if self.snapshot.output is not None:
             restore("final", self.snapshot.output.content)
 
+    def rehydrate_artifacts(self) -> None:
+        """Project the snapshot's typed artifacts back onto disk for a restart.
+
+        A restart rewinds to a checkpoint that predates the redone stage, but
+        the on-disk artifacts still hold whatever a later stage last wrote (e.g.
+        refine overwrites plan.json). Stages read their upstream inputs as
+        files, so the artifacts are reset to the rewound snapshot's state —
+        otherwise a redone stage would read newer state the rewind discarded.
+        """
+        notes = self.ensure_notes()
+        if self.snapshot.plan is not None:
+            notes.save_artifact("plan", self.snapshot.plan)
+        if self.snapshot.research is not None:
+            notes.save_artifact("research", self.snapshot.research)
+
     def rehydrate_sections(self) -> None:
         """Rebuild the section→tab map and section roster when resuming.
 
@@ -2791,8 +2806,16 @@ class PipelineRunner:
             raise PipelineError("Pipeline completed without producing output")
         return output
 
-    async def run_from(self, snapshot: PipelineSnapshot) -> WritingOutput:
-        """Resume pipeline execution from a saved snapshot."""
+    async def run_from(
+        self, snapshot: PipelineSnapshot, *, restart: bool = False
+    ) -> WritingOutput:
+        """Resume pipeline execution from a saved snapshot.
+
+        With ``restart``, the snapshot is a checkpoint that predates the stage
+        being redone: no agent resumes a prior conversation (``pending_resume``
+        stays empty) and the on-disk artifacts are reset to the snapshot, so the
+        redone stages regenerate from clean state instead of continuing one.
+        """
         self.install_block_callback()
         self.snapshot = snapshot
         configure_session_state(self.state)
@@ -2811,7 +2834,11 @@ class PipelineRunner:
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
             self.cost_accumulator.load_state(snapshot.cost_state)
-        self.pending_resume = self.prepare_resumable_sessions(snapshot)
+        if restart:
+            self.rehydrate_artifacts()
+            self.pending_resume = {}
+        else:
+            self.pending_resume = self.prepare_resumable_sessions(snapshot)
 
         await self.setup_doc()
         self.rehydrate_sections()

@@ -98,31 +98,68 @@ class SessionManager:
             if handle.status == "running":
                 return resume_session_id
 
-        resolved_profile = profile
-        if not resolved_profile:
-            original = self.sessions.get(resume_session_id)
-            if original:
-                resolved_profile = original.profile
-        if not resolved_profile:
-            from inkwell.agent.core import load_snapshot
-
-            snapshot = load_snapshot(resume_session_id, from_stage=from_stage)
-            if snapshot:
-                resolved_profile = snapshot.profile
-        if not resolved_profile:
-            raise ValueError(
-                "Cannot resume: no profile found. The session predates profile "
-                "tracking, or the snapshot is missing. Please specify a profile."
-            )
-
         return self.launch(
             session_id=resume_session_id,
             resume_session_id=resume_session_id,
             resume_from_stage=from_stage,
-            profile=resolved_profile,
+            profile=self.resolve_session_profile(
+                resume_session_id, profile, from_stage
+            ),
             model=model,
             stage_models=stage_models,
             writer_mode=writer_mode,
+        )
+
+    async def restart_session(
+        self,
+        resume_session_id: str,
+        *,
+        from_stage: str,
+        profile: str | None = None,
+        model: str | None = None,
+        stage_models: dict[str, str] | None = None,
+        writer_mode: str | None = None,
+    ) -> str:
+        """Rewind to before ``from_stage`` and regenerate it (and everything
+        after) from scratch with fresh agents — unlike resume, which continues
+        an interrupted agent's own conversation."""
+        if resume_session_id in self.sessions:
+            handle = self.sessions[resume_session_id]
+            if handle.status == "running":
+                return resume_session_id
+
+        return self.launch(
+            session_id=resume_session_id,
+            resume_session_id=resume_session_id,
+            restart_from_stage=from_stage,
+            profile=self.resolve_session_profile(resume_session_id, profile, None),
+            model=model,
+            stage_models=stage_models,
+            writer_mode=writer_mode,
+        )
+
+    def resolve_session_profile(
+        self, resume_session_id: str, profile: str | None, from_stage: str | None
+    ) -> str:
+        """Pin the profile whose account is billed for a resumed/restarted run.
+
+        Prefer an explicit override, then a live handle, then the snapshot's
+        recorded profile. Raises if none is known, since the spawned claude CLI
+        must bill a specific account.
+        """
+        if profile:
+            return profile
+        original = self.sessions.get(resume_session_id)
+        if original and original.profile:
+            return original.profile
+        from inkwell.agent.core import load_snapshot
+
+        snapshot = load_snapshot(resume_session_id, from_stage=from_stage)
+        if snapshot and snapshot.profile:
+            return snapshot.profile
+        raise ValueError(
+            "Cannot resume: no profile found. The session predates profile "
+            "tracking, or the snapshot is missing. Please specify a profile."
         )
 
     def launch(
@@ -135,6 +172,7 @@ class SessionManager:
         existing_doc_id: str | None = None,
         resume_session_id: str | None = None,
         resume_from_stage: str | None = None,
+        restart_from_stage: str | None = None,
         profile: str | None = None,
         model: str | None = None,
         stage_models: dict[str, str] | None = None,
@@ -171,6 +209,7 @@ class SessionManager:
                     existing_doc_id=existing_doc_id,
                     resume_session_id=resume_session_id,
                     resume_from_stage=resume_from_stage,
+                    restart_from_stage=restart_from_stage,
                     session_id=session_id,
                     listener=listener,
                     session_state=state,

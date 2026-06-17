@@ -82,6 +82,17 @@ class ResumeSessionRequest(ModelConfigOverrides):
     )
 
 
+class RestartSessionRequest(ModelConfigOverrides):
+    from_stage: str = Field(
+        description="Stage to re-run from scratch; this stage and everything "
+        "after it are regenerated with fresh agents, discarding their prior output"
+    )
+    profile: str | None = Field(
+        default=None,
+        description="Override profile (required if original profile is unknown)",
+    )
+
+
 class StageCostSummary(BaseModel):
     cost_usd: float
     duration_s: float

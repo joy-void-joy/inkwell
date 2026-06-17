@@ -104,6 +104,7 @@ textarea { resize: none; }
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
 }
 .resume-stage-select {
   background: var(--bg-elevated);
@@ -113,6 +114,13 @@ textarea { resize: none; }
   padding: 6px 10px;
   font-size: 0.875rem;
 }
+.resume-hint {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.resume-hint strong { color: var(--text-dim); font-weight: 500; }
 
 .revision-banner {
   background: rgba(212, 168, 67, 0.08);

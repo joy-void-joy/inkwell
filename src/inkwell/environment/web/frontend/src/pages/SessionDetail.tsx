@@ -24,9 +24,10 @@ function formatSessionTitle(sessionId: string): string {
 }
 
 function ResumeControls() {
-  const { state, pipelineStages, resume } = useSession();
+  const { state, pipelineStages, resume, restart } = useSession();
   const [resumeStage, setResumeStage] = useState("");
   const [resuming, setResuming] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileResponse[]>([]);
   const [overrideProfile, setOverrideProfile] = useState("");
@@ -36,27 +37,49 @@ function ResumeControls() {
   }, []);
 
   const hasKnownProfile = !!state.profile;
+  const busy = resuming || restarting;
+  const needsProfile = !hasKnownProfile && !overrideProfile;
 
   const currentIdx = stageProgressIndex(state.stage, pipelineStages);
   const completedStages = currentIdx > 0
     ? pipelineStages.slice(0, currentIdx)
     : [];
 
+  // No stage picked means "the one it stopped in"; extract can't be redone on
+  // resume (its sources aren't re-supplied), so it's never a restart target.
+  const restartStage = resumeStage || state.stage;
+  const canRestart = pipelineStages.includes(restartStage) && restartStage !== "extract";
+
+  const reportError = (err: unknown, fallback: string) => {
+    const msg = err instanceof Error ? err.message : fallback;
+    if (msg.includes("no profile found") || msg.includes("specify a profile")) {
+      setError("This session needs a profile to continue. Please select one.");
+    } else {
+      setError(msg);
+    }
+  };
+
   const handleResume = async () => {
     setResuming(true);
     setError(null);
     try {
-      const profileArg = overrideProfile || undefined;
-      await resume(resumeStage || undefined, profileArg);
+      await resume(resumeStage || undefined, overrideProfile || undefined);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Resume failed";
-      if (msg.includes("no profile found") || msg.includes("specify a profile")) {
-        setError("This session needs a profile to resume. Please select one.");
-      } else {
-        setError(msg);
-      }
+      reportError(err, "Resume failed");
     } finally {
       setResuming(false);
+    }
+  };
+
+  const handleRestart = async () => {
+    setRestarting(true);
+    setError(null);
+    try {
+      await restart(restartStage, overrideProfile || undefined);
+    } catch (err) {
+      reportError(err, "Restart failed");
+    } finally {
+      setRestarting(false);
     }
   };
 
@@ -67,9 +90,16 @@ function ResumeControls() {
         <button
           className="btn-primary"
           onClick={handleResume}
-          disabled={resuming || (!hasKnownProfile && !overrideProfile)}
+          disabled={busy || needsProfile}
         >
           {resuming ? "Resuming..." : "Resume Session"}
+        </button>
+        <button
+          onClick={handleRestart}
+          disabled={busy || needsProfile || !canRestart}
+          title="Re-run the selected stage and everything after it from scratch with fresh agents"
+        >
+          {restarting ? "Restarting..." : "Restart Fresh"}
         </button>
         {completedStages.length > 0 && (
           <select
@@ -80,7 +110,7 @@ function ResumeControls() {
             <option value="">From where it stopped</option>
             {completedStages.map((s) => (
               <option key={s} value={s}>
-                Redo from {stageLabel(s)}
+                {stageLabel(s)}
               </option>
             ))}
           </select>
@@ -90,7 +120,7 @@ function ResumeControls() {
             value={overrideProfile}
             onChange={(e) => setOverrideProfile(e.target.value)}
             className="resume-stage-select"
-            title="Profile whose account is billed for the resumed run"
+            title="Profile whose account is billed for the run"
           >
             <option value="">{hasKnownProfile ? `Keep current (${state.profile})` : "Select profile (account billed)..."}</option>
             {profiles.map((p) => (
@@ -99,6 +129,12 @@ function ResumeControls() {
           </select>
         )}
       </div>
+      <p className="resume-hint">
+        <strong>Resume</strong> continues after the selected stage (or from where it
+        stopped), picking up an interrupted agent mid-task. <strong>Restart</strong> re-runs
+        the selected stage (or the one it stopped in) and everything after it from
+        scratch with fresh agents, discarding their previous output.
+      </p>
     </div>
   );
 }

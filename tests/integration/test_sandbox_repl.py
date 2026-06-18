@@ -108,3 +108,39 @@ class TestInstallPackage:
             r_ok = sandbox.run_code("print(keeper)")
             assert r_ok["exit_code"] == 0
             assert "still here" in r_ok["stdout"]
+
+
+class TestReadWriteMounts:
+    """rw_mounts let executed code write back to the host; ro stays read-only."""
+
+    def test_identical_path_rw_mount_roundtrip(self, tmp_path: Path) -> None:
+        """A file written inside the container to an identical-path rw mount
+        appears on the host — the mechanism per-stage stage outputs rely on."""
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        target = out_dir / "output.md"
+        sb = Sandbox(
+            session_id="test-rw-mount",
+            shared_dir=tmp_path / "shared",
+            pre_install=None,
+            rw_mounts={out_dir: str(out_dir)},
+        )
+        with sb:
+            r = sb.run_code(f"open({str(target)!r}, 'w').write('from container')")
+            assert r["exit_code"] == 0, r
+        assert target.read_text() == "from container"
+
+    def test_read_only_mount_blocks_writes(self, tmp_path: Path) -> None:
+        """Writing into a read-only mount fails and leaves the host untouched."""
+        ro_dir = tmp_path / "ro"
+        ro_dir.mkdir()
+        sb = Sandbox(
+            session_id="test-ro-mount",
+            shared_dir=tmp_path / "shared",
+            pre_install=None,
+            read_only_mounts={ro_dir: "/ro"},
+        )
+        with sb:
+            r = sb.run_code("open('/ro/new.txt', 'w').write('x')")
+            assert r["exit_code"] != 0
+        assert not (ro_dir / "new.txt").exists()

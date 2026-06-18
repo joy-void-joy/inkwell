@@ -468,6 +468,19 @@ class Sandbox:
             except (NotFound, APIError):
                 pass
 
+    def try_start(self) -> bool:
+        """Start the container, returning False when Docker is unavailable.
+
+        Wraps :meth:`start` so callers can degrade gracefully without
+        depending on Docker's exception types.
+        """
+        try:
+            self.start()
+            return True
+        except (DockerException, OSError):
+            logger.warning("Sandbox start failed — Docker unavailable")
+            return False
+
     def write_repl_script(self) -> None:
         """Write the REPL server script into the container via tar archive."""
         script_bytes = REPL_SERVER_SCRIPT.encode("utf-8")

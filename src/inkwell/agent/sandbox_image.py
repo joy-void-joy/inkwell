@@ -3,8 +3,8 @@
 The base uv image can't run the LaTeX toolchain: ``tectonic`` is a static Rust
 binary, not an apt package on bookworm-slim. Academic runs therefore use an
 image built ahead of time from ``sandbox.Dockerfile``. Build it once with
-``uv run lup-devtools dev build-sandbox-image``; ``start_sandbox`` picks it up
-automatically when it exists.
+``uv run lup-devtools dev build-sandbox-image``; each stage's sandbox picks it
+up automatically when it exists.
 """
 
 import logging

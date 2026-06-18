@@ -14,7 +14,8 @@ import shutil
 import tempfile
 import unicodedata
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -786,6 +787,17 @@ def build_compute_server(
     )
     tool_names = [f"mcp__compute__{t.sdk_tool.name}" for t in tools]
     return {"compute": server}, tool_names
+
+
+class StageCompute(NamedTuple):
+    """Per-stage compute handle: the compute MCP server, its tool names, the
+    dedicated read-write path the stage writes its deliverable to, and the
+    live sandbox (None when Docker is unavailable) for direct shell use."""
+
+    servers: dict[str, McpServerConfig]
+    tool_names: list[str]
+    output_path: Path
+    sandbox: Sandbox | None
 
 
 def build_research_servers() -> dict[str, McpServerConfig]:
@@ -2439,10 +2451,6 @@ class PipelineRunner:
             lambda: registry_path_for(self.ensure_notes().artifacts_dir)
         )
 
-        self.sandbox: Sandbox | None = None
-        self.compute_servers: dict[str, McpServerConfig] = {}
-        self.compute_tool_names: list[str] = []
-
         self.doc_id = ""
         self.doc_url = ""
         self.known_tabs: dict[str, str] = {}
@@ -2475,53 +2483,68 @@ class PipelineRunner:
             self.state.attach_agent_ids_registry(self.notes.base_dir / "agent_ids.txt")
         return self.notes
 
-    def start_sandbox(self) -> None:
-        """Start the Docker sandbox and build compute MCP servers."""
-        notes = self.ensure_notes()
-        shared_dir = notes.artifacts_dir / "shared"
-        shared_dir.mkdir(parents=True, exist_ok=True)
-        docker_image = Sandbox.DEFAULT_DOCKER_IMAGE
-        if self.effective_format == "academic" and not sandbox_image_available():
-            logger.info("Academic format — building the sandbox image (one-time)")
-            ensure_sandbox_image()
-        if sandbox_image_available():
-            docker_image = INKWELL_SANDBOX_IMAGE
-        source_mounts = {
+    def source_mounts(self) -> dict[Path, str]:
+        """Author source files, mounted read-only at their own host paths."""
+        return {
             path: str(path)
             for src in self.sources
             if (path := Path(src).expanduser().resolve()).is_file()
         }
-        self.sandbox = Sandbox(
-            session_id=f"inkwell-{id(self)}",
+
+    def stage_docker_image(self) -> str:
+        """Pick the sandbox image, building the academic image once if needed."""
+        if self.effective_format == "academic" and not sandbox_image_available():
+            logger.info("Academic format — building the sandbox image (one-time)")
+            ensure_sandbox_image()
+        if sandbox_image_available():
+            return INKWELL_SANDBOX_IMAGE
+        return Sandbox.DEFAULT_DOCKER_IMAGE
+
+    def fallback_compute(self) -> tuple[dict[str, McpServerConfig], list[str]]:
+        """Compute server without code execution, for when Docker is absent."""
+        from inkwell.agent.tools.citations import CITATION_TOOLS
+
+        notes = self.ensure_notes()
+        return build_output_server(
+            "compute", [*make_query_tools(notes.artifacts_dir), *CITATION_TOOLS]
+        )
+
+    @asynccontextmanager
+    async def stage_compute(self, label: str) -> AsyncIterator[StageCompute]:
+        """Run one stage (or one parallel task) in its own fresh container.
+
+        Inputs are mounted read-only at /notes, /shared carries scratch and
+        cross-stage artifacts, and a per-stage output directory is mounted
+        read-write at its identical host path — so the deliverable path is
+        writable from both the host Write tool and execute_code, with no
+        host/container translation. Yields the compute MCP server, its tool
+        names, and the deliverable path; the container is stopped on exit.
+        Falls back to a no-execution compute server when Docker is absent.
+        """
+        notes = self.ensure_notes()
+        shared_dir = notes.artifacts_dir / "shared"
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = notes.work_dir / uuid.uuid4().hex
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = out_dir / "output.md"
+        sandbox = Sandbox(
+            session_id=f"inkwell-{label}-{out_dir.name}",
             shared_dir=shared_dir,
-            docker_image=docker_image,
-            read_only_mounts={notes.base_dir: "/notes", **source_mounts},
+            docker_image=self.stage_docker_image(),
+            read_only_mounts={notes.base_dir: "/notes", **self.source_mounts()},
+            rw_mounts={out_dir: str(out_dir)},
         )
-        try:
-            self.sandbox.start()
-        except Exception:
-            logger.warning("Sandbox unavailable — running without code execution")
-            self.sandbox = None
-            from inkwell.agent.tools.citations import CITATION_TOOLS
-
-            self.compute_servers, self.compute_tool_names = build_output_server(
-                "compute",
-                [*make_query_tools(notes.artifacts_dir), *CITATION_TOOLS],
-            )
+        if not sandbox.try_start():
+            servers, names = self.fallback_compute()
+            yield StageCompute(servers, names, output_path, None)
             return
-
-        self.compute_servers, self.compute_tool_names = build_compute_server(
-            self.sandbox, notes.artifacts_dir
-        )
         if self.state is not None:
             self.state.shared_dir = shared_dir
-        logger.info(
-            "Sandbox started with %d compute tools", len(self.compute_tool_names)
-        )
-
-    def stop_sandbox(self) -> None:
-        if self.sandbox is not None:
-            self.sandbox.stop()
+        try:
+            servers, names = build_compute_server(sandbox, notes.artifacts_dir)
+            yield StageCompute(servers, names, output_path, sandbox)
+        finally:
+            sandbox.stop()
 
     async def finalize_on_interrupt(self) -> None:
         """Ship whatever the snapshot holds when an interrupt cuts the run short.
@@ -2549,8 +2572,6 @@ class PipelineRunner:
             if tab_ids:
                 self.final_tab_id = tab_ids[0]
                 self.known_tabs["Final"] = tab_ids[0]
-            self.sandbox = None
-            logger.info("Sandbox stopped")
 
     def get_draft_path(self, label: str) -> Path:
         slug = label.lower().replace(" ", "-")
@@ -2752,7 +2773,6 @@ class PipelineRunner:
         self.snapshot.profile = current_settings().profile
         configure_session_state(self.state)
         await self.setup_doc()
-        self.start_sandbox()
         policy_token = session_policy.set(self.session_policy_for_run())
 
         try:
@@ -2798,7 +2818,6 @@ class PipelineRunner:
             finally:
                 await self.stop_watcher()
         finally:
-            self.stop_sandbox()
             session_policy.reset(policy_token)
 
         output = self.snapshot.output
@@ -2842,7 +2861,6 @@ class PipelineRunner:
 
         await self.setup_doc()
         self.rehydrate_sections()
-        self.start_sandbox()
         policy_token = session_policy.set(self.session_policy_for_run())
 
         try:
@@ -2883,7 +2901,6 @@ class PipelineRunner:
             finally:
                 await self.stop_watcher()
         finally:
-            self.stop_sandbox()
             session_policy.reset(policy_token)
 
         output = self.snapshot.output
@@ -3397,19 +3414,19 @@ class PipelineRunner:
                 analyzable_samples.append(sample)
                 analyzable_sources.append(source)
 
-        all_servers = {**self.research_servers, **self.compute_servers}
-        all_tool_names = research_tool_names() + self.compute_tool_names
-
-        analyses = await analyze_voice_individually(
-            self.snapshot.conversation,
-            analyzable_samples,
-            corpus_sources=analyzable_sources,
-            target_format=self.target_format,
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-            mcp_servers=all_servers,
-            mcp_tool_names=all_tool_names,
-        )
+        async with self.stage_compute("voice") as sc:
+            all_servers = {**self.research_servers, **sc.servers}
+            all_tool_names = research_tool_names() + sc.tool_names
+            analyses = await analyze_voice_individually(
+                self.snapshot.conversation,
+                analyzable_samples,
+                corpus_sources=analyzable_sources,
+                target_format=self.target_format,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+                mcp_servers=all_servers,
+                mcp_tool_names=all_tool_names,
+            )
         if not analyses and not explicit_prescriptive:
             raise PipelineError("Voice analysis produced no output")
 
@@ -3572,21 +3589,22 @@ class PipelineRunner:
         if brief:
             notes.save_brief(brief)
 
-        plan = await plan_article(
-            notes,
-            target_format=self.target_format,
-            voice_file_paths=self.snapshot.voice_file_paths,
-            source_file_paths=self.snapshot.source_file_paths,
-            author_notes=self.author_notes,
-            author_directions=directions,
-            source_servers=self.source_servers,
-            source_tool_names_list=self.source_tool_names,
-            compute_servers=self.compute_servers,
-            compute_tool_names=self.compute_tool_names,
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-            on_plan_update=sync_plan_tab,
-        )
+        async with self.stage_compute("plan") as sc:
+            plan = await plan_article(
+                notes,
+                target_format=self.target_format,
+                voice_file_paths=self.snapshot.voice_file_paths,
+                source_file_paths=self.snapshot.source_file_paths,
+                author_notes=self.author_notes,
+                author_directions=directions,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                compute_servers=sc.servers,
+                compute_tool_names=sc.tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+                on_plan_update=sync_plan_tab,
+            )
         await self.post_author_notes()
         self.snapshot.plan = plan
         self.snapshot.stage = "plan"
@@ -3609,18 +3627,19 @@ class PipelineRunner:
         await self.update_overview(active_stage="assumptions")
         notes = self.ensure_notes()
 
-        assumptions = await surface_assumptions(
-            notes,
-            self.doc_id,
-            has_research=self.snapshot.research is not None,
-            session_state=self.state,
-            source_servers=self.source_servers,
-            source_tool_names_list=self.source_tool_names,
-            compute_servers=self.compute_servers,
-            compute_tool_names=self.compute_tool_names,
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-        )
+        async with self.stage_compute("assumptions") as sc:
+            assumptions = await surface_assumptions(
+                notes,
+                self.doc_id,
+                has_research=self.snapshot.research is not None,
+                session_state=self.state,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                compute_servers=sc.servers,
+                compute_tool_names=sc.tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
         self.snapshot.stage = "assumptions"
         await self.save_snapshot()
         if assumptions.items:
@@ -3654,19 +3673,20 @@ class PipelineRunner:
                     session_state=self.state,
                 )
 
-        research = await research_plan(
-            notes,
-            feedback_path=feedback_path,
-            servers=self.research_servers,
-            source_servers=self.source_servers,
-            source_tool_names_list=self.source_tool_names,
-            author_notes=self.author_notes,
-            compute_servers=self.compute_servers,
-            compute_tool_names=self.compute_tool_names,
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-            on_research_update=sync_research_tab,
-        )
+        async with self.stage_compute("research") as sc:
+            research = await research_plan(
+                notes,
+                feedback_path=feedback_path,
+                servers=self.research_servers,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                author_notes=self.author_notes,
+                compute_servers=sc.servers,
+                compute_tool_names=sc.tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+                on_research_update=sync_research_tab,
+            )
         await self.post_author_notes()
         self.snapshot.research = research
         self.snapshot.stage = "research"
@@ -3705,19 +3725,20 @@ class PipelineRunner:
                     session_state=self.state,
                 )
 
-        refined = await refine_plan(
-            notes,
-            voice_file_paths=self.snapshot.voice_file_paths,
-            feedback_path=feedback_path,
-            author_notes=self.author_notes,
-            source_servers=self.source_servers,
-            source_tool_names_list=self.source_tool_names,
-            compute_servers=self.compute_servers,
-            compute_tool_names=self.compute_tool_names,
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-            on_plan_update=sync_refine_tab,
-        )
+        async with self.stage_compute("refine") as sc:
+            refined = await refine_plan(
+                notes,
+                voice_file_paths=self.snapshot.voice_file_paths,
+                feedback_path=feedback_path,
+                author_notes=self.author_notes,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                compute_servers=sc.servers,
+                compute_tool_names=sc.tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+                on_plan_update=sync_refine_tab,
+            )
         await self.post_author_notes()
         self.snapshot.plan = refined
         self.snapshot.stage = "refine"
@@ -3763,38 +3784,42 @@ class PipelineRunner:
             nonlocal completed
             tid = self.tab_ids.get(section.title, "")
             draft_path = self.get_draft_path(section.title)
-            syncer: DraftSyncer | None = None
-            if tid:
-                syncer = DraftSyncer(
-                    self.doc_id,
-                    tid,
-                    draft_path,
-                    session_state=self.state,
-                )
-                await syncer.start()
-            try:
-                draft = await write_section(
-                    section.title,
-                    notes=notes,
-                    draft_path=draft_path,
-                    voice_file_paths=self.snapshot.voice_file_paths,
-                    feedback_path=feedback_path,
-                    section_context=self.build_neighbor_context(plan, section.title),
-                    target_format=self.effective_format,
-                    servers=self.research_servers,
-                    source_servers=self.source_servers,
-                    source_tool_names_list=self.source_tool_names,
-                    author_notes=self.author_notes,
-                    compute_servers=self.compute_servers,
-                    compute_tool_names=self.compute_tool_names,
-                    glossary_servers=glossary_servers,
-                    glossary_tool_names=glossary_tool_names,
-                    trace_logger=self.trace_logger,
-                    cost_accumulator=self.cost_accumulator,
-                )
-            finally:
-                if syncer is not None:
-                    await syncer.stop()
+            async with self.stage_compute(f"write:{section.title}") as sc:
+                syncer: DraftSyncer | None = None
+                if tid:
+                    syncer = DraftSyncer(
+                        self.doc_id,
+                        tid,
+                        sc.output_path,
+                        session_state=self.state,
+                    )
+                    await syncer.start()
+                try:
+                    draft = await write_section(
+                        section.title,
+                        notes=notes,
+                        draft_path=sc.output_path,
+                        voice_file_paths=self.snapshot.voice_file_paths,
+                        feedback_path=feedback_path,
+                        section_context=self.build_neighbor_context(
+                            plan, section.title
+                        ),
+                        target_format=self.effective_format,
+                        servers=self.research_servers,
+                        source_servers=self.source_servers,
+                        source_tool_names_list=self.source_tool_names,
+                        author_notes=self.author_notes,
+                        compute_servers=sc.servers,
+                        compute_tool_names=sc.tool_names,
+                        glossary_servers=glossary_servers,
+                        glossary_tool_names=glossary_tool_names,
+                        trace_logger=self.trace_logger,
+                        cost_accumulator=self.cost_accumulator,
+                    )
+                finally:
+                    if syncer is not None:
+                        await syncer.stop()
+            draft_path.write_text(draft.content, encoding="utf-8")
             self.snapshot.section_drafts[section.title] = draft
             await self.save_snapshot()
             completed += 1
@@ -3859,34 +3884,36 @@ class PipelineRunner:
             mins, secs = divmod(int(elapsed), 60)
             await self.hooks.on_progress(f"Writing... ({mins}m{secs:02d}s elapsed)")
 
-        syncer = DraftSyncer(
-            self.doc_id,
-            self.draft_tab_id,
-            output_path,
-            tab_name="Draft",
-            session_state=self.state,
-            interval=8.0,
-        )
-        await syncer.start()
-        try:
-            content = await write_full_draft(
-                notes=notes,
-                output_path=output_path,
-                voice_file_paths=self.snapshot.voice_file_paths,
-                feedback_path=feedback_path,
-                target_format=self.effective_format,
-                servers=self.research_servers,
-                author_notes=self.author_notes,
-                source_servers=self.source_servers,
-                source_tool_names_list=self.source_tool_names,
-                compute_servers=self.compute_servers,
-                compute_tool_names=self.compute_tool_names,
-                trace_logger=self.trace_logger,
-                heartbeat=write_heartbeat,
-                cost_accumulator=self.cost_accumulator,
+        async with self.stage_compute("write") as sc:
+            syncer = DraftSyncer(
+                self.doc_id,
+                self.draft_tab_id,
+                sc.output_path,
+                tab_name="Draft",
+                session_state=self.state,
+                interval=8.0,
             )
-        finally:
-            await syncer.stop()
+            await syncer.start()
+            try:
+                content = await write_full_draft(
+                    notes=notes,
+                    output_path=sc.output_path,
+                    voice_file_paths=self.snapshot.voice_file_paths,
+                    feedback_path=feedback_path,
+                    target_format=self.effective_format,
+                    servers=self.research_servers,
+                    author_notes=self.author_notes,
+                    source_servers=self.source_servers,
+                    source_tool_names_list=self.source_tool_names,
+                    compute_servers=sc.servers,
+                    compute_tool_names=sc.tool_names,
+                    trace_logger=self.trace_logger,
+                    heartbeat=write_heartbeat,
+                    cost_accumulator=self.cost_accumulator,
+                )
+            finally:
+                await syncer.stop()
+        output_path.write_text(content, encoding="utf-8")
 
         await self.post_author_notes()
         self.snapshot.merged = MergedDraft(
@@ -3939,36 +3966,38 @@ class PipelineRunner:
             self.known_tabs["Draft"] = await do_create_tab(self.doc_id, "Draft")
         self.draft_tab_id = self.known_tabs["Draft"]
 
-        syncer = DraftSyncer(
-            self.doc_id,
-            self.draft_tab_id,
-            output_path,
-            tab_name="Draft",
-            session_state=self.state,
-            interval=8.0,
-        )
-        await syncer.start()
-        try:
-            merged = await merge_sections(
-                section_paths,
-                notes=notes,
-                output_path=output_path,
-                voice_file_paths=self.snapshot.voice_file_paths,
-                feedback_path=feedback_path,
-                target_format=self.effective_format,
-                author_notes=self.author_notes,
-                glossary_servers=glossary_servers,
-                glossary_tool_names=glossary_tool_names,
-                source_servers=self.source_servers,
-                source_tool_names_list=self.source_tool_names,
-                compute_servers=self.compute_servers,
-                compute_tool_names=self.compute_tool_names,
-                trace_logger=self.trace_logger,
-                heartbeat=merge_heartbeat,
-                cost_accumulator=self.cost_accumulator,
+        async with self.stage_compute("merge") as sc:
+            syncer = DraftSyncer(
+                self.doc_id,
+                self.draft_tab_id,
+                sc.output_path,
+                tab_name="Draft",
+                session_state=self.state,
+                interval=8.0,
             )
-        finally:
-            await syncer.stop()
+            await syncer.start()
+            try:
+                merged = await merge_sections(
+                    section_paths,
+                    notes=notes,
+                    output_path=sc.output_path,
+                    voice_file_paths=self.snapshot.voice_file_paths,
+                    feedback_path=feedback_path,
+                    target_format=self.effective_format,
+                    author_notes=self.author_notes,
+                    glossary_servers=glossary_servers,
+                    glossary_tool_names=glossary_tool_names,
+                    source_servers=self.source_servers,
+                    source_tool_names_list=self.source_tool_names,
+                    compute_servers=sc.servers,
+                    compute_tool_names=sc.tool_names,
+                    trace_logger=self.trace_logger,
+                    heartbeat=merge_heartbeat,
+                    cost_accumulator=self.cost_accumulator,
+                )
+            finally:
+                await syncer.stop()
+        output_path.write_text(merged.content, encoding="utf-8")
         await self.post_author_notes()
         self.snapshot.merged = merged
         self.snapshot.stage = "merge"
@@ -3991,19 +4020,20 @@ class PipelineRunner:
         notes = self.ensure_notes()
         draft_path = self.get_draft_path("merged")
 
-        findings = await review_all(
-            notes,
-            draft_path,
-            servers=self.research_servers,
-            voice_file_paths=self.snapshot.voice_file_paths,
-            author_notes=self.author_notes,
-            source_servers=self.source_servers,
-            source_tool_names_list=self.source_tool_names,
-            compute_servers=self.compute_servers,
-            compute_tool_names=self.compute_tool_names,
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-        )
+        async with self.stage_compute("review") as sc:
+            findings = await review_all(
+                notes,
+                draft_path,
+                servers=self.research_servers,
+                voice_file_paths=self.snapshot.voice_file_paths,
+                author_notes=self.author_notes,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                compute_servers=sc.servers,
+                compute_tool_names=sc.tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
         await self.post_author_notes()
         consolidated = consolidate_findings(findings)
         findings = consolidated.findings
@@ -4049,19 +4079,20 @@ class PipelineRunner:
             f"a conservative brief-honoring default.\n\n"
             f"Write the resolutions to: {resolutions_path}"
         )
-        await query(
-            task,
-            model=stage_model("review"),
-            system_prompt=RESOLVER_PROMPT,
-            tools=BUILTIN_WRITE_TOOLS,
-            max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
-            mcp_servers={**self.source_servers, **self.compute_servers},
-            allowed_tools=self.source_tool_names + self.compute_tool_names,
-            prefix="[resolve] ",
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-        )
+        async with self.stage_compute("resolve") as sc:
+            await query(
+                task,
+                model=stage_model("review"),
+                system_prompt=RESOLVER_PROMPT,
+                tools=BUILTIN_WRITE_TOOLS,
+                max_thinking_tokens=128_000 - 1,
+                permission_mode="bypassPermissions",
+                mcp_servers={**self.source_servers, **sc.servers},
+                allowed_tools=self.source_tool_names + sc.tool_names,
+                prefix="[resolve] ",
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
         if resolutions_path.exists():
             resolved = resolutions_path.read_text(encoding="utf-8").count("\n  A:")
             await self.hooks.on_progress(
@@ -4088,35 +4119,37 @@ class PipelineRunner:
             self.known_tabs["Draft"] = await do_create_tab(self.doc_id, "Draft")
         self.draft_tab_id = self.known_tabs["Draft"]
 
-        syncer = DraftSyncer(
-            self.doc_id,
-            self.draft_tab_id,
-            output_path,
-            tab_name="Draft",
-            session_state=self.state,
-            interval=8.0,
-        )
-        await syncer.start()
-        try:
-            output = await rewrite_final(
-                notes,
-                draft_path,
-                self.snapshot.findings,
-                output_path=output_path,
-                voice_file_paths=self.snapshot.voice_file_paths,
-                feedback_path=feedback_path,
-                target_format=self.effective_format,
-                dropped_suggestions=getattr(self, "dropped_suggestions", 0),
-                author_notes=self.author_notes,
-                source_servers=self.source_servers,
-                source_tool_names_list=self.source_tool_names,
-                compute_servers=self.compute_servers,
-                compute_tool_names=self.compute_tool_names,
-                trace_logger=self.trace_logger,
-                cost_accumulator=self.cost_accumulator,
+        async with self.stage_compute("rewrite") as sc:
+            syncer = DraftSyncer(
+                self.doc_id,
+                self.draft_tab_id,
+                sc.output_path,
+                tab_name="Draft",
+                session_state=self.state,
+                interval=8.0,
             )
-        finally:
-            await syncer.stop()
+            await syncer.start()
+            try:
+                output = await rewrite_final(
+                    notes,
+                    draft_path,
+                    self.snapshot.findings,
+                    output_path=sc.output_path,
+                    voice_file_paths=self.snapshot.voice_file_paths,
+                    feedback_path=feedback_path,
+                    target_format=self.effective_format,
+                    dropped_suggestions=getattr(self, "dropped_suggestions", 0),
+                    author_notes=self.author_notes,
+                    source_servers=self.source_servers,
+                    source_tool_names_list=self.source_tool_names,
+                    compute_servers=sc.servers,
+                    compute_tool_names=sc.tool_names,
+                    trace_logger=self.trace_logger,
+                    cost_accumulator=self.cost_accumulator,
+                )
+            finally:
+                await syncer.stop()
+        output_path.write_text(output.content, encoding="utf-8")
         await self.post_author_notes()
 
         output.voice_profile = self.snapshot.voice_profile
@@ -4186,28 +4219,33 @@ class PipelineRunner:
                 self.final_tab_id = tab_ids[0]
                 self.known_tabs["Final"] = tab_ids[0]
 
-        if self.sandbox is None:
-            await self.hooks.on_progress("No sandbox — shipping .tex without compile")
+        async with self.stage_compute("academic") as sc:
+            if sc.sandbox is None:
+                await self.hooks.on_progress(
+                    "No sandbox — shipping .tex without compile"
+                )
+                return tex_source
+
+            await self.hooks.on_progress("Compiling paper.tex (tectonic)")
+            artifacts = await compile_tex(tex_source, sc.sandbox)
+            artifacts = save_artifacts_to(
+                artifacts, self.ensure_notes().artifacts_dir / "latex"
+            )
+            if artifacts.tex_path:
+                async with gdoc_nonfatal("upload paper.tex"):
+                    await do_upload_artifact(artifacts.tex_path, "application/x-tex")
+            if not artifacts.pdf_path:
+                logger.warning("LaTeX compile incomplete: %s", artifacts.log[-300:])
+                await self.hooks.on_progress(
+                    "LaTeX compile incomplete — shipped .tex only"
+                )
+                return tex_source
+            async with gdoc_nonfatal("upload paper.pdf"):
+                await do_upload_artifact(artifacts.pdf_path, "application/pdf")
+            await self.write_preview_tab(sc.sandbox)
             return tex_source
 
-        await self.hooks.on_progress("Compiling paper.tex (tectonic)")
-        artifacts = await compile_tex(tex_source, self.sandbox)
-        artifacts = save_artifacts_to(
-            artifacts, self.ensure_notes().artifacts_dir / "latex"
-        )
-        if artifacts.tex_path:
-            async with gdoc_nonfatal("upload paper.tex"):
-                await do_upload_artifact(artifacts.tex_path, "application/x-tex")
-        if not artifacts.pdf_path:
-            logger.warning("LaTeX compile incomplete: %s", artifacts.log[-300:])
-            await self.hooks.on_progress("LaTeX compile incomplete — shipped .tex only")
-            return tex_source
-        async with gdoc_nonfatal("upload paper.pdf"):
-            await do_upload_artifact(artifacts.pdf_path, "application/pdf")
-        await self.write_preview_tab()
-        return tex_source
-
-    async def write_preview_tab(self) -> None:
+    async def write_preview_tab(self, sandbox: Sandbox | None) -> None:
         """Render the compiled PDF to images and publish them in a Preview tab."""
         from inkwell.agent.tools.google_docs import (
             do_create_tab,
@@ -4217,9 +4255,9 @@ class PipelineRunner:
         )
         from inkwell.agent.tools.latex import render_pdf_preview
 
-        if self.sandbox is None:
+        if sandbox is None:
             return
-        pages = await render_pdf_preview(self.sandbox)
+        pages = await render_pdf_preview(sandbox)
         if not pages:
             return
         async with gdoc_nonfatal("write preview tab"):
@@ -4329,46 +4367,45 @@ class PipelineRunner:
 
         patch_path = self.get_draft_path(section)
         patch_path.parent.mkdir(parents=True, exist_ok=True)
-        patch_path.write_text(draft.content, encoding="utf-8")
 
-        task = (
-            f"Apply this targeted edit to the section.\n\n"
-            f"## Section: {section}\n\n"
-            f"Draft file: {patch_path}\n\n"
-            f'## Edit Target\n\n"{target_text}"\n\n'
-            f"## Instruction\n\n{instruction}\n\n"
-            f"Read the draft with the Read tool, then use Edit to apply "
-            f"the change. Use Write if the change is too large for Edit."
-        )
-        all_servers = {
-            **self.research_servers,
-            **self.source_servers,
-            **self.compute_servers,
-        }
-        all_tools = (
-            research_tool_names() + self.source_tool_names + self.compute_tool_names
-        )
-        await query(
-            task,
-            model=stage_model("write"),
-            system_prompt=SECTION_WRITER_PROMPT,
-            tools=BUILTIN_WRITE_TOOLS,
-            max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
-            mcp_servers=all_servers,
-            allowed_tools=all_tools,
-            prefix=f"[patch:{section}] ",
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-        )
-
-        if patch_path.exists():
-            content = patch_path.read_text(encoding="utf-8")
-            self.snapshot.section_drafts[section] = SectionDraft(
-                title=section,
-                content=content,
-                word_count=len(content.split()),
+        async with self.stage_compute(f"patch:{section}") as sc:
+            sc.output_path.write_text(draft.content, encoding="utf-8")
+            task = (
+                f"Apply this targeted edit to the section.\n\n"
+                f"## Section: {section}\n\n"
+                f"Draft file: {sc.output_path}\n\n"
+                f'## Edit Target\n\n"{target_text}"\n\n'
+                f"## Instruction\n\n{instruction}\n\n"
+                f"Read the draft with the Read tool, then use Edit to apply "
+                f"the change. Use Write if the change is too large for Edit."
             )
+            all_servers = {
+                **self.research_servers,
+                **self.source_servers,
+                **sc.servers,
+            }
+            all_tools = research_tool_names() + self.source_tool_names + sc.tool_names
+            await query(
+                task,
+                model=stage_model("write"),
+                system_prompt=SECTION_WRITER_PROMPT,
+                tools=BUILTIN_WRITE_TOOLS,
+                max_thinking_tokens=128_000 - 1,
+                permission_mode="bypassPermissions",
+                mcp_servers=all_servers,
+                allowed_tools=all_tools,
+                prefix=f"[patch:{section}] ",
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
+            content = sc.output_path.read_text(encoding="utf-8")
+
+        patch_path.write_text(content, encoding="utf-8")
+        self.snapshot.section_drafts[section] = SectionDraft(
+            title=section,
+            content=content,
+            word_count=len(content.split()),
+        )
 
     async def execute_rewrites(
         self,
@@ -4386,43 +4423,50 @@ class PipelineRunner:
             await self.hooks.on_progress(
                 f"Researching {len(new_questions)} new question(s) before rewriting"
             )
-            self.snapshot.research = await research_questions(
-                notes,
-                new_questions,
-                servers=self.research_servers,
-                source_servers=self.source_servers,
-                source_tool_names_list=self.source_tool_names,
-                compute_servers=self.compute_servers,
-                compute_tool_names=self.compute_tool_names,
-                trace_logger=self.trace_logger,
-                cost_accumulator=self.cost_accumulator,
-            )
+            async with self.stage_compute("restart:research") as sc:
+                self.snapshot.research = await research_questions(
+                    notes,
+                    new_questions,
+                    servers=self.research_servers,
+                    source_servers=self.source_servers,
+                    source_tool_names_list=self.source_tool_names,
+                    compute_servers=sc.servers,
+                    compute_tool_names=sc.tool_names,
+                    trace_logger=self.trace_logger,
+                    cost_accumulator=self.cost_accumulator,
+                )
 
         feedback_path = await self.prepare_feedback("restart")
         glossary_servers, glossary_tool_names = build_glossary_server(
             notes.artifacts_dir / "glossary.json"
         )
 
-        def rewrite_coro(section_plan: SectionPlan):
-            return write_section(
-                section_plan.title,
-                notes=notes,
-                draft_path=self.get_draft_path(section_plan.title),
-                voice_file_paths=self.snapshot.voice_file_paths,
-                feedback_path=feedback_path,
-                section_context=self.build_neighbor_context(plan, section_plan.title),
-                target_format=self.effective_format,
-                servers=self.research_servers,
-                source_servers=self.source_servers,
-                source_tool_names_list=self.source_tool_names,
-                author_notes=self.author_notes,
-                compute_servers=self.compute_servers,
-                compute_tool_names=self.compute_tool_names,
-                glossary_servers=glossary_servers,
-                glossary_tool_names=glossary_tool_names,
-                trace_logger=self.trace_logger,
-                cost_accumulator=self.cost_accumulator,
-            )
+        async def rewrite_coro(section_plan: SectionPlan) -> SectionDraft:
+            draft_path = self.get_draft_path(section_plan.title)
+            async with self.stage_compute(f"rewrite:{section_plan.title}") as sc:
+                draft = await write_section(
+                    section_plan.title,
+                    notes=notes,
+                    draft_path=sc.output_path,
+                    voice_file_paths=self.snapshot.voice_file_paths,
+                    feedback_path=feedback_path,
+                    section_context=self.build_neighbor_context(
+                        plan, section_plan.title
+                    ),
+                    target_format=self.effective_format,
+                    servers=self.research_servers,
+                    source_servers=self.source_servers,
+                    source_tool_names_list=self.source_tool_names,
+                    author_notes=self.author_notes,
+                    compute_servers=sc.servers,
+                    compute_tool_names=sc.tool_names,
+                    glossary_servers=glossary_servers,
+                    glossary_tool_names=glossary_tool_names,
+                    trace_logger=self.trace_logger,
+                    cost_accumulator=self.cost_accumulator,
+                )
+            draft_path.write_text(draft.content, encoding="utf-8")
+            return draft
 
         all_plans = [sp for sp, _qs in rewrite_tasks] + add_tasks
         all_coros = [rewrite_coro(sp) for sp in all_plans]
@@ -4569,22 +4613,24 @@ class PipelineRunner:
         # Original review findings were already applied in stage_rewrite;
         # re-annotating them here would anchor stale excerpts onto revised
         # text. Standby rewrites are driven by author feedback alone.
-        output = await rewrite_final(
-            notes,
-            standby_draft,
-            [],
-            output_path=standby_output,
-            voice_file_paths=self.snapshot.voice_file_paths,
-            feedback_path=feedback_path,
-            target_format=self.effective_format,
-            author_notes=self.author_notes,
-            source_servers=self.source_servers,
-            source_tool_names_list=self.source_tool_names,
-            compute_servers=self.compute_servers,
-            compute_tool_names=self.compute_tool_names,
-            trace_logger=self.trace_logger,
-            cost_accumulator=self.cost_accumulator,
-        )
+        async with self.stage_compute("standby") as sc:
+            output = await rewrite_final(
+                notes,
+                standby_draft,
+                [],
+                output_path=sc.output_path,
+                voice_file_paths=self.snapshot.voice_file_paths,
+                feedback_path=feedback_path,
+                target_format=self.effective_format,
+                author_notes=self.author_notes,
+                source_servers=self.source_servers,
+                source_tool_names_list=self.source_tool_names,
+                compute_servers=sc.servers,
+                compute_tool_names=sc.tool_names,
+                trace_logger=self.trace_logger,
+                cost_accumulator=self.cost_accumulator,
+            )
+        standby_output.write_text(output.content, encoding="utf-8")
         await self.post_author_notes()
 
         final_content = await apply_format(

@@ -58,6 +58,7 @@ class PipelineNotes:
         self.feedback_dir = base_dir / "feedback"
         self.directions_dir = base_dir / "directions"
         self.processed_dir = base_dir / "processed"
+        self.work_dir = base_dir / "work"
         self.lock = asyncio.Lock()
 
         for d in (
@@ -69,6 +70,7 @@ class PipelineNotes:
             self.research_dir,
             self.terminal_dir,
             self.processed_dir,
+            self.work_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

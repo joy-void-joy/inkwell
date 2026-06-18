@@ -386,6 +386,8 @@ class Sandbox:
         pre_install: Packages to pre-install on start. Pass ``None`` to skip.
         read_only_mounts: Host→container path mapping mounted read-only,
             for exposing session data (artifacts, notes) to executed code.
+        rw_mounts: Host→container path mapping mounted read-write, for
+            stage outputs that executed code must write back to the host.
     """
 
     DEFAULT_DOCKER_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
@@ -400,6 +402,7 @@ class Sandbox:
         timeout_seconds: int = 30,
         pre_install: Sequence[str] | None = DEFAULT_PRE_INSTALL,
         read_only_mounts: dict[str | Path, str] | None = None,
+        rw_mounts: dict[str | Path, str] | None = None,
     ) -> None:
         suffix = session_id.replace("/", "-")
         self.container_name = f"lup-sandbox-{suffix}"
@@ -409,6 +412,10 @@ class Sandbox:
         self.read_only_mounts = {
             Path(host).resolve(): container
             for host, container in (read_only_mounts or {}).items()
+        }
+        self.rw_mounts = {
+            Path(host).resolve(): container
+            for host, container in (rw_mounts or {}).items()
         }
         self.network_mode = network_mode
         self.timeout_seconds = timeout_seconds
@@ -518,6 +525,10 @@ class Sandbox:
                 **{
                     str(host): {"bind": container, "mode": "ro"}
                     for host, container in self.read_only_mounts.items()
+                },
+                **{
+                    str(host): {"bind": container, "mode": "rw"}
+                    for host, container in self.rw_mounts.items()
                 },
             },
             working_dir="/workspace",
@@ -679,9 +690,13 @@ class Sandbox:
             f"Read-only mount: {container} (host data).\n"
             for container in self.read_only_mounts.values()
         )
+        writable_note = "".join(
+            f"Writable mount: {container} (write stage outputs here).\n"
+            for container in self.rw_mounts.values()
+        )
         extra_notes = (
-            f"\n{mounts_note}{usage_notes}".rstrip() + "\n\n"
-            if (mounts_note or usage_notes)
+            f"\n{mounts_note}{writable_note}{usage_notes}".rstrip() + "\n\n"
+            if (mounts_note or writable_note or usage_notes)
             else "\n\n"
         )
 

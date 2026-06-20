@@ -190,6 +190,31 @@ Overview tab, and the terminal stage counter so all three agree on which
 stage is which and how many there are. ``preprocess`` is an internal
 pre-stage and is prepended where the runner needs it."""
 
+CHECKPOINT_STAGES = [s for s in DISPLAY_STAGES if s != "resolve"]
+"""Backbone stages that persist a resumable snapshot — the valid targets for
+``resume --from`` and for a ``--stop-after`` pause. ``resolve`` runs between
+review and rewrite without checkpointing, so it is neither a resume boundary
+nor a place a run can be paused and continued from."""
+
+
+def validate_stop_after(stage: str | None) -> str | None:
+    """Normalize and validate a requested stop point, or raise ValueError.
+
+    ``None``/empty means "run to the end" and passes through. Every other
+    value must name a checkpoint stage, so a typo fails loudly at construction
+    rather than silently never firing and letting the run finish unpaused.
+    """
+    if stage is None or not stage.strip():
+        return None
+    normalized = stage.strip().lower()
+    if normalized not in CHECKPOINT_STAGES:
+        raise ValueError(
+            f"Invalid stop point '{stage}'. Valid stages: "
+            f"{', '.join(CHECKPOINT_STAGES)}"
+        )
+    return normalized
+
+
 REACTIVE_LABELS = ("classify", "orchestrator")
 """Trace-label prefixes for one-shot reactive helpers (comment classification,
 restart orchestration): persisted but never resumed, since each invocation is a
@@ -241,6 +266,20 @@ def relocate_transcripts(
 
 class PipelineError(Exception):
     """Raised when a pipeline stage fails to produce valid output."""
+
+
+class PipelineStopRequested(Exception):
+    """Signals a clean halt at a configured stop point, carrying the stage name.
+
+    Raised at a stage boundary when the run was launched with ``stop_after``
+    set to the stage that just finished. It unwinds out of the stage sequence
+    so the runner can finalize a pause instead of continuing — the stage's
+    snapshot is already saved, so a later resume picks up from the next stage.
+    """
+
+    def __init__(self, stage: str) -> None:
+        super().__init__(stage)
+        self.stage = stage
 
 
 class TabEdit(BaseModel):
@@ -518,6 +557,15 @@ class PipelineListener:
 
     async def on_complete(self, output: WritingOutput) -> None:
         logger.info("Pipeline complete: '%s'", output.title)
+
+    async def on_pause(self, stage: str, doc_url: str) -> None:
+        """The run reached its configured stop point and is pausing here.
+
+        Stages through ``stage`` are done and checkpointed; the environment
+        tells the author how to review and continue (the Doc is at
+        ``doc_url``; a resume picks up from the next stage).
+        """
+        logger.info("Pipeline paused after stage '%s' (%s)", stage, doc_url)
 
     async def on_block(self, _block_type: str, _content: str, _prefix: str) -> None:
         pass
@@ -2425,6 +2473,7 @@ class PipelineRunner:
         trace_logger: TraceLogger | None = None,
         listener: PipelineListener | None = None,
         cost_accumulator: CostAccumulator | None = None,
+        stop_after: str | None = None,
     ) -> None:
         self.sources = sources
         self.refs = refs or []
@@ -2434,6 +2483,7 @@ class PipelineRunner:
         self.notes = notes
         self.trace_logger = trace_logger
         self.hooks = listener or PipelineListener()
+        self.stop_after = validate_stop_after(stop_after)
 
         if cost_accumulator is None:
             cost_accumulator = CostAccumulator()
@@ -2767,8 +2817,57 @@ class PipelineRunner:
             )
         return placed
 
+    async def run_stage(self, stage_name: str) -> None:
+        """Run one backbone stage and its standard boundary work.
+
+        Dispatches to ``stage_<name>``, runs the restart check for the stages
+        that can ingest plan-breaking feedback, polls for any requested sync,
+        then honors a configured stop point. Centralizing the boundary keeps
+        the fresh run and the resume loop in lockstep and gives the stop point
+        one unmissable place to fire.
+        """
+        method = getattr(self, f"stage_{stage_name}")
+        await method()
+        if stage_name in ("research", "write", "review"):
+            await self.check_and_maybe_restart()
+        await self.sync_if_requested()
+        self.maybe_stop(stage_name)
+
+    def maybe_stop(self, stage: str) -> None:
+        """Raise PipelineStopRequested if this stage is the configured stop point.
+
+        Called only at a stage boundary, after the stage has finished and saved
+        its snapshot, so the pause leaves a clean resume checkpoint.
+        """
+        if self.stop_after is not None and stage == self.stop_after:
+            raise PipelineStopRequested(stage)
+
+    async def handle_pause(self, stage: str) -> WritingOutput:
+        """Finalize a clean pause at a configured stop point.
+
+        The stage's snapshot is already saved, so a resume continues from the
+        next stage. Refreshes the Overview tab, tells the listener so the
+        environment can surface the pause and how to resume, and returns a
+        marker output (``paused_after`` set, no finished content) so the caller
+        reports a pause rather than a completion.
+        """
+        logger.info("Paused after stage %r — stop point reached", stage)
+        await self.update_overview(paused=True)
+        await self.hooks.on_pause(stage, self.doc_url)
+        plan = self.snapshot.plan
+        return WritingOutput(
+            title=plan.title if plan else self.state.title,
+            google_doc_id=self.doc_id,
+            google_doc_url=self.doc_url,
+            paused_after=stage,
+            summary=(
+                f"Paused after the {stage} stage. Review the Google Doc and "
+                "comment, then resume to continue."
+            ),
+        )
+
     async def run(self) -> WritingOutput:
-        """Execute the full pipeline with restart support."""
+        """Execute the full pipeline with restart and stop-point support."""
         self.install_block_callback()
         self.snapshot.profile = current_settings().profile
         configure_session_state(self.state)
@@ -2776,36 +2875,24 @@ class PipelineRunner:
         policy_token = session_policy.set(self.session_policy_for_run())
 
         try:
-            await self.stage_preprocess()
-            await self.stage_extract()
-            await self.stage_voice()
-            await self.stage_plan()
-            await self.sync_if_requested()
-
-            await self.stage_research()
-            await self.check_and_maybe_restart()
-            await self.sync_if_requested()
-
-            await self.stage_assumptions()
-            await self.stage_refine()
+            for stage_name in ("preprocess", "extract", "voice", "plan"):
+                await self.run_stage(stage_name)
+            await self.run_stage("research")
+            for stage_name in ("assumptions", "refine"):
+                await self.run_stage(stage_name)
 
             self.start_watcher()
 
             try:
-                await self.stage_write()
-                await self.check_and_maybe_restart()
-                await self.sync_if_requested()
-
-                await self.stage_merge()
-                await self.sync_if_requested()
-                await self.stage_review()
-                await self.check_and_maybe_restart()
-                await self.sync_if_requested()
-
-                await self.stage_resolve()
-                await self.stage_rewrite()
-                await self.sync_if_requested()
-                await self.stage_format()
+                for stage_name in (
+                    "write",
+                    "merge",
+                    "review",
+                    "resolve",
+                    "rewrite",
+                    "format",
+                ):
+                    await self.run_stage(stage_name)
 
                 output = self.snapshot.output
                 if output is None:
@@ -2817,6 +2904,8 @@ class PipelineRunner:
                 await self.standby_loop()
             finally:
                 await self.stop_watcher()
+        except PipelineStopRequested as stop:
+            return await self.handle_pause(stop.stage)
         finally:
             session_policy.reset(policy_token)
 
@@ -2875,11 +2964,7 @@ class PipelineRunner:
 
             try:
                 for stage_name in remaining:
-                    method = getattr(self, f"stage_{stage_name}")
-                    await method()
-                    if stage_name in ("research", "write", "review"):
-                        await self.check_and_maybe_restart()
-                    await self.sync_if_requested()
+                    await self.run_stage(stage_name)
 
                 output = self.snapshot.output
                 if output is None:
@@ -2888,6 +2973,8 @@ class PipelineRunner:
                 await self.update_overview()
                 await self.hooks.on_complete(output)
                 await self.standby_loop()
+            except PipelineStopRequested as stop:
+                return await self.handle_pause(stop.stage)
             except (
                 Exception
             ) as exc:  # claude: ignore — SDK raises generic Exception for exit codes
@@ -4814,7 +4901,9 @@ class PipelineRunner:
                 session_state=self.state,
             )
 
-    async def update_overview(self, active_stage: str | None = None) -> None:
+    async def update_overview(
+        self, active_stage: str | None = None, *, paused: bool = False
+    ) -> None:
         async with gdoc_nonfatal("update overview"):
             snap = self.snapshot
             plan = snap.plan
@@ -4885,7 +4974,12 @@ class PipelineRunner:
                 n = len(self.state.pending_questions)
                 parts.append(f"\n**Questions for author:** {n} pending")
 
-            if active_stage == "revise":
+            if paused:
+                parts.append(
+                    f"\n**⏸ Paused after {completed_stage}.** Review the tabs and "
+                    "comment, then resume to continue the pipeline."
+                )
+            elif active_stage == "revise":
                 parts.append("\n*Processing your feedback...*")
             else:
                 parts.append("\n*Comment on any tab to give feedback.*")
@@ -4909,6 +5003,7 @@ async def run_pipeline(
     trace_logger: TraceLogger | None = None,
     listener: PipelineListener | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    stop_after: str | None = None,
 ) -> WritingOutput:
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
@@ -4921,5 +5016,6 @@ async def run_pipeline(
         trace_logger=trace_logger,
         listener=listener,
         cost_accumulator=cost_accumulator,
+        stop_after=stop_after,
     )
     return await runner.run()

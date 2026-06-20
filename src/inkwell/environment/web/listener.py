@@ -121,6 +121,17 @@ class WebListener(PipelineListener):
         )
         await self.broadcast_cost()
 
+    async def on_pause(self, stage: str, doc_url: str) -> None:
+        await self.broadcast(
+            {
+                "type": "progress",
+                "message": (
+                    f"⏸ Paused after {stage} — review and comment in the Doc, "
+                    "then resume to continue."
+                ),
+            }
+        )
+
     async def on_message(self, source: str, message: str) -> None:
         await self.broadcast({"type": "message", "source": source, "message": message})
 

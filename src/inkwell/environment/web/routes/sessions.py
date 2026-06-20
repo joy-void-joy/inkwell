@@ -83,6 +83,19 @@ async def get_pipeline_stages() -> list[str]:
     return list(DISPLAY_STAGES)
 
 
+@formats_router.get("/stop-stages")
+async def get_stop_stages() -> list[str]:
+    """Stages a run can be paused after — the valid ``stop_after`` targets.
+
+    Served from the pipeline's ``CHECKPOINT_STAGES`` (the backbone minus stages
+    that never checkpoint), so the New Session stop-after picker offers only
+    stages the run can actually pause and resume from.
+    """
+    from inkwell.agent.pipeline import CHECKPOINT_STAGES
+
+    return list(CHECKPOINT_STAGES)
+
+
 @router.post("", status_code=201)
 async def create_session(req: CreateSessionRequest) -> dict[str, str]:
     mgr = get_manager()
@@ -95,6 +108,7 @@ async def create_session(req: CreateSessionRequest) -> dict[str, str]:
         model=req.model,
         stage_models=req.stage_models,
         writer_mode=req.writer_mode,
+        stop_after=req.stop_after,
     )
     return {"session_id": session_id, "status": "running"}
 
@@ -137,6 +151,7 @@ async def resume_session(
             model=req.model if req else None,
             stage_models=req.stage_models if req else None,
             writer_mode=req.writer_mode if req else None,
+            stop_after=req.stop_after if req else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

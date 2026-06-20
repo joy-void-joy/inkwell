@@ -268,6 +268,23 @@ class PipelineError(Exception):
     """Raised when a pipeline stage fails to produce valid output."""
 
 
+class PipelineInterrupted(PipelineError):
+    """Raised when an interrupt (SIGINT) cut the run short before any output.
+
+    Distinct from a failure: the per-stage snapshots are intact, so the run is
+    resumable. ``stage`` names where it stopped, so callers can report *why*
+    no output exists instead of the misleading "completed without output".
+    """
+
+    def __init__(self, stage: str | None) -> None:
+        self.stage = stage
+        where = stage or "an early stage"
+        super().__init__(
+            f"Pipeline interrupted during {where} before producing output — "
+            "resume to continue"
+        )
+
+
 class PipelineStopRequested(Exception):
     """Signals a clean halt at a configured stop point, carrying the stage name.
 
@@ -2986,6 +3003,7 @@ class PipelineRunner:
         await self.setup_doc()
         self.rehydrate_sections()
         policy_token = session_policy.set(self.session_policy_for_run())
+        current_stage: str | None = None
 
         try:
             stages = ["preprocess", *DISPLAY_STAGES]
@@ -2999,11 +3017,14 @@ class PipelineRunner:
 
             try:
                 for stage_name in remaining:
+                    current_stage = stage_name
                     await self.run_stage(stage_name)
 
                 output = self.snapshot.output
                 if output is None:
-                    raise PipelineError("Pipeline completed without producing output")
+                    raise PipelineError(
+                        "Pipeline ran every stage but produced no final output"
+                    )
 
                 await self.update_overview()
                 await self.hooks.on_complete(output)
@@ -3017,7 +3038,7 @@ class PipelineRunner:
                     raise
                 logger.info(
                     "Pipeline interrupted during stage %r — finalizing",
-                    self.snapshot.stage,
+                    current_stage,
                 )
                 await self.finalize_on_interrupt()
             finally:
@@ -3026,9 +3047,9 @@ class PipelineRunner:
             session_policy.reset(policy_token)
 
         output = self.snapshot.output
-        if output is None:
-            raise PipelineError("Pipeline completed without producing output")
-        return output
+        if output is not None:
+            return output
+        raise PipelineInterrupted(current_stage)
 
     def start_watcher(self) -> None:
         if self.notes is None:

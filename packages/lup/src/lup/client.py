@@ -66,6 +66,7 @@ import contextvars
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -76,6 +77,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ContentBlock,
     Message,
+    ProcessError,
     TextBlock,
 )
 from claude_agent_sdk.types import (
@@ -168,6 +170,23 @@ def is_interrupt(exc: BaseException) -> bool:
     main pipeline client both treat this as a benign stop, not a crash.
     """
     return "exit code -2" in str(exc)
+
+
+def attach_cli_stderr(exc: ProcessError, stderr_lines: deque[str]) -> None:
+    """Splice captured CLI stderr into the SDK's opaque process error.
+
+    The SDK raises ``ProcessError`` with a fixed ``"Check stderr output for
+    details"`` placeholder and never attaches the real subprocess stderr, even
+    when a stderr callback is set. Replacing the placeholder with the captured
+    tail turns a blind ``exit code 1`` into the actual reason the CLI died,
+    while keeping the ``exit code N`` token intact so ``is_interrupt`` (and any
+    other exit-code matching) still works.
+    """
+    tail = "\n".join(stderr_lines).strip()
+    if not tail:
+        return
+    exc.stderr = tail
+    exc.args = (f"Command failed with exit code {exc.exit_code}\nError output: {tail}",)
 
 
 # ---------------------------------------------------------------------------
@@ -626,8 +645,21 @@ async def build_client(
     for key, value in (client_env.get() or {}).items():
         options.env[key] = value
 
+    stderr_lines: deque[str] = deque(maxlen=200)
+
+    def record_stderr(line: str) -> None:
+        stderr_lines.append(line)
+        logger.debug("CLI stderr: %s", line)
+
+    if options.stderr is None:
+        options.stderr = record_stderr
+
     async with ClaudeSDKClient(options=options) as client:
-        yield client
+        try:
+            yield client
+        except ProcessError as exc:
+            attach_cli_stderr(exc, stderr_lines)
+            raise
 
 
 # ---------------------------------------------------------------------------

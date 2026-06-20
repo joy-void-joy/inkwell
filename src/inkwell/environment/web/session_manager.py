@@ -11,13 +11,14 @@ from datetime import datetime
 
 from fastapi import WebSocket
 
-from lup.client import CostAccumulator
+from lup.client import CostAccumulator, is_interrupt
 from lup.history import list_all_sessions, get_latest_session_json
 from lup.paths import sessions_dir, trace_logs_dir
 
 from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.google_auth import GoogleAuthError
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot
+from inkwell.agent.pipeline import PipelineInterrupted
 from inkwell.agent.session import WritingSessionState
 from inkwell.environment.web.listener import WebListener
 from inkwell.environment.web.models import (
@@ -33,6 +34,21 @@ from inkwell.environment.web.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def classify_session_failure(exc: BaseException) -> tuple[str, str]:
+    """Map a failed pipeline task to a ``(status, client_message)``.
+
+    An interrupt is resumable, not a failure: a resume's ``PipelineInterrupted``
+    names the stage it stopped at, and a SIGINT-killed subprocess (a reloaded
+    dev server, a Ctrl-C) surfaces through ``is_interrupt``. Both become
+    ``"interrupted"`` so the UI invites a resume instead of reporting a crash.
+    """
+    stage = exc.stage if isinstance(exc, PipelineInterrupted) else None
+    if stage is not None or is_interrupt(exc):
+        detail = f" during {stage}" if stage else ""
+        return "interrupted", f"Session interrupted{detail}. Resume to continue."
+    return "failed", str(exc)
 
 
 @dataclass
@@ -311,14 +327,20 @@ class SessionManager:
                     "timestamp": datetime.now().isoformat(),
                 },
             )
-        except Exception as exc:
-            handle.status = "failed"
-            logger.exception("Session %s failed", session_id)
+        except (
+            Exception
+        ) as exc:  # claude: ignore — SDK raises generic Exception for exit codes
+            ended_status, message = classify_session_failure(exc)
+            handle.status = ended_status
+            if ended_status == "failed":
+                logger.exception("Session %s failed", session_id)
+            else:
+                logger.info("Session %s interrupted — resumable", session_id)
             await self.broadcast(
                 session_id,
                 {
                     "type": "error",
-                    "message": str(exc),
+                    "message": message,
                     "timestamp": datetime.now().isoformat(),
                 },
             )
@@ -326,7 +348,7 @@ class SessionManager:
                 session_id,
                 {
                     "type": "session_ended",
-                    "status": "failed",
+                    "status": ended_status,
                     "timestamp": datetime.now().isoformat(),
                 },
             )

@@ -1,18 +1,19 @@
-"""LaTeX deliverable for academic pieces — pandoc conversion + tectonic compile.
+"""LaTeX deliverable for academic pieces — assemble and compile with tectonic.
 
-For an arXiv-bound paper, markdown in a Google Doc is a review surface,
-not the deliverable. This module turns the final markdown into
-``paper.tex`` (pandoc) and a compiled ``paper.pdf`` (tectonic), both
-produced inside the session sandbox so the host needs no TeX install.
+For an arXiv-bound paper, the Google Doc is a review surface, not the
+deliverable. The document-owning stages emit a complete LaTeX source; this
+module compiles it to ``paper.pdf`` (tectonic) inside the session sandbox so
+the host needs no TeX install, and exposes ``compile_latex`` as a tool so a
+stage can verify its document builds and repair it against the error log.
 """
 
 import asyncio
 import logging
-import shlex
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from lup.mcp import LupMcpTool, ToolError, lup_tool
 from lup.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -31,71 +32,6 @@ class LatexArtifacts(BaseModel):
 def ensure_tex_tooling(sandbox: Sandbox) -> bool:
     """Probe for pandoc + tectonic, provisioned in the sandbox image."""
     return sandbox.run_shell(TEX_TOOLING_PROBE)["exit_code"] == 0
-
-
-def build_latex_artifacts_sync(
-    markdown_text: str,
-    sandbox: Sandbox,
-    *,
-    title: str,
-) -> LatexArtifacts:
-    """Convert markdown to paper.tex and compile paper.pdf in the sandbox.
-
-    Best-effort: returns whatever artifacts were produced; a missing
-    ``pdf_path`` with a populated ``log`` means compilation failed and
-    the .tex (when present) is still shippable.
-    """
-    shared = sandbox.shared_dir
-    (shared / "paper.md").write_text(markdown_text, encoding="utf-8")
-
-    if not ensure_tex_tooling(sandbox):
-        return LatexArtifacts(log="TeX tooling unavailable in sandbox")
-
-    log_parts: list[str] = []
-    pandoc = sandbox.run_shell(
-        "cd /shared && pandoc paper.md -s "
-        f"--metadata title={shlex.quote(title)} -o paper.tex"
-    )
-    log_parts.append(pandoc["stdout"])
-    tex_host = shared / "paper.tex"
-    if pandoc["exit_code"] != 0 or not tex_host.exists():
-        return LatexArtifacts(log="pandoc failed:\n" + "\n".join(log_parts))
-
-    tectonic = sandbox.run_shell("cd /shared && tectonic paper.tex")
-    log_parts.append(tectonic["stdout"])
-    pdf_host = shared / "paper.pdf"
-    if tectonic["exit_code"] != 0 or not pdf_host.exists():
-        return LatexArtifacts(
-            tex_path=str(tex_host),
-            log="tectonic failed:\n" + "\n".join(log_parts),
-        )
-
-    return LatexArtifacts(
-        tex_path=str(tex_host),
-        pdf_path=str(pdf_host),
-        log="\n".join(log_parts),
-    )
-
-
-async def build_latex_artifacts(
-    markdown_text: str,
-    sandbox: Sandbox,
-    *,
-    title: str,
-) -> LatexArtifacts:
-    """Thread-offloaded ``build_latex_artifacts_sync`` (compile is blocking)."""
-    return await asyncio.to_thread(
-        build_latex_artifacts_sync, markdown_text, sandbox, title=title
-    )
-
-
-def latex_artifacts_note(artifacts: LatexArtifacts, links: list[str]) -> str:
-    """Render a short markdown block linking the produced artifacts."""
-    if not artifacts.tex_path and not artifacts.pdf_path:
-        return ""
-    lines = ["", "---", "", "**LaTeX artifacts**", ""]
-    lines.extend(f"- {link}" for link in links)
-    return "\n".join(lines) + "\n"
 
 
 def save_artifacts_to(artifacts: LatexArtifacts, target_dir: Path) -> LatexArtifacts:
@@ -202,6 +138,59 @@ def compile_tex_sync(tex_source: str, sandbox: Sandbox) -> LatexArtifacts:
 async def compile_tex(tex_source: str, sandbox: Sandbox) -> LatexArtifacts:
     """Thread-offloaded ``compile_tex_sync`` (compile is blocking)."""
     return await asyncio.to_thread(compile_tex_sync, tex_source, sandbox)
+
+
+class CompileLatexInput(BaseModel):
+    tex_path: str = Field(
+        description=(
+            "Path to the .tex file to compile — the complete document you "
+            "wrote, with its preamble and \\begin{document}...\\end{document}."
+        )
+    )
+
+
+class CompileLatexResult(BaseModel):
+    compiled: bool = Field(
+        description="True when tectonic produced a PDF (the document builds)."
+    )
+    log: str = Field(
+        description=(
+            "tectonic output. When compiled is False, the failure is named "
+            "here (undefined environment, missing \\usepackage, stray brace)."
+        )
+    )
+
+
+def make_latex_tools(sandbox: Sandbox) -> list[LupMcpTool]:
+    """LaTeX compile tool bound to a stage's sandbox.
+
+    Lets a document-owning stage verify its assembled paper actually builds
+    and repair it against the compiler's own error report — so the preamble
+    stays in sync with whatever environments, packages, and macros the body
+    uses, instead of being guessed ahead of time.
+    """
+
+    @lup_tool(
+        "Compile a complete LaTeX document with tectonic and report whether it "
+        "builds. Pass the path to the .tex file you wrote (preamble + body). "
+        "Use it after assembling or editing an academic paper: when compiled "
+        "is False, the log names the exact failure — an undefined environment, "
+        "a missing \\usepackage, a stray brace — so fix the document's "
+        "preamble or body and call again until it builds. This is how the "
+        "paper's preamble is kept consistent with what the body actually uses.",
+        name="compile_latex",
+    )
+    async def compile_latex(inp: CompileLatexInput) -> CompileLatexResult:
+        path = Path(inp.tex_path)
+        if not path.exists():
+            raise ToolError(f"No .tex file at {inp.tex_path}")
+        artifacts = await compile_tex(path.read_text(encoding="utf-8"), sandbox)
+        return CompileLatexResult(
+            compiled=bool(artifacts.pdf_path),
+            log=artifacts.log[-4000:],
+        )
+
+    return [compile_latex]
 
 
 def render_pdf_preview_sync(sandbox: Sandbox, *, max_pages: int = 20) -> list[Path]:

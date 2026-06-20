@@ -19,7 +19,7 @@ export interface ModelConfig {
   writer_mode?: string;
 }
 
-export type SessionStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted" | "resuming";
+export type SessionStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted" | "resuming" | "paused";
 
 export interface StageCostSummary {
   cost_usd: number;

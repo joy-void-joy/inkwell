@@ -158,7 +158,11 @@ function SessionDetailInner() {
           <h1>{state.title || formatSessionTitle(state.sessionId)}</h1>
           <span className="profile-badge">{state.profile}</span>
           <span className={`status-badge status-${state.status}`}>
-            {inStandby ? "Standby" : currentStageLabel}
+            {state.status === "paused"
+              ? `Paused after ${currentStageLabel}`
+              : inStandby
+                ? "Standby"
+                : currentStageLabel}
           </span>
         </div>
       </div>

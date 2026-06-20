@@ -30,12 +30,19 @@ export async function fetchPipelineStages(): Promise<string[]> {
   return res.json();
 }
 
+export async function fetchStopStages(): Promise<string[]> {
+  const res = await fetch(`${BASE}/stop-stages`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function createSession(
   sources: string[],
   targetFormat: string = "auto",
   refs: string[] = [],
   profile?: string,
   modelConfig?: ModelConfig,
+  stopAfter?: string,
 ): Promise<{ session_id: string; status: string }> {
   const res = await fetch(`${BASE}/sessions`, {
     method: "POST",
@@ -48,6 +55,7 @@ export async function createSession(
       model: modelConfig?.model || null,
       stage_models: modelConfig?.stage_models || {},
       writer_mode: modelConfig?.writer_mode || null,
+      stop_after: stopAfter || null,
     }),
   });
   if (!res.ok) throw new Error(await res.text());

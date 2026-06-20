@@ -27,6 +27,9 @@ function statusLabel(session: SessionSummary): string {
   if (session.status === "interrupted") {
     return `interrupted at ${stageLabel(session.stage)}`;
   }
+  if (session.status === "paused") {
+    return `paused after ${stageLabel(session.stage)}`;
+  }
   return session.status;
 }
 

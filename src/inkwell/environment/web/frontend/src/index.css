@@ -150,6 +150,8 @@ textarea { resize: none; }
 .status-failed { background: rgba(221, 102, 102, 0.15); color: var(--red); }
 .status-cancelled { background: rgba(136, 136, 136, 0.15); color: var(--text-dim); }
 .status-interrupted { background: rgba(230, 180, 80, 0.15); color: #e6b450; }
+.status-paused { background: rgba(167, 139, 250, 0.18); color: #a78bfa; }
+.status-resuming { background: rgba(109, 158, 235, 0.15); color: var(--accent); }
 
 .profile-badge {
   font-size: 0.7rem;

@@ -21,6 +21,26 @@ FORMAT_HELP = "Suggested format (agent may override): " + ", ".join(
     f"{f.key}:<description>" if f.accepts_description else f.key for f in OUTPUT_FORMATS
 )
 
+STOP_AFTER_HELP = (
+    "Pause after this stage finishes, then exit cleanly — review and comment in "
+    "the Doc, then `inkwell resume <id>` to continue. Stages: extract, voice, "
+    "plan, research, assumptions, refine, write, merge, review, rewrite, format"
+)
+
+
+def validate_stage_option(value: str | None, flag: str) -> None:
+    """Reject a stage flag that doesn't name a resumable checkpoint stage."""
+    if value is None:
+        return
+    from inkwell.agent.pipeline import CHECKPOINT_STAGES
+
+    if value not in CHECKPOINT_STAGES:
+        typer.echo(
+            f"Invalid {flag} '{value}'. Valid stages: {', '.join(CHECKPOINT_STAGES)}"
+        )
+        raise typer.Exit(1)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +118,10 @@ def write(
         str | None,
         typer.Option("--session-id", "-s", help="Session identifier"),
     ] = None,
+    stop_after: Annotated[
+        str | None,
+        typer.Option("--stop-after", help=STOP_AFTER_HELP),
+    ] = None,
     verbose: Annotated[
         bool,
         typer.Option("--verbose", "-v", help="Enable verbose logging"),
@@ -115,9 +139,11 @@ def write(
     Examples:
         inkwell write "https://claude.ai/share/abc123"
         inkwell write "https://claude.ai/share/abc123" paper.pdf -f twitter
-        inkwell write conversation.md notes.txt --ref "https://arxiv.org/abs/..." --doc "https://docs.google.com/..."
+        inkwell write conversation.md --stop-after plan   # pause to review the plan
     """
     from inkwell.environment.cli.chat import chat_session
+
+    validate_stage_option(stop_after, "--stop-after")
 
     doc_id: str | None = None
     if doc:
@@ -134,6 +160,7 @@ def write(
                 session_id=session_id,
                 target_format=target_format,
                 existing_doc_id=doc_id,
+                stop_after=stop_after,
                 verbose=verbose,
             )
         )
@@ -152,6 +179,10 @@ def run(
         str | None,
         typer.Option("--session-id", "-s", help="Session identifier"),
     ] = None,
+    stop_after: Annotated[
+        str | None,
+        typer.Option("--stop-after", help=STOP_AFTER_HELP),
+    ] = None,
     verbose: Annotated[
         bool,
         typer.Option("--verbose", "-v", help="Enable verbose logging"),
@@ -165,12 +196,15 @@ def run(
     """
     from inkwell.environment.cli.chat import chat_session
 
+    validate_stage_option(stop_after, "--stop-after")
+
     try:
         asyncio.run(
             chat_session(
                 sources=[task],
                 session_id=session_id,
                 target_format=target_format,
+                stop_after=stop_after,
                 verbose=verbose,
             )
         )
@@ -233,21 +267,6 @@ def sessions(
                 typer.echo(f"    checkpoints: {', '.join(checkpoints)}")
 
 
-VALID_STAGES = [
-    "extract",
-    "voice",
-    "plan",
-    "research",
-    "assumptions",
-    "refine",
-    "write",
-    "merge",
-    "review",
-    "rewrite",
-    "format",
-]
-
-
 @app.command()
 def resume(
     session_id: Annotated[
@@ -263,6 +282,10 @@ def resume(
             "Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
         ),
     ] = None,
+    stop_after: Annotated[
+        str | None,
+        typer.Option("--stop-after", help=STOP_AFTER_HELP),
+    ] = None,
     verbose: Annotated[
         bool,
         typer.Option("--verbose", "-v", help="Enable verbose logging"),
@@ -271,18 +294,17 @@ def resume(
     """Resume a previous writing session from its saved pipeline state.
 
     By default, picks up from the last completed stage. Use --from to
-    resume from an earlier checkpoint.
+    resume from an earlier checkpoint, and --stop-after to pause again at a
+    later one.
 
     Examples:
         inkwell sessions                              # find the session ID
         inkwell resume 20260523_143022                # resume from last stage
         inkwell resume 20260523_143022 --from write   # re-run merge onward
+        inkwell resume 20260523_143022 --stop-after review  # pause after review
     """
-    if from_stage and from_stage not in VALID_STAGES:
-        typer.echo(
-            f"Invalid stage '{from_stage}'. Valid stages: {', '.join(VALID_STAGES)}"
-        )
-        raise typer.Exit(1)
+    validate_stage_option(from_stage, "--from")
+    validate_stage_option(stop_after, "--stop-after")
 
     from inkwell.environment.cli.chat import chat_session
 
@@ -291,6 +313,7 @@ def resume(
             chat_session(
                 resume_session_id=session_id,
                 resume_from_stage=from_stage,
+                stop_after=stop_after,
                 verbose=verbose,
             )
         )

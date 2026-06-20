@@ -55,6 +55,37 @@ class TestPipelineNotesComments:
         assert result == []
 
 
+class TestPlanBreakingLifecycle:
+    """Clearing and downgrading after a restart consumes plan-breaking feedback."""
+
+    @pytest.mark.anyio
+    async def test_clear_stops_retriggering(self, notes: PipelineNotes) -> None:
+        await notes.add_comment(
+            ClassifiedComment(
+                comment_id="c1", content="wrong angle", impact="plan_breaking"
+            )
+        )
+        await notes.clear_plan_breaking()
+        assert not await notes.has_plan_breaking()
+
+    @pytest.mark.anyio
+    async def test_downgrade_keeps_feedback_but_stops_retriggering(
+        self, notes: PipelineNotes
+    ) -> None:
+        await notes.add_comment(
+            ClassifiedComment(
+                comment_id="c1", content="wrong angle", impact="plan_breaking"
+            )
+        )
+        await notes.downgrade_plan_breaking()
+
+        assert not await notes.has_plan_breaking()
+        feedback = await notes.get_all_feedback()
+        assert "wrong angle" in feedback
+        assert "Critical Author Feedback" not in feedback
+        assert "Author Direction" in feedback
+
+
 class TestPipelineNotesTerminal:
     """Terminal input handling."""
 

@@ -176,6 +176,25 @@ class PipelineNotes:
                 except (json.JSONDecodeError, ValueError):
                     logger.warning("Failed to read note during clear: %s", path)
 
+    async def downgrade_plan_breaking(self) -> None:
+        """Re-mark plan-breaking comments as stage-local.
+
+        Used when the restart budget is spent: the feedback can no longer
+        force a structural replan, but it stays in the feedback set as author
+        direction for the rewrite, and stops re-triggering the orchestrator.
+        """
+        async with self.lock:
+            for path in sorted(self.comments_dir.glob("*.json")):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    comment = ClassifiedComment.model_validate(data)
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning("Failed to read note during downgrade: %s", path)
+                    continue
+                if comment.impact == "plan_breaking":
+                    comment.impact = "stage_local"
+                    path.write_text(comment.model_dump_json(indent=2), encoding="utf-8")
+
     async def get_all_feedback(self) -> str:
         """Render all accumulated feedback as markdown for prompt injection."""
         comments = await self.list_comments()

@@ -1257,7 +1257,7 @@ async def research_questions(
 
     await query(
         task,
-        model="claude-opus-4-6",
+        model=stage_model("research"),
         system_prompt=RESEARCHER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
@@ -3024,7 +3024,7 @@ class PipelineRunner:
         classified = await query(
             task,
             output_type=ClassifiedComment,
-            model="claude-opus-4-6",
+            model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
             permission_mode="bypassPermissions",
@@ -4304,6 +4304,7 @@ class PipelineRunner:
                 "Max restarts (%d) reached — downgrading to stage-local",
                 self.max_restarts,
             )
+            await notes.downgrade_plan_breaking()
             return
 
         logger.info("Plan-breaking feedback detected — running orchestrator")
@@ -4322,6 +4323,7 @@ class PipelineRunner:
         self.snapshot.generation += 1
 
         await self.execute_strategy(strategy)
+        await notes.clear_plan_breaking()
 
     async def execute_strategy(self, strategy: RestartStrategy) -> None:
         notes = self.ensure_notes()
@@ -4354,8 +4356,20 @@ class PipelineRunner:
         if rewrite_tasks or add_tasks:
             await self.execute_rewrites(rewrite_tasks, add_tasks)
 
-        if strategy.needs_remerge and self.snapshot.section_drafts:
+        # Only remerge once the linear merge stage has already run: a restart
+        # before it (research/write checkpoints) is picked up by the merge stage
+        # ahead, so remerging here would just duplicate it. When the draft was
+        # already reviewed, the existing findings now point at superseded text —
+        # re-review so the rewrite applies findings that match the new draft.
+        if (
+            strategy.needs_remerge
+            and self.snapshot.merged is not None
+            and self.snapshot.section_drafts
+        ):
+            stale_findings = bool(self.snapshot.findings)
             await self.stage_merge()
+            if stale_findings:
+                await self.stage_review()
 
     async def patch_section(
         self, section: str, target_text: str, instruction: str
@@ -4576,10 +4590,8 @@ class PipelineRunner:
                 break
 
             notes = self.ensure_notes()
-            has_plan_breaking = await notes.has_plan_breaking()
-            if has_plan_breaking and self.restart_count < self.max_restarts:
+            if await notes.has_plan_breaking():
                 await self.check_and_maybe_restart()
-                await notes.clear_plan_breaking()
 
             await self.do_standby_rewrite()
 

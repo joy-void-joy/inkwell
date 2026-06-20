@@ -107,7 +107,7 @@ interface SessionContextValue {
   pipelineStages: string[];
   send: (text: string) => void;
   sendAction: (action: string) => void;
-  resume: (fromStage?: string, profile?: string) => Promise<void>;
+  resume: (fromStage?: string, profile?: string, stopAfter?: string) => Promise<void>;
   restart: (fromStage: string, profile?: string) => Promise<void>;
 }
 
@@ -166,8 +166,8 @@ export function SessionProvider({
     }
   }, [state.events.length]);
 
-  const resume = useCallback(async (fromStage?: string, profile?: string) => {
-    await resumeSession(sessionId, fromStage, profile);
+  const resume = useCallback(async (fromStage?: string, profile?: string, stopAfter?: string) => {
+    await resumeSession(sessionId, fromStage, profile, undefined, stopAfter);
     dispatch({ type: "RESUMED" });
     setWsSessionId(sessionId);
   }, [sessionId]);

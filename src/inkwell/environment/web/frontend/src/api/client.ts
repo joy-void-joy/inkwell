@@ -85,6 +85,7 @@ export async function resumeSession(
   fromStage?: string,
   profile?: string,
   modelConfig?: ModelConfig,
+  stopAfter?: string,
 ): Promise<{ session_id: string; status: string }> {
   const res = await fetch(`${BASE}/sessions/${id}/resume`, {
     method: "POST",
@@ -95,6 +96,7 @@ export async function resumeSession(
       model: modelConfig?.model || null,
       stage_models: modelConfig?.stage_models || {},
       writer_mode: modelConfig?.writer_mode || null,
+      stop_after: stopAfter ?? null,
     }),
   });
   if (!res.ok) throw new Error(await res.text());

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { fetchProfiles } from "../api/client";
+import { fetchProfiles, fetchStopStages } from "../api/client";
 import { SessionProvider, useSession } from "../context/SessionContext";
 import { StageProgress } from "../components/StageProgress";
 import { LogStream } from "../components/LogStream";
@@ -31,9 +31,12 @@ function ResumeControls() {
   const [error, setError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileResponse[]>([]);
   const [overrideProfile, setOverrideProfile] = useState("");
+  const [stopStages, setStopStages] = useState<string[]>([]);
+  const [stopAfter, setStopAfter] = useState("");
 
   useEffect(() => {
     fetchProfiles().then(setProfiles).catch(() => {});
+    fetchStopStages().then(setStopStages).catch(() => {});
   }, []);
 
   const hasKnownProfile = !!state.profile;
@@ -63,7 +66,11 @@ function ResumeControls() {
     setResuming(true);
     setError(null);
     try {
-      await resume(resumeStage || undefined, overrideProfile || undefined);
+      await resume(
+        resumeStage || undefined,
+        overrideProfile || undefined,
+        stopAfter || undefined,
+      );
     } catch (err) {
       reportError(err, "Resume failed");
     } finally {
@@ -125,6 +132,19 @@ function ResumeControls() {
             <option value="">{hasKnownProfile ? `Keep current (${state.profile})` : "Select profile (account billed)..."}</option>
             {profiles.map((p) => (
               <option key={p.name} value={p.name}>{p.name}</option>
+            ))}
+          </select>
+        )}
+        {stopStages.length > 0 && (
+          <select
+            value={stopAfter}
+            onChange={(e) => setStopAfter(e.target.value)}
+            className="resume-stage-select"
+            title="Pause again after this stage once resumed"
+          >
+            <option value="">Run to the end</option>
+            {stopStages.map((s) => (
+              <option key={s} value={s}>Pause after {stageLabel(s)}</option>
             ))}
           </select>
         )}

@@ -152,6 +152,7 @@ async def run_session(
     trace_holder: list[SessionTrace] | None = None,
     session_state: WritingSessionState | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    stop_after: str | None = None,
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
@@ -161,6 +162,8 @@ async def run_session(
     - restart_from_stage: With resume_session_id, rewind to before this stage and
       regenerate it (and everything after) from scratch with fresh agents,
       discarding their prior output rather than resuming an interrupted agent
+    - stop_after: Pause cleanly once this stage finishes (fresh run or resume),
+      leaving a checkpoint to resume from after the author reviews the Doc
     """
     if session_id is None:
         session_id = resume_session_id or uuid.uuid4().hex[:16]
@@ -216,6 +219,7 @@ async def run_session(
                 trace_logger=setup.trace_logger,
                 listener=listener,
                 cost_accumulator=cost_acc,
+                stop_after=stop_after,
             )
             output = await runner.run_from(snapshot, restart=bool(restart_from_stage))
         else:
@@ -229,6 +233,7 @@ async def run_session(
                 trace_logger=setup.trace_logger,
                 listener=listener,
                 cost_accumulator=cost_acc,
+                stop_after=stop_after,
             )
     finally:
         setup.trace_logger.save()

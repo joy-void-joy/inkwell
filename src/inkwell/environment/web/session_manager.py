@@ -69,6 +69,7 @@ class SessionManager:
         model: str | None = None,
         stage_models: dict[str, str] | None = None,
         writer_mode: str | None = None,
+        stop_after: str | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex[:16]
         return self.launch(
@@ -81,6 +82,7 @@ class SessionManager:
             model=model,
             stage_models=stage_models,
             writer_mode=writer_mode,
+            stop_after=stop_after,
         )
 
     async def resume_session(
@@ -92,6 +94,7 @@ class SessionManager:
         model: str | None = None,
         stage_models: dict[str, str] | None = None,
         writer_mode: str | None = None,
+        stop_after: str | None = None,
     ) -> str:
         if resume_session_id in self.sessions:
             handle = self.sessions[resume_session_id]
@@ -108,6 +111,7 @@ class SessionManager:
             model=model,
             stage_models=stage_models,
             writer_mode=writer_mode,
+            stop_after=stop_after,
         )
 
     async def restart_session(
@@ -177,6 +181,7 @@ class SessionManager:
         model: str | None = None,
         stage_models: dict[str, str] | None = None,
         writer_mode: str | None = None,
+        stop_after: str | None = None,
     ) -> str:
         from inkwell.agent.config import load_settings, use_settings
 
@@ -215,6 +220,7 @@ class SessionManager:
                     session_state=state,
                     cost_accumulator=cost,
                     trace_holder=trace_holder,
+                    stop_after=stop_after,
                 )
 
         task = asyncio.create_task(
@@ -251,12 +257,18 @@ class SessionManager:
 
         try:
             handle.result = task.result()
-            handle.status = "completed"
+            output = handle.result.output
+            # A run launched with a stop point returns normally but carries a
+            # paused marker instead of finished content — it is resumable, not
+            # done, so the UI must show it as paused rather than completed.
+            handle.status = (
+                "paused" if output is not None and output.paused_after else "completed"
+            )
             await self.broadcast(
                 session_id,
                 {
                     "type": "session_ended",
-                    "status": "completed",
+                    "status": handle.status,
                     "timestamp": datetime.now().isoformat(),
                 },
             )
@@ -422,12 +434,13 @@ class SessionManager:
                     )
                 continue
             parsed = HistorySessionData.model_validate(raw)
+            paused_stage = parsed.output.paused_after if parsed.output else ""
             summaries.append(
                 SessionSummary(
                     session_id=sid,
                     title=parsed.output.title if parsed.output else "",
-                    status="completed",
-                    stage="done",
+                    status="paused" if paused_stage else "completed",
+                    stage=paused_stage or "done",
                     cost_usd=parsed.cost_usd or 0.0,
                     duration_s=parsed.duration_seconds or 0.0,
                     doc_url=parsed.output.google_doc_url if parsed.output else "",
@@ -458,13 +471,14 @@ class SessionManager:
                     word_count=parsed.output.word_count,
                     review_findings_count=len(parsed.output.review_findings),
                 )
+            paused_stage = parsed.output.paused_after if parsed.output else ""
             return SessionDetail(
                 session_id=session_id,
                 title=parsed.output.title if parsed.output else "",
-                status="completed",
+                status="paused" if paused_stage else "completed",
                 state=SessionStateSnapshot(
                     doc_url=parsed.output.google_doc_url if parsed.output else "",
-                    stage="done",
+                    stage=paused_stage or "done",
                 ),
                 cost=CostSnapshot(
                     total_cost_usd=parsed.cost_usd or 0.0,

@@ -1,8 +1,19 @@
 """Pydantic models for the web API — request/response schemas and WebSocket messages."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
+
+
+def normalize_stop_after(value: str | None) -> str | None:
+    """Validate a requested stop point against the pipeline's checkpoint stages."""
+    from inkwell.agent.pipeline import validate_stop_after
+
+    return validate_stop_after(value)
+
+
+StopAfter = Annotated[str | None, AfterValidator(normalize_stop_after)]
+"""A ``--stop-after`` stage for the API: normalized and validated, or None."""
 
 
 class FormatOption(BaseModel):
@@ -48,6 +59,10 @@ class CreateSessionRequest(ModelConfigOverrides):
     profile: str | None = Field(
         default=None, description="Configuration profile to use for this session"
     )
+    stop_after: StopAfter = Field(
+        default=None,
+        description="Pause after this stage completes; resume the session to continue",
+    )
 
 
 class ModelOptions(BaseModel):
@@ -75,6 +90,10 @@ class SessionAction(BaseModel):
 class ResumeSessionRequest(ModelConfigOverrides):
     from_stage: str | None = Field(
         default=None, description="Resume from after this stage"
+    )
+    stop_after: StopAfter = Field(
+        default=None,
+        description="Pause again after this stage completes once resumed",
     )
     profile: str | None = Field(
         default=None,
@@ -140,6 +159,7 @@ class HistoryOutputData(BaseModel):
     title: str = ""
     google_doc_url: str = ""
     word_count: int = 0
+    paused_after: str = ""
     review_findings: list[object] = Field(default_factory=list)
 
 
@@ -158,7 +178,9 @@ class HistorySessionData(BaseModel):
 class SessionSummary(BaseModel):
     session_id: str
     title: str = ""
-    status: Literal["running", "completed", "failed", "cancelled", "interrupted"]
+    status: Literal[
+        "running", "completed", "failed", "cancelled", "interrupted", "paused"
+    ]
     stage: str = "starting"
     cost_usd: float = 0.0
     duration_s: float = 0.0
@@ -171,7 +193,9 @@ class SessionSummary(BaseModel):
 class SessionDetail(BaseModel):
     session_id: str
     title: str = ""
-    status: Literal["running", "completed", "failed", "cancelled", "interrupted"]
+    status: Literal[
+        "running", "completed", "failed", "cancelled", "interrupted", "paused"
+    ]
     state: SessionStateSnapshot
     cost: CostSnapshot
     created_at: str = ""

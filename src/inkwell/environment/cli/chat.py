@@ -105,10 +105,13 @@ class InteractiveListener(PipelineListener):
         self,
         console: Console,
         input_queue: asyncio.Queue[str],
+        *,
+        session_id: str = "",
     ) -> None:
         super().__init__()
         self.console = console
         self.input_queue = input_queue
+        self.session_id = session_id
         self.current_stage = ""
 
     async def on_stage(self, stage: str, description: str) -> None:
@@ -134,6 +137,26 @@ class InteractiveListener(PipelineListener):
                 f"[dim]Review:[/dim] {len(output.review_findings)} findings",
                 title="Pipeline complete",
                 border_style="green",
+                expand=False,
+            )
+        )
+
+    async def on_pause(self, stage: str, doc_url: str) -> None:
+        label = STAGE_LABELS.get(stage, stage)
+        resume_cmd = (
+            f"inkwell resume {self.session_id}"
+            if self.session_id
+            else ("inkwell resume <session-id>")
+        )
+        self.console.print()
+        self.console.print(
+            Panel(
+                f"Stopped after [bold]{label}[/bold] as requested.\n\n"
+                f"[dim]Doc:[/dim]    {doc_url}\n\n"
+                "Review and comment in the Doc, then continue with:\n"
+                f"  [bold]{resume_cmd}[/bold]",
+                title="⏸ Paused",
+                border_style="yellow",
                 expand=False,
             )
         )
@@ -396,6 +419,7 @@ async def chat_session(
     resume_from_stage: str | None = None,
     target_format: str = "auto",
     existing_doc_id: str | None = None,
+    stop_after: str | None = None,
     verbose: bool = False,
 ) -> None:
     """Run the writing pipeline interactively.
@@ -416,7 +440,7 @@ async def chat_session(
     reset_metrics()
 
     input_queue: asyncio.Queue[str] = asyncio.Queue()
-    listener = InteractiveListener(console, input_queue)
+    listener = InteractiveListener(console, input_queue, session_id=session_id)
     pt_session = build_prompt_session(listener)
 
     with patch_stdout(raw=True):
@@ -473,6 +497,7 @@ async def chat_session(
                     listener=listener,
                     trace_holder=trace_holder,
                     session_state=session_state,
+                    stop_after=stop_after,
                 )
 
             if result.cost_usd is not None:

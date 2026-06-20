@@ -5,9 +5,11 @@ import {
   fetchFormats,
   fetchModelOptions,
   fetchProfiles,
+  fetchStopStages,
   uploadFile,
 } from "../api/client";
 import type { FormatOption, ModelOptions, ProfileResponse } from "../types";
+import { stageLabel } from "../types";
 
 const CUSTOM = "__custom__";
 
@@ -89,8 +91,11 @@ export function NewSession() {
   const [writerMode, setWriterMode] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
   const [stageOverrides, setStageOverrides] = useState<Record<string, string>>({});
+  const [stopStages, setStopStages] = useState<string[]>([]);
+  const [stopAfter, setStopAfter] = useState("");
 
   useEffect(() => {
+    fetchStopStages().then(setStopStages).catch(() => {});
     fetchFormats().then(setFormats).catch(() => {});
     fetchProfiles()
       .then((p) => {
@@ -190,6 +195,7 @@ export function NewSession() {
           writer_mode: writerMode || undefined,
           stage_models: Object.keys(overrides).length ? overrides : undefined,
         },
+        stopAfter || undefined,
       );
       navigate(`/session/${result.session_id}`);
     } catch (err) {
@@ -326,6 +332,31 @@ export function NewSession() {
             rows={3}
           />
         </div>
+
+        {stopStages.length > 0 && (
+          <div className="form-group">
+            <label htmlFor="stop-after">Pause after stage (optional)</label>
+            <select
+              id="stop-after"
+              value={stopAfter}
+              onChange={(e) => setStopAfter(e.target.value)}
+            >
+              <option value="">Run all the way through</option>
+              {stopStages.map((s) => (
+                <option key={s} value={s}>
+                  {stageLabel(s)}
+                </option>
+              ))}
+            </select>
+            {stopAfter && (
+              <p className="form-note" style={{ opacity: 0.7 }}>
+                The pipeline will pause after {stageLabel(stopAfter)} so you can
+                review and comment in the Doc. Resume it from the session page to
+                continue.
+              </p>
+            )}
+          </div>
+        )}
 
         {modelOptions && (
           <details className="model-config">

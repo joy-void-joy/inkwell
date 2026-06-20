@@ -474,6 +474,14 @@ class WritingOutput(BaseModel):
         description="Author voice profile used during writing",
     )
     summary: str = Field(default="", description="Brief 1-2 sentence editorial summary")
+    paused_after: str = Field(
+        default="",
+        description=(
+            "Stage the run paused after when launched with a stop point; empty "
+            "for a fully completed run. A paused run carries no finished content "
+            "yet — its snapshot lets a resume continue from the next stage."
+        ),
+    )
     stage_costs: dict[str, StageCostBreakdown] = Field(
         default_factory=dict,
         description="Per-stage cost breakdown populated after pipeline completion",

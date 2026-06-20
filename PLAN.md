@@ -68,6 +68,12 @@ single point of failure.
 - [x] GDoc working tabs host raw `.tex`; a read-only **Preview** tab hosts the rasterized
   compiled PDF (`InsertImage` from `/shared/`), refreshed at checkpoints. `stage_format`
   (`pipeline.py:3949`) rewritten for academic. Deliverable: `paper.tex` (+ PDF).
+- [x] `merge`/`rewrite` own the whole document: they write the preamble (a `\newtheorem`
+  for every theorem-style environment the body uses, every `\usepackage` it needs) and
+  verify with the `compile_latex` tool (`latex.py`), repairing against the tectonic log
+  until it builds — so the preamble matches what the body actually uses instead of a fixed
+  guess that drops `remark`/`notation`. `assemble_latex_document`'s constant preamble
+  survives only as a body-only fallback.
 
 **Fix #1a — academic TeX toolchain (custom image, explicit build)**
 

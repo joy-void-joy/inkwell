@@ -23,7 +23,11 @@ from typing import TYPE_CHECKING
 from googleapiclient.errors import HttpError
 from pydantic import BaseModel, Field
 
-from inkwell.agent.google_auth import ServiceFactory, get_service_factory
+from inkwell.agent.google_auth import (
+    GoogleAuthError,
+    ServiceFactory,
+    get_service_factory,
+)
 from inkwell.agent.markdown_to_docs import (
     clamp_ranges,
     clear_tab_request,
@@ -106,11 +110,13 @@ async def gdoc_nonfatal(operation: str) -> AsyncGenerator[None]:
 
     The Google Doc is a display surface — the pipeline snapshot holds the real
     data.  If a write/comment/tab-create fails, the author sees a stale Doc
-    but the pipeline keeps running.
+    but the pipeline keeps running.  A revoked or expired OAuth token surfaces
+    as GoogleAuthError; it is caught here too, so an auth lapse degrades the
+    live Doc to stale rather than killing a run whose real output is on disk.
     """
     try:
         yield
-    except (HttpError, OSError, TimeoutError, ToolError) as exc:
+    except (HttpError, OSError, TimeoutError, ToolError, GoogleAuthError) as exc:
         logger.warning("GDoc %s failed (non-fatal): %s", operation, exc)
 
 

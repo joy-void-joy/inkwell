@@ -466,6 +466,29 @@ def author_context_block(notes: PipelineNotes) -> str:
     return brief_block(notes) + directions_block(notes)
 
 
+def academic_assembly_block(target_format: str, output_path: Path) -> str:
+    """Document-ownership instructions for the academic merge/rewrite stages.
+
+    The section-writers emit body fragments; whoever assembles them owns the
+    whole paper, preamble included. This stage writes a complete, self-contained
+    LaTeX document and verifies it compiles, so the preamble declares exactly
+    what the body uses rather than a fixed guess made before the body existed.
+    """
+    if target_format != "academic":
+        return ""
+    return (
+        f"This stage owns the complete LaTeX document at {output_path}. Produce "
+        f"a self-contained paper: a preamble (\\documentclass, every "
+        f"\\usepackage the body needs, and a \\newtheorem for each theorem-style "
+        f"environment the body uses — remark, notation, example, claim, and the "
+        f"like), then \\begin{{document}} ... \\end{{document}} around the "
+        f"assembled sections. Then call compile_latex on that file: if it did "
+        f"not compile, the log names the exact failure — fix the preamble or "
+        f"body and compile again, until it builds. Never hand off a paper that "
+        f"does not compile.\n\n"
+    )
+
+
 def render_brief(instructions: str, deliverables: list[str]) -> str:
     """Format the author's instructions and deliverables as a brief block."""
     parts: list[str] = []
@@ -760,12 +783,17 @@ def build_source_server(
 def build_compute_server(
     sandbox: Sandbox,
     artifacts_dir: Path,
+    *,
+    include_latex: bool = False,
 ) -> tuple[dict[str, McpServerConfig], list[str]]:
     """MCP server with code execution (sandbox) and artifact query tools.
 
     Returns (servers_dict, tool_name_list) ready to merge into any stage.
+    With ``include_latex``, also exposes ``compile_latex`` so a document-owning
+    stage can verify and repair its assembled paper against the compiler.
     """
     from inkwell.agent.tools.citations import CITATION_TOOLS
+    from inkwell.agent.tools.latex import make_latex_tools
 
     tools = [
         *sandbox.create_tools(
@@ -779,6 +807,7 @@ def build_compute_server(
         ),
         *make_query_tools(artifacts_dir),
         *CITATION_TOOLS,
+        *(make_latex_tools(sandbox) if include_latex else []),
     ]
     server = create_mcp_server(
         name="compute",
@@ -1547,8 +1576,9 @@ async def merge_sections(
         f"glossary's canonical terms, stitch the seams between sections, and "
         f"cut only redundant re-openings. Do not rewrite, reorganize, or "
         f"smooth the author's voice.\n\n"
-        f"Write the assembled piece to: {output_path}"
+        f"Write the assembled piece to: {output_path}\n\n"
     )
+    task += academic_assembly_block(target_format, output_path)
 
     await query(
         task,
@@ -2157,8 +2187,9 @@ async def rewrite_final(
         f"Use list_research + read_finding to verify corrections against research findings. "
         f"If a style rules file is available, read it and enforce every "
         f"hard editing rule with zero remaining violations.\n\n"
-        f"Write the final piece to: {output_path}"
+        f"Write the final piece to: {output_path}\n\n"
     )
+    task += academic_assembly_block(target_format, output_path)
 
     collector = await query(
         task,
@@ -2541,7 +2572,11 @@ class PipelineRunner:
         if self.state is not None:
             self.state.shared_dir = shared_dir
         try:
-            servers, names = build_compute_server(sandbox, notes.artifacts_dir)
+            servers, names = build_compute_server(
+                sandbox,
+                notes.artifacts_dir,
+                include_latex=self.effective_format == "academic",
+            )
             yield StageCompute(servers, names, output_path, sandbox)
         finally:
             sandbox.stop()
@@ -4193,12 +4228,14 @@ class PipelineRunner:
         await self.update_overview()
 
     async def finalize_academic(self, body: str, plan: ArticlePlan) -> str:
-        """Assemble, compile, and publish the LaTeX paper.
+        """Compile and publish the paper the document-owning stages produced.
 
-        The content is already LaTeX (academic writers emit it), so the paper is
-        assembled and compiled directly: the Final tab carries the raw .tex, a
-        Preview tab shows the rasterized PDF, and both .tex and .pdf upload to
-        Drive as the deliverable.
+        Merge and rewrite emit a complete, compiling LaTeX document; this
+        compiles it once more for the deliverable and publishes: the Final tab
+        carries the raw .tex, a Preview tab shows the rasterized PDF, and both
+        .tex and .pdf upload to Drive with their links surfaced.
+        ``assemble_latex_document`` wraps a body-only draft as a fallback when
+        an upstream stage did not own the whole document.
         """
         from inkwell.agent.tools.google_docs import (
             do_upload_artifact,
@@ -4233,7 +4270,10 @@ class PipelineRunner:
             )
             if artifacts.tex_path:
                 async with gdoc_nonfatal("upload paper.tex"):
-                    await do_upload_artifact(artifacts.tex_path, "application/x-tex")
+                    _, tex_url = await do_upload_artifact(
+                        artifacts.tex_path, "application/x-tex"
+                    )
+                    await self.hooks.on_progress(f"Uploaded paper.tex: {tex_url}")
             if not artifacts.pdf_path:
                 logger.warning("LaTeX compile incomplete: %s", artifacts.log[-300:])
                 await self.hooks.on_progress(
@@ -4241,7 +4281,10 @@ class PipelineRunner:
                 )
                 return tex_source
             async with gdoc_nonfatal("upload paper.pdf"):
-                await do_upload_artifact(artifacts.pdf_path, "application/pdf")
+                _, pdf_url = await do_upload_artifact(
+                    artifacts.pdf_path, "application/pdf"
+                )
+                await self.hooks.on_progress(f"Uploaded paper.pdf: {pdf_url}")
             await self.write_preview_tab(sc.sandbox)
             return tex_source
 

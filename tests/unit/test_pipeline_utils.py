@@ -1,9 +1,12 @@
 """Tests for pipeline utility functions: slugify, voice refs."""
 
+from pathlib import Path
+
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.models import ArticlePlan, ReviewFinding
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
+    academic_assembly_block,
     add_voice_refs,
     author_context_block,
     brief_block,
@@ -176,3 +179,17 @@ class TestConstraintsFlowThroughPlan:
             (tmp_path / "plan.json").read_text(encoding="utf-8")
         )
         assert plan.constraints == ["self-contained; do not cite the source"]
+
+
+class TestAcademicAssemblyBlock:
+    def test_empty_for_non_academic(self) -> None:
+        assert academic_assembly_block("lesswrong", Path("/x/out.md")) == ""
+        assert academic_assembly_block("blog", Path("/x/out.md")) == ""
+        assert academic_assembly_block("auto", Path("/x/out.md")) == ""
+
+    def test_academic_owns_document_and_compiles(self) -> None:
+        block = academic_assembly_block("academic", Path("/work/paper.tex"))
+        assert "/work/paper.tex" in block
+        assert "compile_latex" in block
+        assert "\\newtheorem" in block
+        assert "preamble" in block.lower()

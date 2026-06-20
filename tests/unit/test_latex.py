@@ -1,6 +1,21 @@
-"""Tests for LaTeX assembly and title escaping."""
+"""Tests for LaTeX assembly, title escaping, and the compile_latex tool."""
 
-from inkwell.agent.tools.latex import assemble_latex_document, escape_latex
+import json
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from inkwell.agent.tools import latex as latex_mod
+from inkwell.agent.tools.latex import (
+    CompileLatexInput,
+    LatexArtifacts,
+    assemble_latex_document,
+    escape_latex,
+    make_latex_tools,
+)
+from lup.mcp import LupMcpTool
+from lup.sandbox import Sandbox
 
 
 class TestEscapeLatex:
@@ -34,3 +49,55 @@ class TestAssembleLatexDocument:
     def test_body_with_preamble_passes_through(self) -> None:
         body = "\\documentclass{article}\\begin{document}x\\end{document}"
         assert assemble_latex_document(body, "T") == body
+
+
+def compile_latex_tool() -> LupMcpTool:
+    tools = make_latex_tools(cast(Sandbox, object()))
+    return next(t for t in tools if t.sdk_tool.name == "compile_latex")
+
+
+class TestCompileLatexTool:
+    async def test_missing_file_is_actionable_error(self) -> None:
+        tool = compile_latex_tool()
+        result = await tool.sdk_tool.handler(
+            CompileLatexInput(tex_path="/no/such/paper.tex").model_dump()
+        )
+        assert result.get("is_error") is True
+
+    async def test_reports_compiled_when_pdf_produced(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        tex = tmp_path / "paper.tex"
+        tex.write_text("\\documentclass{article}\\begin{document}x\\end{document}")
+
+        async def fake_compile(_source: str, _sandbox: Sandbox) -> LatexArtifacts:
+            return LatexArtifacts(
+                tex_path=str(tex), pdf_path=str(tmp_path / "paper.pdf"), log="ok"
+            )
+
+        monkeypatch.setattr(latex_mod, "compile_tex", fake_compile)
+        result = await compile_latex_tool().sdk_tool.handler(
+            CompileLatexInput(tex_path=str(tex)).model_dump()
+        )
+        payload = json.loads(str(result["content"][0]["text"]))
+        assert payload["compiled"] is True
+
+    async def test_reports_failure_with_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        tex = tmp_path / "paper.tex"
+        tex.write_text("\\begin{remark}x\\end{remark}")
+
+        async def fake_compile(_source: str, _sandbox: Sandbox) -> LatexArtifacts:
+            return LatexArtifacts(
+                tex_path=str(tex),
+                log="! LaTeX Error: Environment remark undefined.",
+            )
+
+        monkeypatch.setattr(latex_mod, "compile_tex", fake_compile)
+        result = await compile_latex_tool().sdk_tool.handler(
+            CompileLatexInput(tex_path=str(tex)).model_dump()
+        )
+        payload = json.loads(str(result["content"][0]["text"]))
+        assert payload["compiled"] is False
+        assert "remark undefined" in payload["log"]

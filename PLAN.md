@@ -21,6 +21,13 @@ have shipped:
 - **Interactive chat CLI**: chat as default; concurrent stdin + agent response; in-chat
   slash commands; Ctrl+C interrupt. Research tools: Exa, arXiv, FRED, Polymarket/Manifold,
   Wikipedia. Formats: academic, LessWrong, Twitter, blog, memo, dialog.
+- **Stop-after pause point**: `--stop-after <stage>` (and web "Pause after stage")
+  runs the pipeline through a named checkpoint stage, then halts cleanly so the author
+  can review/comment in the Doc before continuing. Built on the existing snapshot/resume
+  machinery — the pause leaves a checkpoint that `inkwell resume` (or the web resume
+  controls) picks up from the next stage. `run_stage` is the single stage-boundary both
+  `run()` and `run_from()` funnel through, so the stop point fires in exactly one place;
+  a paused run surfaces as status `paused` everywhere (CLI, session list, detail).
 
 ## What Remains
 

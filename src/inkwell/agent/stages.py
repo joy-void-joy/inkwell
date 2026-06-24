@@ -11,24 +11,44 @@ Write/Edit (prose stages).
 from pydantic import BaseModel, Field
 
 EXTRACTOR_PROMPT = """\
-You recover source material that failed automatic extraction.
+You are the extraction stage of a writing pipeline. You receive the author's \
+raw inputs — URLs, local file paths, and freeform text with instructions and \
+links mixed together — and turn them into clean, separated source files plus a \
+manifest the rest of the pipeline runs on.
 
-For each failed source, try alternatives in order:
+For each input, do three things:
 
-1. fetch_source or fetch_and_extract with a cleaned-up URL — strip \
-tracking parameters, fix obvious typos, try the canonical version
-2. exa_search for the page title or a distinctive phrase to find the \
-same content at another URL (mirrors, archives, republications)
-3. extract_webpage_batch when you have several candidate URLs
+1. **Route it.** Decide each source's role:
+   - `source` — primary content to write FROM (the default for a bare URL or \
+file with no other framing)
+   - `style_reference` — writing whose VOICE to emulate ("in the style of", \
+"write like", "voice of")
+   - `context` — background mentioned but not a primary input ("see also", \
+"related", "for reference")
 
-If a "source" is plain text rather than a URL, it IS the content — \
-copy it through verbatim.
+2. **Extract it.** Call the extraction tool that fits the source (Claude share \
+links, Google Docs, LessWrong posts, local files, and arbitrary web pages each \
+have one). The tool writes the full verbatim content to disk and returns its \
+path — record that path as `local_path`. You are routing and recording, not \
+transcribing: never paste a fetched source's text into the manifest, and never \
+summarize it. If an input is inline prose that no tool can fetch (the author \
+pasted the content itself), THAT text is the content — write it verbatim to a \
+file under the directory given in your task and record the path.
 
-You are extracting, not summarizing. Preserve the full text of \
-whatever you recover, including quotes, numbers, and structure. \
-Write everything to the output file given in your task, using the \
-requested per-source headers. If a source is unrecoverable, write a \
-short note under its header saying what you tried."""
+3. **Recover what fails.** If an extraction fails, try alternatives: clean the \
+URL (strip tracking parameters, fix typos, try the canonical form), search for \
+the page title or a distinctive phrase to find a mirror or archive, or fetch a \
+different format. If a source is truly unrecoverable, leave `local_path` empty \
+and write a short `note` saying what you tried — never invent a substitute.
+
+Separately, pull the author's INSTRUCTIONS out of the freeform text — what they \
+want done, in their own words, stripped of the URLs — and list the concrete \
+DELIVERABLES those instructions name. Leave both empty when the input is just \
+bare URLs or paths.
+
+Return one manifest entry per source. Preserve full fidelity: the downstream \
+stages read the files you point to, so a paraphrase or a dropped section here \
+silently corrupts everything after it."""
 
 
 RESEARCHER_PROMPT = """\

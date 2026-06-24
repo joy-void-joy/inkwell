@@ -86,7 +86,7 @@ from inkwell.agent.stages import (
     STYLE_REVIEWER_PROMPT,
     get_format_guidance,
 )
-from inkwell.agent.stages import EXTRACTOR_PROMPT
+from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import (
     EXTRACT_TOOLS as EXTRACT_MCP_TOOLS,
@@ -1007,45 +1007,6 @@ async def extract_single_source(url: str, existing_doc_id: str | None) -> str:
 
     result = await do_fetch_source(url)
     return Path(result.content.path).read_text(encoding="utf-8")
-
-
-async def extract_with_agent_fallback(
-    failed_urls: list[str],
-    source_dir: Path,
-    *,
-    source_servers: dict[str, McpServerConfig],
-    source_tool_names: list[str],
-    trace_logger: TraceLogger | None = None,
-    cost_accumulator: CostAccumulator | None = None,
-) -> list[str]:
-    """Fall back to an agent for URLs that failed deterministic extraction."""
-    source_list = "\n".join(f"- {url}" for url in failed_urls)
-    task = (
-        f"These sources failed automatic extraction. Try alternatives:\n"
-        f"1. Use exa_search to find the content elsewhere\n"
-        f"2. Try a different URL format (remove tracking params, try archive)\n"
-        f"3. Search for the page title\n\n"
-        f"Sources:\n{source_list}\n\n"
-        f"Write extracted content to: {source_dir / 'recovered.md'}\n"
-        f"Separate each with '--- Source: <url> ---' headers."
-    )
-    await query(
-        task,
-        model=stage_model("extract"),
-        system_prompt=EXTRACTOR_PROMPT,
-        tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
-        mcp_servers=source_servers,
-        allowed_tools=source_tool_names,
-        prefix="[extract:fallback] ",
-        trace_logger=trace_logger,
-        cost_accumulator=cost_accumulator,
-    )
-    recovered_path = source_dir / "recovered.md"
-    if recovered_path.exists():
-        return [recovered_path.read_text(encoding="utf-8")]
-    return []
 
 
 async def plan_article(
@@ -2927,7 +2888,7 @@ class PipelineRunner:
         policy_token = session_policy.set(self.session_policy_for_run())
 
         try:
-            for stage_name in ("preprocess", "extract", "voice", "plan"):
+            for stage_name in ("extract", "voice", "plan"):
                 await self.run_stage(stage_name)
             await self.run_stage("research")
             for stage_name in ("assumptions", "refine"):
@@ -3008,7 +2969,7 @@ class PipelineRunner:
         try:
             stages = ["preprocess", *DISPLAY_STAGES]
             last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
-            remaining = stages[last_idx + 1 :]
+            remaining = [s for s in stages[last_idx + 1 :] if s != "preprocess"]
             if "write" not in remaining and self.write_stage_produced_nothing():
                 remaining = stages[stages.index("write") :]
 
@@ -3370,39 +3331,6 @@ class PipelineRunner:
         )
         return len(comments)
 
-    async def stage_preprocess(self) -> None:
-        """Classify sources by role and extract author instructions."""
-        await self.announce_stage("preprocess", "Classifying sources")
-
-        from inkwell.agent.tools.preprocess import preprocess_sources
-
-        result = await preprocess_sources(self.sources)
-        notes = self.ensure_notes()
-        notes.save_artifact("preprocess", result)
-
-        self.snapshot.raw_sources = result.raw_inputs
-        self.snapshot.author_instructions = result.instructions
-        self.snapshot.author_deliverables = result.deliverables
-        self.snapshot.runtime_style_refs = result.style_refs
-        self.snapshot.stage = "preprocess"
-
-        routed_sources = result.sources
-        if routed_sources:
-            self.sources = routed_sources
-        self.refs = list(set(self.refs + result.style_refs + result.context_refs))
-
-        await self.save_snapshot()
-
-        parts: list[str] = []
-        if result.instructions:
-            parts.append("instructions extracted")
-        parts.append(f"{len(result.sources)} source(s)")
-        if result.style_refs:
-            parts.append(f"{len(result.style_refs)} style ref(s)")
-        if result.context_refs:
-            parts.append(f"{len(result.context_refs)} context ref(s)")
-        await self.hooks.on_progress(f"Preprocess: {', '.join(parts)}")
-
     async def stage_extract(self) -> None:
         await self.announce_stage("extract", "Extracting source material")
         await self.update_overview(active_stage="extract")
@@ -3412,6 +3340,38 @@ class PipelineRunner:
         source_dir.mkdir(parents=True, exist_ok=True)
         output_path = source_dir / "conversation.md"
 
+        original_inputs = list(self.sources) + list(self.refs)
+
+        self_doc_sources = [
+            s
+            for s in self.sources
+            if self.existing_doc_id
+            and GDOC_URL_PATTERN.search(s)
+            and parse_gdoc_id(s) == self.existing_doc_id
+        ]
+        agent_inputs = [s for s in self.sources if s not in self_doc_sources]
+
+        manifest = await run_extraction_agent(
+            agent_inputs,
+            source_dir,
+            source_servers=self.source_servers,
+            source_tool_names=self.source_tool_names,
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        notes.save_artifact("extract", manifest)
+
+        self.snapshot.raw_sources = list(self.sources)
+        self.snapshot.author_instructions = manifest.instructions
+        self.snapshot.author_deliverables = manifest.deliverables
+        self.snapshot.runtime_style_refs = [
+            e.raw_input for e in manifest.sources if e.role == "style_reference"
+        ]
+        routed = [e.raw_input for e in manifest.sources if e.role == "source"]
+        self.sources = (routed or agent_inputs) + self_doc_sources
+        non_source = [e.raw_input for e in manifest.sources if e.role != "source"]
+        self.refs = list(set(self.refs + non_source))
+
         source_doc_id = ""
         for src in self.sources:
             if not source_doc_id and GDOC_URL_PATTERN.search(src):
@@ -3419,34 +3379,27 @@ class PipelineRunner:
                 self.state.source_doc_id = source_doc_id
                 self.source_is_extracted_gdoc = True
 
-        all_urls = list(self.sources) + list(self.refs)
-        results = await asyncio.gather(
-            *(extract_single_source(url, self.existing_doc_id) for url in all_urls),
-            return_exceptions=True,
-        )
-
-        extracted_parts: list[str] = []
-        failed: list[str] = []
-        for url, result in zip(all_urls, results):
-            if isinstance(result, Exception):
-                logger.warning("Extraction failed for %s: %s", url, result)
-                failed.append(url)
-            elif result:
-                extracted_parts.append(f"--- Source: {url} ---\n\n{result}")
-
-        if failed:
+        extracted_parts, unrecovered = assemble_sources(manifest)
+        covered = {e.raw_input for e in manifest.sources}
+        unrecovered += [value for value in original_inputs if value not in covered]
+        unrecovered = list(dict.fromkeys(unrecovered))
+        if unrecovered:
             await self.hooks.on_progress(
-                f"Retrying {len(failed)} failed source(s) with agent fallback"
+                f"Deterministically extracting {len(unrecovered)} source(s) "
+                f"the agent left unrecovered"
             )
-            recovered = await extract_with_agent_fallback(
-                failed,
-                source_dir,
-                source_servers=self.source_servers,
-                source_tool_names=self.source_tool_names,
-                trace_logger=self.trace_logger,
-                cost_accumulator=self.cost_accumulator,
+            results = await asyncio.gather(
+                *(
+                    extract_single_source(url, self.existing_doc_id)
+                    for url in unrecovered
+                ),
+                return_exceptions=True,
             )
-            extracted_parts.extend(recovered)
+            for url, result in zip(unrecovered, results):
+                if isinstance(result, BaseException):
+                    logger.warning("Extraction failed for %s: %s", url, result)
+                elif result.strip():
+                    extracted_parts.append(f"--- Source: {url} ---\n\n{result}")
 
         conversation = "\n\n".join(extracted_parts)
         output_path.write_text(conversation, encoding="utf-8")

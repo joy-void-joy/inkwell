@@ -17,6 +17,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 import sh
 import typer
 from pydantic import BaseModel
@@ -360,22 +361,16 @@ def create(
 ) -> None:
     """Create a new PR."""
     try:
-        raw = str(
-            gh(
-                "pr",
-                "create",
-                "--base",
-                base,
-                "--title",
-                title,
-                "--body",
-                body,
-                "--json",
-                "number,url",
-            )
-        ).strip()
-        data = json.loads(raw)
-        result = CreateResult(number=data["number"], url=data["url"])
+        # gh pr create has no --json flag; on success it prints the new PR's
+        # URL on stdout (e.g. https://github.com/owner/repo/pull/7), whose
+        # final path segment is the PR number.
+        url = (
+            str(gh("pr", "create", "--base", base, "--title", title, "--body", body))
+            .strip()
+            .splitlines()[-1]
+            .strip()
+        )
+        result = CreateResult(number=int(Path(urlparse(url).path).name), url=url)
         output_result(result, as_json)
     except sh.ErrorReturnCode as e:
         stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else str(e.stderr)

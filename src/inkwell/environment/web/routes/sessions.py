@@ -17,6 +17,7 @@ from inkwell.environment.web.models import (
     SessionDetail,
     SessionSummary,
     UploadResult,
+    UploadTextRequest,
 )
 from inkwell.environment.web.session_manager import SessionManager
 
@@ -179,6 +180,7 @@ async def restart_session(
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "inkwell_uploads"
 ALLOWED_EXTENSIONS = {".pdf", ".md", ".txt", ".html", ".htm"}
+TEXT_EXTENSIONS = {".md", ".txt", ".html", ".htm"}
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
@@ -203,6 +205,57 @@ async def upload_file(file: UploadFile) -> UploadResult:
         counter += 1
     dest.write_bytes(content)
     return UploadResult(path=str(dest), filename=dest.name, size=len(content))
+
+
+def coerce_text_filename(name: str) -> str:
+    """Force a pasted document's name to a supported text extension.
+
+    Pasted content is always text, so a missing or non-text suffix (the user
+    typed a bare name, or a binary extension that can't apply to text) becomes
+    ``.md`` — keeping the file readable by the same extractor that ingests
+    uploaded ``.md``/``.txt``/``.html`` documents.
+    """
+    path = Path(name.strip())
+    stem = path.stem or "pasted"
+    suffix = path.suffix.lower()
+    if suffix not in TEXT_EXTENSIONS:
+        suffix = ".md"
+    return f"{stem}{suffix}"
+
+
+def free_upload_path(filename: str) -> Path:
+    """A non-colliding path under the upload dir, suffixing on collision."""
+    dest = UPLOAD_DIR / filename
+    counter = 1
+    while dest.exists():
+        dest = UPLOAD_DIR / f"{Path(filename).stem}_{counter}{Path(filename).suffix}"
+        counter += 1
+    return dest
+
+
+@router.post("/upload-text", status_code=201)
+async def upload_text(req: UploadTextRequest) -> UploadResult:
+    """Save pasted/edited text as an upload, usable as a source or reference.
+
+    Lets the author turn text they have in hand into a named document without
+    the round trip of saving a local file first. An edit passes the previous
+    upload as ``replace_path``: that file is dropped before the rewrite so the
+    name is free to reuse, giving a stable filename across edits and leaving no
+    orphan copies behind.
+    """
+    raw = req.content.encode("utf-8")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Text too large (max 100MB)")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    if req.replace_path:
+        old = Path(req.replace_path).resolve()
+        if UPLOAD_DIR.resolve() in old.parents and old.is_file():
+            old.unlink()
+
+    dest = free_upload_path(coerce_text_filename(req.filename))
+    dest.write_text(req.content, encoding="utf-8")
+    return UploadResult(path=str(dest), filename=dest.name, size=len(raw))
 
 
 @router.post("/{session_id}/action")

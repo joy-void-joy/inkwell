@@ -141,6 +141,24 @@ export async function uploadFile(file: File): Promise<UploadResult> {
   return res.json();
 }
 
+export async function uploadText(
+  filename: string,
+  content: string,
+  replacePath?: string,
+): Promise<UploadResult> {
+  const res = await fetch(`${BASE}/sessions/upload-text`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename,
+      content,
+      replace_path: replacePath ?? null,
+    }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function sendAction(
   id: string,
   action: string,

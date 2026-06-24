@@ -581,6 +581,38 @@ textarea { resize: none; }
 }
 .file-chip-remove:hover { color: var(--red); background: rgba(221, 102, 102, 0.1); }
 
+.file-chip-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.file-chip-edit:hover { color: var(--accent); background: rgba(109, 158, 235, 0.1); }
+
+.paste-text-button { margin-top: 8px; font-size: 0.78rem; }
+
+.text-composer {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+}
+.text-composer-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.text-composer-actions button { width: auto; }
+
 /* --- Settings / Profiles --- */
 
 .settings-page code {

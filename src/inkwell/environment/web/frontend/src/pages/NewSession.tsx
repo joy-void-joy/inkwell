@@ -7,6 +7,7 @@ import {
   fetchProfiles,
   fetchStopStages,
   uploadFile,
+  uploadText,
 } from "../api/client";
 import type { FormatOption, ModelOptions, ProfileResponse } from "../types";
 import { stageLabel } from "../types";
@@ -65,12 +66,115 @@ interface UploadedFile {
   serverPath: string;
   filename: string;
   size: number;
+  text?: string;
+}
+
+interface ComposerTarget {
+  area: "source" | "reference";
+  editIndex: number | null;
 }
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function TextFileComposer({
+  initialName,
+  initialText,
+  placeholder,
+  saving,
+  onSave,
+  onCancel,
+}: {
+  initialName: string;
+  initialText: string;
+  placeholder: string;
+  saving: boolean;
+  onSave: (name: string, text: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(initialName);
+  const [text, setText] = useState(initialText);
+
+  return (
+    <div className="text-composer">
+      <input
+        className="text-composer-name"
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="filename (e.g. notes.md)"
+      />
+      <textarea
+        className="text-composer-body"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={placeholder}
+        rows={6}
+        autoFocus
+      />
+      <div className="text-composer-actions">
+        <button type="button" onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={saving || !text.trim()}
+          onClick={() => onSave(name.trim(), text)}
+        >
+          {saving ? "Saving..." : "Save file"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FileChips({
+  files,
+  onEdit,
+  onRemove,
+}: {
+  files: UploadedFile[];
+  onEdit: (index: number) => void;
+  onRemove: (index: number) => void;
+}) {
+  if (files.length === 0) return null;
+  return (
+    <div className="file-list">
+      {files.map((f, i) => (
+        <div key={f.serverPath} className="file-chip">
+          <span className="file-chip-name">{f.filename}</span>
+          <span className="file-chip-size">{formatBytes(f.size)}</span>
+          {f.text !== undefined && (
+            <button
+              type="button"
+              className="file-chip-edit"
+              title="Edit text"
+              onClick={(e) => {
+                e.stopPropagation();
+                onEdit(i);
+              }}
+            >
+              ✎
+            </button>
+          )}
+          <button
+            type="button"
+            className="file-chip-remove"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove(i);
+            }}
+          >
+            &times;
+          </button>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function NewSession() {
@@ -85,6 +189,9 @@ export function NewSession() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [refFiles, setRefFiles] = useState<UploadedFile[]>([]);
+  const [composer, setComposer] = useState<ComposerTarget | null>(null);
+  const [savingText, setSavingText] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [modelOptions, setModelOptions] = useState<ModelOptions | null>(null);
@@ -159,8 +266,51 @@ export function NewSession() {
     [handleFiles],
   );
 
+  // Removing a chip shifts indices, so an open edit of that area would now
+  // point at the wrong file — cancel it. A new paste (editIndex null) keeps
+  // its draft.
+  const cancelEditOn = (area: ComposerTarget["area"]) => {
+    if (composer?.area === area && composer.editIndex !== null) setComposer(null);
+  };
+
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
+    cancelEditOn("source");
+  };
+
+  const removeRefFile = (index: number) => {
+    setRefFiles((prev) => prev.filter((_, i) => i !== index));
+    cancelEditOn("reference");
+  };
+
+  const saveTextFile = async (name: string, text: string) => {
+    if (!composer) return;
+    const { area, editIndex } = composer;
+    const list = area === "source" ? files : refFiles;
+    const setList = area === "source" ? setFiles : setRefFiles;
+    const replacePath = editIndex !== null ? list[editIndex]?.serverPath : undefined;
+
+    setSavingText(true);
+    setError(null);
+    try {
+      const result = await uploadText(name, text, replacePath);
+      const entry: UploadedFile = {
+        serverPath: result.path,
+        filename: result.filename,
+        size: result.size,
+        text,
+      };
+      setList((prev) =>
+        editIndex === null
+          ? [...prev, entry]
+          : prev.map((f, i) => (i === editIndex ? entry : f)),
+      );
+      setComposer(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save text");
+    } finally {
+      setSavingText(false);
+    }
   };
 
   const hasSource = source.trim() || files.length > 0;
@@ -178,10 +328,13 @@ export function NewSession() {
       if (source.trim()) sources.push(source.trim());
       for (const f of files) sources.push(f.serverPath);
 
-      const refList = refs
-        .split("\n")
-        .map((r) => r.trim())
-        .filter(Boolean);
+      const refList = [
+        ...refs
+          .split("\n")
+          .map((r) => r.trim())
+          .filter(Boolean),
+        ...refFiles.map((f) => f.serverPath),
+      ];
       const overrides = Object.fromEntries(
         Object.entries(stageOverrides).filter(([, v]) => v.trim()),
       );
@@ -278,23 +431,39 @@ export function NewSession() {
             )}
           </div>
 
-          {files.length > 0 && (
-            <div className="file-list">
-              {files.map((f, i) => (
-                <div key={f.serverPath} className="file-chip">
-                  <span className="file-chip-name">{f.filename}</span>
-                  <span className="file-chip-size">{formatBytes(f.size)}</span>
-                  <button
-                    type="button"
-                    className="file-chip-remove"
-                    onClick={(e) => { e.stopPropagation(); removeFile(i); }}
-                  >
-                    &times;
-                  </button>
-                </div>
-              ))}
-            </div>
+          {composer?.area === "source" ? (
+            <TextFileComposer
+              key={`source-${composer.editIndex ?? "new"}`}
+              initialName={
+                composer.editIndex !== null
+                  ? (files[composer.editIndex]?.filename ?? "")
+                  : ""
+              }
+              initialText={
+                composer.editIndex !== null
+                  ? (files[composer.editIndex]?.text ?? "")
+                  : ""
+              }
+              placeholder="Paste or type text — saved as a source file the pipeline ingests like an upload"
+              saving={savingText}
+              onSave={saveTextFile}
+              onCancel={() => setComposer(null)}
+            />
+          ) : (
+            <button
+              type="button"
+              className="paste-text-button"
+              onClick={() => setComposer({ area: "source", editIndex: null })}
+            >
+              + Paste text as file
+            </button>
           )}
+
+          <FileChips
+            files={files}
+            onEdit={(i) => setComposer({ area: "source", editIndex: i })}
+            onRemove={removeFile}
+          />
         </div>
 
         <div className="form-group">
@@ -330,6 +499,40 @@ export function NewSession() {
             onChange={(e) => setRefs(e.target.value)}
             placeholder="https://arxiv.org/abs/...\nhttps://example.com/paper.pdf"
             rows={3}
+          />
+
+          {composer?.area === "reference" ? (
+            <TextFileComposer
+              key={`reference-${composer.editIndex ?? "new"}`}
+              initialName={
+                composer.editIndex !== null
+                  ? (refFiles[composer.editIndex]?.filename ?? "")
+                  : ""
+              }
+              initialText={
+                composer.editIndex !== null
+                  ? (refFiles[composer.editIndex]?.text ?? "")
+                  : ""
+              }
+              placeholder="Paste or type reference text — saved as a file and passed as a reference"
+              saving={savingText}
+              onSave={saveTextFile}
+              onCancel={() => setComposer(null)}
+            />
+          ) : (
+            <button
+              type="button"
+              className="paste-text-button"
+              onClick={() => setComposer({ area: "reference", editIndex: null })}
+            >
+              + Paste text as file
+            </button>
+          )}
+
+          <FileChips
+            files={refFiles}
+            onEdit={(i) => setComposer({ area: "reference", editIndex: i })}
+            onRemove={removeRefFile}
           />
         </div>
 

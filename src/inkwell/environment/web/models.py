@@ -30,6 +30,18 @@ class UploadResult(BaseModel):
     size: int = Field(description="File size in bytes")
 
 
+class UploadTextRequest(BaseModel):
+    filename: str = Field(
+        description="Desired file name; a text extension (.md/.txt/.html) is enforced"
+    )
+    content: str = Field(description="Pasted or edited text to save as a file")
+    replace_path: str | None = Field(
+        default=None,
+        description="Existing upload to replace in place (the edit case), so the "
+        "saved file keeps a stable name across edits instead of accumulating copies",
+    )
+
+
 class ModelConfigOverrides(BaseModel):
     """Per-session model/pipeline overrides, applied on top of the profile."""
 

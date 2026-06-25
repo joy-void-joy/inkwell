@@ -80,11 +80,28 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Attachments live only in component state, so an HMR update or accidental
+// reload between upload and submit drops them while the uploaded file lingers
+// on the server — the silent loss this guards against. Persist them so a
+// remount restores the chips instead of leaving them behind.
+const FILES_KEY = "inkwell.newSession.files";
+const REF_FILES_KEY = "inkwell.newSession.refFiles";
+
+function loadStoredFiles(key: string): UploadedFile[] {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as UploadedFile[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 function TextFileComposer({
   initialName,
   initialText,
   placeholder,
   saving,
+  error,
   onSave,
   onCancel,
 }: {
@@ -92,6 +109,7 @@ function TextFileComposer({
   initialText: string;
   placeholder: string;
   saving: boolean;
+  error: string | null;
   onSave: (name: string, text: string) => void;
   onCancel: () => void;
 }) {
@@ -128,6 +146,7 @@ function TextFileComposer({
           {saving ? "Saving..." : "Save file"}
         </button>
       </div>
+      {error && <div className="error-message text-composer-error">{error}</div>}
     </div>
   );
 }
@@ -188,9 +207,12 @@ export function NewSession() {
   const [refs, setRefs] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [files, setFiles] = useState<UploadedFile[]>([]);
-  const [refFiles, setRefFiles] = useState<UploadedFile[]>([]);
+  const [files, setFiles] = useState<UploadedFile[]>(() => loadStoredFiles(FILES_KEY));
+  const [refFiles, setRefFiles] = useState<UploadedFile[]>(() =>
+    loadStoredFiles(REF_FILES_KEY),
+  );
   const [composer, setComposer] = useState<ComposerTarget | null>(null);
+  const [composerError, setComposerError] = useState<string | null>(null);
   const [savingText, setSavingText] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -218,6 +240,14 @@ export function NewSession() {
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    sessionStorage.setItem(FILES_KEY, JSON.stringify(files));
+  }, [files]);
+
+  useEffect(() => {
+    sessionStorage.setItem(REF_FILES_KEY, JSON.stringify(refFiles));
+  }, [refFiles]);
 
   const setStageModel = (stage: string, model: string) => {
     setStageOverrides((prev) => {
@@ -266,6 +296,18 @@ export function NewSession() {
     [handleFiles],
   );
 
+  // Opening a fresh composer must drop a previous save's error so it doesn't
+  // greet the next paste; closing does too.
+  const openComposer = (target: ComposerTarget) => {
+    setComposerError(null);
+    setComposer(target);
+  };
+
+  const closeComposer = () => {
+    setComposerError(null);
+    setComposer(null);
+  };
+
   // Removing a chip shifts indices, so an open edit of that area would now
   // point at the wrong file — cancel it. A new paste (editIndex null) keeps
   // its draft.
@@ -291,7 +333,7 @@ export function NewSession() {
     const replacePath = editIndex !== null ? list[editIndex]?.serverPath : undefined;
 
     setSavingText(true);
-    setError(null);
+    setComposerError(null);
     try {
       const result = await uploadText(name, text, replacePath);
       const entry: UploadedFile = {
@@ -307,7 +349,7 @@ export function NewSession() {
       );
       setComposer(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save text");
+      setComposerError(err instanceof Error ? err.message : "Failed to save text");
     } finally {
       setSavingText(false);
     }
@@ -319,6 +361,10 @@ export function NewSession() {
     e.preventDefault();
     if (!hasSource) return;
     if (selected?.accepts_description && !customFormat.trim()) return;
+    if (composer !== null) {
+      setError("Save or cancel your pasted text first — it isn't attached yet.");
+      return;
+    }
 
     setSubmitting(true);
     setError(null);
@@ -350,6 +396,8 @@ export function NewSession() {
         },
         stopAfter || undefined,
       );
+      sessionStorage.removeItem(FILES_KEY);
+      sessionStorage.removeItem(REF_FILES_KEY);
       navigate(`/session/${result.session_id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create session");
@@ -446,14 +494,15 @@ export function NewSession() {
               }
               placeholder="Paste or type text — saved as a source file the pipeline ingests like an upload"
               saving={savingText}
+              error={composerError}
               onSave={saveTextFile}
-              onCancel={() => setComposer(null)}
+              onCancel={closeComposer}
             />
           ) : (
             <button
               type="button"
               className="paste-text-button"
-              onClick={() => setComposer({ area: "source", editIndex: null })}
+              onClick={() => openComposer({ area: "source", editIndex: null })}
             >
               + Paste text as file
             </button>
@@ -461,7 +510,7 @@ export function NewSession() {
 
           <FileChips
             files={files}
-            onEdit={(i) => setComposer({ area: "source", editIndex: i })}
+            onEdit={(i) => openComposer({ area: "source", editIndex: i })}
             onRemove={removeFile}
           />
         </div>
@@ -516,14 +565,15 @@ export function NewSession() {
               }
               placeholder="Paste or type reference text — saved as a file and passed as a reference"
               saving={savingText}
+              error={composerError}
               onSave={saveTextFile}
-              onCancel={() => setComposer(null)}
+              onCancel={closeComposer}
             />
           ) : (
             <button
               type="button"
               className="paste-text-button"
-              onClick={() => setComposer({ area: "reference", editIndex: null })}
+              onClick={() => openComposer({ area: "reference", editIndex: null })}
             >
               + Paste text as file
             </button>
@@ -531,7 +581,7 @@ export function NewSession() {
 
           <FileChips
             files={refFiles}
-            onEdit={(i) => setComposer({ area: "reference", editIndex: i })}
+            onEdit={(i) => openComposer({ area: "reference", editIndex: i })}
             onRemove={removeRefFile}
           />
         </div>

@@ -1,5 +1,6 @@
 """REST endpoints for session management."""
 
+import logging
 import tempfile
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from inkwell.environment.web.models import (
 )
 from inkwell.environment.web.session_manager import SessionManager
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 formats_router = APIRouter(prefix="/api", tags=["config"])
 
@@ -36,6 +39,22 @@ def get_manager() -> SessionManager:
     if manager is None:
         raise RuntimeError("SessionManager not initialized")
     return manager
+
+
+def summarize_source(value: str) -> str:
+    """A short, log-safe description of one source/ref input.
+
+    Distinguishes an uploaded file path from a URL from freeform text and
+    previews it, so a dropped attachment is obvious in the log without dumping
+    a whole pasted document.
+    """
+    stripped = value.strip()
+    path = Path(stripped)
+    if path.is_file():
+        return f"file:{path} ({path.stat().st_size} B)"
+    if stripped.startswith(("http://", "https://")):
+        return f"url:{stripped[:80]}"
+    return f"text[{len(stripped)}]:{stripped[:60]!r}"
 
 
 @formats_router.get("/formats")
@@ -100,6 +119,13 @@ async def get_stop_stages() -> list[str]:
 @router.post("", status_code=201)
 async def create_session(req: CreateSessionRequest) -> dict[str, str]:
     mgr = get_manager()
+    logger.info(
+        "create_session: %d source(s)=%s refs=%s format=%s",
+        len(req.sources),
+        [summarize_source(s) for s in req.sources],
+        [summarize_source(r) for r in (req.refs or [])],
+        req.target_format,
+    )
     session_id = await mgr.create_session(
         sources=req.sources,
         refs=req.refs or None,
@@ -204,6 +230,7 @@ async def upload_file(file: UploadFile) -> UploadResult:
         dest = UPLOAD_DIR / f"{Path(file.filename).stem}_{counter}{suffix}"
         counter += 1
     dest.write_bytes(content)
+    logger.info("upload: %s (%d B) -> %s", file.filename, len(content), dest)
     return UploadResult(path=str(dest), filename=dest.name, size=len(content))
 
 
@@ -255,6 +282,13 @@ async def upload_text(req: UploadTextRequest) -> UploadResult:
 
     dest = free_upload_path(coerce_text_filename(req.filename))
     dest.write_text(req.content, encoding="utf-8")
+    logger.info(
+        "upload-text: %r (%d B) -> %s (replace=%s)",
+        req.filename,
+        len(raw),
+        dest,
+        req.replace_path,
+    )
     return UploadResult(path=str(dest), filename=dest.name, size=len(raw))
 
 

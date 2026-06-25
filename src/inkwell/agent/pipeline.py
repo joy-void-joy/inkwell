@@ -2525,6 +2525,8 @@ class PipelineRunner:
     ) -> None:
         self.sources = sources
         self.refs = refs or []
+        self.style_refs: list[str] = []
+        self.context_refs: list[str] = list(self.refs)
         self.target_format = target_format
         self.existing_doc_id = existing_doc_id
         self.state = session_state or WritingSessionState()
@@ -3389,7 +3391,8 @@ class PipelineRunner:
         routed_sources = result.sources
         if routed_sources:
             self.sources = routed_sources
-        self.refs = list(set(self.refs + result.style_refs + result.context_refs))
+        self.style_refs = result.style_refs
+        self.context_refs = list(set(self.context_refs + result.context_refs))
 
         await self.save_snapshot()
 
@@ -3402,6 +3405,25 @@ class PipelineRunner:
         if result.context_refs:
             parts.append(f"{len(result.context_refs)} context ref(s)")
         await self.hooks.on_progress(f"Preprocess: {', '.join(parts)}")
+
+    async def extract_style_samples(self) -> tuple[list[str], list[str]]:
+        """Extract the prose of runtime style references for voice analysis."""
+        if not self.style_refs:
+            return [], []
+        results = await asyncio.gather(
+            *(
+                extract_single_source(url, self.existing_doc_id)
+                for url in self.style_refs
+            ),
+            return_exceptions=True,
+        )
+        samples: list[str] = []
+        labels: list[str] = []
+        for url, sample in zip(self.style_refs, results):
+            if sample and not isinstance(sample, BaseException):
+                samples.append(sample)
+                labels.append(url)
+        return samples, labels
 
     async def stage_extract(self) -> None:
         await self.announce_stage("extract", "Extracting source material")
@@ -3419,7 +3441,8 @@ class PipelineRunner:
                 self.state.source_doc_id = source_doc_id
                 self.source_is_extracted_gdoc = True
 
-        all_urls = list(self.sources) + list(self.refs)
+        all_urls = list(self.sources) + list(self.context_refs)
+        source_set = set(self.sources)
         results = await asyncio.gather(
             *(extract_single_source(url, self.existing_doc_id) for url in all_urls),
             return_exceptions=True,
@@ -3432,7 +3455,8 @@ class PipelineRunner:
                 logger.warning("Extraction failed for %s: %s", url, result)
                 failed.append(url)
             elif result:
-                extracted_parts.append(f"--- Source: {url} ---\n\n{result}")
+                role = "Source" if url in source_set else "Reference"
+                extracted_parts.append(f"--- {role}: {url} ---\n\n{result}")
 
         if failed:
             await self.hooks.on_progress(
@@ -3450,6 +3474,10 @@ class PipelineRunner:
 
         conversation = "\n\n".join(extracted_parts)
         output_path.write_text(conversation, encoding="utf-8")
+
+        style_samples, style_labels = await self.extract_style_samples()
+        self.snapshot.style_ref_samples = style_samples
+        self.snapshot.runtime_style_refs = style_labels
 
         all_source_paths = [str(p) for p in sorted(source_dir.glob("*")) if p.is_file()]
 
@@ -3523,6 +3551,11 @@ class PipelineRunner:
         await self.announce_stage("voice", "Analyzing author's writing voice")
         await self.update_overview(active_stage="voice")
         corpus_samples, corpus_sources, corpus_types = await load_style_corpus()
+        corpus_samples = corpus_samples + self.snapshot.style_ref_samples
+        corpus_sources = corpus_sources + self.snapshot.runtime_style_refs
+        corpus_types = corpus_types + ["descriptive"] * len(
+            self.snapshot.style_ref_samples
+        )
         notes = self.ensure_notes()
 
         fingerprint = await compute_voice_fingerprint(

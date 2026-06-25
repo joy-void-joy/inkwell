@@ -385,7 +385,12 @@ class PipelineSnapshot(BaseModel):
         description="Deliverables extracted from the author's instructions",
     )
     runtime_style_refs: list[str] = Field(
-        default_factory=list, description="Style reference inputs supplied at runtime"
+        default_factory=list,
+        description="Labels of runtime style references whose voice was analyzed",
+    )
+    style_ref_samples: list[str] = Field(
+        default_factory=list,
+        description="Extracted prose of runtime style references, fed to voice analysis",
     )
     source_file_paths: list[str] = Field(
         default_factory=list, description="Extracted source file paths"

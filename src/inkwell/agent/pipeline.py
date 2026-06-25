@@ -215,6 +215,25 @@ def validate_stop_after(stage: str | None) -> str | None:
     return normalized
 
 
+def summarize_inputs(inputs: list[str]) -> str:
+    """A compact, log-safe preview of the inputs a run received.
+
+    Labels each input a file, URL, or freeform text with a short preview, so a
+    dropped attachment — only the author's directions arrived — is obvious in
+    the log rather than hidden behind a bare "1 source(s)" count.
+    """
+    parts: list[str] = []
+    for value in inputs:
+        stripped = value.strip()
+        if Path(stripped).is_file():
+            parts.append(f"[file] {Path(stripped).name}")
+        elif stripped.startswith(("http://", "https://")):
+            parts.append(f"[url] {stripped[:60]}")
+        else:
+            parts.append(f"[text {len(stripped)}ch] {stripped[:50]!r}")
+    return "; ".join(parts) if parts else "(none)"
+
+
 REACTIVE_LABELS = ("classify", "orchestrator")
 """Trace-label prefixes for one-shot reactive helpers (comment classification,
 restart orchestration): persisted but never resumed, since each invocation is a
@@ -294,9 +313,10 @@ class PipelineStopRequested(Exception):
     snapshot is already saved, so a later resume picks up from the next stage.
     """
 
-    def __init__(self, stage: str) -> None:
+    def __init__(self, stage: str, message: str = "") -> None:
         super().__init__(stage)
         self.stage = stage
+        self.message = message
 
 
 class TabEdit(BaseModel):
@@ -2894,16 +2914,20 @@ class PipelineRunner:
         if self.stop_after is not None and stage == self.stop_after:
             raise PipelineStopRequested(stage)
 
-    async def handle_pause(self, stage: str) -> WritingOutput:
+    async def handle_pause(self, stage: str, message: str = "") -> WritingOutput:
         """Finalize a clean pause at a configured stop point.
 
         The stage's snapshot is already saved, so a resume continues from the
         next stage. Refreshes the Overview tab, tells the listener so the
         environment can surface the pause and how to resume, and returns a
         marker output (``paused_after`` set, no finished content) so the caller
-        reports a pause rather than a completion.
+        reports a pause rather than a completion. ``message`` overrides the
+        default summary when the halt has a specific reason (e.g. a missing
+        source), so the author sees why rather than a generic stage name.
         """
-        logger.info("Paused after stage %r — stop point reached", stage)
+        logger.info(
+            "Paused after stage %r — %s", stage, message or "stop point reached"
+        )
         await self.update_overview(paused=True)
         await self.hooks.on_pause(stage, self.doc_url)
         plan = self.snapshot.plan
@@ -2912,7 +2936,8 @@ class PipelineRunner:
             google_doc_id=self.doc_id,
             google_doc_url=self.doc_url,
             paused_after=stage,
-            summary=(
+            summary=message
+            or (
                 f"Paused after the {stage} stage. Review the Google Doc and "
                 "comment, then resume to continue."
             ),
@@ -2957,7 +2982,7 @@ class PipelineRunner:
             finally:
                 await self.stop_watcher()
         except PipelineStopRequested as stop:
-            return await self.handle_pause(stop.stage)
+            return await self.handle_pause(stop.stage, stop.message)
         finally:
             session_policy.reset(policy_token)
 
@@ -3030,7 +3055,7 @@ class PipelineRunner:
                 await self.hooks.on_complete(output)
                 await self.standby_loop()
             except PipelineStopRequested as stop:
-                return await self.handle_pause(stop.stage)
+                return await self.handle_pause(stop.stage, stop.message)
             except (
                 Exception
             ) as exc:  # claude: ignore — SDK raises generic Exception for exit codes
@@ -3402,6 +3427,33 @@ class PipelineRunner:
         if result.context_refs:
             parts.append(f"{len(result.context_refs)} context ref(s)")
         await self.hooks.on_progress(f"Preprocess: {', '.join(parts)}")
+        await self.hooks.on_progress(
+            "Inputs received: " + summarize_inputs(result.raw_inputs)
+        )
+
+        if result.references_absent_source and not result.has_concrete_source:
+            await self.warn_missing_source(result.absent_source_note)
+
+    async def warn_missing_source(self, note: str) -> None:
+        """Halt when the instructions reference source material that never
+        arrived, rather than silently writing from the directions alone.
+
+        The author pasted directions that lean on a document, file, or link, but
+        no such source reached the pipeline (a dropped upload, an unsent paste).
+        Surface it loudly and pause so they can re-attach and start again.
+        """
+        detail = f" ({note})" if note else ""
+        await self.hooks.on_progress(
+            "⚠ Your instructions reference source material that didn't arrive"
+            f"{detail}. Only your directions came through — no document, file, "
+            "or link. Pausing instead of writing from the instructions alone; "
+            "re-create the session with the source attached, then start again."
+        )
+        raise PipelineStopRequested(
+            "preprocess",
+            "Paused: the instructions reference source material that wasn't "
+            "provided. Re-create the session with the document attached.",
+        )
 
     async def stage_extract(self) -> None:
         await self.announce_stage("extract", "Extracting source material")

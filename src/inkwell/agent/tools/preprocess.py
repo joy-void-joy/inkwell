@@ -5,6 +5,7 @@ Always runs as the first pipeline stage. Classifies each source by role
 the author's instructions from freeform text.
 """
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -50,6 +51,21 @@ class PreprocessResult(BaseModel):
             "Empty when the instructions name none."
         ),
     )
+    references_absent_source: bool = Field(
+        default=False,
+        description=(
+            "True when the instructions clearly refer to specific source "
+            "material (a document, attachment, paper, prior draft) that is not "
+            "present among the provided sources."
+        ),
+    )
+    absent_source_note: str = Field(
+        default="",
+        description=(
+            "What the instructions reference that appears to be missing, and the "
+            "phrasing that signals it. Empty when nothing is missing."
+        ),
+    )
     classified: list[ClassifiedSource] = Field(
         description="Each source with its classified role"
     )
@@ -90,6 +106,25 @@ class PreprocessResult(BaseModel):
                     results.append(c.value)
         return results
 
+    @property
+    def has_concrete_source(self) -> bool:
+        """Whether any primary source is a real document — a URL or a file on
+        disk — rather than freeform prose standing in for content.
+
+        The guard against a referenced-but-missing document keys off this:
+        when the instructions point at source material but every source is
+        plain text, the actual document never arrived.
+        """
+        for c in self.classified:
+            if c.role != "source":
+                continue
+            value = c.value.strip()
+            if c.discovered_urls or value.startswith(("http://", "https://")):
+                return True
+            if Path(value).is_file():
+                return True
+        return False
+
 
 CLASSIFY_SYSTEM = """\
 You classify sources provided to a writing pipeline.
@@ -114,7 +149,15 @@ From the instructions, also list the DELIVERABLES: each concrete output the \
 user asked for, one item per deliverable, in the user's own terms. Keep their \
 scope words exactly (a requested setting, logic, audience, or format is part \
 of the deliverable, not a suggestion). Empty list if no concrete outputs are \
-named."""
+named.
+
+Finally, judge whether the instructions PRESUPPOSE source material that is not \
+present. Authors often paste directions that lean on "the document", "the \
+attached file", "the paper", "what I'm reading", or a prior draft — wording \
+that only makes sense if that material were provided. If the instructions \
+depend on such material yet no source carries it (every source is the \
+directions themselves), set references_absent_source and note what is missing. \
+If the author is writing from scratch with no such dependency, leave it false."""
 
 
 class ClassifyOutput(BaseModel):
@@ -130,6 +173,17 @@ class ClassifyOutput(BaseModel):
             "Concrete outputs the instructions ask for, one per item, "
             "preserving the author's own terms"
         ),
+    )
+    references_absent_source: bool = Field(
+        default=False,
+        description=(
+            "True when the instructions presuppose source material (a document, "
+            "attachment, paper, prior draft) that is not present among the sources."
+        ),
+    )
+    absent_source_note: str = Field(
+        default="",
+        description="What is referenced but appears missing, and the phrasing that signals it.",
     )
     classified: list[ClassifiedSource] = Field(
         description="Each source with its classified role"
@@ -186,6 +240,8 @@ async def preprocess_sources(sources: list[str]) -> PreprocessResult:
         raw_inputs=sources,
         instructions=result.instructions,
         deliverables=result.deliverables,
+        references_absent_source=result.references_absent_source,
+        absent_source_note=result.absent_source_note,
         classified=result.classified,
     )
 

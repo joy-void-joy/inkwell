@@ -6,6 +6,7 @@ Usage:
     uv run inkwell-web --reload
 """
 
+import logging
 import socket
 from pathlib import Path
 
@@ -45,6 +46,10 @@ def main(
     ),
 ) -> None:
     """Start the Inkwell web server."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     if not skip_build:
         build_frontend()
     if port != 0 and not port_available(host, port):

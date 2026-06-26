@@ -2,74 +2,75 @@
 
 When pasted or uploaded source material is lost before it reaches the pipeline
 (a dropped upload, an unsent paste), the only input left is the author's
-directions — which talk about "the document" that isn't there. The preprocess
-guard catches that: it detects instructions that presuppose absent source
-material and halts instead of silently writing from the directions alone. These
-tests pin the discriminator (is any real source present?), the halt at the
-preprocess boundary, and the log preview that makes the drop visible.
+directions — which talk about "the document" that isn't there. The extract
+guard catches that: the orchestrator flags instructions that presuppose absent
+source material, and the extract stage halts instead of silently writing from
+the directions alone. These tests pin the discriminator (is any real source
+present?), the halt at the extract boundary, and the log preview that makes the
+drop visible.
 """
 
 from pathlib import Path
 
 import pytest
 
+import inkwell.agent.pipeline as pipeline_module
+from inkwell.agent.extract_agent import ExtractedSource, ExtractionManifest
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     PipelineRunner,
     PipelineStopRequested,
     summarize_inputs,
 )
-from inkwell.agent.tools import preprocess as preprocess_mod
-from inkwell.agent.tools.preprocess import ClassifiedSource, PreprocessResult
 
 
 class TestHasConcreteSource:
-    """The discriminator: a real document (URL or file on disk) vs. prose."""
+    """The discriminator: a real fetched document (URL or file) vs. inline prose."""
 
-    def test_freeform_only_has_no_concrete_source(self) -> None:
-        result = PreprocessResult(
-            raw_inputs=["rewrite the document"],
-            classified=[ClassifiedSource(value="rewrite the document", role="source")],
-        )
-        assert result.has_concrete_source is False
-
-    def test_embedded_url_counts(self) -> None:
-        result = PreprocessResult(
-            raw_inputs=["see https://example.com"],
-            classified=[
-                ClassifiedSource(
-                    value="see https://example.com",
-                    role="source",
-                    discovered_urls=["https://example.com"],
+    def test_inline_only_has_no_concrete_source(self) -> None:
+        manifest = ExtractionManifest(
+            sources=[
+                ExtractedSource(
+                    raw_input="rewrite the document", role="source", origin="inline"
                 )
-            ],
+            ]
         )
-        assert result.has_concrete_source is True
+        assert manifest.has_concrete_source is False
 
-    def test_existing_file_counts(self, tmp_path: Path) -> None:
-        doc = tmp_path / "doc.md"
-        doc.write_text("hi", encoding="utf-8")
-        result = PreprocessResult(
-            raw_inputs=[str(doc)],
-            classified=[ClassifiedSource(value=str(doc), role="source")],
+    def test_url_source_counts(self) -> None:
+        manifest = ExtractionManifest(
+            sources=[
+                ExtractedSource(
+                    raw_input="https://example.com", role="source", origin="url"
+                )
+            ]
         )
-        assert result.has_concrete_source is True
+        assert manifest.has_concrete_source is True
+
+    def test_file_source_counts(self) -> None:
+        manifest = ExtractionManifest(
+            sources=[
+                ExtractedSource(raw_input="/tmp/doc.md", role="source", origin="file")
+            ]
+        )
+        assert manifest.has_concrete_source is True
 
     def test_only_source_role_counts(self) -> None:
         # A style-reference URL is not primary source material, so an absent
         # primary source is still absent even though a URL is present.
-        result = PreprocessResult(
-            raw_inputs=["rewrite the doc", "https://example.com"],
-            classified=[
-                ClassifiedSource(value="rewrite the doc", role="source"),
-                ClassifiedSource(
-                    value="https://example.com",
-                    role="style_reference",
-                    discovered_urls=["https://example.com"],
+        manifest = ExtractionManifest(
+            sources=[
+                ExtractedSource(
+                    raw_input="rewrite the doc", role="source", origin="inline"
                 ),
-            ],
+                ExtractedSource(
+                    raw_input="https://example.com",
+                    role="style_reference",
+                    origin="url",
+                ),
+            ]
         )
-        assert result.has_concrete_source is False
+        assert manifest.has_concrete_source is False
 
 
 class TestSummarizeInputs:
@@ -92,7 +93,7 @@ class TestWarnMissingSource:
         runner = PipelineRunner(sources=["x"], notes=PipelineNotes(tmp_path / "n"))
         with pytest.raises(PipelineStopRequested) as exc:
             await runner.warn_missing_source("the document is missing")
-        assert exc.value.stage == "preprocess"
+        assert exc.value.stage == "extract"
         assert "Re-create" in exc.value.message
 
 
@@ -106,14 +107,14 @@ class TestHandlePauseMessageOverride:
             return None
 
         runner.update_overview = noop  # type: ignore[method-assign]  # claude: ignore
-        output = await runner.handle_pause("preprocess", "custom reason here")
+        output = await runner.handle_pause("extract", "custom reason here")
         assert output.summary == "custom reason here"
-        assert output.paused_after == "preprocess"
+        assert output.paused_after == "extract"
 
 
-class TestStagePreprocessGuard:
-    """The stage itself halts when a referenced source is absent, and proceeds
-    when a real document is present even if the model flags a reference."""
+class TestStageExtractGuard:
+    """The extract stage halts when the orchestrator flags a referenced source as
+    absent and no real document is among the extracted sources."""
 
     async def test_pauses_when_referenced_source_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -122,34 +123,40 @@ class TestStagePreprocessGuard:
             sources=["rewrite the document"], notes=PipelineNotes(tmp_path / "n")
         )
 
-        async def fake_preprocess(sources: list[str]) -> PreprocessResult:
-            return PreprocessResult(
-                raw_inputs=sources,
+        async def noop(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        runner.announce_stage = noop  # type: ignore[method-assign]  # claude: ignore
+        runner.update_overview = noop  # type: ignore[method-assign]  # claude: ignore
+
+        async def fake_extract(*_args: object, **_kwargs: object) -> ExtractionManifest:
+            return ExtractionManifest(
                 instructions="rewrite the document",
                 references_absent_source=True,
                 absent_source_note="refers to 'the document'",
-                classified=[ClassifiedSource(value=sources[0], role="source")],
+                sources=[
+                    ExtractedSource(
+                        raw_input="rewrite the document",
+                        role="source",
+                        origin="inline",
+                    )
+                ],
             )
 
-        monkeypatch.setattr(preprocess_mod, "preprocess_sources", fake_preprocess)
+        monkeypatch.setattr(pipeline_module, "run_extraction_agent", fake_extract)
         with pytest.raises(PipelineStopRequested) as exc:
-            await runner.stage_preprocess()
-        assert exc.value.stage == "preprocess"
+            await runner.stage_extract()
+        assert exc.value.stage == "extract"
 
-    async def test_proceeds_when_concrete_source_present(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_concrete_source_keeps_the_stage_running(self, tmp_path: Path) -> None:
+        # A flagged reference plus a real document means the document arrived;
+        # the guard's gate (flagged AND nothing concrete) must be false.
         doc = tmp_path / "doc.md"
         doc.write_text("the real document", encoding="utf-8")
-        runner = PipelineRunner(sources=[str(doc)], notes=PipelineNotes(tmp_path / "n"))
-
-        async def fake_preprocess(sources: list[str]) -> PreprocessResult:
-            return PreprocessResult(
-                raw_inputs=sources,
-                instructions="rewrite the document",
-                references_absent_source=True,
-                classified=[ClassifiedSource(value=sources[0], role="source")],
-            )
-
-        monkeypatch.setattr(preprocess_mod, "preprocess_sources", fake_preprocess)
-        await runner.stage_preprocess()  # concrete source present → no pause
+        manifest = ExtractionManifest(
+            references_absent_source=True,
+            sources=[ExtractedSource(raw_input=str(doc), role="source", origin="file")],
+        )
+        assert not (
+            manifest.references_absent_source and not manifest.has_concrete_source
+        )

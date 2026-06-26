@@ -39,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 
 STAGE_LABELS: dict[str, str] = {
-    "preprocess": "🗂️ Classifying sources",
     "extract": "📄 Extracting source material",
     "voice": "🎙️ Analyzing author's voice",
     "plan": "🗺️ Planning article structure",

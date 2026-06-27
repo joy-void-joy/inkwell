@@ -110,6 +110,7 @@ async def create_session(req: CreateSessionRequest) -> dict[str, str]:
         stage_models=req.stage_models,
         writer_mode=req.writer_mode,
         stop_after=req.stop_after,
+        light=req.light,
     )
     return {"session_id": session_id, "status": "running"}
 

@@ -153,6 +153,7 @@ async def run_session(
     session_state: WritingSessionState | None = None,
     cost_accumulator: CostAccumulator | None = None,
     stop_after: str | None = None,
+    light: bool = False,
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
@@ -220,6 +221,7 @@ async def run_session(
                 listener=listener,
                 cost_accumulator=cost_acc,
                 stop_after=stop_after,
+                light=light,
             )
             output = await runner.run_from(snapshot, restart=bool(restart_from_stage))
         else:
@@ -234,6 +236,7 @@ async def run_session(
                 listener=listener,
                 cost_accumulator=cost_acc,
                 stop_after=stop_after,
+                light=light,
             )
     finally:
         setup.trace_logger.save()

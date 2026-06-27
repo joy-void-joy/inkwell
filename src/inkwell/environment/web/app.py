@@ -116,6 +116,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions_route.formats_router)
     app.include_router(sessions_route.router)
     app.include_router(profiles_route.router)
+    app.include_router(profiles_route.callback_router)
     app.include_router(ws_route.router)
 
     @app.get("/ws-diag")

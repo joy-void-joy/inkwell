@@ -3,11 +3,15 @@
 import asyncio
 import json
 import shutil
+from html import escape
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from inkwell.agent.browser_auth import context_has_cookies, login_interactive
+from inkwell.agent.google_auth import probe_disabled_apis
 from inkwell.devtools.setup import (
     PROFILES_DIR,
     claude_config_dir_for_profile,
@@ -19,8 +23,13 @@ from inkwell.devtools.setup import (
     read_env_local,
     write_env_local,
 )
+from lup.google_oauth import MANUAL_REDIRECT_URI, client_type
 
 router = APIRouter(prefix="/api/profiles", tags=["profiles"])
+
+# Google's consent redirect lands here, profile-agnostic. The proxying dashboard
+# exposes it as ``/inkwell/api/google/callback``; a flow is recovered by ``state``.
+callback_router = APIRouter(prefix="/api/google", tags=["google"])
 
 
 class ServerCapabilities(BaseModel):
@@ -53,6 +62,34 @@ class GoogleStatusResponse(BaseModel):
     has_credentials: bool = Field(description="Whether OAuth client JSON exists")
     has_token: bool = Field(description="Whether authorized token exists")
     detail: str = Field(description="Human-readable status")
+    client_type: str = Field(
+        default="", description="OAuth client kind: 'web', 'installed', or ''"
+    )
+    disabled_apis: list[str] | None = Field(
+        default=None,
+        description="Docs/Drive APIs switched off on the client's Cloud project: "
+        "empty when all enabled, populated with hostnames when off, None if unprobed",
+    )
+
+
+class GoogleAuthUrlResponse(BaseModel):
+    auth_url: str = Field(description="Consent URL to open in the viewer's browser")
+
+
+class GoogleCallbackStartRequest(BaseModel):
+    callback_url: str = Field(
+        description="Full dashboard callback URL the browser is redirected back to, "
+        "e.g. http://host:8765/inkwell/api/google/callback"
+    )
+
+
+class GoogleAuthCompleteRequest(BaseModel):
+    code: str = Field(description="Authorization code (or redirect URL) pasted back")
+    callback_url: str = Field(
+        default="",
+        description="The dashboard callback URL the consent used, echoed back so the "
+        "code is redeemed against the same redirect (Web client only)",
+    )
 
 
 class DetectedLogin(BaseModel):
@@ -298,13 +335,25 @@ def build_google_status(profile: str) -> GoogleStatusResponse:
         has_credentials=has_creds,
         has_token=has_token,
         detail=detail,
+        client_type=client_type(str(creds_path)) if has_creds else "",
     )
 
 
 @router.get("/{name}/google/status")
 async def google_status(name: str) -> GoogleStatusResponse:
-    """Check Google OAuth status for a profile."""
-    return build_google_status(name)
+    """Check Google OAuth status for a profile.
+
+    Beyond the token-file check, this probes whether the Docs/Drive APIs are
+    actually enabled on the client's project — a token can exist yet Doc creation
+    still 403 with SERVICE_DISABLED, which re-authorizing never fixes.
+    """
+    status = build_google_status(name)
+    if status.has_token:
+        _, token_path = google_paths_for_profile(name)
+        status.disabled_apis = await asyncio.to_thread(
+            probe_disabled_apis, str(token_path)
+        )
+    return status
 
 
 @router.post("/{name}/google/upload-credentials")
@@ -378,3 +427,210 @@ async def authorize_google(name: str) -> GoogleStatusResponse:
         profile=name,
     )
     return build_google_status(name)
+
+
+def extract_code(pasted: str) -> str:
+    """Accept either a bare authorization code or the full redirect URL."""
+    text = pasted.strip()
+    if "code=" in text:
+        return parse_qs(urlparse(text).query).get("code", [text])[0]
+    return text
+
+
+def validated_callback(callback_url: str) -> str:
+    """Return ``callback_url`` trimmed, rejecting a non-HTTP(S) value.
+
+    Only the dashboard knows its own externally reachable callback — it sits behind
+    the dashboard's ``/inkwell`` proxy, a prefix this server is unaware of — so the
+    frontend supplies the full URL and this guards it before it reaches Google.
+    """
+    trimmed = callback_url.rstrip("/")
+    parsed = urlparse(trimmed)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Invalid dashboard callback URL")
+    return trimmed
+
+
+def manual_redirect_for(credentials_path: str, callback_url: str) -> str:
+    """Pick the copy-paste redirect target for this OAuth client's type.
+
+    A Web client only honors redirect URIs it has registered, so it reuses the very
+    dashboard callback the auto flow registers; a Desktop client accepts any loopback
+    redirect, so it keeps the dead ``localhost`` page the code is read off of (and
+    its irrelevant ``callback_url`` goes unvalidated).
+    """
+    if client_type(credentials_path) == "web":
+        return validated_callback(callback_url)
+    return MANUAL_REDIRECT_URI
+
+
+class PendingGoogleAuth(BaseModel):
+    """A consent flow in flight, recovered by ``state`` when Google redirects back."""
+
+    credentials_path: str
+    redirect_uri: str
+    token_path: str
+    profile: str
+    code_verifier: str = ""
+
+
+# Keyed by the OAuth ``state``; consumed once on callback. In-process is enough —
+# inkwell is a single server, and an abandoned flow is just a stale entry.
+PENDING_GOOGLE_AUTH: dict[str, PendingGoogleAuth] = {}
+
+
+async def start_consent(name: str, redirect_uri: str, *, use_pkce: bool) -> str:
+    """Build a consent URL for ``redirect_uri`` and register its ``state``.
+
+    Shared by the auto-callback and copy-paste builders, so the eventual redirect —
+    caught by the dashboard or pasted back — ties to this flow and exchanges against
+    the same ``redirect_uri`` and PKCE ``code_verifier``.
+    """
+    from inkwell.agent.google_auth import build_consent_url
+
+    creds_path, token_path = google_paths_for_profile(name)
+    if not creds_path.exists():
+        raise HTTPException(
+            status_code=400, detail="Upload OAuth client credentials JSON first."
+        )
+    auth_url, state, verifier = await asyncio.to_thread(
+        build_consent_url, str(creds_path), redirect_uri, use_pkce=use_pkce
+    )
+    PENDING_GOOGLE_AUTH[state] = PendingGoogleAuth(
+        credentials_path=str(creds_path),
+        redirect_uri=redirect_uri,
+        token_path=str(token_path),
+        profile=name,
+        code_verifier=verifier,
+    )
+    return auth_url
+
+
+@router.post("/{name}/google/auth-url-callback")
+async def google_auth_url_callback(
+    name: str, req: GoogleCallbackStartRequest
+) -> GoogleAuthUrlResponse:
+    """Build a consent URL that redirects back to the dashboard to finish on its own.
+
+    The redirect target is the dashboard's own callback (reached through its
+    ``/inkwell`` proxy), so the dashboard exchanges the code server-side — no dead
+    page, no pasting. A Web client registers that callback for any origin; a Desktop
+    client only redirects to loopback, so off-loopback the frontend keeps copy-paste.
+    """
+    callback_url = validated_callback(req.callback_url)
+    auth_url = await start_consent(name, callback_url, use_pkce=True)
+    return GoogleAuthUrlResponse(auth_url=auth_url)
+
+
+@router.post("/{name}/google/auth-url")
+async def google_auth_url(
+    name: str, req: GoogleCallbackStartRequest
+) -> GoogleAuthUrlResponse:
+    """Build the copy-paste consent URL, the fallback when the callback can't finish.
+
+    A Web client still points at the dashboard callback (paste-able when the approving
+    browser can't reach it back); a Desktop client lands on a dead ``localhost`` page
+    the user reads the code off of. PKCE is off — a bare pasted code carries no
+    ``state`` to recover a verifier by.
+    """
+    creds_path, _ = google_paths_for_profile(name)
+    if not creds_path.exists():
+        raise HTTPException(
+            status_code=400, detail="Upload OAuth client credentials JSON first."
+        )
+    redirect_uri = manual_redirect_for(str(creds_path), req.callback_url)
+    auth_url = await start_consent(name, redirect_uri, use_pkce=False)
+    return GoogleAuthUrlResponse(auth_url=auth_url)
+
+
+@router.post("/{name}/google/auth-complete")
+async def google_auth_complete(
+    name: str, req: GoogleAuthCompleteRequest
+) -> GoogleStatusResponse:
+    """Exchange the pasted code for a token, against the redirect it was issued for."""
+    from oauthlib.oauth2 import OAuth2Error
+
+    from inkwell.agent.google_auth import exchange_code
+
+    creds_path, token_path = google_paths_for_profile(name)
+    code = extract_code(req.code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Paste the authorization code.")
+    redirect_uri = manual_redirect_for(str(creds_path), req.callback_url)
+    try:
+        await asyncio.to_thread(
+            exchange_code, str(creds_path), redirect_uri, code, str(token_path)
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OAuth2Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Code rejected: {exc}") from exc
+    write_env_local(
+        {
+            "GOOGLE_CREDENTIALS_PATH": str(creds_path),
+            "GOOGLE_TOKEN_PATH": str(token_path),
+        },
+        profile=name,
+    )
+    return build_google_status(name)
+
+
+def callback_page(message: str, *, ok: bool) -> HTMLResponse:
+    """A minimal self-contained page shown in the consent tab after the redirect."""
+    color = "#1a7f37" if ok else "#cf222e"
+    icon = "&#10003;" if ok else "&#10007;"
+    html = (
+        "<!doctype html><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Google authorization</title>"
+        "<div style='font:16px system-ui,sans-serif;margin:18vh auto;max-width:30rem;"
+        "text-align:center;color:#1f2328;padding:0 1rem'>"
+        f"<div style='font-size:2.5rem;color:{color}'>{icon}</div>"
+        f"<p>{escape(message)}</p>"
+        "<p style='color:#656d76'>Return to the dashboard tab to continue.</p></div>"
+    )
+    return HTMLResponse(html)
+
+
+@callback_router.get("/callback")
+async def google_callback(
+    state: str = "", code: str = "", error: str = ""
+) -> HTMLResponse:
+    """Catch Google's consent redirect, exchange the code, and confirm in the tab.
+
+    The browser arrives with ``?code=…`` and inkwell finishes authorization
+    server-side, so the user never copies anything. The flow is looked up by
+    ``state`` (also the CSRF check) and consumed once; the dashboard tab learns it
+    succeeded by polling the Google status it just flipped.
+    """
+    from oauthlib.oauth2 import OAuth2Error
+
+    from inkwell.agent.google_auth import exchange_code
+
+    if error:
+        return callback_page(f"Google reported an error: {error}", ok=False)
+    pending = PENDING_GOOGLE_AUTH.pop(state, None)
+    if pending is None or not code:
+        return callback_page(
+            "This authorization link has expired — start again from the dashboard.",
+            ok=False,
+        )
+    try:
+        await asyncio.to_thread(
+            exchange_code,
+            pending.credentials_path,
+            pending.redirect_uri,
+            code,
+            pending.token_path,
+            code_verifier=pending.code_verifier or None,
+        )
+    except (FileNotFoundError, OAuth2Error, ValueError) as exc:
+        return callback_page(f"Authorization failed: {exc}", ok=False)
+    write_env_local(
+        {
+            "GOOGLE_CREDENTIALS_PATH": pending.credentials_path,
+            "GOOGLE_TOKEN_PATH": pending.token_path,
+        },
+        profile=pending.profile,
+    )
+    return callback_page("Authorized — you can close this tab.", ok=True)

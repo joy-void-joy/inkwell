@@ -21,6 +21,7 @@ from inkwell.devtools.setup import (
     list_profiles,
     mask,
     read_env_local,
+    reset_integration,
     write_env_local,
 )
 from lup.google_oauth import MANUAL_REDIRECT_URI, client_type
@@ -38,6 +39,7 @@ class ServerCapabilities(BaseModel):
 
 
 class IntegrationStatus(BaseModel):
+    id: str = Field(description="Stable id the dashboard sends to reset this one")
     name: str = Field(description="Integration name")
     configured: bool = Field(description="Whether this integration is configured")
     detail: str = Field(default="", description="Status detail (masked key, etc.)")
@@ -148,6 +150,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
     login_ok = bool(config_dir) and (Path(config_dir) / ".credentials.json").exists()
     integrations.append(
         IntegrationStatus(
+            id="claude-login",
             name="Claude login",
             configured=login_ok,
             detail=config_dir if login_ok else "not configured",
@@ -164,15 +167,27 @@ async def build_profile_response(name: str) -> ProfileResponse:
         google_detail = "not configured"
     integrations.append(
         IntegrationStatus(
+            id="google",
             name="Google",
             configured=google_ok,
             detail=google_detail,
         )
     )
 
+    author_email = env.get("INKWELL_AUTHOR_EMAIL", "")
+    integrations.append(
+        IntegrationStatus(
+            id="author",
+            name="Author email",
+            configured=bool(author_email),
+            detail=author_email or "not configured",
+        )
+    )
+
     exa_key = env.get("EXA_API_KEY", "")
     integrations.append(
         IntegrationStatus(
+            id="exa",
             name="Exa",
             configured=bool(exa_key),
             detail=mask(exa_key) if exa_key else "not configured",
@@ -190,6 +205,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
         claude_detail = "not configured"
     integrations.append(
         IntegrationStatus(
+            id="session",
             name="Claude.ai session",
             configured=claude_ok,
             detail=claude_detail,
@@ -199,6 +215,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
     fred_key = env.get("FRED_API_KEY", "")
     integrations.append(
         IntegrationStatus(
+            id="fred",
             name="FRED",
             configured=bool(fred_key),
             detail=mask(fred_key) if fred_key else "not configured",
@@ -267,6 +284,26 @@ async def delete_profile(name: str) -> None:
     if not profile_dir.exists():
         raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
     shutil.rmtree(profile_dir)
+
+
+@router.post("/{name}/reset/{integration}")
+async def reset_profile_integration(name: str, integration: str) -> ProfileResponse:
+    """Disconnect one integration for a profile, leaving the rest intact.
+
+    Drops just that integration's env keys and on-disk artifacts (the Google
+    token, the claude.ai session), so a credential can be re-authorized without
+    deleting and rebuilding the whole profile.
+    """
+    env_path = env_file_for_profile(name)
+    if not env_path.exists():
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
+    try:
+        await asyncio.to_thread(reset_integration, integration, name)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown integration '{integration}'"
+        ) from exc
+    return await build_profile_response(name)
 
 
 @router.post("/{name}/login")

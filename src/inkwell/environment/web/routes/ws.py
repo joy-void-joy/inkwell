@@ -1,7 +1,9 @@
 """WebSocket endpoint for real-time session event streaming."""
 
+import asyncio
 import json
 import logging
+from contextlib import suppress
 from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -41,6 +43,72 @@ async def ws_ping(websocket: WebSocket) -> None:
             await websocket.send_text(f"echo: {data}")
     except (WebSocketDisconnect, RuntimeError) as exc:
         logger.info("PING WS: closed: %s", exc)
+
+
+@router.websocket("/ws/claude-login/{name}")
+async def claude_login_stream(websocket: WebSocket, name: str) -> None:
+    """Stream a server-side login browser so a remote user can sign into claude.ai.
+
+    The browser runs off-screen on the inkwell host (the only place that can
+    capture the HttpOnly ``sessionKey`` into this profile's durable context);
+    its screen is streamed to the viewer as JPEG frames and their clicks/keys
+    are replayed into it. On capture, the stale pasted cookie is cleared so the
+    fresh durable session becomes authoritative.
+    """
+    from pydantic import ValidationError
+
+    from inkwell.agent.browser_auth import InputEvent, StreamingLoginSession
+    from inkwell.devtools.setup import write_env_local
+
+    await websocket.accept()
+    session = StreamingLoginSession(name)
+    try:
+        await session.start()
+    except RuntimeError as exc:
+        await websocket.send_json({"type": "error", "detail": str(exc)})
+        await websocket.close()
+        return
+    await websocket.send_json({"type": "ready"})
+
+    async def forward_frames() -> None:
+        try:
+            while True:
+                data = await session.frames.get()
+                await websocket.send_json({"type": "frame", "data": data})
+        except (WebSocketDisconnect, RuntimeError):
+            return
+
+    async def forward_input() -> None:
+        while True:
+            try:
+                message = await websocket.receive_json()
+            except (WebSocketDisconnect, ValueError):
+                return
+            try:
+                event = InputEvent.model_validate(message)
+            except ValidationError:
+                continue
+            await session.apply_input(event)
+
+    async def await_capture() -> None:
+        await session.wait_for_session()
+        write_env_local({"CLAUDE_COOKIE": ""}, profile=name)
+        with suppress(WebSocketDisconnect, RuntimeError):
+            await websocket.send_json({"type": "done"})
+
+    tasks = [
+        asyncio.create_task(forward_frames()),
+        asyncio.create_task(forward_input()),
+        asyncio.create_task(await_capture()),
+    ]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await session.aclose()
+        with suppress(RuntimeError):
+            await websocket.close()
 
 
 @router.websocket("/ws/{session_id}")

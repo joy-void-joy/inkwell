@@ -10,7 +10,7 @@ import type {
   SessionSummary,
 } from "../types";
 
-const BASE = "/api";
+const BASE = `${import.meta.env.BASE_URL}api`;
 
 export async function fetchFormats(): Promise<FormatOption[]> {
   const res = await fetch(`${BASE}/formats`);

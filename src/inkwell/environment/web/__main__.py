@@ -6,6 +6,7 @@ Usage:
     uv run inkwell-web --reload
 """
 
+import os
 import socket
 from pathlib import Path
 
@@ -43,8 +44,12 @@ def main(
     skip_build: bool = typer.Option(
         False, "--skip-build", help="Skip frontend rebuild"
     ),
+    base_path: str = typer.Option(
+        "/", help="Sub-path the SPA is served under (e.g. /inkwell/ behind a proxy)."
+    ),
 ) -> None:
     """Start the Inkwell web server."""
+    os.environ["INKWELL_BASE_PATH"] = base_path
     if not skip_build:
         build_frontend()
     if port != 0 and not port_available(host, port):

@@ -681,7 +681,7 @@ wheels = [
 [[package]]
 name = "lup"
 version = "0.2.0"
-source = { git = "https://github.com/joy-void-joy/lup?subdirectory=packages%2Flup&branch=dev#766d8ec35a70b1fb115ad232eb27525fbfdfbfce" }
+source = { git = "https://github.com/joy-void-joy/lup?subdirectory=packages%2Flup&branch=dev#53b4a114a81393bda9d097546df065b7ed27b5c7" }
 dependencies = [
     { name = "httpx" },
     { name = "markdown-it-py" },

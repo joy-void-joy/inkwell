@@ -238,6 +238,16 @@ class MergedDraft(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+type CommentImpact = Literal[
+    "plan_breaking", "stage_local", "clarification", "dismiss", "revert_suggested"
+]
+"""How an author's GDoc comment bears on the run in flight."""
+
+
+type AssumptionTag = Literal["direction_check", "assumption", "question", "confusion"]
+"""What kind of uncertainty the assumptions stage surfaced."""
+
+
 class ClassifiedComment(BaseModel):
     """A GDoc comment classified by impact on the pipeline."""
 
@@ -249,9 +259,7 @@ class ClassifiedComment(BaseModel):
     reply: str = Field(
         default="", description="Author's reply text, if replying to an agent comment"
     )
-    impact: Literal[
-        "plan_breaking", "stage_local", "clarification", "dismiss", "revert_suggested"
-    ] = Field(
+    impact: CommentImpact = Field(
         description=(
             "plan_breaking: invalidates thesis/structure, requires re-planning. "
             "stage_local: affects current/next stage only. "
@@ -275,7 +283,7 @@ class ClassifiedComment(BaseModel):
 class Assumption(BaseModel):
     """A single uncertainty surfaced by the assumptions stage."""
 
-    tag: Literal["direction_check", "assumption", "question", "confusion"] = Field(
+    tag: AssumptionTag = Field(
         description=(
             "direction_check: which way should this go? "
             "assumption: something the agent is assuming without confirmation. "

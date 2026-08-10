@@ -22,7 +22,7 @@ from inkwell.agent.client import provider_factory, query
 from lup.mcp import LupMcpTool, ToolError, create_mcp_server, lup_tool
 
 from inkwell.agent.config import stage_model
-from inkwell.agent.models import ClassifiedComment
+from inkwell.agent.models import ClassifiedComment, CommentImpact
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.session import AuthorComment, WritingSessionState
 from inkwell.agent.stages import COMMENT_CLASSIFIER_PROMPT
@@ -30,14 +30,18 @@ from inkwell.agent.tools.google_docs import do_reply_to_comment
 
 logger = logging.getLogger(__name__)
 
-ACKNOWLEDGE_TEMPLATES: dict[str, str] = {
+ACKNOWLEDGE_TEMPLATES: dict[CommentImpact, str | None] = {
     "plan_breaking": (
         "Understood — this changes the direction. "
         "Restarting from the planning stage to incorporate your feedback."
     ),
     "stage_local": "Noted — will apply this in the next revision.",
     "clarification": "Got it, incorporating this.",
+    "dismiss": None,
+    "revert_suggested": None,
 }
+"""The reply each classification earns. `None` where the comment is answered by
+acting on it — reverting the damage, or ignoring noise — not by posting."""
 
 WATCHER_SYSTEM_PROMPT = """\
 You are a comment watcher for a writing pipeline. Each turn you receive \
@@ -69,7 +73,7 @@ class PollOutput(BaseModel):
 
 class AckInput(BaseModel):
     comment_id: str = Field(description="Comment ID to reply to")
-    impact: str = Field(description="The classified impact level")
+    impact: CommentImpact = Field(description="The classified impact level")
 
 
 class AckOutput(BaseModel):
@@ -136,7 +140,7 @@ def create_watcher_tools(
         if not session_state.doc_id:
             return AckOutput(status="no_doc")
 
-        reply_text = ACKNOWLEDGE_TEMPLATES.get(inp.impact, "Noted.")
+        reply_text = ACKNOWLEDGE_TEMPLATES[inp.impact] or "Noted."
         try:
             await do_reply_to_comment(
                 session_state.doc_id,

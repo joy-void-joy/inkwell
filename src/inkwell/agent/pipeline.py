@@ -8,7 +8,6 @@ rather than receiving everything in the prompt.
 
 import asyncio
 import difflib
-import json
 import logging
 import shutil
 import tempfile
@@ -50,6 +49,7 @@ from inkwell.agent.config import current_settings, load_settings, stage_model
 from inkwell.agent.models import (
     ArticlePlan,
     AssumptionsList,
+    AssumptionTag,
     AuthorNote,
     ClassifiedComment,
     MergedDraft,
@@ -422,6 +422,15 @@ SLUG_MAX_CHARS = 80
 def slugify(label: str) -> str:
     """Turn a section title or label into a filesystem-safe slug."""
     return "-".join(label.lower().translate(SLUG_CHAR_MAP).split())[:SLUG_MAX_CHARS]
+
+
+ASSUMPTION_TAG_PREFIX: dict[AssumptionTag, str] = {
+    "direction_check": "[DIRECTION]",
+    "assumption": "[ASSUMPTION]",
+    "question": "[QUESTION]",
+    "confusion": "[UNCLEAR]",
+}
+"""How each surfaced uncertainty announces itself in the comment it posts."""
 
 
 AUTHOR_MARKERS = ("TODO", "FIXME", "BOTEC", "XXX")
@@ -1683,6 +1692,18 @@ async def merge_sections(
     return MergedDraft(content=content, changes_made=[])
 
 
+def load_review(review_path: Path) -> ReviewOutput:
+    """What a reviewer recorded, or nothing where the stage wrote no file.
+
+    Every reviewer persists through a `ReviewCollector`, so the artifact is a
+    `ReviewOutput` whichever reviewer produced it — a reviewer that recorded
+    no findings and one that never ran read the same here.
+    """
+    if not review_path.exists():
+        return ReviewOutput(findings=[])
+    return ReviewOutput.model_validate_json(review_path.read_text(encoding="utf-8"))
+
+
 async def review_narrative(
     notes: PipelineNotes,
     draft_path: Path,
@@ -1746,12 +1767,7 @@ async def review_narrative(
         prefix="[review:narrative] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_facts(
@@ -1817,12 +1833,7 @@ async def review_facts(
         prefix="[review:facts] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_style(
@@ -1883,12 +1894,7 @@ async def review_style(
         prefix="[review:style] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_source_fidelity(
@@ -1947,12 +1953,7 @@ async def review_source_fidelity(
         prefix="[review:source] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_coverage(
@@ -2018,12 +2019,7 @@ async def review_coverage(
         prefix="[review:coverage] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_all(
@@ -2454,17 +2450,11 @@ async def surface_assumptions(
     else:
         result = AssumptionsList(items=[])
 
-    tag_prefix = {
-        "direction_check": "[DIRECTION]",
-        "assumption": "[ASSUMPTION]",
-        "question": "[QUESTION]",
-        "confusion": "[UNCLEAR]",
-    }
     if result.items:
         specs = [
             CommentSpec(
                 content=(
-                    f"{tag_prefix.get(item.tag, '[NOTE]')} {item.content}\n\n"
+                    f"{ASSUMPTION_TAG_PREFIX[item.tag]} {item.content}\n\n"
                     f"My best guess: {item.best_guess}"
                 ),
                 anchor_text=item.anchor_section,
@@ -2724,13 +2714,7 @@ class PipelineRunner:
                 self.known_tabs["Final"] = tab_ids[0]
 
     def get_draft_path(self, label: str) -> Path:
-        slug = label.lower().replace(" ", "-")
-        for ch in "/:.,;!?\"'()[]{}":
-            slug = slug.replace(ch, "")
-        while "--" in slug:
-            slug = slug.replace("--", "-")
-        slug = slug.strip("-")
-        return self.ensure_notes().drafts_dir / f"{slug}.md"
+        return self.ensure_notes().drafts_dir / f"{slugify(label)}.md"
 
     def rehydrate_draft_files(self) -> None:
         """Project the snapshot's draft content back onto disk for a resume.
@@ -3245,7 +3229,7 @@ class PipelineRunner:
         notes = self.ensure_notes()
         await notes.add_comment(classified)
 
-        reply_text = ACKNOWLEDGE_TEMPLATES.get(classified.impact)
+        reply_text = ACKNOWLEDGE_TEMPLATES[classified.impact]
         if reply_text:
             async with gdoc_nonfatal("acknowledge comment"):
                 await do_reply_to_comment(

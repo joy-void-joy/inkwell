@@ -389,13 +389,13 @@ async def read_terminal_input(
         if stripped.startswith("/style"):
             from inkwell.agent.tools.voice import list_style_references
 
-            voice_entries, prescriptive_entries = list_style_references()
-            if not voice_entries and not prescriptive_entries:
+            listing = list_style_references()
+            if not listing.voice and not listing.prescriptive:
                 console.print("  [dim]No style corpus. Use `inkwell style add`.[/dim]")
             else:
-                for e in voice_entries:
+                for e in listing.voice:
                     console.print(f"  [dim][{e.kind}] {e.name}[/dim]")
-                for e in prescriptive_entries:
+                for e in listing.prescriptive:
                     console.print(f"  [dim][prescriptive] {e.name}[/dim]")
             continue
         if stripped == "/sync":

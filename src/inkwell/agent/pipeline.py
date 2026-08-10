@@ -165,6 +165,7 @@ from inkwell.agent.tools.stage_outputs import (
 )
 from inkwell.agent.tools.query_artifacts import make_query_tools
 from inkwell.agent.tools.voice import (
+    StyleSample,
     analyze_voice_individually,
     compute_voice_fingerprint,
     invalidate_merged_cache,
@@ -2153,21 +2154,6 @@ class StandbyWake(BaseModel):
     from_sync: bool
 
 
-class CorpusSample(BaseModel):
-    """One style-corpus entry: its prose, where it came from, and how to read it.
-
-    A prescriptive entry is the author telling the pipeline how to write; the
-    rest are samples for it to learn a voice from. The two take different
-    routes, so the corpus is partitioned on this before analysis.
-    """
-
-    text: str = Field(description="The sample's prose")
-    source: str = Field(description="Label or path the sample came from")
-    prescriptive: bool = Field(
-        description="Whether the author wrote it as instruction, not as a sample"
-    )
-
-
 class StyleSamples(BaseModel):
     """The prose of the style references that could be read, and their labels."""
 
@@ -3644,16 +3630,18 @@ class PipelineRunner:
     async def stage_voice(self) -> None:
         await self.announce_stage("voice", "Analyzing author's writing voice")
         await self.update_overview(active_stage="voice")
-        corpus_samples, corpus_sources, corpus_types = await load_style_corpus()
-        corpus_samples = corpus_samples + self.snapshot.style_ref_samples
-        corpus_sources = corpus_sources + self.snapshot.runtime_style_refs
-        corpus_types = corpus_types + ["descriptive"] * len(
-            self.snapshot.style_ref_samples
-        )
+        corpus = await load_style_corpus() + [
+            StyleSample(label=label, text=text, source_type="descriptive")
+            for text, label in zip(
+                self.snapshot.style_ref_samples, self.snapshot.runtime_style_refs
+            )
+        ]
         notes = self.ensure_notes()
 
         fingerprint = await compute_voice_fingerprint(
-            self.snapshot.conversation, corpus_samples, self.target_format
+            self.snapshot.conversation,
+            [sample.text for sample in corpus],
+            self.target_format,
         )
         if (
             self.snapshot.voice_fingerprint == fingerprint
@@ -3674,22 +3662,15 @@ class PipelineRunner:
             invalidate_merged_cache()
             logger.info("Voice inputs changed — re-analyzing")
 
-        corpus = [
-            CorpusSample(text=text, source=source, prescriptive=stype == "prescriptive")
-            for text, source, stype in zip(corpus_samples, corpus_sources, corpus_types)
-        ]
         explicit_prescriptive = [entry for entry in corpus if entry.prescriptive]
         analyzable = [entry for entry in corpus if not entry.prescriptive]
-        analyzable_samples = [entry.text for entry in analyzable]
-        analyzable_sources = [entry.source for entry in analyzable]
 
         async with self.stage_compute("voice") as sc:
             all_servers = {**self.research_servers, **sc.servers}
             all_tool_names = research_tool_names() + sc.tool_names
             analyses = await analyze_voice_individually(
                 self.snapshot.conversation,
-                analyzable_samples,
-                corpus_sources=analyzable_sources,
+                analyzable,
                 target_format=self.target_format,
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
@@ -3707,16 +3688,12 @@ class PipelineRunner:
         n_auto_prescriptive = 0
         presc_idx = 0
 
-        labels = analyzable_sources or [
-            f"sample-{i}" for i in range(len(analyzable_samples))
-        ]
-        source_by_label: StringMap = {
-            label: sample for sample, label in zip(analyzable_samples, labels)
-        }
+        source_by_label: StringMap = {entry.label: entry.text for entry in analyzable}
 
-        for i, (label, text, is_prescriptive) in enumerate(analyses):
+        for one in analyses:
+            label, text = one.label, one.analysis
             slug = slugify(label)
-            if is_prescriptive and label in source_by_label:
+            if one.prescriptive and label in source_by_label:
                 raw = source_by_label[label]
                 envelope = await notes.save_content(
                     f"prescriptive_{presc_idx}_{slug}",
@@ -3743,36 +3720,29 @@ class PipelineRunner:
             voice_file_paths.append(str(path))
 
         for entry in explicit_prescriptive:
-            slug = slugify(entry.source)
+            slug = slugify(entry.label)
             envelope = await notes.save_content(
                 f"prescriptive_{presc_idx}_{slug}",
                 entry.text,
                 stage="voice",
                 content_type="prescriptive",
-                label=entry.source,
+                label=entry.label,
             )
             voice_file_paths.append(envelope.path)
-            voice_tab_parts.append(f"## Prescriptive: {entry.source}\n\n{entry.text}")
+            voice_tab_parts.append(f"## Prescriptive: {entry.label}\n\n{entry.text}")
             presc_idx += 1
 
-        for i, (sample, source) in enumerate(
-            zip(analyzable_samples, analyzable_sources)
-        ):
-            if source not in source_by_label:
+        saved_verbatim = {one.label for one in analyses if one.prescriptive}
+        for i, entry in enumerate(analyzable):
+            if entry.label in saved_verbatim:
                 continue
-            label_entry = next(
-                (a for a in analyses if a[0] == source and a[2]),
-                None,
-            )
-            if label_entry:
-                continue
-            slug = slugify(source)
+            slug = slugify(entry.label)
             envelope = await notes.save_content(
                 f"corpus_{i}_{slug}",
-                sample,
+                entry.text,
                 stage="voice",
                 content_type="source",
-                label=source,
+                label=entry.label,
             )
             voice_file_paths.append(envelope.path)
 

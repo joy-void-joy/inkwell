@@ -737,8 +737,7 @@ still makes sense."""
 # Format-specific structural guidance
 # ---------------------------------------------------------------------------
 
-FORMAT_GUIDANCE: dict[str, str] = {
-    "memo": """\
+MEMO_GUIDANCE = """\
 ## Format: Policy Memo
 
 This piece is a memo, not an article. Memos are structured for busy \
@@ -792,8 +791,9 @@ story.
 - Target 3,000-5,000 words for a substantive policy memo. Under 3,000 \
 if possible. Every paragraph must earn its place.
 - Cut any paragraph that repeats a point already made elsewhere.
-- If a section runs over 800 words, split it or cut.""",
-    "lesswrong": """\
+- If a section runs over 800 words, split it or cut."""
+
+LESSWRONG_GUIDANCE = """\
 ## Format: LessWrong
 
 This piece targets LessWrong — a technically literate audience that \
@@ -900,8 +900,9 @@ must earn its place.
 - Cut aggressively: target 20-50% reduction from first draft. \
 Remove any paragraph that repeats a point made elsewhere.
 - Dense supplementary material goes in footnotes or collapsible \
-sections, not the main body.""",
-    "academic": """\
+sections, not the main body."""
+
+ACADEMIC_GUIDANCE = """\
 ## Format: Academic Paper
 
 This piece is a research paper for expert readers (arXiv, journal, or \
@@ -954,27 +955,29 @@ statements numbered, proofs marked.
 questions, no engagement devices.
 - State a fact once, where it belongs. Repetition is a defect, not \
 emphasis.
-- Hedge only where the mathematics or evidence is genuinely open.""",
-    "blog": """\
+- Hedge only where the mathematics or evidence is genuinely open."""
+
+BLOG_GUIDANCE = """\
 ## Format: Blog Post
 
 Write for a general audience. Hook the reader in the first paragraph. \
 Use subheadings every 300-400 words for scannability. Paragraphs \
-should be short (3-5 sentences). Conversational but substantive.""",
-    "twitter": """\
+should be short (3-5 sentences). Conversational but substantive."""
+
+TWITTER_GUIDANCE = """\
 ## Format: Twitter Thread
 
 Each point must be self-contained within ~260 characters. The first \
 tweet is the hook — it must grab attention without context. Build \
 a thread that rewards sequential reading but where each tweet \
-also works standalone.""",
-    "dialog": """\
+also works standalone."""
+
+DIALOG_GUIDANCE = """\
 ## Format: Dialog
 
 Structure as a conversation between 2-3 speakers with distinct \
 perspectives. Each speaker should have a recognizable voice. \
-Distribute arguments naturally across speakers. Vary turn length.""",
-}
+Distribute arguments naturally across speakers. Vary turn length."""
 
 
 class OutputFormatSpec(BaseModel):
@@ -986,15 +989,24 @@ class OutputFormatSpec(BaseModel):
         default=False,
         description="Whether the key takes a ':<description>' suffix",
     )
+    guidance: str = Field(
+        default="",
+        description="Structural guidance the writing stages read, if this "
+        "format has any of its own",
+    )
 
 
 OUTPUT_FORMATS: list[OutputFormatSpec] = [
-    OutputFormatSpec(key="academic", label="Academic paper"),
-    OutputFormatSpec(key="lesswrong", label="LessWrong post"),
-    OutputFormatSpec(key="blog", label="Blog post"),
-    OutputFormatSpec(key="twitter", label="Twitter thread"),
-    OutputFormatSpec(key="dialog", label="Dialog"),
-    OutputFormatSpec(key="memo", label="Policy memo"),
+    OutputFormatSpec(
+        key="academic", label="Academic paper", guidance=ACADEMIC_GUIDANCE
+    ),
+    OutputFormatSpec(
+        key="lesswrong", label="LessWrong post", guidance=LESSWRONG_GUIDANCE
+    ),
+    OutputFormatSpec(key="blog", label="Blog post", guidance=BLOG_GUIDANCE),
+    OutputFormatSpec(key="twitter", label="Twitter thread", guidance=TWITTER_GUIDANCE),
+    OutputFormatSpec(key="dialog", label="Dialog", guidance=DIALOG_GUIDANCE),
+    OutputFormatSpec(key="memo", label="Policy memo", guidance=MEMO_GUIDANCE),
     OutputFormatSpec(key="newsletter", label="Newsletter"),
     OutputFormatSpec(key="custom", label="Custom format", accepts_description=True),
 ]
@@ -1002,6 +1014,22 @@ OUTPUT_FORMATS: list[OutputFormatSpec] = [
 FORMAT_KEYS: list[str] = [
     f"{f.key}:<description>" if f.accepts_description else f.key for f in OUTPUT_FORMATS
 ]
+
+
+def format_key(target_format: str) -> str:
+    """The format's own key, dropping the description a custom format carries.
+
+    Only a format declared as accepting one can carry a description, so the
+    key comes off that declaration rather than off wherever a colon lands.
+    """
+    return next(
+        (
+            spec.key
+            for spec in OUTPUT_FORMATS
+            if spec.accepts_description and target_format.startswith(f"{spec.key}:")
+        ),
+        target_format,
+    )
 
 
 VOICE_PRECEDENCE_NOTE = """\
@@ -1024,7 +1052,9 @@ def get_format_guidance(target_format: str) -> str:
     note travels with every non-empty block so no stage reads the structural
     rules without the reminder that the voice profile outranks them.
     """
-    guidance = FORMAT_GUIDANCE.get(target_format, "")
+    guidance = next(
+        (spec.guidance for spec in OUTPUT_FORMATS if spec.key == target_format), ""
+    )
     if not guidance:
         return ""
     return f"{guidance}\n\n{VOICE_PRECEDENCE_NOTE}"

@@ -488,7 +488,9 @@ def style_list() -> None:
     """List the current style corpus and format-specific examples."""
     from inkwell.agent.tools.voice import list_format_examples, list_style_references
 
-    voice_entries, prescriptive_entries = list_style_references()
+    listing = list_style_references()
+    voice_entries = listing.voice
+    prescriptive_entries = listing.prescriptive
     format_entries = list_format_examples()
 
     if not voice_entries and not prescriptive_entries and not format_entries:

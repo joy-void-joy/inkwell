@@ -7,28 +7,69 @@ Examples::
 
     $ uv run lup-devtools --help
     $ uv run lup-devtools agent inspect --json
+    $ uv run lup-devtools py info requests
     $ uv run lup-devtools trace show <session_id>
     $ uv run lup-devtools feedback status
     $ uv run lup-devtools dev branches
     $ uv run lup-devtools dev worktree create feat-name
     $ uv run lup-devtools dev check --no-test
     $ uv run lup-devtools version
-    $ uv run lup-devtools sync list
-    $ uv run lup-devtools usage --no-detail
+    $ uv run lup-devtools sync status
+    $ uv run lup-devtools usage claude --no-detail
 """
+
+from pathlib import Path
 
 import typer
 
+import inkwell.agent.stages as stages
+from lup.devtools.feedback.app import create_feedback_app
+from lup.devtools.feedback.models import AgentPrompt
+from lup.devtools.subapps import SubApp, compose
 from inkwell.devtools.agent import app as agent_app
 from inkwell.devtools.api import app as api_app
 from inkwell.devtools.dev.app import app as dev_app
-from inkwell.devtools.feedback import app as feedback_app
 from inkwell.devtools.harness.app import app as harness_app
 from inkwell.devtools.setup import app as setup_app
-from inkwell.devtools.sync import app as sync_app
-from inkwell.devtools.trace import app as trace_app
-from inkwell.devtools.usage import app as usage_app
-from inkwell.devtools.version import app as version_app
+from inkwell.devtools.subapps import APPLICATION_SPECS, INHERITED
+
+
+def assembled_prompt() -> AgentPrompt:
+    """This application's stage prompts, as the health report weighs them.
+
+    inkwell has no single system prompt: a run is a pipeline, and each stage
+    opens its session with one of these. The report weighs what sessions
+    actually receive, so all of them are what it is given — read off the
+    module rather than matched by shape, so renaming the package moves it.
+    """
+    named = {
+        name: value
+        for name, value in vars(stages).items()
+        if name.isupper() and isinstance(value, str)
+    }
+    source = stages.__file__
+    return AgentPrompt(
+        sections=sorted(named),
+        rendered="\n\n".join(named[name] for name in sorted(named)),
+        source=None if source is None else Path(source),
+    )
+
+
+APPLICATION_APPS = {
+    "agent": agent_app,
+    "api": api_app,
+    "dev": dev_app,
+    "feedback": create_feedback_app(assembled_prompt),
+    "harness": harness_app,
+    "setup": setup_app,
+}
+"""Where each application spec meets the Typer app answering to its name.
+
+This module is the composition root and nothing imports it, which is what
+lets the apps be named here without the guidance that documents them coming
+along. A spec with no app raises on the first invocation rather than serving
+a CLI missing a command the docs promise.
+"""
 
 app = typer.Typer(
     help="lup-devtools: development and analysis tools",
@@ -36,17 +77,16 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-app.add_typer(agent_app, name="agent", help="Agent introspection and debugging")
-app.add_typer(api_app, name="api", help="API inspection")
-app.add_typer(dev_app, name="dev", help="Worktrees, branches, and pre-flight checks")
-app.add_typer(
-    feedback_app, name="feedback", help="Feedback state, metrics, and commits"
+compose(
+    app,
+    sorted(
+        [
+            *INHERITED,
+            *[
+                SubApp(spec=spec, app=APPLICATION_APPS[spec.name])
+                for spec in APPLICATION_SPECS
+            ],
+        ],
+        key=lambda entry: entry.spec.name,
+    ),
 )
-app.add_typer(
-    harness_app, name="harness", help="Generate and launch the native harness"
-)
-app.add_typer(sync_app, name="sync", help="Upstream sync tracking")
-app.add_typer(trace_app, name="trace", help="Trace display, search, and analysis")
-app.add_typer(usage_app, name="usage", help="Claude Code usage display")
-app.add_typer(setup_app, name="setup", help="Interactive setup wizard")
-app.add_typer(version_app, name="version", help="Agent version, changelog, and bump")

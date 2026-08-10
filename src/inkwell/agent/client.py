@@ -24,9 +24,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import overload
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr
 
-from lup.adapters.claude.selection import CLAUDE_RUNTIME
+from lup.adapters.claude.config import (
+    ClaudeCompatibilityTransform,
+    ClaudeCompatibleEndpoint,
+)
+from lup.adapters.claude.runtime import create_claude_session_factory
+from lup.adapters.claude.selection import CLAUDE_RUNTIME, claude_config
 from lup.runtime.selection import SessionAutonomy, SessionRequest
 from lup.hooks import LupHooksConfig, create_large_read_hook
 from lup.mcp import McpServerEntry
@@ -228,7 +233,44 @@ def result_text[T: BaseModel | None](result: TurnResult[T]) -> str:
     )
 
 
-RUNTIME = CLAUDE_RUNTIME
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"
+"""Where an OpenRouter key routes inference instead of the vendor's own API."""
+
+
+def compatible_endpoint() -> ClaudeCompatibleEndpoint | None:
+    """The endpoint inference is routed through, or None for the vendor's own.
+
+    Read per session rather than once at import, so a profile that carries an
+    OpenRouter key routes through it and one that does not is unaffected.
+    """
+    from inkwell.agent.config import current_settings
+
+    api_key = current_settings().openrouter_api_key
+    if not api_key:
+        return None
+    return ClaudeCompatibleEndpoint(
+        base_url=AnyHttpUrl(OPENROUTER_BASE_URL),
+        api_key=SecretStr(api_key),
+        map_model_aliases=False,
+    )
+
+
+def open_session(request: SessionRequest) -> SessionFactory:
+    """Open a session, routed through a compatible endpoint where one is set.
+
+    The endpoint is a transform over the runtime's own configuration rather
+    than variables written into the environment, so a session is routed by
+    what it was configured with instead of by what the process happens to
+    have inherited.
+    """
+    config = claude_config(request)
+    endpoint = compatible_endpoint()
+    if endpoint is not None:
+        config = ClaudeCompatibilityTransform(endpoint).apply(config)
+    return create_claude_session_factory(config)
+
+
+RUNTIME = CLAUDE_RUNTIME.model_copy(update={"open": open_session})
 """The one place inkwell names a provider.
 
 Everything downstream reads this: :func:`provider_factory` opens sessions

@@ -2,7 +2,6 @@
 
 import contextvars
 import logging
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Literal, Self, get_args
@@ -377,42 +376,20 @@ def stage_model(stage: PipelineStage) -> str:
     return current_settings().model_for(stage)
 
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api"
-"""Where an OpenRouter key routes inference instead of the vendor's own API."""
-
-
-def openrouter_env(api_key: str) -> EnvVars:
-    """The variables that point a provider CLI at OpenRouter with `api_key`.
-
-    The empty API key is deliberate: it displaces an ambient vendor key that
-    would otherwise take precedence over the routed one.
-    """
-    return {
-        "ANTHROPIC_BASE_URL": OPENROUTER_BASE_URL,
-        "ANTHROPIC_AUTH_TOKEN": api_key,
-        "ANTHROPIC_API_KEY": "",
-    }
-
-
 def subprocess_auth_env(session_settings: Settings) -> EnvVars:
     """Auth env routing a session's spawned ``claude`` CLI to its profile.
 
     The CLI decides which account pays for inference from its own
-    environment, so a profile only affects billing if these vars reach the
+    environment, so a profile only affects billing if this reaches the
     subprocess. Without it, every session inherits the server's ambient
     login and bills that account regardless of the selected profile.
+
+    Routing through a compatible endpoint is not here: that is a transform
+    over the runtime's own configuration, applied in ``agent.client``.
     """
-    login = (
-        {PROVIDER_LOGIN.config_home_env: session_settings.claude_config_dir}
-        if session_settings.claude_config_dir
-        else {}
-    )
-    routed = (
-        openrouter_env(session_settings.openrouter_api_key)
-        if session_settings.openrouter_api_key
-        else {}
-    )
-    return {**login, **routed}
+    if not session_settings.claude_config_dir:
+        return {}
+    return {PROVIDER_LOGIN.config_home_env: session_settings.claude_config_dir}
 
 
 @contextmanager
@@ -433,10 +410,3 @@ def use_settings(session_settings: Settings) -> Iterator[None]:
     finally:
         client_env.reset(env_token)
         active_settings.reset(settings_token)
-
-
-if settings.openrouter_api_key:
-    os.environ.setdefault("ANTHROPIC_BASE_URL", "https://openrouter.ai/api")
-    os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", settings.openrouter_api_key)
-    os.environ.setdefault("ANTHROPIC_API_KEY", "")
-    logger.info("OpenRouter enabled")

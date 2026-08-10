@@ -9,11 +9,12 @@ restart strategies, assumptions, and pipeline snapshot state.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Protocol, TypedDict, Union
+from typing import Annotated, Literal, Protocol, TypedDict
 
 from pydantic import BaseModel, Field, field_validator
 
 from lup.runtime.usage import CostAccumulator
+from lup.types import JsonObject, StringMap
 from lup.workspace.history import SessionResult
 
 
@@ -193,8 +194,8 @@ class SectionDraft(BaseModel):
     @field_validator("questions_for_author", mode="before")
     @classmethod
     def coerce_strings_to_author_notes(
-        cls, v: list[str | AuthorNote | dict[str, str]]
-    ) -> list[AuthorNote | dict[str, str]]:
+        cls, v: list[str | AuthorNote | JsonObject]
+    ) -> list[AuthorNote | JsonObject]:
         """Accept plain strings from old snapshots."""
         return [AuthorNote(note=item) if isinstance(item, str) else item for item in v]
 
@@ -426,7 +427,7 @@ class PreserveAction(RestartStep):
 
 
 RestartAction = Annotated[
-    Union[PatchAction, RewriteAction, AddAction, DropAction, PreserveAction],
+    PatchAction | RewriteAction | AddAction | DropAction | PreserveAction,
     Field(discriminator="kind"),
 ]
 
@@ -500,14 +501,14 @@ class PipelineSnapshot(BaseModel):
 
     doc_id: str = Field(default="", description="Google Doc ID (for resume)")
     doc_url: str = Field(default="", description="Google Doc URL (for resume)")
-    seen_comment_ids: set[str] = Field(
-        default_factory=set, description="Comment IDs already processed"
+    seen_comment_ids: list[str] = Field(
+        default_factory=list, description="Comment IDs already processed"
     )
-    agent_comment_ids: set[str] = Field(
-        default_factory=set, description="Comment IDs posted by the agent"
+    agent_comment_ids: list[str] = Field(
+        default_factory=list, description="Comment IDs posted by the agent"
     )
-    seen_source_comment_ids: set[str] = Field(
-        default_factory=set, description="Source-doc comment IDs already processed"
+    seen_source_comment_ids: list[str] = Field(
+        default_factory=list, description="Source-doc comment IDs already processed"
     )
     source_doc_id: str = Field(
         default="", description="Google Doc ID of the source document, if any"
@@ -519,7 +520,7 @@ class PipelineSnapshot(BaseModel):
         default=None,
         description="Accumulated cost/token state, carried across process restarts",
     )
-    session_ids: dict[str, str] = Field(
+    session_ids: StringMap = Field(
         default_factory=dict,
         description=(
             "Stage/section label -> SDK session id, so a resumed run can "

@@ -2,10 +2,12 @@
 
 from pathlib import Path
 
+from lup.types import JsonValue
+
 from inkwell.agent.session import WritingSessionState
 
 
-def api_result(comments: list[dict[str, object]]) -> dict[str, object]:
+def api_result(comments: list[JsonValue]) -> JsonValue:
     return {"comments": comments}
 
 
@@ -19,7 +21,7 @@ class TestParseComments:
         )
 
         assert parsed == []
-        assert "c1" not in state.seen_comment_ids
+        assert "c1" not in state.seen_comments
 
     def test_agent_comment_with_agent_only_reply_is_filtered(self) -> None:
         state = WritingSessionState()
@@ -86,7 +88,8 @@ class TestAgentIdsRegistry:
         second = WritingSessionState()
         second.attach_agent_ids_registry(registry)
 
-        assert {"c1", "r1"} <= second.agent_comment_ids
+        assert "c1" in second.agent_comments
+        assert "r1" in second.agent_comments
 
     def test_stale_snapshot_merges_with_registry(self, tmp_path: Path) -> None:
         registry = tmp_path / "agent_ids.txt"
@@ -96,7 +99,7 @@ class TestAgentIdsRegistry:
 
         resumed = WritingSessionState()
         resumed.attach_agent_ids_registry(registry)
-        resumed.agent_comment_ids.update({"older-snapshot-id"})
+        resumed.agent_comments.mark("older-snapshot-id")
 
-        assert "review-comment" in resumed.agent_comment_ids
-        assert "older-snapshot-id" in resumed.agent_comment_ids
+        assert "review-comment" in resumed.agent_comments
+        assert "older-snapshot-id" in resumed.agent_comments

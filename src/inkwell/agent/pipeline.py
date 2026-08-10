@@ -71,7 +71,7 @@ from inkwell.agent.watcher import (
     create_comment_watcher,
     create_source_watcher,
 )
-from inkwell.agent.session import AuthorComment, WritingSessionState
+from inkwell.agent.session import AuthorComment, CommentLedger, WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
     COMMENT_CLASSIFIER_PROMPT,
@@ -2832,9 +2832,11 @@ class PipelineRunner:
         self.snapshot.doc_id = self.state.doc_id
         self.snapshot.doc_url = self.state.doc_url
         self.snapshot.source_doc_id = self.state.source_doc_id
-        self.snapshot.seen_comment_ids = {*self.state.seen_comment_ids}
-        self.snapshot.agent_comment_ids = {*self.state.agent_comment_ids}
-        self.snapshot.seen_source_comment_ids = {*self.state.seen_source_comment_ids}
+        self.snapshot.seen_comment_ids = list(self.state.seen_comments.handled)
+        self.snapshot.agent_comment_ids = list(self.state.agent_comments.handled)
+        self.snapshot.seen_source_comment_ids = list(
+            self.state.seen_source_comments.handled
+        )
         self.snapshot.pending_questions = list(self.state.pending_questions)
         self.snapshot.cost_state = self.cost_accumulator
 
@@ -3046,11 +3048,13 @@ class PipelineRunner:
         elif snapshot.output and snapshot.output.google_doc_id:
             self.existing_doc_id = snapshot.output.google_doc_id
 
-        self.state.seen_comment_ids = {*snapshot.seen_comment_ids}
-        self.state.agent_comment_ids.update(snapshot.agent_comment_ids)
+        self.state.seen_comments = CommentLedger(handled=snapshot.seen_comment_ids)
+        self.state.agent_comments.mark_all(snapshot.agent_comment_ids)
         self.ensure_notes()
         self.rehydrate_draft_files()
-        self.state.seen_source_comment_ids = {*snapshot.seen_source_comment_ids}
+        self.state.seen_source_comments = CommentLedger(
+            handled=snapshot.seen_source_comment_ids
+        )
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:

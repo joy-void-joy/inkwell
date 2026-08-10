@@ -611,9 +611,10 @@ class SessionManager:
             else:
                 doc_id = doc_arg
 
-            already_seen = (
-                handle.state.seen_comment_ids | handle.state.agent_comment_ids
-            )
+            already_seen = [
+                *handle.state.seen_comments.handled,
+                *handle.state.agent_comments.handled,
+            ]
             comments = await do_fetch_comments(
                 doc_id, exclude_ids=already_seen, include_resolved=True
             )

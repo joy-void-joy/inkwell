@@ -313,11 +313,12 @@ async def fetch_and_queue_comments(
         else:
             doc_id = doc_arg
 
-        already_seen = set[str]()
+        already_seen: list[str] = []
         if session_state:
-            already_seen = (
-                session_state.seen_comment_ids | session_state.agent_comment_ids
-            )
+            already_seen = [
+                *session_state.seen_comments.handled,
+                *session_state.agent_comments.handled,
+            ]
 
         comments = await do_fetch_comments(
             doc_id, exclude_ids=already_seen, include_resolved=True

@@ -9,13 +9,47 @@ import logging
 from typing import TypedDict
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.config import current_settings
 from lup.workspace.content_safety import save_content
 from lup.mcp import ToolError, lup_tool
+from lup.types import JsonObject
 
 logger = logging.getLogger(__name__)
+
+SNIPPET_LENGTH = 500
+"""How much of a result is returned inline before it is saved to disk instead."""
+
+UTC_SUFFIX = "Z"
+"""What Exa appends to a timestamp, which callers here read without."""
+
+
+class WireResult(BaseModel):
+    """One search hit, by the names Exa sends."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    title: str = ""
+    url: str = ""
+    text: str = ""
+    highlights: list[str] = Field(default_factory=list)
+    score: float | None = None
+    published_date: str = Field(default="", alias="publishedDate")
+
+    def published_at(self) -> str | None:
+        """When this was published, without the zone marker Exa appends."""
+        if not self.published_date:
+            return None
+        return self.published_date.removesuffix(UTC_SUFFIX)
+
+
+class WireSearchResponse(BaseModel):
+    """What an Exa search answers with."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    results: list[WireResult] = Field(default_factory=list)
 
 
 class ExaResult(TypedDict):
@@ -81,7 +115,7 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
         "content-type": "application/json",
         "x-api-key": api_key,
     }
-    payload: dict[str, object] = {
+    payload: JsonObject = {
         "query": params.query,
         "type": "auto",
         "useAutoprompt": True,
@@ -102,9 +136,9 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
     if params.published_after:
         payload["startPublishedDate"] = f"{params.published_after}T00:00:00.000Z"
     if params.include_domains:
-        payload["includeDomains"] = params.include_domains
+        payload["includeDomains"] = list(params.include_domains)
     if params.exclude_domains:
-        payload["excludeDomains"] = params.exclude_domains
+        payload["excludeDomains"] = list(params.exclude_domains)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(url, json=payload, headers=headers)
@@ -113,34 +147,30 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
                 f"Exa API error {response.status_code}: {response.text[:200]}"
             )
         response.raise_for_status()
-        data = response.json()
+        found = WireSearchResponse.model_validate(response.json())
 
-    results: list[ExaResult] = []
-    for r in data.get("results", []):
-        published_date = r.get("publishedDate")
-        if isinstance(published_date, str):
-            published_date = published_date.rstrip("Z")
+    def stored(hit: WireResult) -> str | None:
+        """Where this hit's full text was saved, when it was long enough."""
+        if len(hit.text) <= SNIPPET_LENGTH:
+            return None
+        try:
+            return save_content("exa", hit.url or params.query, hit.text).path
+        except RuntimeError:
+            logger.debug("No content directory configured; returning snippet only")
+            return None
 
-        full_text = r.get("text") or ""
-        full_text_path: str | None = None
-        if len(full_text) > 500:
-            try:
-                saved = save_content("exa", r.get("url") or params.query, full_text)
-                full_text_path = saved.path
-            except RuntimeError:
-                logger.debug("No content directory configured; returning snippet only")
-
-        results.append(
-            ExaResult(
-                title=r.get("title"),
-                url=r.get("url"),
-                snippet=full_text[:500] or None,
-                highlights=[h[:500] for h in r.get("highlights", [])[:3]] or None,
-                published_date=published_date,
-                score=r.get("score"),
-                full_text_path=full_text_path,
-            )
+    results = [
+        ExaResult(
+            title=hit.title or None,
+            url=hit.url or None,
+            snippet=hit.text[:SNIPPET_LENGTH] or None,
+            highlights=[h[:SNIPPET_LENGTH] for h in hit.highlights[:3]] or None,
+            published_date=hit.published_at(),
+            score=hit.score,
+            full_text_path=stored(hit),
         )
+        for hit in found.results
+    ]
 
     return ExaSearchOutput(
         query=params.query,

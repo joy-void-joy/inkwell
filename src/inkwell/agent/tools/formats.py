@@ -319,7 +319,7 @@ async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=THREAD_WRITER_SYSTEM,
     )
 
@@ -361,7 +361,7 @@ async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=(
             "You restructure articles into dialogs. Each turn should feel natural "
             "and conversational while preserving the substance of the original. "
@@ -478,7 +478,7 @@ async def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=(
             "You restructure article-style content into memo format. "
             "Apply these rules strictly:\n\n"
@@ -542,7 +542,7 @@ async def do_format_academic(params: FormatAcademicInput) -> FormatAcademicOutpu
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=(
             "You restructure article-style content into academic paper format.\n\n"
             "1. ABSTRACT: Write a 150-300 word abstract if none provided.\n"
@@ -631,7 +631,7 @@ async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=(
             "You are a format adapter. Rewrite the content to match the requested "
             "format exactly — adopt the conventions, structure, tone, and layout "

@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from inkwell.agent.browser_auth import context_has_cookies, login_interactive
+from inkwell.agent.client import PROVIDER_LOGIN, RUNTIME
 from inkwell.devtools.setup import (
     PROFILES_DIR,
     claude_config_dir_for_profile,
@@ -75,7 +76,7 @@ SETTABLE_KEYS = frozenset(
         "FRED_API_KEY",
         "CLAUDE_COOKIE",
         "CLAUDE_ORG_UUID",
-        "CLAUDE_CONFIG_DIR",
+        PROVIDER_LOGIN.config_home_env,
         "INKWELL_AUTHOR_EMAIL",
         "INKWELL_GOOGLE_WORKSPACE_DOMAIN",
         "AGENT_MODEL",
@@ -107,11 +108,12 @@ async def build_profile_response(name: str) -> ProfileResponse:
 
     integrations: list[IntegrationStatus] = []
 
-    config_dir = env.get("CLAUDE_CONFIG_DIR", "")
-    login_ok = bool(config_dir) and (Path(config_dir) / ".credentials.json").exists()
+    # lup: ignore[dict-get] — a parsed env file, keyed by whatever it holds
+    config_dir = env.get(PROVIDER_LOGIN.config_home_env, "")
+    login_ok = bool(config_dir) and PROVIDER_LOGIN.logged_in(Path(config_dir))
     integrations.append(
         IntegrationStatus(
-            name="Claude login",
+            name=f"{RUNTIME.name} login",
             configured=login_ok,
             detail=config_dir if login_ok else "not configured",
         )
@@ -277,7 +279,7 @@ async def detect_claude_login(name: str) -> DetectResult:
     found = [
         DetectedLogin(path=str(d), label=label, is_profile_match=match)
         for d, label, match in candidates
-        if d.is_dir() and (d / ".credentials.json").exists()
+        if d.is_dir() and PROVIDER_LOGIN.logged_in(d)
     ]
 
     return DetectResult(found=found)

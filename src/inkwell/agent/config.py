@@ -10,6 +10,8 @@ from typing import Self
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from inkwell.agent.client import PROVIDER_LOGIN
+
 logger = logging.getLogger(__name__)
 
 
@@ -143,8 +145,8 @@ class Settings(BaseSettings):
 
     claude_config_dir: str | None = Field(
         default=None,
-        validation_alias="CLAUDE_CONFIG_DIR",
-        description="Separate Claude config directory for agent login",
+        validation_alias=PROVIDER_LOGIN.config_home_env,
+        description="Separate runtime config directory for agent login",
     )
 
     openrouter_api_key: str | None = Field(
@@ -326,7 +328,7 @@ def subprocess_auth_env(session_settings: Settings) -> dict[str, str]:
     """
     env: dict[str, str] = {}
     if session_settings.claude_config_dir:
-        env["CLAUDE_CONFIG_DIR"] = session_settings.claude_config_dir
+        env[PROVIDER_LOGIN.config_home_env] = session_settings.claude_config_dir
     if session_settings.openrouter_api_key:
         env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
         env["ANTHROPIC_AUTH_TOKEN"] = session_settings.openrouter_api_key

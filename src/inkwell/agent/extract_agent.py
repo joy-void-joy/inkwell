@@ -201,7 +201,7 @@ async def run_extraction_agent(
         allowed_tools=source_tool_names,
         mcp_servers=source_servers,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         prefix="[extract] ",
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,

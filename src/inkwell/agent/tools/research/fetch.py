@@ -271,7 +271,7 @@ async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:
         output_type=FocusedExtract,
         tools=["Read"],
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
     )
 
     if result is None:

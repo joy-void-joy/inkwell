@@ -112,7 +112,7 @@ def create_watcher_tools(
             model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix="[classify] ",
         )
         if classified is None:
@@ -261,7 +261,7 @@ def watcher_agent(
             system_prompt=system_prompt,
             tool_servers={name: server},
             allowed_tools=[f"mcp__{name}__{tool.name}" for tool in tools],
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
         ),
         state_to_request=lambda batch: turn_request(batch.prompt),
         result_handler=discard,
@@ -353,7 +353,7 @@ def create_source_watcher_tools(
             model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix="[source-classify] ",
         )
         if classified is None:

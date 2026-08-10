@@ -24,6 +24,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from inkwell.agent.client import PROVIDER_LOGIN, RUNTIME
+
 app = typer.Typer(
     help="Interactive setup wizard",
     pretty_exceptions_show_locals=False,
@@ -214,12 +216,13 @@ def build_status_table(profile: str | None = None) -> Table:
     table.add_column("Integration", min_width=30)
     table.add_column("Detail", style="dim")
 
-    config_dir = env.get("CLAUDE_CONFIG_DIR", "")
-    login_ok = bool(config_dir) and (Path(config_dir) / ".credentials.json").exists()
+    # lup: ignore[dict-get] — a parsed env file, keyed by whatever it holds
+    config_dir = env.get(PROVIDER_LOGIN.config_home_env, "")
+    login_ok = bool(config_dir) and PROVIDER_LOGIN.logged_in(Path(config_dir))
     table.add_row(
         "[green]OK[/]" if login_ok else "[dim]--[/]",
-        "Claude login",
-        config_dir if login_ok else "using default (shared with Claude Code)",
+        f"{RUNTIME.name} login",
+        config_dir if login_ok else f"using default (shared with {RUNTIME.name})",
     )
 
     google_ok = google_token.exists()
@@ -559,11 +562,11 @@ def setup_claude_login() -> dict[str, str]:
     console.print()
 
     env = read_env_local(profile)
-    existing_dir = env.get("CLAUDE_CONFIG_DIR", "")
+    # lup: ignore[dict-get] — a parsed env file, keyed by whatever it holds
+    existing_dir = env.get(PROVIDER_LOGIN.config_home_env, "")
 
     if existing_dir and Path(existing_dir).exists():
-        creds_path = Path(existing_dir) / ".credentials.json"
-        if creds_path.exists():
+        if PROVIDER_LOGIN.logged_in(Path(existing_dir)):
             console.print(
                 f"[green]Already configured.[/] Using [bold]{existing_dir}[/]"
             )
@@ -589,7 +592,10 @@ def setup_claude_login() -> dict[str, str]:
         "  you want the writing agent to use.\n"
     )
 
-    login_env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)}
+    login_env = {
+        **os.environ,  # lup: ignore[os-environ] — exact child-process inheritance
+        **PROVIDER_LOGIN.environment(config_dir),
+    }
     claude = sh.Command("claude")
     try:
         claude("/login", _env=login_env, _fg=True)
@@ -600,7 +606,7 @@ def setup_claude_login() -> dict[str, str]:
         return {}
 
     console.print("[green]Logged in![/]")
-    return {"CLAUDE_CONFIG_DIR": str(config_dir)}
+    return PROVIDER_LOGIN.environment(config_dir)
 
 
 # =====================================================================

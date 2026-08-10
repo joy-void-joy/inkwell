@@ -333,7 +333,7 @@ def make_source_consult_tools(
             system_prompt=SOURCE_READER_PROMPT,
             tools=["Read"],
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix=f"[consult:{doc.label}] ",
         )
         answer = result_text(collector)
@@ -420,7 +420,7 @@ async def build_reading_notes(
                 system_prompt=READING_NOTES_PROMPT,
                 tools=["Read", "Write"],
                 max_thinking_tokens=128_000 - 1,
-                permission_mode="bypassPermissions",
+                autonomy="unattended",
                 prefix=f"[reading:{doc.label}:{start}-{end}] ",
                 trace_logger=trace_logger,
                 cost_accumulator=cost_accumulator,

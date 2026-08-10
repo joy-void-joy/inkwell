@@ -686,7 +686,7 @@ async def repl(
         model=effective_model,
         system_prompt=prompt,
         max_thinking_tokens=settings.max_thinking_tokens or (128_000 - 1),
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         tool_servers=mcp_servers or None,
     )
     try:

@@ -22,14 +22,12 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Literal, overload
+from typing import overload
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from lup.adapters.claude.runtime import (
-    ClaudeSessionConfig,
-    create_claude_session_factory,
-)
+from lup.adapters.claude.selection import CLAUDE_RUNTIME
+from lup.runtime.selection import SessionAutonomy, SessionRequest
 from lup.hooks import LupHooksConfig, create_large_read_hook
 from lup.mcp import McpServerEntry
 from lup.runtime.errors import TurnInterruptedError
@@ -57,10 +55,6 @@ type HeartbeatCallback = Callable[[float], Coroutine[None, None, None]]
 
 type SessionCapture = Callable[[str, str], Coroutine[None, None, None]]
 """Async hook that records ``(stage_label, session_id)`` durably."""
-
-type PermissionMode = Literal[
-    "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"
-]
 
 type TraceSink = Callable[[TraceRecord], Coroutine[None, None, None]]
 type DisplaySink = Callable[[DisplayRecord], Coroutine[None, None, None]]
@@ -236,32 +230,47 @@ def result_text[T: BaseModel | None](result: TurnResult[T]) -> str:
     )
 
 
+RUNTIME = CLAUDE_RUNTIME
+"""The one place inkwell names a provider.
+
+Everything downstream reads this: :func:`provider_factory` opens sessions
+through it, and the profile system administers the login it carries. Pointing
+this at another runtime moves both, so the two cannot come to disagree about
+which provider inkwell is running.
+"""
+
+PROVIDER_LOGIN = RUNTIME.login
+"""Where the selected runtime keeps a login, and how to point it at one."""
+
+
 def provider_factory(
     *,
     model: str | None = None,
     system_prompt: str = "",
     tools: list[str] | None = None,
     allowed_tools: list[str] | None = None,
-    permission_mode: PermissionMode | None = None,
+    autonomy: SessionAutonomy | None = None,
     tool_servers: dict[str, McpServerEntry] | None = None,
     max_thinking_tokens: int | None = None,
     max_turns: int | None = None,
     cwd: Path | None = None,
     hooks: LupHooksConfig | None = None,
 ) -> SessionFactory:
-    """The one application-owned provider selection boundary.
+    """Open a session through the selected runtime.
 
-    Native identifiers stay confined here. Every caller above receives only a
-    configured ``SessionFactory`` and cannot tell which runtime answers it.
+    Every caller above receives only a configured ``SessionFactory`` and
+    cannot tell which runtime answers it — the selection itself is
+    :data:`RUNTIME`, and this states what a session should be, not who runs
+    it.
     """
-    return create_claude_session_factory(
-        ClaudeSessionConfig(
+    return RUNTIME.session_factory(
+        SessionRequest(
             model=model,
-            system_prompt=system_prompt,
+            instructions=system_prompt,
             tools=tools,
             allowed_tools=allowed_tools or [],
             tool_servers=tool_servers or {},
-            permission_mode=permission_mode,
+            autonomy=autonomy,
             max_turns=max_turns,
             max_thinking_tokens=max_thinking_tokens,
             cwd=cwd,
@@ -349,7 +358,7 @@ async def query[T: BaseModel](
     system_prompt: str = ...,
     tools: list[str] | None = ...,
     allowed_tools: list[str] | None = ...,
-    permission_mode: PermissionMode | None = ...,
+    autonomy: SessionAutonomy | None = ...,
     mcp_servers: dict[str, McpServerEntry] | None = ...,
     max_thinking_tokens: int | None = ...,
     max_turns: int | None = ...,
@@ -373,7 +382,7 @@ async def query(
     system_prompt: str = ...,
     tools: list[str] | None = ...,
     allowed_tools: list[str] | None = ...,
-    permission_mode: PermissionMode | None = ...,
+    autonomy: SessionAutonomy | None = ...,
     mcp_servers: dict[str, McpServerEntry] | None = ...,
     max_thinking_tokens: int | None = ...,
     max_turns: int | None = ...,
@@ -397,7 +406,7 @@ async def query(
     system_prompt: str = "",
     tools: list[str] | None = None,
     allowed_tools: list[str] | None = None,
-    permission_mode: PermissionMode | None = None,
+    autonomy: SessionAutonomy | None = None,
     mcp_servers: dict[str, McpServerEntry] | None = None,
     max_thinking_tokens: int | None = None,
     max_turns: int | None = None,
@@ -431,7 +440,7 @@ async def query(
             system_prompt=system_prompt,
             tools=tools,
             allowed_tools=allowed_tools,
-            permission_mode=permission_mode,
+            autonomy=autonomy,
             tool_servers=mcp_servers,
             max_thinking_tokens=max_thinking_tokens,
             max_turns=max_turns,

@@ -5,13 +5,17 @@ scatter plots, 256-color palettes, and watch-mode utilities. Import these
 builders from devtools commands that need visualization.
 """
 
+import math
 import select
 import statistics
 import sys
 import termios
 import tty
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timedelta
+
+from pydantic import BaseModel, Field
 
 
 # ── color palette ─────────────────────────────────────────
@@ -62,25 +66,94 @@ def pick_colors(n: int) -> list[int]:
     return [SATURATED_RING[int(i * step) % len(SATURATED_RING)] for i in range(n)]
 
 
-# ── types ─────────────────────────────────────────────────
+# ── chart vocabulary ──────────────────────────────────────
 
 
-ScatterPoint = tuple[float, float, str, int]
-"""(x, y, category_label, item_id) for scatter charts."""
+type GroupOrder = Callable[[str], tuple[int, ...]]
+"""Orders one group or category by name; builders sort lexicographically without."""
+
+
+class ScatterPoint(BaseModel):
+    """One plotted point: where it sits, what it belongs to, what it came from."""
+
+    x: float = Field(description="Days after the chart epoch")
+    y: float = Field(description="The plotted value")
+    category: str = Field(description="Category whose color this point takes")
+    item_id: int = Field(description="Identity of the record behind the point")
+
+
+class ChartCategory(BaseModel):
+    """One category of a chart panel: how it draws, and how much of it shows."""
+
+    name: str = Field(description="Category name, as the legend spells it")
+    color: int = Field(default=7, description="256-color code drawing this category")
+    count: int = Field(default=0, description="Points visible for this category")
+    total: int = Field(default=0, description="Points the category has in all")
+
+
+class StripGroup(BaseModel):
+    """One row of a strip chart: a group's values, and how the row is labelled.
+
+    The row answers its own statistics, so a caller assembles what it measured
+    and never a second list running parallel to it.
+    """
+
+    name: str = Field(description="Group name, leading the row label")
+    values: list[float] = Field(
+        default_factory=list, description="Values plotted as dots along the row"
+    )
+    label: str = Field(default="", description="Display suffix — a date, a description")
+    color: int | None = Field(
+        default=None,
+        description="256-color code; a position in the saturated ring when None",
+    )
+    total: int | None = Field(
+        default=None,
+        description="Population the values sample, labelling the row as n/total",
+    )
+
+    @property
+    def count(self) -> int:
+        """How many values the row plots."""
+        return len(self.values)
+
+    @property
+    def mean(self) -> float:
+        """Average of the plotted values, zero for an empty row."""
+        return statistics.mean(self.values) if self.values else 0.0
+
+    @property
+    def stdev(self) -> float:
+        """Sample deviation of the plotted values, zero below two of them."""
+        return statistics.stdev(self.values) if len(self.values) > 1 else 0.0
+
+    @property
+    def lowest(self) -> float:
+        """Smallest plotted value, zero for an empty row."""
+        return min(self.values, default=0.0)
+
+    @property
+    def highest(self) -> float:
+        """Largest plotted value, zero for an empty row."""
+        return max(self.values, default=0.0)
+
+    @property
+    def caption(self) -> str:
+        """The row's left-hand label: name, suffix, and how many of how many."""
+        if self.total is not None:
+            return f"{self.name} {self.label} {self.count}/{self.total}".strip()
+        return f"{self.name} {self.label} (n={self.count:>2})".strip()
 
 
 # ── strip chart ───────────────────────────────────────────
 
 
 def build_strip_chart(
-    by_group: dict[str, list[float]],
-    group_labels: dict[str, str],
+    groups: list[StripGroup],
     term_width: int,
     *,
-    color_map: dict[str, int] | None = None,
-    group_totals: dict[str, int] | None = None,
     title: str = "Score by group (higher is better)",
-    sort_key: Callable[[str], tuple[int, ...]] | None = None,
+    sort_key: GroupOrder | None = None,
 ) -> str:
     """Build a horizontal scatter strip chart with summary statistics.
 
@@ -89,33 +162,17 @@ def build_strip_chart(
     outliers and shows a zero reference line when in range.
 
     Args:
-        by_group: Group name -> list of float values to plot.
-        group_labels: Group name -> display suffix (e.g. date, description).
+        groups: One row per group, in any order. A group that carries a total
+            but no values still gets a row, drawn empty.
         term_width: Terminal width in columns.
-        color_map: Pre-computed group -> 256-color code. Auto-assigned if None.
-        group_totals: Total count per group (shown as n/total in labels).
         title: Bold header line above the chart.
-        sort_key: Sort function for group ordering. Lexicographic if None.
+        sort_key: Row ordering over group names. Lexicographic if None.
     """
-    key_fn: Callable[[str], tuple[int, ...]] = sort_key or (lambda _: (0,))
+    key_fn: GroupOrder = sort_key or (lambda _: (0,))
+    ordered = sorted(groups, key=lambda group: key_fn(group.name))
+    ring = pick_colors(len(ordered))
 
-    all_groups = set(by_group.keys())
-    if group_totals:
-        all_groups |= group_totals.keys()
-    groups_sorted = sorted(all_groups, key=key_fn)
-
-    group_stats: list[tuple[str, int, float, float, float, float]] = []
-    for g in groups_sorted:
-        values = by_group.get(g, [])
-        n = len(values)
-        if n > 0:
-            avg = statistics.mean(values)
-            std = statistics.stdev(values) if n > 1 else 0.0
-            group_stats.append((g, n, avg, std, min(values), max(values)))
-        else:
-            group_stats.append((g, 0, 0.0, 0.0, 0.0, 0.0))
-
-    all_values = sorted(v for g in groups_sorted for v in by_group.get(g, []))
+    all_values = sorted(value for group in ordered for value in group.values)
     if not all_values:
         all_values = [0.0]
     n_values = len(all_values)
@@ -131,14 +188,7 @@ def build_strip_chart(
     range_max = val_max + margin
     val_range = range_max - range_min
 
-    def label_text(g: str, n: int) -> str:
-        suffix = group_labels.get(g, "")
-        total = group_totals.get(g) if group_totals else None
-        if total is not None:
-            return f"{g} {suffix} {n}/{total}".strip()
-        return f"{g} {suffix} (n={n:>2})".strip()
-
-    label_width = max(len(label_text(s[0], s[1])) for s in group_stats)
+    label_width = max(len(group.caption) for group in ordered)
     value_width = 22
     chart_width = max(20, term_width - label_width - value_width - 4)
 
@@ -158,30 +208,23 @@ def build_strip_chart(
     else:
         zero_pos = to_pos(0.0)
 
-    if color_map is None:
-        colors = pick_colors(len(groups_sorted))
-        color_map = dict(zip(groups_sorted, colors))
-
     BOLD = "\033[1m"
     DIM = "\033[2m"
     RESET = "\033[0m"
 
     lines: list[str] = [f"{BOLD}{title}{RESET}", ""]
 
-    for g, n, avg, std, mn, mx in group_stats:
-        label = label_text(g, n).ljust(label_width)
-        c = color_map.get(g)
-        ansi = f"\033[38;5;{c}m" if c is not None else ""
+    for index, group in enumerate(ordered):
+        label = group.caption.ljust(label_width)
+        color = group.color if group.color is not None else ring[index % len(ring)]
+        ansi = f"\033[38;5;{color}m"
 
-        if n > 0:
-            counts: dict[int, int] = {}
-            for v in by_group.get(g, []):
-                pos = to_pos(v)
-                counts[pos] = counts.get(pos, 0) + 1
+        if group.count:
+            counts = Counter(to_pos(value) for value in group.values)
 
             parts: list[str] = []
             for col in range(chart_width):
-                count = counts.get(col, 0)
+                count = counts[col]
                 if count > 0:
                     char = "●" if count == 1 else str(min(count, 9))
                     parts.append(f"{ansi}{char}{RESET}")
@@ -190,7 +233,10 @@ def build_strip_chart(
                 else:
                     parts.append(" ")
             row = "".join(parts)
-            stats = f"{avg:>5.1f} ±{std:>2.0f}  {mn:>3.0f}‥{mx:.0f}"
+            stats = (
+                f"{group.mean:>5.1f} ±{group.stdev:>2.0f}  "
+                f"{group.lowest:>3.0f}‥{group.highest:.0f}"
+            )
             lines.append(f"  {ansi}{label}{RESET} {row}  {stats}")
         else:
             empty = list(" " * chart_width)
@@ -235,7 +281,7 @@ def build_scatter(
     ylabel: str,
     term_width: int,
     chart_height: int,
-    color_map: dict[str, int],
+    categories: list[ChartCategory],
     epoch: datetime,
 ) -> str:
     """Build a scatter chart panel with IQR-based y-axis clipping.
@@ -244,18 +290,18 @@ def build_scatter(
     and the x-axis shows dates relative to *epoch*.
 
     Args:
-        points: List of (x_day_offset, y_value, category, item_id).
+        points: Every point to plot, in any order.
         title_label: Chart title shown above the plot.
         ylabel: Y-axis label.
         term_width: Terminal width in columns.
         chart_height: Chart height in rows.
-        color_map: Category -> 256-color code mapping.
+        categories: Categories to draw, in drawing order, with their colors.
         epoch: Reference datetime for x-axis date labels.
     """
     import plotext as plt
 
-    x_all = [p[0] for p in points]
-    y_all = [p[1] for p in points]
+    x_all = [point.x for point in points]
+    y_all = [point.y for point in points]
 
     sorted_y = sorted(y_all)
     n = len(sorted_y)
@@ -268,37 +314,26 @@ def build_scatter(
     y_lo = min(y_lo, 0.0)
     y_hi = max(y_hi, 0.0)
 
-    by_category: dict[str, list[ScatterPoint]] = {}
-    for p in points:
-        by_category.setdefault(p[2], []).append(p)
-
     plt.clear_figure()
     plt.theme("dark")
 
-    for cat, color in color_map.items():
-        cat_points = by_category.get(cat)
-        if not cat_points:
+    for category in categories:
+        drawn = [point for point in points if point.category == category.name]
+        if not drawn:
             continue
         plt.scatter(
-            [p[0] for p in cat_points],
-            [p[1] for p in cat_points],
+            [point.x for point in drawn],
+            [point.y for point in drawn],
             marker="dot",
-            color=color,
+            color=category.color,
         )
 
     n_yticks = max(3, chart_height // 3)
     y_step = (y_hi - y_lo) / max(1, n_yticks)
-    yticks: list[float] = []
-    v = 0.0
-    while v >= y_lo:
-        yticks.append(v)
-        v -= y_step
-    v = y_step
-    while v <= y_hi:
-        yticks.append(v)
-        v += y_step
-    yticks.sort()
-    plt.yticks(yticks, [f"{t:.0f}" for t in yticks])
+    below = math.floor(-y_lo / y_step) if y_step else 0
+    above = math.floor(y_hi / y_step) if y_step else 0
+    yticks = [step * y_step for step in range(-below, above + 1)]
+    plt.yticks(yticks, [f"{tick:.0f}" for tick in yticks])
     plt.ylim(yticks[0], yticks[-1])
 
     x_min, x_max = min(x_all), max(x_all)
@@ -323,44 +358,36 @@ def build_scatter(
 
 
 def build_legend(
-    categories: list[str],
-    color_map: dict[str, int],
-    counts: dict[str, int],
-    totals: dict[str, int] | None,
+    categories: list[ChartCategory],
     term_width: int,
-    sort_key: Callable[[str], tuple[int, ...]] | None = None,
+    sort_key: GroupOrder | None = None,
 ) -> str:
     """Build a colored inline legend for scatter charts.
 
+    A category with no total is left out: nothing was collected under it.
+
     Args:
-        categories: Category names to include.
-        color_map: Category -> 256-color code.
-        counts: Visible/resolved count per category.
-        totals: Total count per category (shown as count/total).
+        categories: Categories to describe, in any order.
         term_width: Terminal width for even spacing.
-        sort_key: Sort function. Lexicographic if None.
+        sort_key: Ordering over category names. Lexicographic if None.
     """
-    key_fn: Callable[[str], tuple[int, ...]] = sort_key or (lambda _: (0,))
-
-    entries: list[tuple[str, int]] = []
-    for cat in sorted(categories, key=key_fn):
-        color = color_map.get(cat, 7)
-        total = totals.get(cat, 0) if totals else 0
-        if not total:
-            continue
-        count = counts.get(cat, 0)
-        ansi = f"\033[38;5;{color}m"
-        text = f"{cat} {count}/{total}"
-        entries.append((f"{ansi}{text}\033[0m", len(text)))
-
-    if not entries:
+    key_fn: GroupOrder = sort_key or (lambda _: (0,))
+    shown = [
+        category
+        for category in sorted(categories, key=lambda item: key_fn(item.name))
+        if category.total
+    ]
+    if not shown:
         return ""
 
-    visible_total = sum(vl for _, vl in entries)
-    n = len(entries)
+    labels = [f"{item.name} {item.count}/{item.total}" for item in shown]
+    visible_total = sum(len(label) for label in labels)
     remaining = max(0, term_width - visible_total)
-    gap = remaining // max(1, n - 1) if n > 1 else 0
-    return (" " * gap).join(entry for entry, _ in entries)
+    gap = remaining // max(1, len(shown) - 1) if len(shown) > 1 else 0
+    return (" " * gap).join(
+        f"\033[38;5;{category.color}m{label}\033[0m"
+        for category, label in zip(shown, labels)
+    )
 
 
 # ── terminal utility ──────────────────────────────────────

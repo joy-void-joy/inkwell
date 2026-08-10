@@ -5,7 +5,7 @@ import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Self
+from typing import Literal, Self, get_args
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import (
@@ -68,7 +68,7 @@ def build_env_files() -> tuple[str, ...]:
     return env_files_for(active_profile())
 
 
-PIPELINE_STAGES: tuple[str, ...] = (
+type PipelineStage = Literal[
     "preprocess",
     "extract",
     "voice",
@@ -85,8 +85,11 @@ PIPELINE_STAGES: tuple[str, ...] = (
     "orchestrate",
     "reader",
     "format",
-)
-"""Stage names accepted by per-stage model overrides."""
+]
+"""One stage of the writing pipeline, as a per-stage model override names it."""
+
+PIPELINE_STAGES: tuple[PipelineStage, ...] = get_args(PipelineStage.__value__)
+"""Stage names accepted by per-stage model overrides, in pipeline order."""
 
 SUGGESTED_MODELS: tuple[str, ...] = (
     "claude-opus-4-6",
@@ -220,7 +223,7 @@ class Settings(BaseSettings):
         description="Default Claude model for all pipeline stages",
     )
 
-    stage_models: dict[str, str] = Field(
+    stage_models: dict[PipelineStage, str] = Field(
         default_factory=dict,
         validation_alias="AGENT_STAGE_MODELS",
         description=(
@@ -243,9 +246,9 @@ class Settings(BaseSettings):
         ),
     )
 
-    def model_for(self, stage: str) -> str:
+    def model_for(self, stage: PipelineStage) -> str:
         """Model for a pipeline stage: stage override, else the default model."""
-        return self.stage_models.get(stage, self.model)
+        return self.stage_models[stage] if stage in self.stage_models else self.model
 
     max_thinking_tokens: int | None = Field(
         default=128_000 - 1,
@@ -367,7 +370,7 @@ def current_settings() -> Settings:
     return override if override is not None else settings
 
 
-def stage_model(stage: str) -> str:
+def stage_model(stage: PipelineStage) -> str:
     """Model for a pipeline stage from the active settings."""
     return current_settings().model_for(stage)
 

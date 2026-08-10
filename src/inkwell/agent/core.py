@@ -4,7 +4,7 @@ Exports:
 - setup_session() — create notes, trace, and session state for a run
 - run_session() — unified entry point (fresh run or snapshot resume)
 - load_snapshot() — load saved pipeline state for resumption
-- SessionTrace — trace handle so callers can save on interrupt
+- SessionTrace — a run's trace, so callers can save it on interrupt
 """
 
 import logging
@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
+
+from pydantic import BaseModel
 
 from lup.runtime.usage import CostAccumulator
 from lup.types import Usage
@@ -132,14 +134,20 @@ def checkpoint_before(session_id: str, redo_stage: str) -> str | None:
     return None
 
 
-class SessionTrace:
-    """Holds trace state so callers can save on interrupt."""
+class SessionTrace(BaseModel):
+    """A session's trace, handed to :func:`run_session` for it to fill in.
 
-    def __init__(self, trace_logger: TraceLogger) -> None:
-        self.trace_logger = trace_logger
+    A caller constructs one before the run and keeps it, so an interrupted
+    run still leaves it holding whatever was logged up to the interrupt. It
+    is empty until the session opens its log, and saving an empty one writes
+    nothing.
+    """
 
-    def save(self) -> Path:
-        return self.trace_logger.save()
+    trace_logger: TraceLogger | None = None
+
+    def save(self) -> Path | None:
+        """Write the trace out, or nothing when no log was ever opened."""
+        return self.trace_logger.save() if self.trace_logger else None
 
 
 async def run_session(
@@ -154,7 +162,7 @@ async def run_session(
     session_id: str | None = None,
     task_id: str | None = None,
     listener: PipelineListener | None = None,
-    trace_holder: list[SessionTrace] | None = None,
+    trace: SessionTrace | None = None,
     session_state: WritingSessionState | None = None,
     cost_accumulator: CostAccumulator | None = None,
     stop_after: str | None = None,
@@ -184,8 +192,8 @@ async def run_session(
 
     setup = setup_session(session_id, session_state=session_state)
 
-    if trace_holder is not None:
-        trace_holder.append(SessionTrace(setup.trace_logger))
+    if trace is not None:
+        trace.trace_logger = setup.trace_logger
 
     cost_acc = cost_accumulator or CostAccumulator()
     pipeline_notes = PipelineNotes(setup.notes.session / "pipeline_notes")

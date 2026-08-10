@@ -478,7 +478,7 @@ async def chat_session(
         elif resume_session_id:
             console.print(f"  [dim]Resuming session: {resume_session_id}[/dim]")
 
-        trace_holder: list[SessionTrace] = []
+        trace = SessionTrace()
         session_state = WritingSessionState()
 
         input_task = asyncio.create_task(
@@ -509,7 +509,7 @@ async def chat_session(
                     existing_doc_id=existing_doc_id,
                     session_id=session_id,
                     listener=listener,
-                    trace_holder=trace_holder,
+                    trace=trace,
                     session_state=session_state,
                     stop_after=stop_after,
                 )
@@ -555,8 +555,8 @@ async def chat_session(
                 await input_task
             except asyncio.CancelledError:
                 pass
-            if trace_holder:
-                trace_path = trace_holder[0].save()
+            trace_path = trace.save()
+            if trace_path:
                 console.print(f"\n  [dim]Trace saved to: {trace_path}[/dim]")
 
     log_metrics_summary()

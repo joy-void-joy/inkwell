@@ -1,29 +1,31 @@
 """WebSocket endpoint for real-time session event streaming."""
 
-import json
 import logging
-from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
-from inkwell.environment.web.session_manager import SessionManager
+from inkwell.environment.web.models import (
+    ClientMessage,
+    CollectRevisionEvent,
+    SessionEndedEvent,
+)
+from inkwell.environment.web.session_manager import ManagerHolder, SessionManager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-manager: SessionManager | None = None
+holder = ManagerHolder()
+"""Filled in at app startup, so a route reaches the manager without a global."""
 
 
 def set_manager(m: SessionManager) -> None:
-    global manager  # noqa: PLW0603
-    manager = m
+    holder.manager = m
 
 
 def get_manager() -> SessionManager:
-    if manager is None:
-        raise RuntimeError("SessionManager not initialized")
-    return manager
+    return holder.require()
 
 
 WS_CLOSE_SESSION_NOT_FOUND = 4004
@@ -51,7 +53,7 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         "WS %s: accepted, handle_exists=%s", session_id, session_id in mgr.sessions
     )
 
-    handle = mgr.sessions.get(session_id)
+    handle = mgr.handle_for(session_id)
 
     if handle is None:
         saved_events = mgr.load_events(session_id)
@@ -60,19 +62,13 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         )
         for event in saved_events:
             try:
-                await websocket.send_text(json.dumps(event, default=str))
+                await websocket.send_text(event.model_dump_json())
             except (RuntimeError, OSError, ConnectionError):
                 logger.info("WS %s: send failed during replay", session_id)
                 return
         try:
             await websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "session_ended",
-                        "status": "completed",
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
+                SessionEndedEvent(status="completed").model_dump_json()
             )
             await websocket.close(
                 code=WS_CLOSE_SESSION_NOT_FOUND, reason="Session not found"
@@ -87,12 +83,12 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         handle.status,
         len(handle.events),
     )
-    handle.clients.add(websocket)
+    handle.attach_client(websocket)
 
     replayed = len(handle.events)
     for event in handle.events[:replayed]:
         try:
-            await websocket.send_text(json.dumps(event, default=str))
+            await websocket.send_text(event.model_dump_json())
         except (RuntimeError, OSError, ConnectionError):
             logger.info("WS %s: send failed during handle replay", session_id)
             mgr.remove_client(session_id, websocket)
@@ -106,13 +102,7 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         )
         try:
             await websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "session_ended",
-                        "status": handle.status,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
+                SessionEndedEvent(status=handle.status).model_dump_json()
             )
             await websocket.close(code=1000)
         except (RuntimeError, OSError, ConnectionError):
@@ -122,17 +112,11 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         return
 
     if handle.listener.awaiting_revision:
-        state_snapshot = handle.listener.serialize_state(handle.state)
         try:
             await websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "collect_revision",
-                        "state": state_snapshot,
-                        "timestamp": datetime.now().isoformat(),
-                    },
-                    default=str,
-                )
+                CollectRevisionEvent(
+                    state=handle.listener.serialize_state(handle.state)
+                ).model_dump_json()
             )
         except (RuntimeError, OSError, ConnectionError):
             mgr.remove_client(session_id, websocket)
@@ -143,22 +127,18 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         while True:
             raw = await websocket.receive_text()
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
+                message = ClientMessage.model_validate_json(raw)
+            except ValidationError:
                 continue
 
-            msg_type = msg.get("type", "")
-            match msg_type:
+            match message.type:
                 case "feedback":
-                    items = msg.get("items", [])
-                    if items:
-                        await handle.listener.feedback_queue.put(items)
+                    if message.items:
+                        await handle.listener.feedback_queue.put(message.items)
                 case "revision":
-                    text = msg.get("text")
-                    await handle.listener.revision_queue.put(text)
+                    await handle.listener.revision_queue.put(message.text)
                 case "action":
-                    action = msg.get("action", "")
-                    await mgr.send_action(session_id, action, msg.get("text"))
+                    await mgr.send_action(session_id, message.action, message.text)
 
     except (WebSocketDisconnect, RuntimeError) as exc:
         logger.info("WS %s: receive loop ended: %s", session_id, exc)

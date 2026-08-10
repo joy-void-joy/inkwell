@@ -1,8 +1,11 @@
 """Pydantic models for the web API — request/response schemas and WebSocket messages."""
 
+from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, SerializeAsAny
+
+from inkwell.agent.config import PipelineStage
 
 
 def normalize_stop_after(value: str | None) -> str | None:
@@ -14,6 +17,11 @@ def normalize_stop_after(value: str | None) -> str | None:
 
 StopAfter = Annotated[str | None, AfterValidator(normalize_stop_after)]
 """A ``--stop-after`` stage for the API: normalized and validated, or None."""
+
+type SessionStatus = Literal[
+    "running", "completed", "failed", "cancelled", "interrupted", "paused"
+]
+"""Where a session stands: the six states the UI knows how to render."""
 
 
 class FormatOption(BaseModel):
@@ -48,7 +56,7 @@ class ModelConfigOverrides(BaseModel):
     model: str | None = Field(
         default=None, description="Default model for all stages (AGENT_MODEL)"
     )
-    stage_models: dict[str, str] = Field(
+    stage_models: dict[PipelineStage, str] = Field(
         default_factory=dict,
         description="Per-stage model overrides, stage name -> model id",
     )
@@ -87,7 +95,7 @@ class ModelOptions(BaseModel):
     writer_modes: list[str] = Field(description="Available draft production modes")
     default_model: str = Field(description="Active default model")
     default_writer_mode: str = Field(description="Active writer mode")
-    default_stage_models: dict[str, str] = Field(
+    default_stage_models: dict[PipelineStage, str] = Field(
         description="Per-stage overrides active in the current settings"
     )
 
@@ -163,6 +171,134 @@ class CompletionOutput(BaseModel):
     review_findings_count: int = 0
 
 
+class SessionLaunched(BaseModel):
+    """The session a create, resume, or restart request left running."""
+
+    session_id: str = Field(description="Id of the session now running")
+    status: SessionStatus = Field(
+        default="running", description="The state it was left in"
+    )
+
+
+class ActionAccepted(BaseModel):
+    """Confirmation that an action reached its running session."""
+
+    ok: bool = Field(default=True, description="True once the action was delivered")
+
+
+class ClientMessage(BaseModel):
+    """One message the browser sends up a session's socket.
+
+    Which fields carry a value is decided by ``type``, so all of them are
+    defaulted and a message that omits the ones its kind does not use still
+    validates. Anything else the client sends is ignored rather than refused.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    type: str = Field(default="", description="What the client is asking for")
+    items: list[str] = Field(
+        default_factory=list, description="Feedback items, for a 'feedback' message"
+    )
+    text: str | None = Field(
+        default=None, description="Free text, for a 'revision' or 'action' message"
+    )
+    action: str = Field(default="", description="Which action, for an 'action' message")
+
+
+class SessionEvent(BaseModel):
+    """One event a session broadcasts to its clients, and replays from its log.
+
+    The subclasses below are every event a run raises, each declaring the
+    ``type`` that names it and the payload that follows; a caller constructs
+    one of them rather than assembling a dict. The base declares only what
+    every event has, and stays open because it is also what a *stored* event
+    validates as: a log written by an older run replays with its own kind and
+    fields intact instead of down to nothing.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now().isoformat(),
+        description="When the event was raised, ISO-8601",
+    )
+
+
+class StageEvent(SessionEvent):
+    """A pipeline stage began."""
+
+    type: Literal["stage"] = "stage"
+    stage: str
+    description: str
+
+
+class ProgressEvent(SessionEvent):
+    """A line of narration about what the run is doing."""
+
+    type: Literal["progress"] = "progress"
+    message: str
+
+
+class MessageEvent(SessionEvent):
+    """Prose from a named participant — an agent, a subagent, the author."""
+
+    type: Literal["message"] = "message"
+    source: str
+    message: str
+
+
+class BlockEvent(SessionEvent):
+    """One content block off the agent's stream."""
+
+    type: Literal["block"] = "block"
+    block_type: str
+    content: str
+    prefix: str
+
+
+class CompleteEvent(SessionEvent):
+    """The run finished its article."""
+
+    type: Literal["complete"] = "complete"
+    output: CompletionOutput
+
+
+class CostUpdateEvent(SessionEvent):
+    """Refreshed spend for the run so far."""
+
+    type: Literal["cost_update"] = "cost_update"
+    cost: CostSnapshot
+
+
+class StateUpdateEvent(SessionEvent):
+    """Refreshed session state — document, title, stage, sections."""
+
+    type: Literal["state_update"] = "state_update"
+    state: SessionStateSnapshot
+
+
+class CollectRevisionEvent(SessionEvent):
+    """The run is waiting on the author's revision before it continues."""
+
+    type: Literal["collect_revision"] = "collect_revision"
+    state: SessionStateSnapshot
+
+
+class ErrorEvent(SessionEvent):
+    """Something the run needed failed, or the run itself did."""
+
+    type: Literal["error"] = "error"
+    message: str
+
+
+class SessionEndedEvent(SessionEvent):
+    """The run stopped, in the state it stopped in."""
+
+    type: Literal["session_ended"] = "session_ended"
+    status: SessionStatus
+
+
 class HistoryOutputData(BaseModel):
     """Nested output from a history session record."""
 
@@ -190,9 +326,7 @@ class HistorySessionData(BaseModel):
 class SessionSummary(BaseModel):
     session_id: str
     title: str = ""
-    status: Literal[
-        "running", "completed", "failed", "cancelled", "interrupted", "paused"
-    ]
+    status: SessionStatus
     stage: str = "starting"
     cost_usd: float = 0.0
     duration_s: float = 0.0
@@ -205,14 +339,12 @@ class SessionSummary(BaseModel):
 class SessionDetail(BaseModel):
     session_id: str
     title: str = ""
-    status: Literal[
-        "running", "completed", "failed", "cancelled", "interrupted", "paused"
-    ]
+    status: SessionStatus
     state: SessionStateSnapshot
     cost: CostSnapshot
     created_at: str = ""
     profile: str | None = None
-    events: list[dict[str, object]] = Field(default_factory=list)
+    events: list[SerializeAsAny[SessionEvent]] = Field(default_factory=list)
     output: CompletionOutput | None = None
     checkpoints: list[str] = Field(default_factory=list)
 

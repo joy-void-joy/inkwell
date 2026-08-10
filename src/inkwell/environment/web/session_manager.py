@@ -608,11 +608,11 @@ class SessionManager:
         self, handle: SessionHandle, doc_arg: str
     ) -> None:
         """Fetch comments from a Google Doc and queue them as feedback."""
-        from inkwell.agent.tools.extract import GDOC_URL_PATTERN, parse_gdoc_id
+        from inkwell.agent.tools.extract import is_gdoc_url, parse_gdoc_id
         from inkwell.agent.tools.google_docs import do_fetch_comments
 
         try:
-            if GDOC_URL_PATTERN.search(doc_arg):
+            if is_gdoc_url(doc_arg):
                 doc_id = parse_gdoc_id(doc_arg)
             else:
                 doc_id = doc_arg

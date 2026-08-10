@@ -86,7 +86,7 @@ from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import (
     EXTRACT_TOOLS as EXTRACT_MCP_TOOLS,
-    GDOC_URL_PATTERN,
+    is_gdoc_url,
     do_extract_conversation,
     do_extract_file,
     do_extract_gdoc,
@@ -1019,7 +1019,7 @@ async def extract_single_source(url: str, existing_doc_id: str | None) -> str:
         result = await do_extract_conversation(url)
         return Path(result.content.path).read_text(encoding="utf-8")
 
-    if GDOC_URL_PATTERN.search(url):
+    if is_gdoc_url(url):
         doc_id = parse_gdoc_id(url)
         if existing_doc_id and doc_id == existing_doc_id:
             return await extract_source_tab_only(url)
@@ -3456,7 +3456,7 @@ class PipelineRunner:
             s
             for s in self.sources
             if self.existing_doc_id
-            and GDOC_URL_PATTERN.search(s)
+            and is_gdoc_url(s)
             and parse_gdoc_id(s) == self.existing_doc_id
         ]
         agent_inputs = [s for s in self.sources if s not in self_doc_sources]
@@ -3490,7 +3490,7 @@ class PipelineRunner:
 
         source_doc_id = ""
         for src in self.sources:
-            if not source_doc_id and GDOC_URL_PATTERN.search(src):
+            if not source_doc_id and is_gdoc_url(src):
                 source_doc_id = parse_gdoc_id(src)
                 self.state.source_doc_id = source_doc_id
                 self.source_is_extracted_gdoc = True

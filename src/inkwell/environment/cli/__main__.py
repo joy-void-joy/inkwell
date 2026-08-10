@@ -337,10 +337,10 @@ def fetch_comments(
         inkwell fetch-comments "https://docs.google.com/document/d/abc123/edit"
         inkwell fetch-comments abc123 --session 20260523_143022
     """
-    from inkwell.agent.tools.extract import GDOC_URL_PATTERN, parse_gdoc_id
+    from inkwell.agent.tools.extract import is_gdoc_url, parse_gdoc_id
     from inkwell.agent.tools.google_docs import do_fetch_comments
 
-    if GDOC_URL_PATTERN.search(doc):
+    if is_gdoc_url(doc):
         doc_id = parse_gdoc_id(doc)
     else:
         doc_id = doc

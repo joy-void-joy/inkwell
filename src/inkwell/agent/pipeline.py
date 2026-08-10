@@ -14,10 +14,9 @@ import shutil
 import tempfile
 import unicodedata
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import NamedTuple
 
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,20 +40,16 @@ from lup.telemetry.trace import TraceLogger
 
 from inkwell.agent.config import current_settings, load_settings, stage_model
 from inkwell.agent.models import (
-    AddAction,
     ArticlePlan,
     AssumptionsList,
     ClassifiedComment,
-    DropAction,
     MergedDraft,
-    PatchAction,
     PipelineSnapshot,
-    PreserveAction,
     ResearchCompilation,
+    RestartQueue,
     RestartStrategy,
     ReviewFinding,
     ReviewOutput,
-    RewriteAction,
     SectionDraft,
     SectionPlan,
     WritingOutput,
@@ -655,38 +650,47 @@ class PipelineListener:
 # ---------------------------------------------------------------------------
 
 
+class WrittenTab(BaseModel):
+    """What this run last wrote into one tab, and what it called it."""
+
+    label: str
+    content: str
+
+
 class TabTracker:
     """Tracks written tab content and detects author edits/suggestions."""
 
     def __init__(self, doc_id: str) -> None:
         self.doc_id = doc_id
-        self.written: dict[str, tuple[str, str]] = {}
+        self.written: dict[str, WrittenTab] = {}
 
     def record(self, tab_id: str, label: str, content: str) -> None:
-        self.written[tab_id] = (label, content)
+        self.written[tab_id] = WrittenTab(label=label, content=content)
 
     async def record_from_doc(self, tab_id: str, label: str) -> None:
         actual = await do_read_tab(self.doc_id, tab_id, as_markdown=True)
-        self.written[tab_id] = (label, actual)
+        self.record(tab_id, label, actual)
 
     async def detect_edits(self) -> list[TabEdit]:
-        edits: list[TabEdit] = []
-        for tab_id, (label, original) in self.written.items():
-            try:
-                current = await do_read_tab(
-                    self.doc_id, tab_id, accept_suggestions=True, as_markdown=True
+        async def edited() -> AsyncGenerator[TabEdit]:
+            """Each tab the author has touched since this run last wrote it."""
+            for tab_id, written in list(self.written.items()):
+                try:
+                    current = await do_read_tab(
+                        self.doc_id, tab_id, accept_suggestions=True, as_markdown=True
+                    )
+                except (RuntimeError, OSError):
+                    continue
+                if not self.has_meaningful_diff(written.content, current):
+                    continue
+                yield TabEdit(
+                    tab=written.label,
+                    diff=extract_edit_summary(written.content, current),
+                    original_snippet=extract_deleted_text(written.content, current),
                 )
-            except (RuntimeError, OSError):
-                continue
-            if not self.has_meaningful_diff(original, current):
-                continue
-            diff = extract_edit_summary(original, current)
-            original_snippet = extract_deleted_text(original, current)
-            edits.append(
-                TabEdit(tab=label, diff=diff, original_snippet=original_snippet)
-            )
-            self.written[tab_id] = (label, current)
-        return edits
+                self.record(tab_id, written.label, current)
+
+        return [edit async for edit in edited()]
 
     @staticmethod
     def has_meaningful_diff(original: str, current: str) -> bool:
@@ -2093,9 +2097,25 @@ async def review_all(
     return all_findings
 
 
-class ConsolidatedFindings(NamedTuple):
+class ConsolidatedFindings(BaseModel):
+    """What survived the budget, and how much of it did not."""
+
     findings: list[ReviewFinding]
     dropped_suggestions: int
+
+
+class StandbyWake(BaseModel):
+    """Why standby woke: an author revision, a sync request, or both."""
+
+    revision: str | None
+    from_sync: bool
+
+
+class StyleSamples(BaseModel):
+    """The prose of the style references that could be read, and their labels."""
+
+    prose: list[str] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
 
 
 def consolidate_findings(
@@ -3400,10 +3420,10 @@ class PipelineRunner:
             "provided. Re-create the session with the document attached.",
         )
 
-    async def extract_style_samples(self) -> tuple[list[str], list[str]]:
+    async def extract_style_samples(self) -> StyleSamples:
         """Extract the prose of runtime style references for voice analysis."""
         if not self.style_refs:
-            return [], []
+            return StyleSamples()
         results = await asyncio.gather(
             *(
                 extract_single_source(url, self.existing_doc_id)
@@ -3411,13 +3431,15 @@ class PipelineRunner:
             ),
             return_exceptions=True,
         )
-        samples: list[str] = []
-        labels: list[str] = []
-        for url, sample in zip(self.style_refs, results):
-            if sample and not isinstance(sample, BaseException):
-                samples.append(sample)
-                labels.append(url)
-        return samples, labels
+        extracted = [
+            (url, sample)
+            for url, sample in zip(self.style_refs, results)
+            if sample and not isinstance(sample, BaseException)
+        ]
+        return StyleSamples(
+            prose=[sample for _url, sample in extracted],
+            labels=[url for url, _sample in extracted],
+        )
 
     async def stage_extract(self) -> None:
         await self.announce_stage("extract", "Extracting source material")
@@ -3500,9 +3522,9 @@ class PipelineRunner:
         conversation = "\n\n".join(extracted_parts)
         output_path.write_text(conversation, encoding="utf-8")
 
-        style_samples, style_labels = await self.extract_style_samples()
-        self.snapshot.style_ref_samples = style_samples
-        self.snapshot.runtime_style_refs = style_labels
+        style = await self.extract_style_samples()
+        self.snapshot.style_ref_samples = style.prose
+        self.snapshot.runtime_style_refs = style.labels
 
         all_source_paths = [str(p) for p in sorted(source_dir.glob("*")) if p.is_file()]
 
@@ -4540,28 +4562,12 @@ class PipelineRunner:
             await self.write_plan_tab(strategy.new_plan)
             await self.create_section_tabs(strategy.new_plan)
 
-        rewrite_tasks: list[tuple[SectionPlan, list[str]]] = []
-        add_tasks: list[SectionPlan] = []
-
+        queue = RestartQueue()
         for action in strategy.actions:
-            match action:
-                case PreserveAction():
-                    pass
-                case PatchAction(
-                    section=section, target_text=target, instruction=instr
-                ):
-                    await self.patch_section(section, target, instr)
-                case RewriteAction(section=section, new_research_questions=questions):
-                    section_plan = self.find_section_plan(section)
-                    if section_plan:
-                        rewrite_tasks.append((section_plan, questions))
-                case AddAction(section_plan=section_plan):
-                    add_tasks.append(section_plan)
-                case DropAction(section=section):
-                    self.snapshot.section_drafts.pop(section, None)
+            await action.carry_out(self, queue)
 
-        if rewrite_tasks or add_tasks:
-            await self.execute_rewrites(rewrite_tasks, add_tasks)
+        if queue.pending():
+            await self.execute_rewrites(queue)
 
         # Only remerge once the linear merge stage has already run: a restart
         # before it (research/write checkpoints) is picked up by the merge stage
@@ -4628,18 +4634,14 @@ class PipelineRunner:
             word_count=len(content.split()),
         )
 
-    async def execute_rewrites(
-        self,
-        rewrite_tasks: list[tuple[SectionPlan, list[str]]],
-        add_tasks: list[SectionPlan],
-    ) -> None:
+    async def execute_rewrites(self, queue: RestartQueue) -> None:
         plan = self.snapshot.plan
         if plan is None:
             return
 
         notes = self.ensure_notes()
 
-        new_questions = [q for _section_plan, qs in rewrite_tasks for q in qs]
+        new_questions = [q for task in queue.rewrites for q in task.research_questions]
         if new_questions:
             await self.hooks.on_progress(
                 f"Researching {len(new_questions)} new question(s) before rewriting"
@@ -4688,7 +4690,7 @@ class PipelineRunner:
             draft_path.write_text(draft.content, encoding="utf-8")
             return draft
 
-        all_plans = [sp for sp, _qs in rewrite_tasks] + add_tasks
+        all_plans = [task.section_plan for task in queue.rewrites] + queue.additions
         all_coros = [rewrite_coro(sp) for sp in all_plans]
 
         results = await asyncio.gather(*all_coros, return_exceptions=True)
@@ -4698,6 +4700,10 @@ class PipelineRunner:
             else:
                 result.title = all_plans[i].title
                 self.snapshot.section_drafts[all_plans[i].title] = result
+
+    def drop_section(self, section: str) -> None:
+        """Forget a section's draft, which is what dropping one leaves."""
+        self.snapshot.section_drafts.pop(section, None)
 
     def find_section_plan(self, section_title: str) -> SectionPlan | None:
         plan = self.snapshot.plan
@@ -4734,7 +4740,7 @@ class PipelineRunner:
 
     async def wait_for_revision_or_sync(
         self, state: WritingSessionState
-    ) -> tuple[str | None, bool]:
+    ) -> StandbyWake:
         revision_task = asyncio.ensure_future(self.hooks.collect_revision(state))
         sync_task = asyncio.ensure_future(self.hooks.sync_requested.wait())
         done, pending = await asyncio.wait(
@@ -4748,15 +4754,18 @@ class PipelineRunner:
                 pass
 
         if revision_task in done:
-            return revision_task.result(), sync_task in done
+            return StandbyWake(
+                revision=revision_task.result(), from_sync=sync_task in done
+            )
         self.hooks.sync_requested.clear()
-        return None, True
+        return StandbyWake(revision=None, from_sync=True)
 
     async def standby_loop(
         self, initial_wait: float = 120.0, quiet_wait: float = 90.0
     ) -> None:
         while True:
-            revision, from_sync = await self.wait_for_revision_or_sync(self.state)
+            woke = await self.wait_for_revision_or_sync(self.state)
+            revision, from_sync = woke.revision, woke.from_sync
             if revision is None and not from_sync:
                 continue
 

@@ -14,7 +14,7 @@ import pytest
 
 import inkwell.agent.pipeline as pipeline_module
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.pipeline import PipelineRunner
+from inkwell.agent.pipeline import PipelineRunner, StyleSamples
 
 
 def make_runner(tmp_path: Path, style_refs: list[str]) -> PipelineRunner:
@@ -36,7 +36,7 @@ def patch_extract(monkeypatch: pytest.MonkeyPatch):
 
 async def test_empty_style_refs_returns_empty(tmp_path: Path) -> None:
     runner = make_runner(tmp_path, [])
-    assert await runner.extract_style_samples() == ([], [])
+    assert await runner.extract_style_samples() == StyleSamples()
 
 
 async def test_failed_extraction_dropped_and_alignment_preserved(
@@ -50,17 +50,17 @@ async def test_failed_extraction_dropped_and_alignment_preserved(
     patch_extract(behavior)
     runner = make_runner(tmp_path, ["a", "bad", "c"])
 
-    samples, labels = await runner.extract_style_samples()
+    style = await runner.extract_style_samples()
 
-    assert samples == ["prose:a", "prose:c"]
-    assert labels == ["a", "c"]
+    assert style.prose == ["prose:a", "prose:c"]
+    assert style.labels == ["a", "c"]
 
 
 async def test_blank_extraction_dropped(tmp_path: Path, patch_extract) -> None:
     patch_extract(lambda url: "" if url == "empty" else f"prose:{url}")
     runner = make_runner(tmp_path, ["empty", "real"])
 
-    samples, labels = await runner.extract_style_samples()
+    style = await runner.extract_style_samples()
 
-    assert samples == ["prose:real"]
-    assert labels == ["real"]
+    assert style.prose == ["prose:real"]
+    assert style.labels == ["real"]

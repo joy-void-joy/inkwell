@@ -9,7 +9,7 @@ restart strategies, assumptions, and pipeline snapshot state.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, TypedDict, Union
+from typing import Annotated, Literal, Protocol, TypedDict, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -294,7 +294,58 @@ class AssumptionsList(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PatchAction(BaseModel):
+class RewriteTask(BaseModel):
+    """One section queued for a full re-research and re-write."""
+
+    section_plan: SectionPlan
+    research_questions: list[str] = Field(default_factory=list)
+
+
+class RestartQueue(BaseModel):
+    """What carrying out a restart strategy leaves for the rewrite stage.
+
+    Two of the five actions cannot be done one at a time — a rewrite and an
+    addition are both scheduled work — so they collect here while the ones
+    that act immediately act.
+    """
+
+    rewrites: list[RewriteTask] = Field(default_factory=list)
+    additions: list[SectionPlan] = Field(default_factory=list)
+
+    def pending(self) -> bool:
+        """Whether anything was queued for the rewrite stage."""
+        return bool(self.rewrites or self.additions)
+
+
+class RestartTarget(Protocol):
+    """What an action needs of the run carrying it out.
+
+    Named as a protocol so the actions stay in this module: a run imports
+    them, and an action that imported the run back would close the loop.
+    """
+
+    async def patch_section(
+        self, section: str, target_text: str, instruction: str
+    ) -> None: ...
+
+    def find_section_plan(self, section_title: str) -> "SectionPlan | None": ...
+
+    def drop_section(self, section: str) -> None: ...
+
+
+class RestartStep(BaseModel):
+    """One step of the orchestrator's rework plan.
+
+    The base declares what carrying a step out means and each kind answers or
+    declines, so adding a kind is one class rather than an edit to every walk
+    that would otherwise have to notice it.
+    """
+
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        """Do nothing, which is what a step that changes nothing means."""
+
+
+class PatchAction(RestartStep):
     """Rewrite a specific passage within a section."""
 
     kind: Literal["patch"] = "patch"
@@ -302,8 +353,11 @@ class PatchAction(BaseModel):
     target_text: str = Field(description="The paragraph or passage to replace")
     instruction: str = Field(description="What to change and why")
 
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        await run.patch_section(self.section, self.target_text, self.instruction)
 
-class RewriteAction(BaseModel):
+
+class RewriteAction(RestartStep):
     """Full re-research and re-write of a section."""
 
     kind: Literal["rewrite"] = "rewrite"
@@ -314,24 +368,40 @@ class RewriteAction(BaseModel):
         description="Additional research questions for the rewritten section",
     )
 
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        section_plan = run.find_section_plan(self.section)
+        if section_plan is not None:
+            queue.rewrites.append(
+                RewriteTask(
+                    section_plan=section_plan,
+                    research_questions=self.new_research_questions,
+                )
+            )
 
-class AddAction(BaseModel):
+
+class AddAction(RestartStep):
     """Add a new section to the article."""
 
     kind: Literal["add"] = "add"
     section_plan: SectionPlan = Field(description="Plan for the new section")
     insert_after: str = Field(description="Title of the section to insert after")
 
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        queue.additions.append(self.section_plan)
 
-class DropAction(BaseModel):
+
+class DropAction(RestartStep):
     """Remove a section from the article."""
 
     kind: Literal["drop"] = "drop"
     section: str = Field(description="Section title to remove")
     reason: str = Field(description="Why this section should be dropped")
 
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        run.drop_section(self.section)
 
-class PreserveAction(BaseModel):
+
+class PreserveAction(RestartStep):
     """Keep a section as-is — no changes needed."""
 
     kind: Literal["preserve"] = "preserve"

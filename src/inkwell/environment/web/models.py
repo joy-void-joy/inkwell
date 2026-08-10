@@ -299,30 +299,6 @@ class SessionEndedEvent(SessionEvent):
     status: SessionStatus
 
 
-class HistoryOutputData(BaseModel):
-    """Nested output from a history session record."""
-
-    model_config = {"extra": "ignore"}
-
-    title: str = ""
-    google_doc_url: str = ""
-    word_count: int = 0
-    paused_after: str = ""
-    review_findings: list[object] = Field(default_factory=list)
-
-
-class HistorySessionData(BaseModel):
-    """Parse a session from the record format `lup.workspace.history` saves."""
-
-    model_config = {"extra": "ignore"}
-
-    cost_usd: float | None = None
-    duration_seconds: float | None = None
-    timestamp: str = ""
-    output: HistoryOutputData | None = None
-    profile: str | None = None
-
-
 class SessionSummary(BaseModel):
     session_id: str
     title: str = ""

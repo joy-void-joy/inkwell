@@ -20,7 +20,11 @@ from lup.workspace.paths import sessions_dir, trace_logs_dir
 from inkwell.agent.config import PipelineStage
 from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.google_auth import GoogleAuthError
-from inkwell.agent.models import AgentSessionResult, PipelineSnapshot
+from inkwell.agent.models import (
+    AgentSessionResult,
+    HistorySessionData,
+    PipelineSnapshot,
+)
 from inkwell.agent.pipeline import PipelineInterrupted
 from inkwell.agent.session import WritingSessionState
 from inkwell.environment.web.listener import WebListener
@@ -29,7 +33,6 @@ from inkwell.environment.web.models import (
     CostSnapshot,
     ErrorEvent,
     GeneratingPrompt,
-    HistorySessionData,
     ProgressEvent,
     SectionInfo,
     SessionDetail,

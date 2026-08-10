@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Protocol, TypedDict
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lup.runtime.usage import CostAccumulator
-from lup.types import JsonObject, StringMap
+from lup.types import JsonObject, JsonValue, StringMap
 from lup.workspace.history import SessionResult
 
 
@@ -533,6 +533,35 @@ class PipelineSnapshot(BaseModel):
 # ---------------------------------------------------------------------------
 # Final output
 # ---------------------------------------------------------------------------
+
+
+class HistoryOutputData(BaseModel):
+    """A saved record's output, read as tolerantly as a reader of one must.
+
+    A record on disk was written by whichever version produced it, so every
+    field is optional and anything newer is ignored: a listing of past
+    sessions should show what it can rather than refuse the whole record.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = ""
+    google_doc_url: str = ""
+    word_count: int = 0
+    paused_after: str = ""
+    review_findings: list[JsonValue] = Field(default_factory=list)
+
+
+class HistorySessionData(BaseModel):
+    """One session read back from the record format `lup.workspace.history` saves."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    cost_usd: float | None = None
+    duration_seconds: float | None = None
+    timestamp: str = ""
+    output: HistoryOutputData | None = None
+    profile: str | None = None
 
 
 class StageCostBreakdown(TypedDict):

@@ -8,14 +8,25 @@ Usage:
 
 import asyncio
 import logging
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib.parse import urlparse
 
 import typer
+from pydantic import BaseModel, Field
 
 from inkwell.agent.config import select_profile
+from inkwell.agent.models import HistorySessionData
 from inkwell.agent.stages import OUTPUT_FORMATS
+
+
+class CacheTarget(BaseModel):
+    """One cache a clear command would remove, and how it is described."""
+
+    label: str = Field(description="What the confirmation prompt calls it")
+    path: Path = Field(description="Directory the cache lives in")
+
 
 FORMAT_HELP = "Suggested format (agent may override): " + ", ".join(
     f"{f.key}:<description>" if f.accepts_description else f.key for f in OUTPUT_FORMATS
@@ -235,19 +246,17 @@ def sessions(
             typer.echo(f"  {sid}  (no data)")
             continue
 
-        # lup: ignore[dict-get] — a record keeps `output` raw, because the
-        # output model belongs to the domain and is not known at read time
-        title = record.output.get("title")
-        doc_url = record.output.get("google_doc_url")  # lup: ignore[dict-get]
+        saved = HistorySessionData.model_validate(record.model_dump())
+        output = saved.output
 
         parts = [f"  {sid}"]
-        if isinstance(title, str):
-            parts.append(f"  {title}")
+        if output and output.title:
+            parts.append(f"  {output.title}")
         if record.cost_usd is not None:
             parts.append(f"  ${record.cost_usd:.2f}")
         typer.echo("".join(parts))
-        if isinstance(doc_url, str):
-            typer.echo(f"    {doc_url}")
+        if output and output.google_doc_url:
+            typer.echo(f"    {output.google_doc_url}")
 
         notes_dir = sessions_dir() / sid / "pipeline_notes"
         if notes_dir.exists():
@@ -568,34 +577,38 @@ def cache_clear(
         return
 
     clear_all = not voice and not urls
-    targets: list[tuple[str, Path]] = []
 
     voice_dir = cache_root / "voice"
     url_cache_files = list(cache_root.glob("*.txt"))
 
-    if (clear_all or voice) and voice_dir.exists():
-        count = sum(1 for _ in voice_dir.rglob("*") if _.is_file())
-        targets.append((f"voice analyses ({count} files)", voice_dir))
+    def chosen() -> Iterator[CacheTarget]:
+        """Each cache the flags asked for, where there is one to clear."""
+        if (clear_all or voice) and voice_dir.exists():
+            count = sum(1 for entry in voice_dir.rglob("*") if entry.is_file())
+            yield CacheTarget(label=f"voice analyses ({count} files)", path=voice_dir)
+        if (clear_all or urls) and url_cache_files:
+            yield CacheTarget(
+                label=f"URL fetch cache ({len(url_cache_files)} files)",
+                path=cache_root,
+            )
 
-    if (clear_all or urls) and url_cache_files:
-        targets.append((f"URL fetch cache ({len(url_cache_files)} files)", cache_root))
-
+    targets = list(chosen())
     if not targets:
         typer.echo("Nothing to clear.")
         return
 
-    for label, _ in targets:
-        typer.echo(f"  {label}")
+    for target in targets:
+        typer.echo(f"  {target.label}")
 
     if not yes:
         typer.confirm("Delete these caches?", abort=True)
 
-    for label, path in targets:
-        if path == cache_root:
-            for f in url_cache_files:
-                f.unlink()
+    for target in targets:
+        if target.path == cache_root:
+            for cached in url_cache_files:
+                cached.unlink()
         else:
-            shutil.rmtree(path, ignore_errors=True)
+            shutil.rmtree(target.path, ignore_errors=True)
 
     typer.echo("Cleared.")
 

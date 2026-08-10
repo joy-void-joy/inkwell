@@ -20,6 +20,16 @@ from lup.mcp import ToolError, lup_tool
 logger = logging.getLogger(__name__)
 
 
+def content_type(response: httpx.Response) -> str:
+    """The content type a response declares, empty when it declares none.
+
+    A server sends whatever headers it likes, so a missing one is ordinary
+    and every caller here treats absent and blank the same way.
+    """
+    headers = response.headers
+    return headers["content-type"] if "content-type" in headers else ""
+
+
 class ExtractedMetadata(BaseModel):
     """The one field this project reads out of trafilatura's JSON output."""
 
@@ -125,9 +135,7 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
     if resp.status_code >= 500:
         raise ToolError(f"Server error {resp.status_code} for {url}. Try again later.")
 
-    ct = resp.headers.get(
-        "content-type", ""
-    )  # lup: ignore[dict-get] — HTTP headers, an open mapping
+    ct = content_type(resp)
 
     if "html" in ct:
         marker = challenge_page_marker(resp.text)

@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
+from inkwell.agent.tools.research.fetch import content_type
+
 logger = logging.getLogger(__name__)
 
 DOWNLOADS_DIR = Path("tmp/downloads")
@@ -173,10 +175,7 @@ async def fetch_arxiv(params: FetchArxivInput) -> FetchArxivOutput:
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         try:
             resp = await client.get(html_url)
-            content_type = resp.headers.get(
-                "content-type", ""
-            )  # lup: ignore[dict-get] — HTTP headers, an open mapping
-            if resp.status_code == 200 and "text/html" in content_type:
+            if resp.status_code == 200 and "text/html" in content_type(resp):
                 text = trafilatura.extract(resp.text) or ""
                 if len(text) > 500:
                     saved = save_content("arxiv", paper_id, text)

@@ -384,6 +384,7 @@ export function NewSession() {
       const overrides = Object.fromEntries(
         Object.entries(stageOverrides).filter(([, v]) => v.trim()),
       );
+      const hasOverrides = Object.keys(overrides).length > 0;
       const result = await createSession(
         sources,
         resolvedFormat,
@@ -392,7 +393,7 @@ export function NewSession() {
         {
           model: defaultModel.trim() || undefined,
           writer_mode: writerMode || undefined,
-          stage_models: Object.keys(overrides).length ? overrides : undefined,
+          stage_models: hasOverrides ? overrides : undefined,
         },
         stopAfter || undefined,
       );

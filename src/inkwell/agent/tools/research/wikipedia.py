@@ -5,10 +5,12 @@ background context, definitions, and historical information.
 """
 
 import logging
+from collections.abc import Iterator
 from html.parser import HTMLParser
 from urllib.parse import quote
 
 import httpx
+from httpx import QueryParams
 from pydantic import BaseModel, ConfigDict, Field
 
 from lup.workspace.content_safety import SavedContent, save_content
@@ -163,17 +165,16 @@ async def wiki_search(params: WikiSearchInput) -> WikiSearchOutput:
     "timelines, and verifying basic facts."
 )
 async def fetch_wikipedia(params: FetchWikipediaInput) -> FetchWikipediaOutput:
-    query_params: dict[
-        str, str | int
-    ] = {  # lup: ignore[dict-str-payload] — an HTTP query string, which is what httpx takes
-        "action": "query",
-        "titles": params.title,
-        "prop": "extracts",
-        "explaintext": "1",
-        "format": "json",
-    }
-    if params.section is None:
-        query_params["exlimit"] = 1
+    query_params = QueryParams(
+        {
+            "action": "query",
+            "titles": params.title,
+            "prop": "extracts",
+            "explaintext": "1",
+            "format": "json",
+            **({"exlimit": 1} if params.section is None else {}),
+        }
+    )
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
@@ -231,20 +232,23 @@ def heading_title(line: str) -> str | None:
 def extract_section(text: str, section_title: str) -> str | None:
     """Extract a specific section from Wikipedia plaintext."""
     target = section_title.lower().strip()
-    captured: list[str] = []
-    capturing = False
 
-    for line in text.splitlines():
-        heading = heading_title(line)
-        if heading == target:
-            capturing = True
-            captured.append(line)
-            continue
-        if capturing:
+    def under_heading() -> Iterator[str]:
+        """The matching heading, then every line up to the next heading."""
+        capturing = False
+        for line in text.splitlines():
+            heading = heading_title(line)
+            if heading == target:
+                capturing = True
+                yield line
+                continue
+            if not capturing:
+                continue
             if heading is not None:
-                break
-            captured.append(line)
+                return
+            yield line
 
+    captured = list(under_heading())
     return "\n".join(captured) if captured else None
 
 

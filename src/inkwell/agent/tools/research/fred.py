@@ -8,6 +8,7 @@ import logging
 from typing import TypedDict
 
 import httpx
+from httpx import QueryParams
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.config import current_settings
@@ -86,13 +87,9 @@ class FredQuery(BaseModel):
     api_key: str
     file_type: str = "json"
 
-    def sent(
-        self,
-    ) -> dict[
-        str, str | int
-    ]:  # lup: ignore[dict-str-payload] — an HTTP query string, which is what httpx takes
-        """This query as the parameter mapping the client sends."""
-        return self.model_dump(exclude_none=True)
+    def sent(self) -> QueryParams:
+        """This query as the parameters the client sends."""
+        return QueryParams(self.model_dump(exclude_none=True))
 
 
 class SeriesSearchQuery(FredQuery):

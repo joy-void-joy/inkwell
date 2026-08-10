@@ -25,19 +25,21 @@ export function ActionBar({
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
   }, [text]);
 
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
+  const send = () => {
     if (!text.trim()) return;
     onSend(text.trim());
     setText("");
   };
 
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    send();
+  };
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (text.trim()) {
-        handleSubmit(e as unknown as FormEvent);
-      }
+      send();
     }
   };
 

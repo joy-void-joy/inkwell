@@ -11,10 +11,19 @@ from pydantic import BaseModel, Field
 
 from lup.mcp import LupMcpTool, ToolError, lup_tool
 
-from inkwell.agent.models import ArticlePlan, ResearchCompilation, ResearchFinding
+from inkwell.agent.models import (
+    ArticlePlan,
+    ResearchCompilation,
+    ResearchFinding,
+    SectionPlan,
+)
 from inkwell.agent.tools.citations import BibliographyEntry
 
 logger = logging.getLogger(__name__)
+
+LOOSE_MATCH_OVERLAP = 0.4
+"""How much wording a question and a finding must share to count as the same
+question, once neither an exact nor a containment match has been found."""
 
 
 class EmptyInput(BaseModel):
@@ -107,14 +116,15 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
         for f in research.findings:
             if q in f.question.lower() or f.question.lower() in q:
                 return f
-        q_words = set(q.split())  # claude: ignore
-        best, best_overlap = None, 0.0
-        for f in research.findings:
-            f_words = set(f.question.lower().split())  # claude: ignore
-            overlap = len(q_words & f_words) / max(len(q_words | f_words), 1)
-            if overlap > best_overlap:
-                best, best_overlap = f, overlap
-        if best_overlap > 0.4:
+        asked = {*q.split()}
+
+        def word_overlap(finding: ResearchFinding) -> float:
+            """How much wording the question and this finding share, 0 to 1."""
+            answered = {*finding.question.lower().split()}
+            return len(asked & answered) / max(len(asked | answered), 1)
+
+        best = max(research.findings, key=word_overlap, default=None)
+        if best is not None and word_overlap(best) > LOOSE_MATCH_OVERLAP:
             return best
         return None
 
@@ -161,25 +171,23 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
                 "No research artifact found — research stage hasn't run yet"
             )
 
-        results: list[FindingDetail] = []
-        for query in inp.questions:
+        def detail(query: str) -> FindingDetail:
+            """The finding answering `query`, or an error naming what exists."""
             match = find_best_match(query, research)
             if match is None:
                 available = [f.question for f in research.findings]
                 raise ToolError(
                     f"No finding matching {query!r}. Available: {available}"
                 )
-            results.append(
-                FindingDetail(
-                    question=match.question,
-                    answer=match.answer,
-                    confidence=match.confidence,
-                    source_urls=[s.url for s in match.sources],
-                    data_points=match.data_points,
-                )
+            return FindingDetail(
+                question=match.question,
+                answer=match.answer,
+                confidence=match.confidence,
+                source_urls=[s.url for s in match.sources],
+                data_points=match.data_points,
             )
 
-        return ReadFindingOutput(findings=results)
+        return ReadFindingOutput(findings=[detail(query) for query in inp.questions])
 
     @lup_tool(
         "Query the article plan for section details, research questions, and "
@@ -197,28 +205,25 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
         if inp.section:
             sections = [s for s in sections if inp.section.lower() in s.title.lower()]
 
-        results = []
-        for s in sections:
-            section_questions = [
-                q.question
-                for q in plan.research_questions
-                if q.section.lower() == s.title.lower()
-            ]
-            results.append(
-                SectionResult(
-                    title=s.title,
-                    summary=s.summary,
-                    key_points=s.key_points,
-                    quotes_to_include=s.quotes_to_include,
-                    research_questions=section_questions,
-                )
+        def summarized(section: SectionPlan) -> SectionResult:
+            """One planned section, with the questions asked on its behalf."""
+            return SectionResult(
+                title=section.title,
+                summary=section.summary,
+                key_points=section.key_points,
+                quotes_to_include=section.quotes_to_include,
+                research_questions=[
+                    q.question
+                    for q in plan.research_questions
+                    if q.section.lower() == section.title.lower()
+                ],
             )
 
         return QueryPlanOutput(
             title=plan.title,
             thesis=plan.thesis,
             target_format=plan.target_format,
-            sections=results,
+            sections=[summarized(section) for section in sections],
             total_research_questions=len(plan.research_questions),
         )
 
@@ -236,21 +241,14 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
                 "No research artifact found — research stage hasn't run yet"
             )
 
-        seen_urls: set[str] = set()
-        entries: list[BibliographyEntry] = []
-        for finding in research.findings:
-            for src in finding.sources:
-                if src.url in seen_urls:
-                    continue
-                seen_urls.add(src.url)
-                entries.append(
-                    BibliographyEntry(
-                        title=src.title,
-                        url=src.url,
-                        key_excerpt=src.key_excerpt,
-                    )
-                )
-
+        cited = [source for finding in research.findings for source in finding.sources]
+        entries = [
+            BibliographyEntry(
+                title=source.title, url=source.url, key_excerpt=source.key_excerpt
+            )
+            for index, source in enumerate(cited)
+            if not any(earlier.url == source.url for earlier in cited[:index])
+        ]
         return ListSourcesOutput(sources=entries, total=len(entries))
 
     return [list_research, read_finding, query_plan, list_sources]

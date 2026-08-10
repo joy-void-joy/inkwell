@@ -650,49 +650,56 @@ class LookupTermsInput(BaseModel):
 
 
 class GlossaryView(BaseModel):
+    """The shared glossary: what the plan seeded, and what writers coined."""
+
+    model_config = ConfigDict(extra="ignore")
+
     conventions: list[str] = Field(
-        description="Plan-level conventions seeded before writing"
+        default_factory=list,
+        description="Plan-level conventions seeded before writing",
     )
     terms: list[GlossaryEntry] = Field(
-        description="Terms coined by section writers so far"
+        default_factory=list,
+        description="Terms coined by section writers so far",
     )
 
 
-def load_glossary(path: Path) -> tuple[list[str], list[GlossaryEntry]]:
-    """Read the shared glossary file: (seeded conventions, coined terms)."""
+def load_glossary(path: Path) -> GlossaryView:
+    """Read the shared glossary file, empty when nothing has been written yet."""
     if not path.exists():
-        return [], []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    conventions = [str(c) for c in data.get("conventions", [])]
-    terms = [GlossaryEntry.model_validate(e) for e in data.get("terms", [])]
-    return conventions, terms
+        return GlossaryView()
+    return GlossaryView.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def write_glossary(
-    path: Path, conventions: list[str], terms: list[GlossaryEntry]
-) -> None:
+def write_glossary(path: Path, glossary: GlossaryView) -> None:
     """Persist the shared glossary file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"conventions": conventions, "terms": [e.model_dump() for e in terms]}
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    path.write_text(glossary.model_dump_json(indent=2), encoding="utf-8")
 
 
 def seed_glossary(path: Path, conventions: list[str]) -> None:
     """Seed the glossary with the plan's conventions, preserving coined terms."""
-    _, terms = load_glossary(path)
-    write_glossary(path, conventions, terms)
+    write_glossary(
+        path,
+        GlossaryView(conventions=conventions, terms=load_glossary(path).terms),
+    )
 
 
 def define_term_in_glossary(path: Path, term: str, meaning: str) -> DefineTermResult:
     """Register a term unless a sibling already defined it — first definition wins."""
-    conventions, terms = load_glossary(path)
-    for entry in terms:
+    glossary = load_glossary(path)
+    for entry in glossary.terms:
         if entry.term.casefold() == term.casefold():
             return DefineTermResult(
                 term=entry.term, meaning=entry.meaning, already_defined=True
             )
-    terms.append(GlossaryEntry(term=term, meaning=meaning))
-    write_glossary(path, conventions, terms)
+    write_glossary(
+        path,
+        GlossaryView(
+            conventions=glossary.conventions,
+            terms=[*glossary.terms, GlossaryEntry(term=term, meaning=meaning)],
+        ),
+    )
     return DefineTermResult(term=term, meaning=meaning, already_defined=False)
 
 
@@ -710,11 +717,14 @@ def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
         return define_term_in_glossary(glossary_path, inp.term, inp.meaning)
 
     async def handle_lookup(inp: LookupTermsInput) -> GlossaryView:
-        conventions, terms = load_glossary(glossary_path)
-        if inp.contains:
-            needle = inp.contains.casefold()
-            terms = [e for e in terms if needle in e.term.casefold()]
-        return GlossaryView(conventions=conventions, terms=terms)
+        glossary = load_glossary(glossary_path)
+        if not inp.contains:
+            return glossary
+        needle = inp.contains.casefold()
+        return GlossaryView(
+            conventions=glossary.conventions,
+            terms=[e for e in glossary.terms if needle in e.term.casefold()],
+        )
 
     return [
         build_stage_tool(

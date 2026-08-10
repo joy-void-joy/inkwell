@@ -339,6 +339,13 @@ class TabEdit(BaseModel):
     )
 
 
+class SectionTab(BaseModel):
+    """A planned section paired with the GDoc tab that holds its draft."""
+
+    title: str = Field(description="Section title, as the plan names it")
+    tab_id: str = Field(description="Tab the section's draft is written to")
+
+
 GDOC_CHAR_MAP = str.maketrans(
     {
         "‘": "'",
@@ -366,32 +373,30 @@ def extract_edit_summary(original: str, current: str, context_lines: int = 2) ->
     curr_lines = current.splitlines()
     matcher = difflib.SequenceMatcher(None, orig_lines, curr_lines)
 
-    blocks: list[str] = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-
+    def rendered(tag: str, i1: int, i2: int, j1: int, j2: int) -> Iterator[str]:
+        """One changed region: the lines before it, the change, the lines after."""
         ctx_before = orig_lines[max(0, i1 - context_lines) : i1]
-        ctx_after = orig_lines[i2 : i2 + context_lines]
-
-        parts: list[str] = []
         if ctx_before:
-            parts.append("  " + "\n  ".join(ctx_before))
+            yield "  " + "\n  ".join(ctx_before)
 
         match tag:
             case "replace":
-                parts.append("- " + "\n- ".join(orig_lines[i1:i2]))
-                parts.append("+ " + "\n+ ".join(curr_lines[j1:j2]))
+                yield "- " + "\n- ".join(orig_lines[i1:i2])
+                yield "+ " + "\n+ ".join(curr_lines[j1:j2])
             case "delete":
-                parts.append("- " + "\n- ".join(orig_lines[i1:i2]))
+                yield "- " + "\n- ".join(orig_lines[i1:i2])
             case "insert":
-                parts.append("+ " + "\n+ ".join(curr_lines[j1:j2]))
+                yield "+ " + "\n+ ".join(curr_lines[j1:j2])
 
+        ctx_after = orig_lines[i2 : i2 + context_lines]
         if ctx_after:
-            parts.append("  " + "\n  ".join(ctx_after))
+            yield "  " + "\n  ".join(ctx_after)
 
-        blocks.append("\n".join(parts))
-
+    blocks = [
+        "\n".join(rendered(tag, i1, i2, j1, j2))
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    ]
     return "\n---\n".join(blocks)
 
 
@@ -400,10 +405,12 @@ def extract_deleted_text(original: str, current: str) -> str:
     orig_lines = original.splitlines()
     curr_lines = current.splitlines()
     matcher = difflib.SequenceMatcher(None, orig_lines, curr_lines)
-    deleted: list[str] = []
-    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
-        if tag in ("delete", "replace"):
-            deleted.extend(orig_lines[i1:i2])
+    deleted = [
+        line
+        for tag, i1, i2, _j1, _j2 in matcher.get_opcodes()
+        if tag in ("delete", "replace")
+        for line in orig_lines[i1:i2]
+    ]
     return "\n".join(deleted)
 
 
@@ -1015,22 +1022,25 @@ def annotate_draft_with_findings(draft: str, findings: list[ReviewFinding]) -> s
     ]
     anchorable.sort(key=lambda f: len(f.text_excerpt), reverse=True)
 
-    anchored: set[int] = set()
-    for f in anchorable:
-        if f.severity == "praise":
-            annotation = f"\n[PRESERVE:{f.reviewer}] {f.issue}\n"
-        else:
-            annotation = (
-                f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}\n  → {f.suggestion}\n"
-            )
-        if f.text_excerpt in annotated:
-            annotated = annotated.replace(  # claude: ignore
-                f.text_excerpt,
-                f"{f.text_excerpt}{annotation}",
-                1,
-            )
-            anchored.add(id(f))
+    def inline() -> Iterator[ReviewFinding]:
+        """Splice each finding in after the excerpt it quotes, yielding the ones
+        whose excerpt was still there to anchor against."""
+        nonlocal annotated
+        for f in anchorable:
+            if f.text_excerpt not in annotated:
+                continue
+            if f.severity == "praise":
+                annotation = f"\n[PRESERVE:{f.reviewer}] {f.issue}\n"
+            else:
+                annotation = (
+                    f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}\n"
+                    f"  → {f.suggestion}\n"
+                )
+            after = annotated.index(f.text_excerpt) + len(f.text_excerpt)
+            annotated = f"{annotated[:after]}{annotation}{annotated[after:]}"
+            yield f
 
+    anchored = {id(f) for f in inline()}
     remaining = [
         f
         for f in findings
@@ -1692,6 +1702,16 @@ async def merge_sections(
     return MergedDraft(content=content, changes_made=[])
 
 
+def tab_id_for(tabs: StringMap, name: str) -> str:
+    """The tab recorded under `name`, or empty where the doc has no such tab.
+
+    The tab maps are keyed by titles the plan and the author invent, so a miss
+    is ordinary rather than exceptional and every caller branches on the empty
+    string it gets back.
+    """
+    return tabs[name] if name in tabs else ""
+
+
 def load_review(review_path: Path) -> ReviewOutput:
     """What a reviewer recorded, or nothing where the stage wrote no file.
 
@@ -2107,14 +2127,16 @@ async def review_all(
 
     results = await asyncio.gather(*review_tasks, return_exceptions=True)
 
-    all_findings: list[ReviewFinding] = []
-    for result in results:
-        if isinstance(result, BaseException):
-            logger.error("Reviewer failed: %s", result)
-        else:
-            all_findings.extend(result.findings)
+    def reported() -> Iterator[ReviewFinding]:
+        """Findings from the reviewers that returned; a failure is logged, not raised,
+        so one reviewer going down does not cost the others their findings."""
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("Reviewer failed: %s", result)
+                continue
+            yield from result.findings
 
-    return all_findings
+    return list(reported())
 
 
 class ConsolidatedFindings(BaseModel):
@@ -2131,6 +2153,21 @@ class StandbyWake(BaseModel):
     from_sync: bool
 
 
+class CorpusSample(BaseModel):
+    """One style-corpus entry: its prose, where it came from, and how to read it.
+
+    A prescriptive entry is the author telling the pipeline how to write; the
+    rest are samples for it to learn a voice from. The two take different
+    routes, so the corpus is partitioned on this before analysis.
+    """
+
+    text: str = Field(description="The sample's prose")
+    source: str = Field(description="Label or path the sample came from")
+    prescriptive: bool = Field(
+        description="Whether the author wrote it as instruction, not as a sample"
+    )
+
+
 class StyleSamples(BaseModel):
     """The prose of the style references that could be read, and their labels."""
 
@@ -2143,29 +2180,28 @@ def consolidate_findings(
     max_suggestions: int = 15,
 ) -> ConsolidatedFindings:
     """Deduplicate and budget review findings to prevent cumulative smoothing."""
-    critical: list[ReviewFinding] = []
-    praise: list[ReviewFinding] = []
-    suggestions: list[ReviewFinding] = []
+    critical = [f for f in findings if f.severity == "critical"]
+    praise = [f for f in findings if f.severity == "praise"]
 
-    seen_excerpts: dict[str, ReviewFinding] = {}
-
-    for f in findings:
-        if f.severity == "critical":
-            critical.append(f)
-            continue
-        if f.severity == "praise":
-            praise.append(f)
-            continue
-        if f.text_excerpt:
-            key = f.text_excerpt[:200]
-            if key in seen_excerpts:
-                existing = seen_excerpts[key]
-                existing.suggestion = (
-                    f"{existing.suggestion}\n[Also from {f.reviewer}]: {f.suggestion}"
-                )
+    def deduplicated() -> Iterator[ReviewFinding]:
+        """Suggestions, with later ones quoting the same passage folded into the
+        first — two reviewers flagging one sentence is one thing to fix."""
+        seen: dict[str, ReviewFinding] = {}  # lup: ignore[empty-collection] — a fold
+        for f in findings:
+            if f.severity in ("critical", "praise"):
                 continue
-            seen_excerpts[key] = f
-        suggestions.append(f)
+            if f.text_excerpt:
+                key = f.text_excerpt[:200]
+                if key in seen:
+                    first = seen[key]
+                    first.suggestion = (
+                        f"{first.suggestion}\n[Also from {f.reviewer}]: {f.suggestion}"
+                    )
+                    continue
+                seen[key] = f
+            yield f
+
+    suggestions = list(deduplicated())
 
     anchored = [s for s in suggestions if s.text_excerpt]
     unanchored = [s for s in suggestions if not s.text_excerpt]
@@ -2559,7 +2595,7 @@ class PipelineRunner:
         self.cost_accumulator = cost_accumulator
 
         self.snapshot = PipelineSnapshot()
-        self.pending_resume: dict[str, str] = {}
+        self.pending_resume: StringMap = {}
         self.plan_breaking = asyncio.Event()
         self.restart_count = 0
         self.max_restarts = 2
@@ -2574,8 +2610,8 @@ class PipelineRunner:
 
         self.doc_id = ""
         self.doc_url = ""
-        self.known_tabs: dict[str, str] = {}
-        self.tab_ids: dict[str, str] = {}
+        self.known_tabs: StringMap = {}
+        self.tab_ids: StringMap = {}
         self.tabs: TabTracker | None = None
 
         self.overview_tab_id = ""
@@ -2771,7 +2807,7 @@ class PipelineRunner:
             return
         for i, section in enumerate(plan.sections):
             tab_name = truncate_tab_title(f"§{i + 1} {section.title}")
-            tid = self.known_tabs.get(tab_name, "")
+            tid = tab_id_for(self.known_tabs, tab_name)
             if tid:
                 self.tab_ids[section.title] = tid
             drafted = self.section_already_drafted(section.title)
@@ -2801,16 +2837,18 @@ class PipelineRunner:
         interruption instead of paying to redraft them. A
         ``[Section failed: ...]`` placeholder does not count — those retry.
         """
-        draft = self.snapshot.section_drafts.get(title)
-        return draft is not None and not draft.content.startswith("[Section failed")
+        if title not in self.snapshot.section_drafts:
+            return False
+        draft = self.snapshot.section_drafts[title]
+        return not draft.content.startswith("[Section failed")
 
     async def save_snapshot(self) -> None:
         self.snapshot.doc_id = self.state.doc_id
         self.snapshot.doc_url = self.state.doc_url
         self.snapshot.source_doc_id = self.state.source_doc_id
-        self.snapshot.seen_comment_ids = set(self.state.seen_comment_ids)
-        self.snapshot.agent_comment_ids = set(self.state.agent_comment_ids)
-        self.snapshot.seen_source_comment_ids = set(self.state.seen_source_comment_ids)
+        self.snapshot.seen_comment_ids = {*self.state.seen_comment_ids}
+        self.snapshot.agent_comment_ids = {*self.state.agent_comment_ids}
+        self.snapshot.seen_source_comment_ids = {*self.state.seen_source_comment_ids}
         self.snapshot.pending_questions = list(self.state.pending_questions)
         self.snapshot.cost_state = self.cost_accumulator
 
@@ -2868,12 +2906,13 @@ class PipelineRunner:
         """Persist a resumable agent's SDK session id the moment it is known."""
         if not is_resumable_label(label):
             return
-        if self.snapshot.session_ids.get(label) == session_id:
+        recorded = self.snapshot.session_ids
+        if label in recorded and recorded[label] == session_id:
             return
         self.snapshot.session_ids[label] = session_id
         await self.save_snapshot()
 
-    def prepare_resumable_sessions(self, snapshot: PipelineSnapshot) -> dict[str, str]:
+    def prepare_resumable_sessions(self, snapshot: PipelineSnapshot) -> StringMap:
         """Session ids to resume, mirroring transcripts across a profile switch.
 
         Same profile: transcripts already sit under the active config dir.
@@ -3021,18 +3060,18 @@ class PipelineRunner:
         elif snapshot.output and snapshot.output.google_doc_id:
             self.existing_doc_id = snapshot.output.google_doc_id
 
-        self.state.seen_comment_ids = set(snapshot.seen_comment_ids)
+        self.state.seen_comment_ids = {*snapshot.seen_comment_ids}
         self.state.agent_comment_ids.update(snapshot.agent_comment_ids)
         self.ensure_notes()
         self.rehydrate_draft_files()
-        self.state.seen_source_comment_ids = set(snapshot.seen_source_comment_ids)
+        self.state.seen_source_comment_ids = {*snapshot.seen_source_comment_ids}
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
             self.cost_accumulator.merge(snapshot.cost_state)
         if restart:
             self.rehydrate_artifacts()
-            self.pending_resume = {}
+            self.pending_resume.clear()
         else:
             self.pending_resume = self.prepare_resumable_sessions(snapshot)
 
@@ -3494,7 +3533,7 @@ class PipelineRunner:
         routed = [e.raw_input for e in manifest.sources if e.role == "source"]
         self.sources = (routed or agent_inputs) + self_doc_sources
         context = [e.raw_input for e in manifest.sources if e.role == "context"]
-        self.context_refs = list(set(self.context_refs + context))
+        self.context_refs = list(dict.fromkeys(self.context_refs + context))
 
         source_doc_id = ""
         for src in self.sources:
@@ -3507,7 +3546,7 @@ class PipelineRunner:
         covered = {e.raw_input for e in manifest.sources}
         unrecovered += [value for value in original_inputs if value not in covered]
         unrecovered = list(dict.fromkeys(unrecovered))
-        source_set = set(self.sources)
+        source_set = {src for src in self.sources}
         if unrecovered:
             await self.hooks.on_progress(
                 f"Deterministically extracting {len(unrecovered)} source(s) "
@@ -3635,15 +3674,14 @@ class PipelineRunner:
             invalidate_merged_cache()
             logger.info("Voice inputs changed — re-analyzing")
 
-        explicit_prescriptive: list[tuple[str, str]] = []
-        analyzable_samples: list[str] = []
-        analyzable_sources: list[str] = []
-        for sample, source, stype in zip(corpus_samples, corpus_sources, corpus_types):
-            if stype == "prescriptive":
-                explicit_prescriptive.append((sample, source))
-            else:
-                analyzable_samples.append(sample)
-                analyzable_sources.append(source)
+        corpus = [
+            CorpusSample(text=text, source=source, prescriptive=stype == "prescriptive")
+            for text, source, stype in zip(corpus_samples, corpus_sources, corpus_types)
+        ]
+        explicit_prescriptive = [entry for entry in corpus if entry.prescriptive]
+        analyzable = [entry for entry in corpus if not entry.prescriptive]
+        analyzable_samples = [entry.text for entry in analyzable]
+        analyzable_sources = [entry.source for entry in analyzable]
 
         async with self.stage_compute("voice") as sc:
             all_servers = {**self.research_servers, **sc.servers}
@@ -3661,19 +3699,20 @@ class PipelineRunner:
         if not analyses and not explicit_prescriptive:
             raise PipelineError("Voice analysis produced no output")
 
-        voice_file_paths: list[str] = []
-        voice_tab_parts: list[str] = []
+        voice_file_paths: list[
+            str
+        ] = []  # lup: ignore[empty-collection] — a 3-loop fold
+        voice_tab_parts: list[str] = []  # lup: ignore[empty-collection] — a 3-loop fold
         n_voice = 0
         n_auto_prescriptive = 0
         presc_idx = 0
 
-        source_by_label: dict[str, str] = {}
-        if analyzable_samples:
-            labels = analyzable_sources or [
-                f"sample-{i}" for i in range(len(analyzable_samples))
-            ]
-            for sample, label in zip(analyzable_samples, labels):
-                source_by_label[label] = sample
+        labels = analyzable_sources or [
+            f"sample-{i}" for i in range(len(analyzable_samples))
+        ]
+        source_by_label: StringMap = {
+            label: sample for sample, label in zip(analyzable_samples, labels)
+        }
 
         for i, (label, text, is_prescriptive) in enumerate(analyses):
             slug = slugify(label)
@@ -3703,17 +3742,17 @@ class PipelineRunner:
                 n_voice += 1
             voice_file_paths.append(str(path))
 
-        for sample, source in explicit_prescriptive:
-            slug = slugify(source)
+        for entry in explicit_prescriptive:
+            slug = slugify(entry.source)
             envelope = await notes.save_content(
                 f"prescriptive_{presc_idx}_{slug}",
-                sample,
+                entry.text,
                 stage="voice",
                 content_type="prescriptive",
-                label=source,
+                label=entry.source,
             )
             voice_file_paths.append(envelope.path)
-            voice_tab_parts.append(f"## Prescriptive: {source}\n\n{sample}")
+            voice_tab_parts.append(f"## Prescriptive: {entry.source}\n\n{entry.text}")
             presc_idx += 1
 
         for i, (sample, source) in enumerate(
@@ -4014,7 +4053,7 @@ class PipelineRunner:
 
         async def write_and_publish(section: SectionPlan) -> SectionDraft:
             nonlocal completed
-            tid = self.tab_ids.get(section.title, "")
+            tid = tab_id_for(self.tab_ids, section.title)
             draft_path = self.get_draft_path(section.title)
             async with self.stage_compute(f"write:{section.title}") as sc:
                 syncer: DraftSyncer | None = None
@@ -4595,10 +4634,10 @@ class PipelineRunner:
     async def patch_section(
         self, section: str, target_text: str, instruction: str
     ) -> None:
-        draft = self.snapshot.section_drafts.get(section)
-        if draft is None:
+        if section not in self.snapshot.section_drafts:
             logger.warning("Cannot patch missing section: %s", section)
             return
+        draft = self.snapshot.section_drafts[section]
 
         patch_path = self.get_draft_path(section)
         patch_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4958,19 +4997,26 @@ class PipelineRunner:
             self.known_tabs["Sections"] = sections_parent_id
         sections_parent_id = self.known_tabs["Sections"]
 
-        self.tab_ids = {}
-        for i, section in enumerate(plan.sections):
-            tab_name = truncate_tab_title(f"§{i + 1} {section.title}")
-            tid = self.known_tabs.get(tab_name, "")
-            if not tid:
-                async with gdoc_nonfatal(f"create tab '{tab_name}'"):
-                    tid = await do_create_tab(
-                        self.doc_id, tab_name, parent_tab_id=sections_parent_id
-                    )
-                    self.known_tabs[tab_name] = tid
-            if tid:
-                self.tab_ids[section.title] = tid
-                self.state.add_section(section.title, tid)
+        async def placed() -> AsyncIterator[SectionTab]:
+            """Each section paired with its tab, creating the ones not there yet.
+
+            A tab creation that fails is non-fatal and yields nothing for that
+            section, so the run continues against the tabs it did get.
+            """
+            for i, section in enumerate(plan.sections):
+                tab_name = truncate_tab_title(f"§{i + 1} {section.title}")
+                tid = tab_id_for(self.known_tabs, tab_name)
+                if not tid:
+                    async with gdoc_nonfatal(f"create tab '{tab_name}'"):
+                        tid = await do_create_tab(
+                            self.doc_id, tab_name, parent_tab_id=sections_parent_id
+                        )
+                        self.known_tabs[tab_name] = tid
+                if tid:
+                    self.state.add_section(section.title, tid)
+                    yield SectionTab(title=section.title, tab_id=tid)
+
+        self.tab_ids = {tab.title: tab.tab_id async for tab in placed()}
 
         async with gdoc_nonfatal("write sections index"):
             sections_summary = "\n".join(
@@ -5015,24 +5061,24 @@ class PipelineRunner:
                 self.known_tabs["Review"] = await do_create_tab(self.doc_id, "Review")
 
             review_text = f"# Review Findings\n\n{len(findings)} total findings\n"
-            critical_specs: list[CommentSpec] = []
-            for finding in findings:
-                review_text += (
-                    f"\n## [{finding.reviewer}] {finding.location}\n\n"
-                    f"**Severity:** {finding.severity}\n\n"
-                    f"{finding.issue}\n\n"
-                    f"**Suggestion:** {finding.suggestion}\n"
+            review_text += "".join(
+                f"\n## [{finding.reviewer}] {finding.location}\n\n"
+                f"**Severity:** {finding.severity}\n\n"
+                f"{finding.issue}\n\n"
+                f"**Suggestion:** {finding.suggestion}\n"
+                for finding in findings
+            )
+            critical_specs = [
+                CommentSpec(
+                    content=(
+                        f"[{finding.reviewer.upper()}] {finding.issue}\n\n"
+                        f"Suggestion: {finding.suggestion}"
+                    ),
+                    anchor_text=finding.text_excerpt or None,
                 )
-                if finding.severity == "critical":
-                    critical_specs.append(
-                        CommentSpec(
-                            content=(
-                                f"[{finding.reviewer.upper()}] {finding.issue}\n\n"
-                                f"Suggestion: {finding.suggestion}"
-                            ),
-                            anchor_text=finding.text_excerpt or None,
-                        )
-                    )
+                for finding in findings
+                if finding.severity == "critical"
+            ]
 
             if critical_specs:
                 async with gdoc_nonfatal("post review comments"):
@@ -5070,14 +5116,13 @@ class PipelineRunner:
                 if active_stage and active_stage in all_stages
                 else -1
             )
-            progress: list[str] = []
-            for i, s in enumerate(all_stages):
-                if i == active_idx:
-                    progress.append(f"[>] {s}")
-                elif i <= completed_idx:
-                    progress.append(f"[x] {s}")
-                else:
-                    progress.append(f"[ ] {s}")
+
+            def marker(index: int) -> str:
+                if index == active_idx:
+                    return "[>]"
+                return "[x]" if index <= completed_idx else "[ ]"
+
+            progress = [f"{marker(i)} {s}" for i, s in enumerate(all_stages)]
             parts.append(" ".join(progress) + "\n")
 
             if plan:
@@ -5094,14 +5139,17 @@ class PipelineRunner:
 
             if plan:
                 parts.append("\n## Sections\n")
-                for i, s in enumerate(plan.sections):
-                    draft = snap.section_drafts.get(s.title)
-                    if draft and not draft.content.startswith("[Section failed"):
-                        parts.append(f"- [x] {s.title} ({draft.word_count} words)")
-                    elif active_stage == "write" and s.title not in snap.section_drafts:
-                        parts.append(f"- [>] {s.title}")
-                    else:
-                        parts.append(f"- [ ] {s.title}")
+
+                def section_line(title: str) -> str:
+                    if title not in snap.section_drafts:
+                        pending = active_stage == "write"
+                        return f"- [{'>' if pending else ' '}] {title}"
+                    draft = snap.section_drafts[title]
+                    if draft.content.startswith("[Section failed"):
+                        return f"- [ ] {title}"
+                    return f"- [x] {title} ({draft.word_count} words)"
+
+                parts.extend(section_line(s.title) for s in plan.sections)
                 total_words = sum(d.word_count for d in snap.section_drafts.values())
                 if total_words:
                     parts.append(

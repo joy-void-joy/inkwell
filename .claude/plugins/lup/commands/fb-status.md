@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(uv run lup-devtools:*), Read, Grep, Glob, AskUserQuestion
-description: Feedback loop entry point — status, targets, and previous session context
+description: "Feedback loop entry point \u2014 status, targets, and previous session context"
+allowed-tools: Bash(uv run lup-devtools:*), Read, AskUserQuestion
 ---
 
 # Status: Feedback Loop Entry Point
@@ -39,9 +39,9 @@ Prioritize: sessions with errors, sessions with poor outcomes (if outcome data e
 
 ### 4. Gate
 
-Use AskUserQuestion to present:
+Show:
 - Agent version and session count
 - Selected target sessions with key stats
 - What was done last session (if applicable)
 
-Options: "Proceed with these targets" / "Change target selection" / "Custom"
+Then Ask the user with the AskUserQuestion tool, offering concrete options plus a free-text choice: whether to proceed with these targets or change the selection

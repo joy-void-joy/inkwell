@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from lup.client import stage_label
+from inkwell.agent.client import stage_label
 
 from inkwell.agent.models import PipelineSnapshot
 from inkwell.agent.notes import PipelineNotes

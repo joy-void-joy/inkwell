@@ -15,7 +15,7 @@ from typing import Annotated, TypedDict
 import sh
 import typer
 
-from lup.paths import AGENT_VERSION
+from lup.workspace.paths import agent_version
 
 app = typer.Typer(invoke_without_command=True, no_args_is_help=False)
 
@@ -100,7 +100,7 @@ def show(
 
     if as_json:
         info: VersionInfo = {
-            "version": AGENT_VERSION,
+            "version": agent_version(),
             "latest_tag": latest_tag,
             "commits_since_tag": commits_since,
             "files_changed": files_changed,
@@ -108,7 +108,7 @@ def show(
         typer.echo(json.dumps(info, indent=2))
         return
 
-    typer.echo(f"\nAgent version: {AGENT_VERSION}")
+    typer.echo(f"\nAgent version: {agent_version()}")
     if latest_tag:
         typer.echo(f"Latest tag: {latest_tag} (+{commits_since} commits)")
     else:

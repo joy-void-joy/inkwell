@@ -21,9 +21,10 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import stage_model
-from lup.client import CostAccumulator, query
+from inkwell.agent.client import query, result_text
+from lup.runtime.usage import CostAccumulator
 from lup.mcp import LupMcpTool, ToolError, lup_tool
-from lup.trace import TraceLogger
+from lup.telemetry.trace import TraceLogger
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +336,7 @@ def make_source_consult_tools(
             permission_mode="bypassPermissions",
             prefix=f"[consult:{doc.label}] ",
         )
-        answer = collector.text
+        answer = result_text(collector)
         if not answer:
             raise ToolError(
                 "The reader produced no answer; retry with a narrower question "

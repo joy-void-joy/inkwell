@@ -13,8 +13,8 @@ from typing import Annotated, Literal, TypedDict, Union
 
 from pydantic import BaseModel, Field, field_validator
 
-from lup.client import CostState
-from lup.history import SessionResult
+from lup.runtime.usage import CostAccumulator
+from lup.workspace.history import SessionResult
 
 from inkwell.agent.tools.stage_outputs import AuthorNote
 
@@ -428,7 +428,7 @@ class PipelineSnapshot(BaseModel):
     pending_questions: list[str] = Field(
         default_factory=list, description="Unanswered questions for the author"
     )
-    cost_state: CostState | None = Field(
+    cost_state: CostAccumulator | None = Field(
         default=None,
         description="Accumulated cost/token state, carried across process restarts",
     )
@@ -493,4 +493,14 @@ class WritingOutput(BaseModel):
     )
 
 
-AgentSessionResult = SessionResult[WritingOutput]
+class AgentSessionResult(SessionResult[WritingOutput]):
+    """One writing session's result, and the account that paid for it.
+
+    The profile is inkwell's own: a run is billed to whichever credentials
+    its profile names, and a resume has to reach the same one, so the answer
+    travels with the result rather than being reconstructed from a snapshot.
+    """
+
+    profile: str | None = Field(
+        default=None, description="Config profile the session ran under"
+    )

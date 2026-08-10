@@ -53,17 +53,17 @@ class WebListener(PipelineListener):
             return
         acc = handle.cost
         snapshot = CostSnapshot(
-            total_cost_usd=acc.total_cost_usd,
-            total_input_tokens=acc.total_input_tokens,
-            total_output_tokens=acc.total_output_tokens,
-            duration_s=acc.duration_seconds,
+            total_cost_usd=acc.total.cost_usd,
+            total_input_tokens=acc.total.input_tokens,
+            total_output_tokens=acc.total.output_tokens,
+            duration_s=acc.total.duration.total_seconds(),
             stages={
                 name: StageCostSummary(
                     cost_usd=sc.cost_usd,
-                    duration_s=sc.duration_seconds,
+                    duration_s=sc.duration.total_seconds(),
                     input_tokens=sc.input_tokens,
                     output_tokens=sc.output_tokens,
-                    calls=sc.call_count,
+                    calls=sc.turn_count,
                 )
                 for name, sc in acc.stages.items()
             },

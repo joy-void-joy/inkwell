@@ -11,7 +11,7 @@ from claude_agent_sdk import ProcessError
 
 from inkwell.agent.pipeline import PipelineInterrupted
 from inkwell.environment.web.session_manager import classify_session_failure
-from lup.client import is_interrupt
+from inkwell.agent.client import is_interrupt
 
 
 def test_resume_interrupt_is_resumable_and_names_stage() -> None:

@@ -11,10 +11,10 @@ Examples::
 import re
 from pathlib import Path
 
-from lup.history import iter_session_dirs, iter_trace_log_files
-from lup.paths import traces_path, AGENT_VERSION
+from lup.workspace.history import iter_session_dirs, iter_trace_log_files
+from lup.workspace.paths import traces_path, agent_version
 
-VERSION_OPT_DEFAULT = AGENT_VERSION
+VERSION_OPT_DEFAULT = agent_version()
 
 
 def find_trace(session_id: str) -> Path | None:

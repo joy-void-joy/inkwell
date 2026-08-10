@@ -1,6 +1,6 @@
 ---
-allowed-tools: Read, Grep, Glob, Bash(ls:*, uv run lup-devtools:*), Task, WebSearch, AskUserQuestion
-description: Audit SDK agent tools and subagents — find gaps, overlaps, and refactoring opportunities
+description: "Audit SDK agent tools and subagents \u2014 find gaps, overlaps, and refactoring opportunities"
+allowed-tools: Read, Bash(ls:*, uv run lup-devtools:*), Agent, WebSearch, AskUserQuestion
 ---
 
 # Tool Review: Tools, Servers & Pipeline
@@ -42,7 +42,7 @@ For remote/external MCP servers:
 - Read `src/lup_template/agent/core.py` for `McpServerConfig` or server lists
 - Read `src/lup_template/agent/config.py` for MCP-related settings
 - Check `pyproject.toml` for MCP server dependencies
-- Grep for `npx`, `uvx`, or other MCP server launch patterns
+- Search with `grep` for `npx`, `uvx`, or other MCP server launch patterns
 
 Present as a grouped outline:
 
@@ -77,7 +77,7 @@ With the pipeline and inventory in hand, assess the design:
 - Does the implementation match the interface? (Read the actual code — does the tool deliver what its docstring promises?)
 - Are tool names consistent and self-explanatory?
 - Do input/output patterns follow consistent conventions?
-- Do tools use the shared response helpers (`mcp_error`, `mcp_success`)?
+- Do tools use the shared MCP plumbing (`lup_tool` for definition, `ToolError` from `lup.mcp` for recoverable failures)?
 - Is anything in the wrong server or confusingly organized?
 
 ### What's Missing
@@ -123,14 +123,14 @@ Present findings as:
 - [Tools that overlap or could be merged]
 
 ### Ideas
-- [Concrete suggestions for improvement, with rough effort estimates]
+- [Concrete suggestions for improvement, scoped by what each touches — never by time estimates]
 ```
 
 ## Rules
 
 - **Draw the pipeline first.** Understanding the flow makes individual tool assessments meaningful.
 - **Read the code, don't guess.** Open every tool file and read the actual implementations. Tool names and docstrings don't tell the full story.
-- **Ground in the current version.** When running devtools commands, they auto-scope to the current AGENT_VERSION. Unfiltered aggregates mix old bugs with current state.
+- **Ground in the current version.** When running devtools commands, they auto-scope to the current agent version. Unfiltered aggregates mix old bugs with current state.
 - **Think from the agent's perspective.** The agent sees a flat list of tools. Does the naming and organization help it choose the right tool?
 - **Propose, don't implement.** This is a review, not a refactoring session. Present findings and let the user decide what to act on.
-- **Use AskUserQuestion** for any decisions or prioritization that need user input.
+- **Put decisions and prioritization to the user** rather than settling them yourself.

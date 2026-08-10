@@ -20,8 +20,8 @@ from typing import Any
 import typer
 from pydantic import BaseModel
 
-from lup.history import iter_session_dirs, resolve_version
-from lup.paths import feedback_path, traces_path, AGENT_VERSION
+from lup.workspace.history import iter_session_dirs, resolve_version
+from lup.workspace.paths import feedback_path, traces_path, agent_version
 
 logger = logging.getLogger(__name__)
 
@@ -313,12 +313,13 @@ def status(  # noqa: C901
     all_versions: bool,
 ) -> None:
     """Show feedback status: version, data, analysis state, and aggregate stats."""
-    effective, ver_warning = resolve_version(version, all_versions)
+    scope = resolve_version(version, all_versions)
+    effective, ver_warning = scope.versions, scope.warning
     if ver_warning:
         typer.echo(ver_warning)
 
     typer.echo("\n=== Agent Version ===\n")
-    typer.echo(f"Current: {AGENT_VERSION}")
+    typer.echo(f"Current: {agent_version()}")
     if effective:
         typer.echo(f"Showing: {', '.join(effective)}")
 
@@ -415,7 +416,8 @@ def collect(
     """Collect feedback metrics from sessions."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    effective, ver_warning = resolve_version(version, all_versions)
+    scope = resolve_version(version, all_versions)
+    effective, ver_warning = scope.versions, scope.warning
     if ver_warning:
         typer.echo(ver_warning)
 
@@ -460,7 +462,8 @@ def collect(
 
 def tools(version: str | None, all_versions: bool) -> None:  # claude: ignore
     """Show tool usage aggregates."""
-    effective, warning = resolve_version(version, all_versions)
+    scope = resolve_version(version, all_versions)
+    effective, warning = scope.versions, scope.warning
     if warning:
         typer.echo(warning)
     sessions = load_sessions_for_versions(effective)
@@ -508,7 +511,8 @@ def errors(  # claude: ignore
     all_versions: bool,
 ) -> None:
     """Show sessions with high error rates from structured metrics."""
-    effective, warning = resolve_version(version, all_versions)
+    scope = resolve_version(version, all_versions)
+    effective, warning = scope.versions, scope.warning
     if warning:
         typer.echo(warning)
     sessions = load_sessions_for_versions(effective)
@@ -547,7 +551,8 @@ def errors(  # claude: ignore
 
 def trends(window: int, version: str | None, all_versions: bool) -> None:
     """Show metric trends over time."""
-    effective, warning = resolve_version(version, all_versions)
+    scope = resolve_version(version, all_versions)
+    effective, warning = scope.versions, scope.warning
     if warning:
         typer.echo(warning)
     sessions = load_sessions_for_versions(effective)
@@ -657,7 +662,8 @@ def prompt_health() -> None:
 
 def unanalyzed(version: str | None, all_versions: bool) -> None:
     """List unanalyzed session IDs, one per line."""
-    effective, ver_warning = resolve_version(version, all_versions)
+    scope = resolve_version(version, all_versions)
+    effective, ver_warning = scope.versions, scope.warning
     if ver_warning:
         typer.echo(ver_warning)
 

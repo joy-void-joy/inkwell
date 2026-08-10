@@ -176,7 +176,7 @@ class HistoryOutputData(BaseModel):
 
 
 class HistorySessionData(BaseModel):
-    """Parse a session from lup.history's SessionData format."""
+    """Parse a session from the record format `lup.workspace.history` saves."""
 
     model_config = {"extra": "ignore"}
 

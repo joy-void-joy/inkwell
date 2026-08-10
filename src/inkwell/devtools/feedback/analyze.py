@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from inkwell.devtools.feedback.state import load_sessions_for_versions
-from lup.history import resolve_version
-from lup.paths import traces_path
+from lup.workspace.history import resolve_version
+from lup.workspace.paths import traces_path
 
 
 class ToolHealth(TypedDict):
@@ -154,8 +154,9 @@ def gather_capability_gaps() -> list[CapabilityGap]:
 
 def build_report(version: str | None, all_versions: bool) -> AnalysisReport:
     """Build a complete analysis report."""
-    effective, _ = resolve_version(version, all_versions)
-    sessions = load_sessions_for_versions(effective)
+    sessions = load_sessions_for_versions(
+        resolve_version(version, all_versions).versions
+    )
 
     return {
         "version": version,

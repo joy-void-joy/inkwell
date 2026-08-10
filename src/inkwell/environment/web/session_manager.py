@@ -11,9 +11,9 @@ from datetime import datetime
 
 from fastapi import WebSocket
 
-from lup.client import CostAccumulator, is_interrupt
-from lup.history import list_all_sessions, get_latest_session_json
-from lup.paths import sessions_dir, trace_logs_dir
+from inkwell.agent.client import CostAccumulator, is_interrupt
+from lup.workspace.history import latest_session_record, list_all_session_ids
+from lup.workspace.paths import sessions_dir, trace_logs_dir
 
 from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.google_auth import GoogleAuthError
@@ -426,20 +426,20 @@ class SessionManager:
                     title=title,
                     status=handle.status,  # type: ignore[arg-type]
                     stage=handle.state.stage,
-                    cost_usd=handle.cost.total_cost_usd,
-                    duration_s=handle.cost.duration_seconds,
+                    cost_usd=handle.cost.total.cost_usd,
+                    duration_s=handle.cost.total.duration.total_seconds(),
                     doc_url=handle.state.doc_url,
                     created_at=handle.created_at.isoformat(),
                     profile=handle.profile,
                 )
             )
 
-        for sid in list_all_sessions():
+        for sid in list_all_session_ids():
             if sid in seen_ids:
                 continue
             seen_ids.add(sid)
-            raw = get_latest_session_json(sid)
-            if raw is None:
+            record = latest_session_record(sid)
+            if record is None:
                 snapshot = self.load_snapshot(sid)
                 if snapshot and snapshot.stage != "init":
                     title = snapshot.plan.title if snapshot.plan else ""
@@ -455,7 +455,7 @@ class SessionManager:
                         )
                     )
                 continue
-            parsed = HistorySessionData.model_validate(raw)
+            parsed = HistorySessionData.model_validate(record.model_dump())
             paused_stage = parsed.output.paused_after if parsed.output else ""
             summaries.append(
                 SessionSummary(
@@ -478,13 +478,13 @@ class SessionManager:
     def get_session_detail(self, session_id: str) -> SessionDetail | None:
         handle = self.sessions.get(session_id)
         if not handle:
-            raw = get_latest_session_json(session_id)
-            if raw is None:
+            record = latest_session_record(session_id)
+            if record is None:
                 snapshot = self.load_snapshot(session_id)
                 if snapshot and snapshot.stage != "init":
                     return self.detail_from_snapshot(session_id, snapshot)
                 return None
-            parsed = HistorySessionData.model_validate(raw)
+            parsed = HistorySessionData.model_validate(record.model_dump())
             output: CompletionOutput | None = None
             if parsed.output:
                 output = CompletionOutput(
@@ -528,17 +528,17 @@ class SessionManager:
                 pending_questions=list(handle.state.pending_questions),
             ),
             cost=CostSnapshot(
-                total_cost_usd=handle.cost.total_cost_usd,
-                total_input_tokens=handle.cost.total_input_tokens,
-                total_output_tokens=handle.cost.total_output_tokens,
-                duration_s=handle.cost.duration_seconds,
+                total_cost_usd=handle.cost.total.cost_usd,
+                total_input_tokens=handle.cost.total.input_tokens,
+                total_output_tokens=handle.cost.total.output_tokens,
+                duration_s=handle.cost.total.duration.total_seconds(),
                 stages={
                     name: StageCostSummary(
                         cost_usd=sc.cost_usd,
-                        duration_s=sc.duration_seconds,
+                        duration_s=sc.duration.total_seconds(),
                         input_tokens=sc.input_tokens,
                         output_tokens=sc.output_tokens,
-                        calls=sc.call_count,
+                        calls=sc.turn_count,
                     )
                     for name, sc in handle.cost.stages.items()
                 },

@@ -13,13 +13,13 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, Literal, cast
+from typing import Awaitable, Callable, Literal
 
-from claude_agent_sdk import SdkMcpTool
 from pydantic import BaseModel, Field, ValidationError
 
 from lup.mcp import LupMcpTool, ToolError, ToolResponse, mcp_response
-from lup.metrics import collector as metrics_collector
+from lup.telemetry.metrics import collector as metrics_collector
+from lup.types import JsonObject
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def build_stage_tool(
 ) -> LupMcpTool:
     """Construct an MCP tool from a handler closure."""
 
-    async def wrapper(args: dict[str, object]) -> ToolResponse:
+    async def wrapper(args: JsonObject) -> ToolResponse:
         start = time.perf_counter()
         is_error = False
         try:
@@ -54,16 +54,12 @@ def build_stage_tool(
             duration_ms = (time.perf_counter() - start) * 1000
             metrics_collector.record(tool_name, duration_ms, is_error)
 
-    sdk = SdkMcpTool(
+    return LupMcpTool(
         name=tool_name,
         description=description,
         input_schema=input_model.model_json_schema(),
-        handler=cast(
-            Callable[[dict[str, object]], Awaitable[dict[str, object]]], wrapper
-        ),
-    )
-    return LupMcpTool(
-        sdk_tool=sdk,
+        handler=wrapper,
+        call_handler=handler,
         input_model=input_model,
         output_model=BaseModel,
     )

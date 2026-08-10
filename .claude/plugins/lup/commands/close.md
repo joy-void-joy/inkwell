@@ -1,6 +1,6 @@
 ---
+description: "Check PR review status, merge if approved, and clean up branches"
 allowed-tools: Bash(uv run lup-devtools:*), AskUserQuestion, Skill(lup:commit)
-description: Check PR review status, merge if approved, and clean up branches
 ---
 
 # Close PR
@@ -32,7 +32,7 @@ If no PR is found, check if the user passed a PR number as an argument. If still
 **If all reviews are approved (or no reviews but checks pass):**
 
 1. Show the PR summary
-2. Confirm the merge via AskUserQuestion
+2. Request explicit user approval before merging the pull request. Reason: the merge is irreversible and closes the review it opened.
 
 ### 4. Merge the PR
 
@@ -55,4 +55,4 @@ Summarize what was done: PR merged (with link), cleanup results.
 ## Guidelines
 
 - Always show review comments before merging -- never skip review feedback
-- The user must confirm before merging via AskUserQuestion
+- The user approves the merge before it happens -- never merge unprompted

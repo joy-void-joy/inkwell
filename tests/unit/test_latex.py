@@ -14,8 +14,8 @@ from inkwell.agent.tools.latex import (
     escape_latex,
     make_latex_tools,
 )
-from lup.mcp import LupMcpTool
-from lup.sandbox import Sandbox
+from lup.mcp import LupMcpTool, response_text
+from lup.sandbox.container import Sandbox
 
 
 class TestEscapeLatex:
@@ -53,13 +53,13 @@ class TestAssembleLatexDocument:
 
 def compile_latex_tool() -> LupMcpTool:
     tools = make_latex_tools(cast(Sandbox, object()))
-    return next(t for t in tools if t.sdk_tool.name == "compile_latex")
+    return next(t for t in tools if t.name == "compile_latex")
 
 
 class TestCompileLatexTool:
     async def test_missing_file_is_actionable_error(self) -> None:
         tool = compile_latex_tool()
-        result = await tool.sdk_tool.handler(
+        result = await tool.handler(
             CompileLatexInput(tex_path="/no/such/paper.tex").model_dump()
         )
         assert result.get("is_error") is True
@@ -76,10 +76,10 @@ class TestCompileLatexTool:
             )
 
         monkeypatch.setattr(latex_mod, "compile_tex", fake_compile)
-        result = await compile_latex_tool().sdk_tool.handler(
+        result = await compile_latex_tool().handler(
             CompileLatexInput(tex_path=str(tex)).model_dump()
         )
-        payload = json.loads(str(result["content"][0]["text"]))
+        payload = json.loads(response_text(result))
         assert payload["compiled"] is True
 
     async def test_reports_failure_with_log(
@@ -95,9 +95,9 @@ class TestCompileLatexTool:
             )
 
         monkeypatch.setattr(latex_mod, "compile_tex", fake_compile)
-        result = await compile_latex_tool().sdk_tool.handler(
+        result = await compile_latex_tool().handler(
             CompileLatexInput(tex_path=str(tex)).model_dump()
         )
-        payload = json.loads(str(result["content"][0]["text"]))
+        payload = json.loads(response_text(result))
         assert payload["compiled"] is False
         assert "remark undefined" in payload["log"]

@@ -296,7 +296,7 @@ Rules:
 
 async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
     """Rewrite content as a thread via LLM, with mechanical splitting as fallback."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class TwitterThread(BaseModel):
         tweets: list[str] = Field(
@@ -337,7 +337,7 @@ async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
 
 async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
     """Structure content as a dialog between named speakers via LLM query."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class DialogTurns(BaseModel):
         turns: list[DialogTurn] = Field(description="Dialog turns in order")
@@ -444,7 +444,7 @@ def do_format_blog(params: FormatBlogInput) -> FormatBlogOutput:
 async def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
     import datetime
 
-    from lup.client import query
+    from inkwell.agent.client import query
 
     header_lines: list[str] = []
 
@@ -519,7 +519,7 @@ async def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
 
 async def do_format_academic(params: FormatAcademicInput) -> FormatAcademicOutput:
     """Format content as an academic paper via LLM restructuring."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class AcademicContent(BaseModel):
         abstract: str = Field(description="Paper abstract (150-300 words)")
@@ -611,7 +611,7 @@ def do_format_newsletter(params: FormatNewsletterInput) -> FormatNewsletterOutpu
 
 async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
     """Reformat content according to a freeform format description via LLM query."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class FormattedContent(BaseModel):
         content: str = Field(description="The reformatted content")

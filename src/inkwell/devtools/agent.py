@@ -35,9 +35,8 @@ from typing import TYPE_CHECKING, Annotated
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from claude_agent_sdk.types import ResultMessage
-
-    from lup.client import ResponseCollector
+    from lup.runtime.contracts import Session
+    from lup.runtime.models import TurnResult
 
 import sh
 import typer
@@ -59,7 +58,12 @@ from inkwell.agent.tools.extract import EXTRACT_TOOLS
 from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS
 from inkwell.agent.tools.research.fetch import FETCH_TOOLS
 from inkwell.agent.tools.voice import VOICE_TOOLS
-from lup.mcp import LupMcpTool
+from inkwell.agent.client import provider_factory
+from lup.mcp import LupMcpTool, create_mcp_server, serve_stdio
+from lup.runtime.models import turn_request
+from lup.telemetry.metrics import configure_metrics, metrics_path
+from lup.workspace.context import SessionContext, read_session_context
+from lup.workspace.notes import session_gate_flag, setup_notes
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +170,7 @@ def print_model_source(
 
 def tool_location(tool: LupMcpTool) -> str:
     """Get file:line for the tool handler (unwraps decorators)."""
-    handler = inspect_mod.unwrap(tool.sdk_tool.handler)
+    handler = inspect_mod.unwrap(tool.handler)
     try:
         filepath = inspect_mod.getfile(handler)
         filename = os.path.basename(filepath)
@@ -190,15 +194,17 @@ def tool_signature(tool: LupMcpTool) -> str:
 
 def print_tool_compact(out: io.StringIO, tool: LupMcpTool) -> None:
     """Print a single tool as a one-liner."""
-    out.write(f"    {tool.sdk_tool.name}{tool_signature(tool)}\n")
+    out.write(f"    {tool.name}{tool_signature(tool)}\n")
 
 
 def print_tool_full(out: io.StringIO, tool: LupMcpTool) -> None:
     """Print a single tool with full description and schemas."""
-    out.write(f"\n  {tool.sdk_tool.name}\n")
-    out.write(f"  {'─' * len(tool.sdk_tool.name)}\n")
+    out.write(f"\n  {tool.name}\n")
+    out.write(f"  {'─' * len(tool.name)}\n")
 
-    desc_lines = tool.sdk_tool.description.split(". ")
+    # lup: ignore[string-split] — a description is prose, and this wraps it
+    # one sentence per line for the terminal
+    desc_lines = tool.description.split(". ")
     for line in desc_lines:
         line = line.strip()
         if line:
@@ -230,8 +236,8 @@ def collect_all_tools() -> list[LupMcpTool]:
 def tool_to_dict(t: LupMcpTool) -> dict[str, object]:
     """Serialize a LupMcpTool for JSON output."""
     return {
-        "name": t.sdk_tool.name,
-        "description": t.sdk_tool.description,
+        "name": t.name,
+        "description": t.description,
         "input_schema": t.input_model.model_json_schema(),
         "output_schema": t.output_model.model_json_schema() if t.output_model else None,
     }
@@ -342,49 +348,63 @@ def inspect_cmd(
 # ---------------------------------------------------------------------------
 
 
+def harness_session_context(name: str) -> SessionContext:
+    """Open the session a natively launched tool server serves.
+
+    An adapter-launched server is handed a session that already exists; a
+    server a native runtime starts is the first thing in that session to run,
+    so it opens one under the name it was given. The name is the whole
+    identity, and every group of one runtime's session is started with the
+    same name, so those processes agree on where session state lives without
+    a channel between them.
+    """
+    notes = setup_notes(session_id=name, task_id=name, type="harness")
+    return SessionContext(
+        session_dir=notes.session,
+        outputs_dir=notes.output.parent,
+        gate_flag=session_gate_flag(name),
+        session_id=name,
+        task_id=name,
+    )
+
+
 @app.command("serve-tools")
-def serve_tools_cmd() -> None:
+def serve_tools_cmd(
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Serve one tool group rather than all of them"),
+    ] = None,
+    session: Annotated[
+        str | None,
+        typer.Option("--session", help="Session the served tools read and write under"),
+    ] = None,
+) -> None:
     """Start SDK tools as an MCP stdio server.
 
-    This is used by the ``chat`` command — claude CLI launches it as a subprocess.
-    Can also be used standalone for testing MCP tool integration.
+    A natively launched harness runs one of these per tool group, all under
+    one session name, so the tools of one native session write where the next
+    one will find them. The ``chat`` command launches it the same way,
+    ungrouped.
     """
-    from mcp.server import Server
-    from mcp.server.stdio import stdio_server
-    from mcp.types import Tool
+    context = read_session_context()
+    if context is None and session is not None:
+        context = harness_session_context(session)
+    if context is not None:
+        configure_metrics(metrics_path(context.session_dir))
 
-    from lup.mcp import generate_json_schema, extract_sdk_tools
+    groups = collect_tools_by_server()
+    tools = (
+        collect_all_tools()
+        if server is None
+        else groups.get(server)  # lup: ignore[dict-get] — group map
+    )
+    if tools is None:
+        typer.echo(f"--server must be one of: {', '.join(groups)}", err=True)
+        raise typer.Exit(2)
 
-    sdk_tools = extract_sdk_tools(collect_all_tools())
-    tool_map = {t.name: t for t in sdk_tools}
-
-    server = Server("lup-tools", version="1.0.0")
-
-    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def list_tools() -> list[Tool]:
-        tool_list = []
-        for t in sdk_tools:
-            schema = generate_json_schema(t.input_schema)
-            tool_list.append(
-                Tool(name=t.name, description=t.description, inputSchema=schema)
-            )
-        return tool_list
-
-    @server.call_tool()  # type: ignore[untyped-decorator]
-    async def call_tool(
-        name: str, arguments: dict[str, object]
-    ) -> list[dict[str, str]]:
-        if name not in tool_map:
-            raise ValueError(f"Tool '{name}' not found")
-        result = await tool_map[name].handler(arguments)
-        return result.get("content", [])  # type: ignore[return-value]
-
-    async def run() -> None:
-        init_options = server.create_initialization_options()
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, init_options)
-
-    asyncio.run(run())
+    # The config's server already answers list_tools and call_tool for these,
+    # so serving them over stdio is the whole of what is left to do.
+    serve_stdio(create_mcp_server(server or "lup-tools", tools=tools))
 
 
 # ---------------------------------------------------------------------------
@@ -475,35 +495,32 @@ class Interrupted(Exception):
     """Raised when the user interrupts response collection via Ctrl-C."""
 
 
-async def collect_interruptible(
-    collector: "ResponseCollector",
-    console: "Console",
-) -> "ResultMessage":
-    """Collect response with Ctrl-C -> client.interrupt() support.
+async def send_interruptible(
+    session: "Session", prompt: str, console: "Console"
+) -> "TurnResult[None]":
+    """Run one turn with Ctrl-C interrupt support.
 
-    First Ctrl-C sends an interrupt signal to the CLI (graceful stop).
-    Second Ctrl-C cancels the collection task (force stop).
+    First Ctrl-C asks the turn to stop (graceful). Second cancels the task
+    waiting on it (force).
     """
     loop = asyncio.get_running_loop()
     interrupt_count = 0
 
-    async def do_collect() -> "ResultMessage":
-        return await collector.collect()
-
-    collect_task = asyncio.create_task(do_collect())
+    turn = await session.start(turn_request(prompt))
+    send_task = asyncio.create_task(turn.turn.result())
 
     def on_sigint() -> None:
         nonlocal interrupt_count
         interrupt_count += 1
-        if interrupt_count == 1:
+        if interrupt_count == 1 and turn.interrupt is not None:
             console.print("\n  [dim]interrupting...[/dim]")
-            asyncio.ensure_future(collector.client.interrupt())
+            asyncio.ensure_future(turn.interrupt.interrupt())
         else:
-            collect_task.cancel()
+            send_task.cancel()
 
     loop.add_signal_handler(signal.SIGINT, on_sigint)
     try:
-        return await collect_task
+        return await send_task
     except asyncio.CancelledError:
         raise Interrupted from None
     finally:
@@ -528,28 +545,25 @@ async def repl(
     from rich.console import Console
     from rich.panel import Panel
 
-    from claude_agent_sdk.types import McpServerConfig
-
     from inkwell.agent.pipeline import (
         build_compute_server,
         build_research_servers,
         build_source_server,
     )
-    from lup.client import build_client, ResponseCollector
-    from lup.content_safety import configure_content_safety
-    from lup.mcp import create_mcp_server, extract_sdk_tools
-    from lup.paths import project_root
-    from lup.sandbox import Sandbox
+    from lup.workspace.content_safety import configure
+    from lup.mcp import McpServerEntry, create_mcp_server
+    from lup.workspace.paths import project_root
+    from lup.sandbox.container import Sandbox
 
     console = Console(highlight=False)
     effective_model = model or settings.model
 
-    mcp_servers: dict[str, McpServerConfig] = {}
+    mcp_servers: dict[str, McpServerEntry] = {}
     stack = AsyncExitStack()
 
     if not no_tools:
         repl_dir = project_root() / ".lup" / "repl"
-        configure_content_safety(repl_dir / "content")
+        configure(directory=repl_dir / "content")
         sandbox = Sandbox(
             session_id="repl",
             shared_dir=repl_dir / "sandbox_shared",
@@ -557,18 +571,13 @@ async def repl(
         )
         stack.enter_context(sandbox)
 
-        source_servers, _ = build_source_server()
-        compute_servers, _ = build_compute_server(sandbox, repl_dir / "artifacts")
-        docs_server = create_mcp_server(
-            name="docs",
-            version="1.0.0",
-            tools=extract_sdk_tools([*GOOGLE_DOCS_TOOLS, *VOICE_TOOLS]),
-        )
         mcp_servers = {
-            **source_servers,
+            **build_source_server().servers,
             **build_research_servers(),
-            **compute_servers,
-            "docs": docs_server,
+            **build_compute_server(sandbox, repl_dir / "artifacts").servers,
+            "docs": create_mcp_server(
+                name="docs", tools=[*GOOGLE_DOCS_TOOLS, *VOICE_TOOLS]
+            ),
         }
 
         # Shutdown message — registered last so it runs first (LIFO)
@@ -591,7 +600,7 @@ async def repl(
                 branch = "  └" if is_last_tool else "  ├"
                 if not is_last_server:
                     branch = f"[dim]│[/dim] {'└' if is_last_tool else '├'}"
-                panel_lines.append(f"[dim]{branch}[/dim] {t.sdk_tool.name}")
+                panel_lines.append(f"[dim]{branch}[/dim] {t.name}")
     else:
         panel_lines.append("[dim]no tools[/dim]")
     panel_lines += [
@@ -673,15 +682,16 @@ async def repl(
         prompt_continuation=FormattedText([("class:prompt-continuation", "··· ")]),
     )
 
+    factory = provider_factory(
+        model=effective_model,
+        system_prompt=prompt,
+        max_thinking_tokens=settings.max_thinking_tokens or (128_000 - 1),
+        permission_mode="bypassPermissions",
+        tool_servers=mcp_servers or None,
+    )
     try:
         async with stack:
-            async with build_client(
-                model=effective_model,
-                system_prompt=prompt,
-                max_thinking_tokens=settings.max_thinking_tokens or (128_000 - 1),
-                permission_mode="bypassPermissions",
-                mcp_servers=mcp_servers if mcp_servers else None,
-            ) as client:
+            async with factory.open() as opened:
                 last_input_sigint = 0.0
 
                 while True:
@@ -718,23 +728,20 @@ async def repl(
                         query_text = (stripped + "\n\n" if stripped else "") + (
                             f"[image attached: {path_list}]"
                         )
-                        await client.query(query_text)
                         pending_images.clear()
                     else:
-                        await client.query(user_input)
-                    collector = ResponseCollector(client)
+                        query_text = user_input
                     try:
-                        result = await collect_interruptible(
-                            collector,
-                            console,
+                        result = await send_interruptible(
+                            opened.session, query_text, console
                         )
                         parts: list[str] = []
-                        if result.duration_ms:
-                            secs = result.duration_ms / 1000
-                            parts.append(f"{secs:.1f}s")
-                        if result.total_cost_usd:
-                            session_cost += result.total_cost_usd
-                            parts.append(f"${result.total_cost_usd:.4f}")
+                        seconds = result.duration.total_seconds()
+                        if seconds:
+                            parts.append(f"{seconds:.1f}s")
+                        if result.usage.cost_usd:
+                            session_cost += result.usage.cost_usd
+                            parts.append(f"${result.usage.cost_usd:.4f}")
                         if parts:
                             console.print(f"  [dim]{' · '.join(parts)}[/dim]")
                         console.print()

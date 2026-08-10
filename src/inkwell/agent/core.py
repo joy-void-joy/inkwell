@@ -13,12 +13,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from lup.client import CostAccumulator, TokenUsage
-from lup.history import save_session
-from lup.metrics import get_metrics_summary, log_metrics_summary, reset_metrics
-from lup.notes import NotesConfig, setup_notes
-from lup.paths import agent_version
-from lup.trace import TraceLogger
+from lup.runtime.usage import CostAccumulator
+from lup.types import Usage
+from lup.workspace.history import save_session
+from lup.telemetry.metrics import (
+    get_metrics_summary,
+    log_metrics_summary,
+    reset_metrics,
+)
+from lup.workspace.notes import NotesConfig, setup_notes
+from lup.workspace.paths import agent_version
+from lup.telemetry.trace import TraceLogger
 
 import inkwell.agent.config as config_mod
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot
@@ -78,7 +83,7 @@ def load_snapshot(
     (snapshot_{stage}.json) if it exists, otherwise loads the latest
     snapshot and rewinds its stage field.
     """
-    from lup.paths import sessions_dir
+    from lup.workspace.paths import sessions_dir
 
     base = sessions_dir() / session_id / "pipeline_notes"
 
@@ -115,7 +120,7 @@ def checkpoint_before(session_id: str, redo_stage: str) -> str | None:
     Walks back past stages that never checkpointed (``resolve``, or a stage the
     run never reached). Returns None when nothing earlier was checkpointed.
     """
-    from lup.paths import sessions_dir
+    from lup.workspace.paths import sessions_dir
 
     backbone = ["preprocess", *DISPLAY_STAGES]
     if redo_stage not in backbone:
@@ -242,10 +247,10 @@ async def run_session(
         output.stage_costs = {
             name: {
                 "cost_usd": sc.cost_usd,
-                "duration_s": sc.duration_seconds,
+                "duration_s": sc.duration.total_seconds(),
                 "input_tokens": sc.input_tokens,
                 "output_tokens": sc.output_tokens,
-                "calls": sc.call_count,
+                "calls": sc.turn_count,
             }
             for name, sc in cost_acc.stages.items()
         }
@@ -260,13 +265,17 @@ async def run_session(
         output=output,
         reasoning="",
         sources_consulted=[],
-        duration_seconds=cost_acc.duration_seconds if cost_acc.call_count else None,
-        cost_usd=cost_acc.total_cost_usd if cost_acc.call_count else None,
-        token_usage=TokenUsage(
-            input_tokens=cost_acc.total_input_tokens,
-            output_tokens=cost_acc.total_output_tokens,
+        duration_seconds=(
+            cost_acc.total.duration.total_seconds()
+            if cost_acc.total.turn_count
+            else None
+        ),
+        cost_usd=cost_acc.total.cost_usd if cost_acc.total.turn_count else None,
+        token_usage=Usage(
+            input_tokens=cost_acc.total.input_tokens,
+            output_tokens=cost_acc.total.output_tokens,
         )
-        if cost_acc.call_count
+        if cost_acc.total.turn_count
         else None,
         tool_metrics=get_metrics_summary(),
         profile=config_mod.current_settings().profile,

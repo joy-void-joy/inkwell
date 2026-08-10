@@ -1,49 +1,48 @@
-"""build_client must route session-scoped env into the spawned subprocess.
+"""Session-scoped env must reach the session the provider opens.
 
-The Agent SDK decides which account pays for inference from the subprocess
-environment, so client_env entries (e.g. a per-profile CLAUDE_CONFIG_DIR)
-must land in ClaudeAgentOptions.env — otherwise every session bills the
-ambient login regardless of the selected profile.
+The provider runs its CLI as a subprocess that decides which account pays for
+inference from its own environment, so a per-profile ``CLAUDE_CONFIG_DIR`` set
+on ``client_env`` has to land in the session config — otherwise every session
+bills the ambient login regardless of the profile selected for it.
 """
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions
 
-from lup.client import build_client, client_env
+from lup.adapters.claude.runtime import ClaudeSessionConfig
+from lup.runtime.factory import SessionFactory
 
-captured: dict[str, ClaudeAgentOptions] = {}
+import inkwell.agent.client as client
 
-
-class FakeClient:
-    def __init__(self, *, options: ClaudeAgentOptions) -> None:
-        captured["options"] = options
-
-    async def __aenter__(self) -> "FakeClient":
-        return self
-
-    async def __aexit__(self, *exc: object) -> bool:
-        return False
+captured: dict[str, ClaudeSessionConfig] = {}
 
 
-async def test_client_env_merged_into_options(
+def capture_config(config: ClaudeSessionConfig) -> SessionFactory:
+    """Stand in for the adapter, keeping the config it was handed."""
+    captured["config"] = config
+    return SessionFactory(lambda resume=None: None)  # pyright: ignore[reportArgumentType]
+
+
+def test_client_env_reaches_the_session_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured.clear()
-    monkeypatch.setattr("lup.client.ClaudeSDKClient", FakeClient)
-    token = client_env.set({"CLAUDE_CONFIG_DIR": "/tmp/cesia"})
+    monkeypatch.setattr(client, "create_claude_session_factory", capture_config)
+
+    token = client.client_env.set({"CLAUDE_CONFIG_DIR": "/tmp/cesia"})
     try:
-        async with build_client(model="claude-opus-4-6"):
-            pass
+        client.provider_factory(model="claude-opus-4-6")
     finally:
-        client_env.reset(token)
-    assert captured["options"].env["CLAUDE_CONFIG_DIR"] == "/tmp/cesia"
+        client.client_env.reset(token)
+
+    assert captured["config"].environment["CLAUDE_CONFIG_DIR"] == "/tmp/cesia"
 
 
-async def test_no_client_env_leaves_config_dir_unset(
+def test_no_client_env_leaves_the_config_dir_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured.clear()
-    monkeypatch.setattr("lup.client.ClaudeSDKClient", FakeClient)
-    async with build_client(model="claude-opus-4-6"):
-        pass
-    assert "CLAUDE_CONFIG_DIR" not in captured["options"].env
+    monkeypatch.setattr(client, "create_claude_session_factory", capture_config)
+
+    client.provider_factory(model="claude-opus-4-6")
+
+    assert "CLAUDE_CONFIG_DIR" not in captured["config"].environment

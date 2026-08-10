@@ -16,11 +16,12 @@ import logging
 from pathlib import Path
 from typing import Literal
 
-from claude_agent_sdk import McpServerConfig
 from pydantic import BaseModel, Field
 
-from lup.client import CostAccumulator, query
-from lup.trace import TraceLogger
+from lup.mcp import McpServerEntry
+from lup.runtime.usage import CostAccumulator
+from inkwell.agent.client import query
+from lup.telemetry.trace import TraceLogger
 
 from inkwell.agent.config import stage_model
 from inkwell.agent.stages import EXTRACTOR_PROMPT
@@ -163,7 +164,7 @@ async def run_extraction_agent(
     inputs: list[str],
     output_dir: Path,
     *,
-    source_servers: dict[str, McpServerConfig],
+    source_servers: dict[str, McpServerEntry],
     source_tool_names: list[str],
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,

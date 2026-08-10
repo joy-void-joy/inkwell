@@ -14,7 +14,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from lup.mcp import LupMcpTool, ToolError, lup_tool
-from lup.sandbox import Sandbox
+from lup.sandbox.container import Sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class LatexArtifacts(BaseModel):
 
 def ensure_tex_tooling(sandbox: Sandbox) -> bool:
     """Probe for pandoc + tectonic, provisioned in the sandbox image."""
-    return sandbox.run_shell(TEX_TOOLING_PROBE)["exit_code"] == 0
+    return sandbox.run_shell(TEX_TOOLING_PROBE).exit_code == 0
 
 
 def save_artifacts_to(artifacts: LatexArtifacts, target_dir: Path) -> LatexArtifacts:
@@ -126,12 +126,12 @@ def compile_tex_sync(tex_source: str, sandbox: Sandbox) -> LatexArtifacts:
 
     tectonic = sandbox.run_shell("cd /shared && tectonic paper.tex")
     pdf_host = shared / "paper.pdf"
-    if tectonic["exit_code"] != 0 or not pdf_host.exists():
+    if tectonic.exit_code != 0 or not pdf_host.exists():
         return LatexArtifacts(
-            tex_path=str(tex_host), log="tectonic failed:\n" + tectonic["stdout"]
+            tex_path=str(tex_host), log="tectonic failed:\n" + tectonic.stdout
         )
     return LatexArtifacts(
-        tex_path=str(tex_host), pdf_path=str(pdf_host), log=tectonic["stdout"]
+        tex_path=str(tex_host), pdf_path=str(pdf_host), log=tectonic.stdout
     )
 
 
@@ -206,8 +206,8 @@ def render_pdf_preview_sync(sandbox: Sandbox, *, max_pages: int = 20) -> list[Pa
         "cd /shared && rm -f preview-*.png && "
         f"pdftoppm -png -r 150 -l {max_pages} paper.pdf preview"
     )
-    if result["exit_code"] != 0:
-        logger.warning("pdftoppm failed: %s", result["stdout"][-300:])
+    if result.exit_code != 0:
+        logger.warning("pdftoppm failed: %s", result.stdout[-300:])
         return []
     return sorted(shared.glob("preview-*.png"))
 

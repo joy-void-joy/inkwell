@@ -12,7 +12,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import current_settings
-from lup.content_safety import save_content
+from lup.workspace.content_safety import save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)

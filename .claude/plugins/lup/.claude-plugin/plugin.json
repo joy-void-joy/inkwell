@@ -1,5 +1,5 @@
 {
+  "description": "Writing harness with feedback, review, and safe resolution flows",
   "name": "lup",
-  "description": "Self-improvement loop scaffold: feedback collection, trace analysis, and meta-level reflection for any agent domain",
-  "keywords": ["self-improvement", "feedback", "calibration", "meta", "agent-sdk", "scaffold"]
+  "version": "0.2.0"
 }

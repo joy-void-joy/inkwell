@@ -15,7 +15,7 @@ import trafilatura
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import stage_model
-from lup.content_safety import SavedContent, save_content
+from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -241,7 +241,7 @@ class FetchAndExtractOutput(BaseModel):
 
 async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:
     """Fetch a URL and extract only the parts relevant to focus."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     source = await do_fetch_source(url)
     content_path = source.content.path

@@ -220,41 +220,33 @@ def sessions(
     ] = 20,
 ) -> None:
     """List past writing sessions."""
-    from lup.history import get_latest_session_json, list_all_sessions
+    from lup.workspace.history import latest_session_record, list_all_session_ids
 
-    session_ids = list_all_sessions()
+    session_ids = list_all_session_ids()
     if not session_ids:
         typer.echo("No sessions found.")
         return
 
-    from lup.paths import sessions_dir
+    from lup.workspace.paths import sessions_dir
 
     for sid in session_ids[-limit:]:
-        data = get_latest_session_json(sid)
-        if data is None:
+        record = latest_session_record(sid)
+        if record is None:
             typer.echo(f"  {sid}  (no data)")
             continue
 
-        title = ""
-        doc_url = ""
-        output = data.get("output")
-        if isinstance(output, dict):
-            t = output.get("title")
-            if isinstance(t, str):
-                title = t
-            u = output.get("google_doc_url")
-            if isinstance(u, str):
-                doc_url = u
-
-        cost = data.get("cost_usd")
+        # lup: ignore[dict-get] — a record keeps `output` raw, because the
+        # output model belongs to the domain and is not known at read time
+        title = record.output.get("title")
+        doc_url = record.output.get("google_doc_url")  # lup: ignore[dict-get]
 
         parts = [f"  {sid}"]
-        if title:
+        if isinstance(title, str):
             parts.append(f"  {title}")
-        if isinstance(cost, (int, float)):
-            parts.append(f"  ${cost:.2f}")
+        if record.cost_usd is not None:
+            parts.append(f"  ${record.cost_usd:.2f}")
         typer.echo("".join(parts))
-        if doc_url:
+        if isinstance(doc_url, str):
             typer.echo(f"    {doc_url}")
 
         notes_dir = sessions_dir() / sid / "pipeline_notes"
@@ -368,7 +360,7 @@ def fetch_comments(
         typer.echo()
 
     if session_id:
-        from lup.paths import sessions_dir
+        from lup.workspace.paths import sessions_dir
 
         notes_dir = sessions_dir() / session_id / "pipeline_notes"
         if not notes_dir.exists():
@@ -414,10 +406,10 @@ def extract(
     from pathlib import Path as P
 
     from inkwell.agent.tools.research.fetch import do_fetch_source
-    from lup.content_safety import configure_content_safety
+    from lup.workspace.content_safety import configure
     from lup.mcp import ToolError
 
-    configure_content_safety(P(tempfile.mkdtemp(prefix="inkwell-extract-")))
+    configure(directory=P(tempfile.mkdtemp(prefix="inkwell-extract-")))
 
     try:
         result = asyncio.run(do_fetch_source(source))

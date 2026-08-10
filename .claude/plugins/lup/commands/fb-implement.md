@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(git:*, uv run lup-devtools:*, uv run python -m lup:*), Read, Grep, Glob, Edit, Write, AskUserQuestion, WebSearch, WebFetch
-description: Implement prioritized changes from feedback loop analysis
+description: "Implement prioritized changes from feedback loop analysis"
+allowed-tools: Bash(git:*, uv run lup-devtools:*, uv run lup:*), Read, Edit, Write, AskUserQuestion, WebSearch, WebFetch
 ---
 
 # Implement: Make Changes
@@ -9,7 +9,7 @@ Implement changes identified during investigation, analysis, and reflection.
 
 ## Entry Gate
 
-Use AskUserQuestion to present the prioritized change list with Bitter Lesson classification. User must approve before implementation.
+Present the prioritized change list with its Bitter Lesson classification, then Request explicit user approval before implementing any of the changes. Reason: the list decides what the next session's work will be.
 
 **Bitter Lesson classification:**
 - **Tool/capability** (preferred): Build or fix a tool, add a data source, improve automation
@@ -32,7 +32,7 @@ From tool health analysis. Fix the root cause, not the symptom.
 
 ### P2: Build requested tools
 
-From capability gap analysis. Discuss with user before building — use AskUserQuestion to present the capability gap, proposed approach, and alternatives.
+From capability gap analysis. Present the gap, the proposed approach, and the alternatives, then Ask the user with the AskUserQuestion tool, offering concrete options plus a free-text choice: which approach to build, if any
 
 ### P3: Improve tool descriptions
 
@@ -69,7 +69,7 @@ End the session by proposing sessions that test the improvements:
 
 ```bash
 # Run evaluation sessions
-uv run python -m lup_template.environment.cli loop "task1" "task2" "task3"
+uv run lup loop "task1" "task2" "task3"
 ```
 
 Choose sessions that are diverse in task type, exercise recently fixed or new tools, and include edge cases where the agent previously struggled.

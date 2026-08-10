@@ -1,0 +1,9 @@
+{
+  "policyIds": [
+    "fetch",
+    "shell",
+    "edit",
+    "unknown-tool"
+  ],
+  "schemaVersion": 1
+}

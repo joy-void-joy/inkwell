@@ -20,22 +20,24 @@ from pathlib import Path
 from typing import NamedTuple
 
 
-from claude_agent_sdk import McpServerConfig
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from lup.client import (
-    CostAccumulator,
+from inkwell.agent.client import (
     HeartbeatCallback,
     SessionPolicy,
     active_block_callback,
     is_interrupt,
     query,
+    result_text,
     session_policy,
 )
-from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
-from lup.paths import find_project_root
-from lup.sandbox import Sandbox
-from lup.trace import TraceLogger, extract_block_info
+from lup.mcp import LupMcpTool, McpServerEntry, create_mcp_server
+from lup.runtime.models import AnyTurnBlock
+from lup.runtime.usage import CostAccumulator
+from lup.workspace.paths import find_project_root
+from lup.sandbox.container import Sandbox
+from lup.telemetry.blocks import extract_block_info
+from lup.telemetry.trace import TraceLogger
 
 from inkwell.agent.config import current_settings, load_settings, stage_model
 from inkwell.agent.models import (
@@ -57,12 +59,11 @@ from inkwell.agent.models import (
     SectionPlan,
     WritingOutput,
 )
-from lup.background import BackgroundAgent
-
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.watcher import (
     ACKNOWLEDGE_TEMPLATES,
+    PollingWatcher,
     create_comment_watcher,
     create_source_watcher,
 )
@@ -844,9 +845,35 @@ def build_research_tools() -> list[LupMcpTool]:
     ]
 
 
+class ToolServers(BaseModel):
+    """MCP servers a stage is given, and the tool names they expose.
+
+    The two travel together everywhere: a session needs the servers to reach
+    the tools and the names to allow them, and a stage that merged one without
+    the other would be handed tools it may not call.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    servers: dict[str, McpServerEntry]
+    tool_names: list[str]
+
+    def merged(self, *others: "ToolServers") -> "ToolServers":
+        """This set of servers and tool names, plus every other, as one."""
+        groups = [self, *others]
+        return ToolServers(
+            servers={
+                name: server
+                for group in groups
+                for name, server in group.servers.items()
+            },
+            tool_names=[name for group in groups for name in group.tool_names],
+        )
+
+
 def build_source_server(
     registry_provider: Callable[[], Path] | None = None,
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+) -> ToolServers:
     """MCP server for source fetching/extraction — available to ALL pipeline stages.
 
     With ``registry_provider``, also exposes the source-document tools
@@ -856,13 +883,10 @@ def build_source_server(
     tools = [*FETCH_TOOLS, *EXTRACT_MCP_TOOLS]
     if registry_provider is not None:
         tools.extend(make_source_consult_tools(registry_provider))
-    server = create_mcp_server(
-        name="source",
-        version="1.0.0",
-        tools=extract_sdk_tools(tools),
+    return ToolServers(
+        servers={"source": create_mcp_server(name="source", tools=tools)},
+        tool_names=[f"mcp__source__{t.name}" for t in tools],
     )
-    tool_names = [f"mcp__source__{t.sdk_tool.name}" for t in tools]
-    return {"source": server}, tool_names
 
 
 def build_compute_server(
@@ -870,10 +894,9 @@ def build_compute_server(
     artifacts_dir: Path,
     *,
     include_latex: bool = False,
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+) -> ToolServers:
     """MCP server with code execution (sandbox) and artifact query tools.
 
-    Returns (servers_dict, tool_name_list) ready to merge into any stage.
     With ``include_latex``, also exposes ``compile_latex`` so a document-owning
     stage can verify and repair its assembled paper against the compiler.
     """
@@ -894,62 +917,46 @@ def build_compute_server(
         *CITATION_TOOLS,
         *(make_latex_tools(sandbox) if include_latex else []),
     ]
-    server = create_mcp_server(
-        name="compute",
-        version="1.0.0",
-        tools=extract_sdk_tools(tools),
+    return ToolServers(
+        servers={"compute": create_mcp_server(name="compute", tools=tools)},
+        tool_names=[f"mcp__compute__{t.name}" for t in tools],
     )
-    tool_names = [f"mcp__compute__{t.sdk_tool.name}" for t in tools]
-    return {"compute": server}, tool_names
 
 
-class StageCompute(NamedTuple):
+class StageCompute(BaseModel):
     """Per-stage compute handle: the compute MCP server, its tool names, the
     dedicated read-write path the stage writes its deliverable to, and the
     live sandbox (None when Docker is unavailable) for direct shell use."""
 
-    servers: dict[str, McpServerConfig]
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    servers: dict[str, McpServerEntry]
     tool_names: list[str]
     output_path: Path
     sandbox: Sandbox | None
 
 
-def build_research_servers() -> dict[str, McpServerConfig]:
+def build_research_servers() -> dict[str, McpServerEntry]:
     """MCP servers for research-capable stages."""
-    research_server = create_mcp_server(
-        name="research",
-        version="1.0.0",
-        tools=extract_sdk_tools(build_research_tools()),
-    )
-    return {"research": research_server}
+    return {
+        "research": create_mcp_server(name="research", tools=build_research_tools())
+    }
 
 
-def build_output_server(
-    server_name: str,
-    tools: list[LupMcpTool],
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+def build_output_server(server_name: str, tools: list[LupMcpTool]) -> ToolServers:
     """MCP server + allowed tool names for stage output tools."""
-    server = create_mcp_server(
-        name=server_name,
-        version="1.0.0",
-        tools=extract_sdk_tools(tools),
+    return ToolServers(
+        servers={server_name: create_mcp_server(name=server_name, tools=tools)},
+        tool_names=[f"mcp__{server_name}__{t.name}" for t in tools],
     )
-    tool_names = [f"mcp__{server_name}__{t.sdk_tool.name}" for t in tools]
-    return {server_name: server}, tool_names
 
 
-def build_note_server(
-    stage: str,
-    notes_collector: list[AuthorNote],
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+def build_note_server(stage: str, notes_collector: list[AuthorNote]) -> ToolServers:
     """Build an MCP server containing just the note_for_author tool."""
-    note_tool = make_note_tool(notes_collector, stage)
-    return build_output_server("notes", [note_tool])
+    return build_output_server("notes", [make_note_tool(notes_collector, stage)])
 
 
-def build_glossary_server(
-    glossary_path: Path,
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+def build_glossary_server(glossary_path: Path) -> ToolServers:
     """Build an MCP server with the shared glossary tools bound to a file."""
     return build_output_server("glossary", make_glossary_tools(glossary_path))
 
@@ -1037,9 +1044,9 @@ async def plan_article(
     source_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
     author_directions: str = "",
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1048,13 +1055,12 @@ async def plan_article(
     """Stage 1: Extract a structured article plan from source material."""
     plan_path = notes.artifact_path("plan")
     collector = PlanCollector(plan_path, on_save=on_plan_update)
-    output_servers, output_tool_names = build_output_server(
-        "output", make_plan_tools(collector)
-    )
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("plan", note_collector)
-    output_servers = {**output_servers, **note_servers}
-    output_tool_names = output_tool_names + note_tool_names
+    stage_tools = build_output_server("output", make_plan_tools(collector)).merged(
+        build_note_server("plan", note_collector)
+    )
+    output_servers = stage_tools.servers
+    output_tool_names = stage_tools.tool_names
 
     from inkwell.agent.stages import FORMAT_KEYS
 
@@ -1135,9 +1141,9 @@ async def refine_plan(
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1147,11 +1153,11 @@ async def refine_plan(
     plan_path = notes.artifact_path("plan")
     refined_path = notes.artifacts_dir / "plan_refined.json"
     collector = PlanCollector(refined_path, on_save=on_plan_update)
-    output_servers, output_tool_names = build_output_server(
-        "output", make_plan_tools(collector)
-    )
+    outputs = build_output_server("output", make_plan_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("refine", note_collector)
+    note_group = build_note_server("refine", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     output_servers = {**output_servers, **note_servers}
     output_tool_names = output_tool_names + note_tool_names
 
@@ -1211,11 +1217,11 @@ async def research_plan(
     notes: PipelineNotes,
     *,
     feedback_path: Path | None = None,
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1228,11 +1234,11 @@ async def research_plan(
     plan_path = notes.artifact_path("plan")
     research_path = notes.artifact_path("research")
     collector = ResearchCollector(research_path, on_save=on_research_update)
-    output_servers, output_tool_names = build_output_server(
-        "output", make_research_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_research_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("research", note_collector)
+    note_group = build_note_server("research", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **servers,
         **output_servers,
@@ -1283,10 +1289,10 @@ async def research_questions(
     notes: PipelineNotes,
     questions: list[str],
     *,
-    servers: dict[str, McpServerConfig] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1307,9 +1313,8 @@ async def research_questions(
         collector.suggested_additions = list(existing.get("suggested_additions", []))
         collector.additional_context = str(existing.get("additional_context", ""))
 
-    output_servers, output_tool_names = build_output_server(
-        "output", make_research_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_research_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     all_servers = {
         **servers,
         **output_servers,
@@ -1357,13 +1362,13 @@ async def write_section(
     feedback_path: Path | None = None,
     section_context: str = "",
     target_format: str = "auto",
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
-    glossary_servers: dict[str, McpServerConfig] | None = None,
+    glossary_servers: dict[str, McpServerEntry] | None = None,
     glossary_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1373,9 +1378,8 @@ async def write_section(
         servers = build_research_servers()
 
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server(
-        f"write:{section_title}", note_collector
-    )
+    note_group = build_note_server(f"write:{section_title}", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **servers,
         **note_servers,
@@ -1472,11 +1476,11 @@ async def write_full_draft(
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
     target_format: str = "auto",
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     heartbeat: HeartbeatCallback | None = None,
@@ -1491,7 +1495,8 @@ async def write_full_draft(
         servers = build_research_servers()
 
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("write", note_collector)
+    note_group = build_note_server("write", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **servers,
         **note_servers,
@@ -1559,11 +1564,11 @@ async def merge_sections(
     feedback_path: Path | None = None,
     target_format: str = "auto",
     author_notes: list[AuthorNote] | None = None,
-    glossary_servers: dict[str, McpServerConfig] | None = None,
+    glossary_servers: dict[str, McpServerEntry] | None = None,
     glossary_tool_names: list[str] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     heartbeat: HeartbeatCallback | None = None,
@@ -1576,7 +1581,8 @@ async def merge_sections(
     phase: the glossary already carries the cross-section term decisions.
     """
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("merge", note_collector)
+    note_group = build_note_server("merge", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     merge_servers = {
         **note_servers,
         **(glossary_servers or {}),
@@ -1655,9 +1661,9 @@ async def review_narrative(
     *,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1666,13 +1672,11 @@ async def review_narrative(
     plan_path = notes.artifact_path("plan")
     review_path = notes.artifacts_dir / "review_narrative.json"
     collector = ReviewCollector(review_path, "narrative")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server(
-        "review:narrative", note_collector
-    )
+    note_group = build_note_server("review:narrative", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **output_servers,
         **note_servers,
@@ -1726,11 +1730,11 @@ async def review_facts(
     notes: PipelineNotes,
     draft_path: Path,
     *,
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1741,11 +1745,11 @@ async def review_facts(
 
     review_path = notes.artifacts_dir / "review_factcheck.json"
     collector = ReviewCollector(review_path, "factcheck")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("review:facts", note_collector)
+    note_group = build_note_server("review:facts", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **servers,
         **output_servers,
@@ -1799,9 +1803,9 @@ async def review_style(
     *,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1809,11 +1813,11 @@ async def review_style(
     """Review for writing quality and voice consistency."""
     review_path = notes.artifacts_dir / "review_style.json"
     collector = ReviewCollector(review_path, "style")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("review:style", note_collector)
+    note_group = build_note_server("review:style", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **output_servers,
         **note_servers,
@@ -1864,9 +1868,9 @@ async def review_source_fidelity(
     draft_path: Path,
     *,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1874,11 +1878,11 @@ async def review_source_fidelity(
     """Verify the draft against the registered source documents."""
     review_path = notes.artifacts_dir / "review_source_fidelity.json"
     collector = ReviewCollector(review_path, "source_fidelity")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("review:source", note_collector)
+    note_group = build_note_server("review:source", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **output_servers,
         **note_servers,
@@ -1929,9 +1933,9 @@ async def review_coverage(
     *,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1939,11 +1943,11 @@ async def review_coverage(
     """Flag the author's concrete specifics that the draft dropped or replaced."""
     review_path = notes.artifacts_dir / "review_coverage.json"
     collector = ReviewCollector(review_path, "coverage")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("review:coverage", note_collector)
+    note_group = build_note_server("review:coverage", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **output_servers,
         **note_servers,
@@ -1998,12 +2002,12 @@ async def review_all(
     notes: PipelineNotes,
     draft_path: Path,
     *,
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -2149,16 +2153,17 @@ async def rewrite_final(
     target_format: str = "auto",
     dropped_suggestions: int = 0,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("rewrite", note_collector)
+    note_group = build_note_server("rewrite", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     rewrite_servers = {
         **note_servers,
         **(source_servers or {}),
@@ -2258,7 +2263,7 @@ async def rewrite_final(
 
     plan = notes.load_artifact("plan", ArticlePlan)
     title = plan.title if plan else "Untitled"
-    summary = collector.text.strip() if collector.text else ""
+    summary = result_text(collector).strip()
 
     return WritingOutput(
         title=title,
@@ -2346,9 +2351,9 @@ async def surface_assumptions(
     *,
     has_research: bool = False,
     session_state: WritingSessionState,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -2357,9 +2362,8 @@ async def surface_assumptions(
     plan_path = notes.artifact_path("plan")
     assumptions_path = notes.artifact_path("assumptions")
     collector = AssumptionsCollector(assumptions_path)
-    output_servers, output_tool_names = build_output_server(
-        "output", make_assumptions_tools(collector)
-    )
+    outputs = build_output_server("output", make_assumptions_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
 
     file_refs = f"Article plan: {plan_path}\n"
 
@@ -2528,9 +2532,11 @@ class PipelineRunner:
 
         self.author_notes: list[AuthorNote] = []
         self.research_servers = build_research_servers()
-        self.source_servers, self.source_tool_names = build_source_server(
+        source_tools = build_source_server(
             lambda: registry_path_for(self.ensure_notes().artifacts_dir)
         )
+        self.source_servers = source_tools.servers
+        self.source_tool_names = source_tools.tool_names
 
         self.doc_id = ""
         self.doc_url = ""
@@ -2542,8 +2548,8 @@ class PipelineRunner:
         self.draft_tab_id = ""
         self.final_tab_id = ""
 
-        self.watcher: BackgroundAgent | None = None
-        self.source_watcher: BackgroundAgent | None = None
+        self.watcher: PollingWatcher | None = None
+        self.source_watcher: PollingWatcher | None = None
         self.source_is_extracted_gdoc = False
 
     @property
@@ -2557,9 +2563,9 @@ class PipelineRunner:
         """Return notes, creating a temp dir if needed."""
         if self.notes is None:
             self.notes = PipelineNotes(Path(tempfile.mkdtemp(prefix="inkwell-notes-")))
-        from lup.content_safety import configure_content_safety
+        from lup.workspace.content_safety import configure
 
-        configure_content_safety(self.notes.base_dir / "content")
+        configure(directory=self.notes.base_dir / "content")
         if self.state.agent_ids_path is None:
             self.state.attach_agent_ids_registry(self.notes.base_dir / "agent_ids.txt")
         return self.notes
@@ -2581,7 +2587,7 @@ class PipelineRunner:
             return INKWELL_SANDBOX_IMAGE
         return Sandbox.DEFAULT_DOCKER_IMAGE
 
-    def fallback_compute(self) -> tuple[dict[str, McpServerConfig], list[str]]:
+    def fallback_compute(self) -> ToolServers:
         """Compute server without code execution, for when Docker is absent."""
         from inkwell.agent.tools.citations import CITATION_TOOLS
 
@@ -2615,19 +2621,34 @@ class PipelineRunner:
             read_only_mounts={notes.base_dir: "/notes", **self.source_mounts()},
             rw_mounts={out_dir: str(out_dir)},
         )
-        if not sandbox.try_start():
-            servers, names = self.fallback_compute()
-            yield StageCompute(servers, names, output_path, None)
+        try:
+            sandbox.start()
+        except Exception:
+            # Docker absent or refusing the container: the stage still runs,
+            # with a compute server that cannot execute code.
+            logger.exception("Sandbox unavailable for stage %s", label)
+            fallback = self.fallback_compute()
+            yield StageCompute(
+                servers=fallback.servers,
+                tool_names=fallback.tool_names,
+                output_path=output_path,
+                sandbox=None,
+            )
             return
         if self.state is not None:
             self.state.shared_dir = shared_dir
         try:
-            servers, names = build_compute_server(
+            compute = build_compute_server(
                 sandbox,
                 notes.artifacts_dir,
                 include_latex=self.effective_format == "academic",
             )
-            yield StageCompute(servers, names, output_path, sandbox)
+            yield StageCompute(
+                servers=compute.servers,
+                tool_names=compute.tool_names,
+                output_path=output_path,
+                sandbox=sandbox,
+            )
         finally:
             sandbox.stop()
 
@@ -2763,7 +2784,7 @@ class PipelineRunner:
         self.snapshot.agent_comment_ids = set(self.state.agent_comment_ids)
         self.snapshot.seen_source_comment_ids = set(self.state.seen_source_comment_ids)
         self.snapshot.pending_questions = list(self.state.pending_questions)
-        self.snapshot.cost_state = self.cost_accumulator.state_dict()
+        self.snapshot.cost_state = self.cost_accumulator
 
         notes = self.ensure_notes()
         data = self.snapshot.model_dump_json()
@@ -2786,10 +2807,9 @@ class PipelineRunner:
 
     def install_block_callback(self) -> None:
         """Set the contextvar so all query() calls forward blocks to the listener."""
-        from claude_agent_sdk import ContentBlock
 
-        async def forward_block(block: ContentBlock, prefix: str) -> None:
-            info = extract_block_info(block)
+        async def forward_block(block: AnyTurnBlock, prefix: str) -> None:
+            info = extract_block_info(block.telemetry_block)
             await self.hooks.on_block(info.label, info.content, prefix)
 
         active_block_callback.set(forward_block)
@@ -2921,7 +2941,7 @@ class PipelineRunner:
             for stage_name in ("assumptions", "refine"):
                 await self.run_stage(stage_name)
 
-            self.start_watcher()
+            await self.start_watcher()
 
             try:
                 for stage_name in (
@@ -2981,7 +3001,7 @@ class PipelineRunner:
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
-            self.cost_accumulator.load_state(snapshot.cost_state)
+            self.cost_accumulator.merge(snapshot.cost_state)
         if restart:
             self.rehydrate_artifacts()
             self.pending_resume = {}
@@ -3001,7 +3021,7 @@ class PipelineRunner:
                 remaining = stages[stages.index("write") :]
 
             if snapshot.plan:
-                self.start_watcher()
+                await self.start_watcher()
 
             try:
                 for stage_name in remaining:
@@ -3039,7 +3059,7 @@ class PipelineRunner:
             return output
         raise PipelineInterrupted(current_stage)
 
-    def start_watcher(self) -> None:
+    async def start_watcher(self) -> None:
         if self.notes is None:
             return
         self.watcher = create_comment_watcher(
@@ -3047,7 +3067,7 @@ class PipelineRunner:
             notes=self.notes,
             plan_breaking_signal=self.plan_breaking,
         )
-        self.watcher.start()
+        await self.watcher.start()
         logger.info("Comment watcher started")
 
         if self.state.source_doc_id and not self.source_is_extracted_gdoc:
@@ -3056,7 +3076,7 @@ class PipelineRunner:
                 notes=self.notes,
                 plan_breaking_signal=self.plan_breaking,
             )
-            self.source_watcher.start()
+            await self.source_watcher.start()
             logger.info("Source document watcher started")
 
     async def stop_watcher(self) -> None:
@@ -3956,7 +3976,8 @@ class PipelineRunner:
         notes = self.ensure_notes()
         glossary_path = notes.artifacts_dir / "glossary.json"
         seed_glossary(glossary_path, plan.conventions)
-        glossary_servers, glossary_tool_names = build_glossary_server(glossary_path)
+        glossary = build_glossary_server(glossary_path)
+        glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         completed = already
 
@@ -4127,9 +4148,8 @@ class PipelineRunner:
         await self.update_overview(active_stage="merge")
         feedback_path = await self.prepare_feedback("merge")
         notes = self.ensure_notes()
-        glossary_servers, glossary_tool_names = build_glossary_server(
-            notes.artifacts_dir / "glossary.json"
-        )
+        glossary = build_glossary_server(notes.artifacts_dir / "glossary.json")
+        glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         async def merge_heartbeat(elapsed: float) -> None:
             mins, secs = divmod(int(elapsed), 60)
@@ -4639,9 +4659,8 @@ class PipelineRunner:
                 )
 
         feedback_path = await self.prepare_feedback("restart")
-        glossary_servers, glossary_tool_names = build_glossary_server(
-            notes.artifacts_dir / "glossary.json"
-        )
+        glossary = build_glossary_server(notes.artifacts_dir / "glossary.json")
+        glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         async def rewrite_coro(section_plan: SectionPlan) -> SectionDraft:
             draft_path = self.get_draft_path(section_plan.title)

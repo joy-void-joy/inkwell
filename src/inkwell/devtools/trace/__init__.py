@@ -5,8 +5,8 @@ from typing import Annotated
 import typer
 
 import inkwell.devtools.trace.traces as traces
-from lup.history import resolve_version
-from lup.paths import AGENT_VERSION
+from lup.workspace.history import resolve_version
+from lup.workspace.paths import agent_version
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -44,27 +44,27 @@ def search_cmd(
 @app.command("list")
 def list_cmd(
     limit: int = typer.Option(20, "-n", "--limit", help="Max to show"),
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
 ) -> None:
     """List available traces."""
-    effective, warning = resolve_version(version, all_versions)
-    if warning:
-        typer.echo(warning)
-    traces.list_traces(limit, effective)
+    scope = resolve_version(version, all_versions)
+    if scope.warning:
+        typer.echo(scope.warning)
+    traces.list_traces(limit, scope.versions)
 
 
 @app.command("errors")
 def errors_cmd(
     limit: int = typer.Option(20, "-n", "--limit", help="Max errors to show"),
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
 ) -> None:
     """Show sessions with errors found in trace files."""
-    effective, warning = resolve_version(version, all_versions)
-    if warning:
-        typer.echo(warning)
-    traces.errors_in_traces(limit, effective)
+    scope = resolve_version(version, all_versions)
+    if scope.warning:
+        typer.echo(scope.warning)
+    traces.errors_in_traces(limit, scope.versions)
 
 
 @app.command("capabilities")

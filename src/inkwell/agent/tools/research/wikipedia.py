@@ -9,7 +9,7 @@ import logging
 import httpx
 from pydantic import BaseModel, Field
 
-from lup.content_safety import SavedContent, save_content
+from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)

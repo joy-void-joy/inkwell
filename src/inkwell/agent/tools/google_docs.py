@@ -34,7 +34,7 @@ from inkwell.agent.markdown_to_docs import (
     markdown_to_requests,
     split_markdown_batch,
 )
-from lup.content_safety import SavedContent, save_content
+from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 if TYPE_CHECKING:
@@ -725,7 +725,7 @@ async def write_with_continuation(
 
     Returns the list of tab IDs written to.
     """
-    from lup.content_safety import split_on_headings
+    from lup.workspace.content_safety import split_on_headings
 
     if plain or len(content) <= TAB_CONTINUATION_CHARS:
         tab_id = await find_tab_by_title(doc_id, tab_name)
@@ -739,7 +739,8 @@ async def write_with_continuation(
     merged: list[str] = []
     current: list[str] = []
     current_len = 0
-    for _heading, chunk_text in chunks:
+    for section in chunks:
+        chunk_text = section.text
         if current_len + len(chunk_text) > TAB_CONTINUATION_CHARS and current:
             merged.append("\n\n".join(current))
             current = []

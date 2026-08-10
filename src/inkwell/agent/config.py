@@ -343,7 +343,7 @@ def use_settings(session_settings: Settings) -> Iterator[None]:
     profile's account. Both the web and CLI entry points wrap session
     execution in this, so profile selection is honored end to end.
     """
-    from lup.client import client_env
+    from inkwell.agent.client import client_env
 
     settings_token = active_settings.set(session_settings)
     env_token = client_env.set(subprocess_auth_env(session_settings))

@@ -14,11 +14,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from claude_agent_sdk import McpServerConfig
+from lup.mcp import McpServerEntry
+from lup.runtime.usage import CostAccumulator
 
 from inkwell.agent.config import current_settings, stage_model
-from lup.client import CostAccumulator, query
-from lup.trace import TraceLogger
+from inkwell.agent.client import query
+from lup.telemetry.trace import TraceLogger
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -404,7 +405,7 @@ async def analyze_single_source(
     source_type: str = "prose",
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
-    mcp_servers: dict[str, McpServerConfig] | None = None,
+    mcp_servers: dict[str, McpServerEntry] | None = None,
     mcp_tool_names: list[str] | None = None,
 ) -> tuple[str, str, bool]:
     """Analyze a single source and return (label, voice_profile, is_prescriptive).
@@ -489,7 +490,7 @@ async def merge_voice_analyses(
     format_examples: list[tuple[str, str]] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
-    mcp_servers: dict[str, McpServerConfig] | None = None,
+    mcp_servers: dict[str, McpServerEntry] | None = None,
     mcp_tool_names: list[str] | None = None,
 ) -> str:
     """Merge individual voice analyses into a unified guide."""
@@ -587,7 +588,7 @@ async def do_analyze_voice(
     target_format: str | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
-    mcp_servers: dict[str, McpServerConfig] | None = None,
+    mcp_servers: dict[str, McpServerEntry] | None = None,
     mcp_tool_names: list[str] | None = None,
 ) -> str | None:
     """Analyze writing samples and return a freeform voice guide in markdown.
@@ -674,7 +675,7 @@ async def analyze_voice_individually(
     target_format: str | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
-    mcp_servers: dict[str, McpServerConfig] | None = None,
+    mcp_servers: dict[str, McpServerEntry] | None = None,
     mcp_tool_names: list[str] | None = None,
 ) -> list[tuple[str, str, bool]]:
     """Analyze voice sources individually.

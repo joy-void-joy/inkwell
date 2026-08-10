@@ -15,6 +15,7 @@ Usage:
 import asyncio
 import logging
 import uuid
+from datetime import timedelta
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
@@ -25,9 +26,9 @@ from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 from rich.panel import Panel
 
-from lup.metrics import log_metrics_summary, reset_metrics
-from lup.paths import project_root
-from lup.trace import active_agents
+from lup.telemetry.metrics import log_metrics_summary, reset_metrics
+from lup.workspace.paths import project_root
+from inkwell.agent.client import active_agents
 
 from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.models import WritingOutput
@@ -60,6 +61,17 @@ STAGE_LABELS: dict[str, str] = {
 SPINNER_FRAMES = "◇◈◆◈"
 
 
+def running_for(elapsed: timedelta) -> str:
+    """How long a turn has been working, at toolbar precision.
+
+    Seconds under a minute, then whole minutes: the toolbar redraws several
+    times a second, and a figure whose last digit never settles reads as
+    noise rather than as progress.
+    """
+    seconds = int(elapsed.total_seconds())
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m"
+
+
 def build_toolbar(listener: InteractiveListener | None = None):
     """Return a callable for prompt-toolkit's bottom_toolbar.
 
@@ -86,7 +98,10 @@ def build_toolbar(listener: InteractiveListener | None = None):
         if label:
             parts.append(("class:toolbar.stage", f"{label} "))
         if active_agents:
-            agents_str = "  ".join(sorted(active_agents))
+            agents_str = "  ".join(
+                f"{agent.label} {running_for(agent.elapsed())}"
+                for agent in sorted(active_agents, key=lambda a: a.started)
+            )
             parts.append(("class:toolbar.agents", f" {agents_str} "))
         return parts or None
 

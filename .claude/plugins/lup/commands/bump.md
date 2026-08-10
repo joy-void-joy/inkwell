@@ -1,12 +1,12 @@
 ---
-allowed-tools: Bash(uv run lup-devtools:*), Read, Grep, Glob, AskUserQuestion, Skill(lup:commit)
-description: Review changes since last bump and bump agent version
-argument-hint: [patch|minor|major]
+description: "Review changes since last bump and bump agent version"
+allowed-tools: Bash(uv run lup-devtools:*), Read, AskUserQuestion, Skill(lup:commit)
+argument-hint: "[patch|minor|major]"
 ---
 
 # Version Bump
 
-Review changes since the last version bump and bump `AGENT_VERSION` accordingly.
+Review changes since the last version bump and bump the agent version (`[tool.lup] agent_version` in `pyproject.toml`) accordingly.
 
 ## Input
 
@@ -38,7 +38,7 @@ Read through the commits and categorize:
 
 - **Behavior changes** (require a bump): prompt changes, new/modified tools, scoring logic, subagent changes
 - **Data changes** (no bump needed): session outputs, notes, resolution updates
-- **Infrastructure changes** (no bump needed): dependencies, CI, scripts, CLAUDE.md
+- **Infrastructure changes** (no bump needed): dependencies, CI, scripts, `.claude/CLAUDE.md`
 
 If there are NO behavior changes since the last bump, inform the user and stop.
 
@@ -50,7 +50,7 @@ If there are NO behavior changes since the last bump, inform the user and stop.
 | **minor** | Prompt changes, new tools, tool modifications | Added web search tool, rewrote system prompt |
 | **major** | Architecture changes                          | New LLM, new framework, fundamental redesign |
 
-If the user provided a level in `$ARGUMENTS`, use it. Otherwise, recommend and confirm via AskUserQuestion.
+If the user provided a level in `$ARGUMENTS`, use it. Otherwise recommend a level, then Ask the user with the AskUserQuestion tool, offering concrete options plus a free-text choice: which bump level to apply
 
 ### 5. Apply the bump
 
@@ -66,4 +66,4 @@ Show the user what was bumped and the behavioral changes that warranted it.
 
 - **Only bump for behavior changes** -- Data, docs, and infra commits don't warrant a bump
 - **Summarize what changed for the agent**, not the codebase
-- **When in doubt, ask** -- Use AskUserQuestion if the level is ambiguous
+- **When in doubt, ask** -- put an ambiguous level to the user rather than guessing

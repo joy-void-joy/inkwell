@@ -21,8 +21,9 @@ import typer
 
 from inkwell.devtools.agent import app as agent_app
 from inkwell.devtools.api import app as api_app
-from inkwell.devtools.dev import app as dev_app
+from inkwell.devtools.dev.app import app as dev_app
 from inkwell.devtools.feedback import app as feedback_app
+from inkwell.devtools.harness.app import app as harness_app
 from inkwell.devtools.setup import app as setup_app
 from inkwell.devtools.sync import app as sync_app
 from inkwell.devtools.trace import app as trace_app
@@ -40,6 +41,9 @@ app.add_typer(api_app, name="api", help="API inspection")
 app.add_typer(dev_app, name="dev", help="Worktrees, branches, and pre-flight checks")
 app.add_typer(
     feedback_app, name="feedback", help="Feedback state, metrics, and commits"
+)
+app.add_typer(
+    harness_app, name="harness", help="Generate and launch the native harness"
 )
 app.add_typer(sync_app, name="sync", help="Upstream sync tracking")
 app.add_typer(trace_app, name="trace", help="Trace display, search, and analysis")

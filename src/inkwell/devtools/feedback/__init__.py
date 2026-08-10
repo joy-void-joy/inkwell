@@ -7,7 +7,7 @@ import typer
 
 import inkwell.devtools.feedback.analyze as analyze
 import inkwell.devtools.feedback.state as state
-from lup.paths import AGENT_VERSION
+from lup.workspace.paths import agent_version
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -23,7 +23,7 @@ ALL_VERSIONS_OPT = Annotated[
 
 @app.command("status")
 def status_cmd(
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
 ) -> None:
     """Show feedback status: version, data, analysis state, and aggregate stats."""
@@ -42,7 +42,7 @@ def collect_cmd(
         bool,
         typer.Option("--all-time", help="Include all sessions regardless of date"),
     ] = False,
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
     output: Annotated[
         Path | None,
@@ -55,7 +55,7 @@ def collect_cmd(
 
 @app.command("tools")
 def tools_cmd(
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
 ) -> None:
     """Show tool usage aggregates."""
@@ -65,7 +65,7 @@ def tools_cmd(
 @app.command("errors")
 def errors_cmd(
     limit: int = typer.Option(20, "-n", "--limit", help="Max errors to show"),
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
 ) -> None:
     """Show sessions with high error rates from structured metrics."""
@@ -78,7 +78,7 @@ def trends_cmd(
         int,
         typer.Option("-w", "--window", help="Rolling window size"),
     ] = 10,
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
 ) -> None:
     """Show metric trends over time."""
@@ -122,7 +122,7 @@ def prompt_health_cmd() -> None:
 
 @app.command("unanalyzed")
 def unanalyzed_cmd(
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
 ) -> None:
     """List unanalyzed session IDs, one per line."""
@@ -131,7 +131,7 @@ def unanalyzed_cmd(
 
 @app.command("analyze")
 def analyze_cmd(
-    version: VERSION_OPT = AGENT_VERSION,
+    version: VERSION_OPT = agent_version(),
     all_versions: ALL_VERSIONS_OPT = False,
     output: Annotated[
         Path | None,

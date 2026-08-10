@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from lup.content_safety import SavedContent
+from lup.workspace.content_safety import SavedContent
 from inkwell.agent.tools.research.fetch import (
     EXTRACT_THRESHOLD_WORDS,
     FetchAndExtractOutput,
@@ -106,7 +106,7 @@ async def test_long_content_triggers_extraction(
             return_value=long_content,
         ),
         patch(
-            "lup.client.query",
+            "inkwell.agent.client.query",
             new_callable=AsyncMock,
             return_value=extracted,
         ) as mock_query,
@@ -131,7 +131,7 @@ async def test_fallback_on_query_failure(long_content: FetchSourceOutput) -> Non
             return_value=long_content,
         ),
         patch(
-            "lup.client.query",
+            "inkwell.agent.client.query",
             new_callable=AsyncMock,
             return_value=None,
         ),

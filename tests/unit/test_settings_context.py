@@ -11,7 +11,7 @@ from inkwell.agent.config import (
     subprocess_auth_env,
     use_settings,
 )
-from lup.client import client_env
+from inkwell.agent.client import client_env
 
 
 def make_settings(**overrides: str) -> Settings:

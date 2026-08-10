@@ -3,9 +3,12 @@
 import asyncio
 import json
 import shutil
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
+
+from lup.types import EnvVars
 
 from inkwell.agent.browser_auth import context_has_cookies, login_interactive
 from inkwell.agent.client import PROVIDER_LOGIN, RUNTIME
@@ -42,9 +45,7 @@ class ProfileResponse(BaseModel):
 
 
 class UpdateProfileRequest(BaseModel):
-    values: dict[str, str] = Field(
-        description="Environment variable key-value pairs to set"
-    )
+    values: EnvVars = Field(description="Environment variable key-value pairs to set")
 
 
 class RenameProfileRequest(BaseModel):
@@ -71,20 +72,43 @@ class DetectResult(BaseModel):
     )
 
 
-SETTABLE_KEYS = frozenset(
-    {
-        "EXA_API_KEY",
-        "FRED_API_KEY",
-        "CLAUDE_COOKIE",
-        "CLAUDE_ORG_UUID",
-        PROVIDER_LOGIN.config_home_env,
-        "INKWELL_AUTHOR_EMAIL",
-        "INKWELL_GOOGLE_WORKSPACE_DOMAIN",
-        "AGENT_MODEL",
-        "AGENT_MAX_BUDGET_USD",
-        "OPENROUTER_API_KEY",
-    }
+class LoginCandidate(BaseModel):
+    """A directory that might hold a Claude login, and how it is described."""
+
+    directory: Path = Field(description="Where the credentials would live")
+    label: str = Field(description="Human-readable name for this location")
+    is_profile_match: bool = Field(
+        default=False, description="Whether this is the profile's own directory"
+    )
+
+    @property
+    def holds_login(self) -> bool:
+        """Whether this directory carries a login rather than just existing."""
+        return self.directory.is_dir() and PROVIDER_LOGIN.logged_in(self.directory)
+
+    @property
+    def detected(self) -> DetectedLogin:
+        """This candidate in the shape the detect endpoint reports."""
+        return DetectedLogin(
+            path=str(self.directory),
+            label=self.label,
+            is_profile_match=self.is_profile_match,
+        )
+
+
+SETTABLE_KEYS: tuple[str, ...] = (
+    "EXA_API_KEY",
+    "FRED_API_KEY",
+    "CLAUDE_COOKIE",
+    "CLAUDE_ORG_UUID",
+    PROVIDER_LOGIN.config_home_env,
+    "INKWELL_AUTHOR_EMAIL",
+    "INKWELL_GOOGLE_WORKSPACE_DOMAIN",
+    "AGENT_MODEL",
+    "AGENT_MAX_BUDGET_USD",
+    "OPENROUTER_API_KEY",
 )
+"""The env keys the profile API may write; anything else is rejected."""
 
 
 @router.get("/capabilities")
@@ -102,8 +126,6 @@ async def get_capabilities(request: Request) -> ServerCapabilities:
 
 async def build_profile_response(name: str) -> ProfileResponse:
     """Build integration status for a named profile."""
-    from pathlib import Path
-
     env = read_env_local(name)
     google = google_paths_for_profile(name)
 
@@ -134,7 +156,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
         )
     )
 
-    exa_key = env.get("EXA_API_KEY", "")
+    exa_key = env_value(env, "EXA_API_KEY")
     integrations.append(
         IntegrationStatus(
             name="Exa",
@@ -144,7 +166,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
     )
 
     has_browser = await context_has_cookies(name)
-    claude_cookie = env.get("CLAUDE_COOKIE", "")
+    claude_cookie = env_value(env, "CLAUDE_COOKIE")
     claude_ok = has_browser or bool(claude_cookie)
     if has_browser:
         claude_detail = "browser session stored"
@@ -160,7 +182,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
         )
     )
 
-    fred_key = env.get("FRED_API_KEY", "")
+    fred_key = env_value(env, "FRED_API_KEY")
     integrations.append(
         IntegrationStatus(
             name="FRED",
@@ -187,7 +209,7 @@ async def get_profile(name: str) -> ProfileResponse:
 
 @router.put("/{name}")
 async def update_profile(name: str, req: UpdateProfileRequest) -> ProfileResponse:
-    disallowed = set(req.values.keys()) - SETTABLE_KEYS
+    disallowed = {key for key in req.values if key not in SETTABLE_KEYS}
     if disallowed:
         raise HTTPException(
             status_code=400,
@@ -260,8 +282,6 @@ async def trigger_login(name: str) -> ProfileResponse:
 @router.post("/{name}/claude-login/detect")
 async def detect_claude_login(name: str) -> DetectResult:
     """Scan known locations for Claude credentials. Does not auto-save."""
-    from pathlib import Path
-
     env_path = env_file_for_profile(name)
     if not env_path.exists():
         raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
@@ -269,19 +289,20 @@ async def detect_claude_login(name: str) -> DetectResult:
     profile_dir = claude_config_dir_for_profile(name)
     default_dir = claude_config_dir_for_profile(None)
 
-    candidates: list[tuple[Path, str, bool]] = [
-        (profile_dir, f'Profile "{name}"', True),
-        (default_dir, "Default (shared across profiles)", False),
-        (Path.home() / ".claude", "Claude Code login (your dev account)", False),
+    candidates = [
+        LoginCandidate(
+            directory=profile_dir, label=f'Profile "{name}"', is_profile_match=True
+        ),
+        LoginCandidate(directory=default_dir, label="Default (shared across profiles)"),
+        LoginCandidate(
+            directory=Path.home() / ".claude",
+            label="Claude Code login (your dev account)",
+        ),
     ]
 
-    found = [
-        DetectedLogin(path=str(d), label=label, is_profile_match=match)
-        for d, label, match in candidates
-        if d.is_dir() and PROVIDER_LOGIN.logged_in(d)
-    ]
-
-    return DetectResult(found=found)
+    return DetectResult(
+        found=[candidate.detected for candidate in candidates if candidate.holds_login]
+    )
 
 
 def build_google_status(profile: str) -> GoogleStatusResponse:

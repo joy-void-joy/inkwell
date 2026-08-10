@@ -14,11 +14,18 @@ import shutil
 import tempfile
 import unicodedata
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+)
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 
+from markdown_it import MarkdownIt
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.client import (
@@ -31,6 +38,7 @@ from inkwell.agent.client import (
     session_policy,
 )
 from lup.mcp import LupMcpTool, McpServerEntry, create_mcp_server
+from lup.types import StringMap
 from lup.runtime.models import AnyTurnBlock
 from lup.runtime.usage import CostAccumulator
 from lup.workspace.paths import find_project_root
@@ -42,6 +50,7 @@ from inkwell.agent.config import current_settings, load_settings, stage_model
 from inkwell.agent.models import (
     ArticlePlan,
     AssumptionsList,
+    AuthorNote,
     ClassifiedComment,
     MergedDraft,
     PipelineSnapshot,
@@ -142,8 +151,8 @@ from inkwell.agent.tools.research.markets import MARKET_TOOLS
 from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 from inkwell.agent.tools.stage_outputs import (
     AssumptionsCollector,
-    AuthorNote,
     PlanCollector,
+    PlanFile,
     ResearchCollector,
     ReviewCollector,
     make_assumptions_tools,
@@ -218,15 +227,16 @@ def summarize_inputs(inputs: list[str]) -> str:
     dropped attachment — only the author's directions arrived — is obvious in
     the log rather than hidden behind a bare "1 source(s)" count.
     """
-    parts: list[str] = []
-    for value in inputs:
+
+    def describe(value: str) -> str:
         stripped = value.strip()
         if Path(stripped).is_file():
-            parts.append(f"[file] {Path(stripped).name}")
-        elif stripped.startswith(("http://", "https://")):
-            parts.append(f"[url] {stripped[:60]}")
-        else:
-            parts.append(f"[text {len(stripped)}ch] {stripped[:50]!r}")
+            return f"[file] {Path(stripped).name}"
+        if stripped.startswith(("http://", "https://")):
+            return f"[url] {stripped[:60]}"
+        return f"[text {len(stripped)}ch] {stripped[:50]!r}"
+
+    parts = [describe(value) for value in inputs]
     return "; ".join(parts) if parts else "(none)"
 
 
@@ -249,8 +259,8 @@ def is_resumable_label(label: str) -> bool:
 def relocate_transcripts(
     src_config: str | None,
     dst_config: str | None,
-    session_ids: dict[str, str],
-) -> dict[str, str]:
+    session_ids: StringMap,
+) -> StringMap:
     """Mirror recorded session transcripts into the resuming profile's dir.
 
     A transcript is filed under the creating profile's ``CLAUDE_CONFIG_DIR``;
@@ -266,17 +276,20 @@ def relocate_transcripts(
         return dict(session_ids)
     src, dst = Path(src_config), Path(dst_config)
     label_for = {sid: label for label, sid in session_ids.items()}
-    placed: dict[str, str] = {}
-    for transcript in (src / "projects").glob("**/*.jsonl"):
-        label = label_for.get(transcript.stem)
-        if label is None:
-            continue
-        target = dst / transcript.relative_to(src)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            shutil.copy2(transcript, target)
-        placed[label] = transcript.stem
-    return placed
+
+    def placed() -> Iterator[str]:
+        """The labels whose transcript was found under `src` and copied across."""
+        for transcript in (src / "projects").glob("**/*.jsonl"):
+            if transcript.stem not in label_for:
+                continue
+            label = label_for[transcript.stem]
+            target = dst / transcript.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.copy2(transcript, target)
+            yield label
+
+    return {label: session_ids[label] for label in placed()}
 
 
 class PipelineError(Exception):
@@ -326,24 +339,25 @@ class TabEdit(BaseModel):
     )
 
 
-GDOC_CHAR_MAP = [
-    ("‘", "'"),
-    ("’", "'"),
-    ("“", '"'),
-    ("”", '"'),
-    ("—", "--"),
-    ("–", "-"),
-    (" ", " "),
-]
+GDOC_CHAR_MAP = str.maketrans(
+    {
+        "‘": "'",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "—": "--",
+        "–": "-",
+        " ": " ",
+    }
+)
+"""Smart punctuation a GDoc substitutes as the author types, mapped back to the
+ASCII the pipeline compares against."""
 
 
 def normalize_gdoc_text(text: str) -> str:
     """Normalize text for comparison, stripping GDoc formatting artifacts."""
-    text = unicodedata.normalize("NFC", text)
-    text = " ".join(text.split())
-    for old, new in GDOC_CHAR_MAP:
-        text = text.replace(old, new)
-    return text
+    collapsed = " ".join(unicodedata.normalize("NFC", text).split())
+    return collapsed.translate(GDOC_CHAR_MAP)
 
 
 def extract_edit_summary(original: str, current: str, context_lines: int = 2) -> str:
@@ -398,17 +412,24 @@ def extract_deleted_text(original: str, current: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+SLUG_CHAR_MAP = str.maketrans({**dict.fromkeys("/:.,;!?\"'()[]{}"), "-": " "})
+"""Punctuation a slug drops outright, plus the hyphen, which becomes a separator
+so that runs of them collapse with the surrounding whitespace."""
+
+SLUG_MAX_CHARS = 80
+
+
 def slugify(label: str) -> str:
     """Turn a section title or label into a filesystem-safe slug."""
-    slug = label.lower().replace(" ", "-")
-    for ch in "/:.,;!?\"'()[]{}":
-        slug = slug.replace(ch, "")
-    while "--" in slug:
-        slug = slug.replace("--", "-")
-    return slug.strip("-")[:80]
+    return "-".join(label.lower().translate(SLUG_CHAR_MAP).split())[:SLUG_MAX_CHARS]
 
 
 AUTHOR_MARKERS = ("TODO", "FIXME", "BOTEC", "XXX")
+
+MARKDOWN = MarkdownIt()
+"""Reads a prose line's text content, so the block markers an author typed
+around a marker — heading, bullet, quote, ordered item — are the parser's
+business rather than a prefix this module strips by hand."""
 
 
 def extract_author_markers(text: str) -> list[str]:
@@ -419,13 +440,17 @@ def extract_author_markers(text: str) -> list[str]:
     tasks; otherwise the pipeline treats the surrounding prose as finished and
     the flagged work silently disappears.
     """
-    found: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip().lstrip("#-*>").strip()
-        upper = line.upper()
-        if any(marker in upper for marker in AUTHOR_MARKERS) and line not in found:
-            found.append(line)
-    return found
+
+    def marked() -> Iterator[str]:
+        for raw in text.splitlines():
+            for token in MARKDOWN.parse(raw):
+                if token.type != "inline":
+                    continue
+                upper = token.content.upper()
+                if any(marker in upper for marker in AUTHOR_MARKERS):
+                    yield token.content
+
+    return list(dict.fromkeys(marked()))
 
 
 def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
@@ -708,55 +733,55 @@ def render_plan_progress(plan_path: Path) -> str:
     """Render the current plan JSON as markdown for the GDoc Plan tab."""
     if not plan_path.exists():
         return "# Planning...\n"
-    data = json.loads(plan_path.read_text(encoding="utf-8"))
-    parts: list[str] = []
-    parts.append(f"# {data.get('title', 'Planning...')}\n")
-    if thesis := data.get("thesis"):
-        parts.append(f"**Thesis:** {thesis}\n")
-    if direction := data.get("author_direction"):
-        parts.append(f"**Author direction:** {direction}\n")
-    sections = data.get("sections", [])
-    if sections:
-        parts.append("\n## Sections\n")
-        for s in sections:
-            parts.append(f"### {s.get('title', '???')}")
-            parts.append(f"{s.get('summary', '')}\n")
-            kp = s.get("key_points", [])
-            if kp:
-                parts.append("Key points: " + ", ".join(kp))
-    questions = data.get("research_questions", [])
-    if questions:
-        parts.append("\n## Research Questions\n")
-        for q in questions:
-            parts.append(
-                f"- [{q.get('priority', '?')}] {q.get('question', '')} "
-                f"(for: {q.get('section', '')})"
-            )
-    quotes = data.get("source_quotes", [])
-    if quotes:
-        parts.append("\n## Source Quotes\n")
-        for q in quotes:
-            parts.append(f'- "{q.get("text", "")}" — {q.get("speaker", "")}')
-    return "\n".join(parts)
+    plan = PlanFile.model_validate_json(plan_path.read_text(encoding="utf-8"))
+
+    def lines() -> Iterator[str]:
+        yield f"# {plan.title or 'Planning...'}\n"
+        if plan.thesis:
+            yield f"**Thesis:** {plan.thesis}\n"
+        if plan.author_direction:
+            yield f"**Author direction:** {plan.author_direction}\n"
+        if plan.sections:
+            yield "\n## Sections\n"
+            for section in plan.sections:
+                yield f"### {section.title or '???'}"
+                yield f"{section.summary}\n"
+                if section.key_points:
+                    yield "Key points: " + ", ".join(section.key_points)
+        if plan.research_questions:
+            yield "\n## Research Questions\n"
+            for question in plan.research_questions:
+                yield (
+                    f"- [{question.priority}] {question.question} "
+                    f"(for: {question.section})"
+                )
+        if plan.source_quotes:
+            yield "\n## Source Quotes\n"
+            for quote in plan.source_quotes:
+                yield f'- "{quote.text}" — {quote.speaker}'
+
+    return "\n".join(lines())
 
 
 def render_research_progress(research_path: Path) -> str:
     """Render the current research JSON as markdown for the GDoc Research tab."""
     if not research_path.exists():
         return "# Researching...\n"
-    data = json.loads(research_path.read_text(encoding="utf-8"))
-    findings = data.get("findings", [])
-    parts = [f"# Research Findings\n\n{len(findings)} findings\n"]
-    for f in findings:
-        parts.append(f"\n## {f.get('question', '???')}\n")
-        parts.append(f"{f.get('answer', '')}\n")
-        parts.append(f"**Confidence:** {f.get('confidence', '?')}")
-        sources = f.get("sources", [])
-        if sources:
-            urls = ", ".join(s.get("url", "") for s in sources if isinstance(s, dict))
+    research = ResearchCompilation.model_validate_json(
+        research_path.read_text(encoding="utf-8")
+    )
+
+    def lines() -> Iterator[str]:
+        yield f"# Research Findings\n\n{len(research.findings)} findings\n"
+        for finding in research.findings:
+            yield f"\n## {finding.question or '???'}\n"
+            yield f"{finding.answer}\n"
+            yield f"**Confidence:** {finding.confidence}"
+            urls = ", ".join(source.url for source in finding.sources)
             if urls:
-                parts.append(f"\n**Sources:** {urls}")
-    return "\n".join(parts)
+                yield f"\n**Sources:** {urls}"
+
+    return "\n".join(lines())
 
 
 class DraftSyncer:
@@ -1312,10 +1337,9 @@ async def research_questions(
     research_path = notes.artifact_path("research")
     collector = ResearchCollector(research_path)
     if research_path.exists():
-        existing = json.loads(research_path.read_text(encoding="utf-8"))
-        collector.findings = list(existing.get("findings", []))
-        collector.suggested_additions = list(existing.get("suggested_additions", []))
-        collector.additional_context = str(existing.get("additional_context", ""))
+        collector.research = ResearchCompilation.model_validate_json(
+            research_path.read_text(encoding="utf-8")
+        )
 
     outputs = build_output_server("output", make_research_output_tools(collector))
     output_servers, output_tool_names = outputs.servers, outputs.tool_names

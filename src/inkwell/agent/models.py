@@ -16,7 +16,16 @@ from pydantic import BaseModel, Field, field_validator
 from lup.runtime.usage import CostAccumulator
 from lup.workspace.history import SessionResult
 
-from inkwell.agent.tools.stage_outputs import AuthorNote
+
+class AuthorNote(BaseModel):
+    """A note from any pipeline stage addressed to the author."""
+
+    note: str = Field(description="The question, flag, or suggestion")
+    anchor: str = Field(
+        default="",
+        description="Section title, quote, or text this note refers to",
+    )
+    stage: str = Field(default="", description="Pipeline stage that produced this note")
 
 
 class SourceQuote(BaseModel):

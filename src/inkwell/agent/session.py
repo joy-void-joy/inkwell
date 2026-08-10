@@ -85,42 +85,41 @@ class WritingSessionState:
 
         try:
             from inkwell.agent.tools.google_docs import execute_with_retry, services
+            from inkwell.agent.tools.google_docs_schema import Comment, CommentPage
 
             svc = services()
             drive = svc.drive_service()
 
-            result = await execute_with_retry(
-                drive.comments().list(
-                    fileId=self.doc_id,
-                    fields="comments(id,replies(id,content),resolved)",
-                    pageSize=100,
+            page = CommentPage.model_validate(
+                await execute_with_retry(
+                    drive.comments().list(
+                        fileId=self.doc_id,
+                        fields="comments(id,replies(id,content),resolved)",
+                        pageSize=100,
+                    )
                 )
             )
 
-            unread = 0
-            for item in result.get("comments", []):
-                if not isinstance(item, dict):
-                    continue
-                if item.get("resolved", False):
-                    continue
-                comment_id = str(item.get("id", ""))
-                if comment_id in self.seen_comment_ids:
-                    continue
+            def unread(comment: Comment) -> bool:
+                """Whether this comment is something the author is waiting on.
 
-                is_agent_comment = comment_id in self.agent_comment_ids
-                reply_list = item.get("replies", [])
-                has_author_reply = isinstance(reply_list, list) and any(
-                    isinstance(r, dict)
-                    and str(r.get("id", "")) not in self.agent_comment_ids
-                    for r in reply_list
-                )
+                A comment inkwell did not write is unread on its own; one it
+                did is unread only once somebody else has replied under it.
+                """
+                if comment.id in self.agent_comment_ids:
+                    return any(
+                        reply.id not in self.agent_comment_ids
+                        for reply in comment.replies
+                    )
+                return True
 
-                if has_author_reply and is_agent_comment:
-                    unread += 1
-                elif not is_agent_comment:
-                    unread += 1
-
-            return unread
+            return sum(
+                1
+                for comment in page.comments
+                if not comment.resolved
+                and comment.id not in self.seen_comment_ids
+                and unread(comment)
+            )
         except Exception:
             logger.warning("Failed to check unread comments", exc_info=True)
             return 0

@@ -3098,11 +3098,12 @@ class PipelineRunner:
             existing = await do_list_tabs(self.doc_id)
             self.known_tabs = {t.title: t.tab_id for t in existing}
         else:
-            self.doc_id, self.doc_url = await do_create_doc(
+            created = await do_create_doc(
                 f"Inkwell — {', '.join(s[:30] for s in self.sources)[:60]}",
                 share_with=current_settings().author_email,
                 session_state=self.state,
             )
+            self.doc_id, self.doc_url = created.doc_id, created.url
             await self.hooks.on_progress(f"Google Doc: {self.doc_url}")
 
         for tab_name in ("Overview", "Source", "Voice", "Plan", "Research"):
@@ -4435,10 +4436,10 @@ class PipelineRunner:
             )
             if artifacts.tex_path:
                 async with gdoc_nonfatal("upload paper.tex"):
-                    _, tex_url = await do_upload_artifact(
+                    tex = await do_upload_artifact(
                         artifacts.tex_path, "application/x-tex"
                     )
-                    await self.hooks.on_progress(f"Uploaded paper.tex: {tex_url}")
+                    await self.hooks.on_progress(f"Uploaded paper.tex: {tex.url}")
             if not artifacts.pdf_path:
                 logger.warning("LaTeX compile incomplete: %s", artifacts.log[-300:])
                 await self.hooks.on_progress(
@@ -4446,10 +4447,8 @@ class PipelineRunner:
                 )
                 return tex_source
             async with gdoc_nonfatal("upload paper.pdf"):
-                _, pdf_url = await do_upload_artifact(
-                    artifacts.pdf_path, "application/pdf"
-                )
-                await self.hooks.on_progress(f"Uploaded paper.pdf: {pdf_url}")
+                pdf = await do_upload_artifact(artifacts.pdf_path, "application/pdf")
+                await self.hooks.on_progress(f"Uploaded paper.pdf: {pdf.url}")
             await self.write_preview_tab(sc.sandbox)
             return tex_source
 

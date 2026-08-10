@@ -868,69 +868,19 @@ class ExtractGdocOutput(BaseModel):
 
 async def fetch_gdoc_comments(doc_id: str) -> list[GdocComment]:
     """Read unresolved comments from a Google Doc via the Drive API."""
-    from inkwell.agent.tools.google_docs import execute_with_retry, services
+    from inkwell.agent.tools.google_docs import do_fetch_comments
 
-    svc = services()
-    drive = svc.drive_service()
-
-    comments: list[GdocComment] = []
-    page_token: str | None = None
-
-    while True:
-        kwargs: dict[str, object] = {
-            "fileId": doc_id,
-            "fields": "comments(id,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
-            "pageSize": 100,
-        }
-        if page_token:
-            kwargs["pageToken"] = page_token
-
-        result = await execute_with_retry(drive.comments().list(**kwargs))
-        items = result.get("comments", [])
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            if bool(item.get("resolved", False)):
-                continue
-
-            author_dict = item.get("author", {})
-            author_name = ""
-            if isinstance(author_dict, dict):
-                author_name = str(author_dict.get("displayName", ""))
-
-            anchor = ""
-            quoted = item.get("quotedFileContent")
-            if isinstance(quoted, dict):
-                anchor = str(quoted.get("value", ""))
-
-            replies_raw = item.get("replies", [])
-            replies: list[str] = []
-            if isinstance(replies_raw, list):
-                for reply in replies_raw:
-                    if isinstance(reply, dict):
-                        rc = reply.get("content", "")
-                        if isinstance(rc, str) and rc:
-                            replies.append(rc)
-
-            comments.append(
-                GdocComment(
-                    comment_id=str(item.get("id", "")),
-                    author=author_name,
-                    content=str(item.get("content", "")),
-                    anchor_text=anchor,
-                    replies=replies,
-                    resolved=False,
-                )
-            )
-
-        page_token_raw = result.get("nextPageToken")
-        if isinstance(page_token_raw, str) and page_token_raw:
-            page_token = page_token_raw
-        else:
-            break
-
-    return comments
+    return [
+        GdocComment(
+            comment_id=entry.comment_id,
+            author=entry.author,
+            content=entry.content,
+            anchor_text=entry.anchor_text,
+            replies=entry.replies,
+            resolved=False,
+        )
+        for entry in await do_fetch_comments(doc_id)
+    ]
 
 
 def format_comments_as_markdown(comments: list[GdocComment]) -> str:
@@ -951,8 +901,8 @@ def format_comments_as_markdown(comments: list[GdocComment]) -> str:
 async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
     """Extract content, comments, and links from a Google Doc."""
     from inkwell.agent.tools.google_docs import (
-        execute_with_retry,
         extract_tab_markdown,
+        fetch_document,
         services,
     )
 
@@ -960,42 +910,24 @@ async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
     svc = services()
     docs = svc.docs_service()
 
-    doc = await execute_with_retry(
+    doc = await fetch_document(
+        # lup: ignore[dict-get] — the API resource's own verb, not a mapping
         docs.documents().get(documentId=doc_id, includeTabsContent=True)
     )
 
-    doc_title = str(doc.get("title", "Untitled"))
-    tabs_raw = doc.get("tabs", [])
-    if not isinstance(tabs_raw, list):
-        raise ToolError("Could not read document tabs")
-
-    tabs: list[GdocTab] = []
-    all_text_parts: list[str] = []
-    total_words = 0
-
-    for tab in tabs_raw:
-        if not isinstance(tab, dict):
-            continue
-        props = tab.get("tabProperties", {})
-        if not isinstance(props, dict):
-            continue
-
-        tab_id = str(props.get("tabId", ""))
-        tab_title = str(props.get("title", ""))
-        text = extract_tab_markdown(tab)
-        all_text_parts.append(text)
-
-        saved = save_content("gdoc", f"{doc_title}-{tab_title}", text)
-        total_words += saved.word_count
-        tabs.append(
-            GdocTab(
-                tab_id=tab_id,
-                title=tab_title,
-                content=saved,
-            )
+    doc_title = doc.title or "Untitled"
+    rendered = [(tab.tab_properties, extract_tab_markdown(tab)) for tab in doc.walk()]
+    tabs = [
+        GdocTab(
+            tab_id=props.tab_id,
+            title=props.title,
+            content=save_content("gdoc", f"{doc_title}-{props.title}", text),
         )
+        for props, text in rendered
+    ]
+    total_words = sum(tab.content.word_count for tab in tabs)
 
-    all_text = "\n".join(all_text_parts)
+    all_text = "\n".join(text for _, text in rendered)
     discovered = discover_links(all_text)
     comments = await fetch_gdoc_comments(doc_id)
 

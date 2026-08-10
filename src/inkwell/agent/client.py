@@ -60,8 +60,6 @@ type TraceSink = Callable[[TraceRecord], Coroutine[None, None, None]]
 type DisplaySink = Callable[[DisplayRecord], Coroutine[None, None, None]]
 
 
-# lup: ignore[set-shape] — a label is the whole record here: what is asked of
-# this is membership, and a stage is in flight or it is not
 class ActiveAgent(BaseModel):
     """One turn in flight, as a surface watching the run sees it."""
 

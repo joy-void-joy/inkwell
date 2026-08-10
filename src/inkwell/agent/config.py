@@ -15,6 +15,8 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from lup.types import EnvVars
+
 from inkwell.agent.client import PROVIDER_LOGIN
 
 logger = logging.getLogger(__name__)
@@ -375,7 +377,24 @@ def stage_model(stage: PipelineStage) -> str:
     return current_settings().model_for(stage)
 
 
-def subprocess_auth_env(session_settings: Settings) -> dict[str, str]:
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"
+"""Where an OpenRouter key routes inference instead of the vendor's own API."""
+
+
+def openrouter_env(api_key: str) -> EnvVars:
+    """The variables that point a provider CLI at OpenRouter with `api_key`.
+
+    The empty API key is deliberate: it displaces an ambient vendor key that
+    would otherwise take precedence over the routed one.
+    """
+    return {
+        "ANTHROPIC_BASE_URL": OPENROUTER_BASE_URL,
+        "ANTHROPIC_AUTH_TOKEN": api_key,
+        "ANTHROPIC_API_KEY": "",
+    }
+
+
+def subprocess_auth_env(session_settings: Settings) -> EnvVars:
     """Auth env routing a session's spawned ``claude`` CLI to its profile.
 
     The CLI decides which account pays for inference from its own
@@ -383,14 +402,17 @@ def subprocess_auth_env(session_settings: Settings) -> dict[str, str]:
     subprocess. Without it, every session inherits the server's ambient
     login and bills that account regardless of the selected profile.
     """
-    env: dict[str, str] = {}
-    if session_settings.claude_config_dir:
-        env[PROVIDER_LOGIN.config_home_env] = session_settings.claude_config_dir
-    if session_settings.openrouter_api_key:
-        env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
-        env["ANTHROPIC_AUTH_TOKEN"] = session_settings.openrouter_api_key
-        env["ANTHROPIC_API_KEY"] = ""
-    return env
+    login = (
+        {PROVIDER_LOGIN.config_home_env: session_settings.claude_config_dir}
+        if session_settings.claude_config_dir
+        else {}
+    )
+    routed = (
+        openrouter_env(session_settings.openrouter_api_key)
+        if session_settings.openrouter_api_key
+        else {}
+    )
+    return {**login, **routed}
 
 
 @contextmanager

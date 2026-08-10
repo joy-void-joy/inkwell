@@ -268,16 +268,9 @@ def format_cookie_header(cookies: StringMap) -> str:
     return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
 
-def cookie_value(cookies: StringMap, name: str) -> str:
-    """The value a cookie jar carries for `name`, empty where it carries none.
-
-    A jar holds whatever the browser put in it, so a miss is ordinary and
-    every caller here treats absent and blank the same way.
-    """
-    return cookies[name] if name in cookies else ""
-
-
 def load_org_uuid_from_cookies(cookies: StringMap) -> str | None:
+    from inkwell.agent.browser_auth import cookie_value
+
     return cookie_value(cookies, "lastActiveOrg") or None
 
 

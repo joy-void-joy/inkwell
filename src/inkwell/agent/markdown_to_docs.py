@@ -9,6 +9,7 @@ from typing import TypedDict
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
+from pydantic import BaseModel, Field
 
 
 def utf16_len(text: str) -> int:
@@ -192,6 +193,44 @@ HEADING_STYLES: dict[int, str] = {
 }
 
 
+def heading_style(level: int) -> str:
+    """The Docs named style a heading of this depth is written in.
+
+    Markdown nests deeper than Docs names styles for, so anything past the
+    third level is written as a third-level heading.
+    """
+    return HEADING_STYLES[level] if level in HEADING_STYLES else "HEADING_3"
+
+
+class OpenListItem(BaseModel):
+    """A list item still being walked: where it began, and its list's kind."""
+
+    start: int = Field(description="Offset the item's text starts at")
+    ordered: bool = Field(description="Whether the list it belongs to numbers items")
+
+
+class MarkdownWalk(BaseModel):
+    """What walking a markdown token stream accumulates as it goes.
+
+    The stream decides when each of these closes — a heading at its close
+    token, a list item at the matching one — so they are filled in as the walk
+    proceeds rather than derived from anything already in hand.
+    """
+
+    text_parts: list[str] = Field(
+        default_factory=list, description="The plain text, in document order"
+    )
+    heading_ranges: list[HeadingRange] = Field(
+        default_factory=list, description="Where each heading starts and ends"
+    )
+    bullet_ranges: list[BulletRange] = Field(
+        default_factory=list, description="Where each list item starts and ends"
+    )
+    open_items: list[OpenListItem] = Field(
+        default_factory=list, description="List items whose close has not arrived"
+    )
+
+
 def walk_inline(
     children: list[Token],
     text_parts: list[str],
@@ -265,37 +304,29 @@ def markdown_to_requests(
     md = MarkdownIt()
     tokens = md.parse(markdown)
 
-    text_parts: list[str] = []
+    walk = MarkdownWalk()
     offset = 0
 
     bold_spans: list[BoldSpan] = []
     italic_spans: list[ItalicSpan] = []
     link_spans: list[LinkSpan] = []
-    heading_ranges: list[HeadingRange] = []
-    bullet_ranges: list[BulletRange] = []
 
     in_heading: int | None = None
     heading_start: int = 0
     in_bullet_list: bool = False
     in_ordered_list: bool = False
-    list_item_start: int = 0
-    list_item_starts: list[tuple[int, bool]] = []
 
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-
+    for token in tokens:
         match token.type:
             case "heading_open":
-                tag_level = int(token.tag[1:])
-                in_heading = tag_level
+                in_heading = int(token.tag.removeprefix("h"))
                 heading_start = offset
 
             case "heading_close":
                 if in_heading is not None:
-                    text_parts.append("\n")
+                    walk.text_parts.append("\n")
                     offset += 1
-                    heading_ranges.append(
+                    walk.heading_ranges.append(
                         HeadingRange(start=heading_start, end=offset, level=in_heading)
                     )
                     in_heading = None
@@ -305,14 +336,14 @@ def markdown_to_requests(
 
             case "paragraph_close":
                 if not in_heading:
-                    text_parts.append("\n")
+                    walk.text_parts.append("\n")
                     offset += 1
 
             case "inline":
                 if token.children:
                     offset = walk_inline(
                         token.children,
-                        text_parts,
+                        walk.text_parts,
                         offset,
                         bold_spans,
                         italic_spans,
@@ -332,40 +363,39 @@ def markdown_to_requests(
                 in_ordered_list = False
 
             case "list_item_open":
-                list_item_start = offset
-                list_item_starts.append(
-                    (list_item_start, in_ordered_list and not in_bullet_list)
+                walk.open_items.append(
+                    OpenListItem(
+                        start=offset, ordered=in_ordered_list and not in_bullet_list
+                    )
                 )
 
             case "list_item_close":
-                if list_item_starts:
-                    item_start, ordered = list_item_starts.pop()
-                    bullet_ranges.append(
-                        BulletRange(start=item_start, end=offset, ordered=ordered)
+                if walk.open_items:
+                    item = walk.open_items.pop()
+                    walk.bullet_ranges.append(
+                        BulletRange(start=item.start, end=offset, ordered=item.ordered)
                     )
 
             case "fence":
-                text_parts.append(token.content)
+                walk.text_parts.append(token.content)
                 offset += utf16_len(token.content)
                 if not token.content.endswith("\n"):
-                    text_parts.append("\n")
+                    walk.text_parts.append("\n")
                     offset += 1
 
             case "code_block":
-                text_parts.append(token.content)
+                walk.text_parts.append(token.content)
                 offset += utf16_len(token.content)
                 if not token.content.endswith("\n"):
-                    text_parts.append("\n")
+                    walk.text_parts.append("\n")
                     offset += 1
 
             case "hr":
                 separator = "---\n"
-                text_parts.append(separator)
+                walk.text_parts.append(separator)
                 offset += utf16_len(separator)
 
-        i += 1
-
-    full_text = "".join(text_parts)
+    full_text = "".join(walk.text_parts)
     if not full_text:
         return []
 
@@ -393,15 +423,13 @@ def markdown_to_requests(
             DocsRequest(
                 updateParagraphStyle=UpdateParagraphStyle(
                     paragraphStyle=RequestParagraphStyle(
-                        # lup: ignore[dict-get] — a heading depth markdown may
-                        # nest deeper than Docs names a style for
-                        namedStyleType=HEADING_STYLES.get(hr["level"], "HEADING_3")
+                        namedStyleType=heading_style(hr["level"])
                     ),
                     range=span_range(hr["start"], hr["end"]),
                     fields="namedStyleType",
                 )
             )
-            for hr in heading_ranges
+            for hr in walk.heading_ranges
         ),
         *(
             styled(span["start"], span["end"], RequestTextStyle(bold=True), "bold")
@@ -431,7 +459,7 @@ def markdown_to_requests(
                     ),
                 )
             )
-            for br in bullet_ranges
+            for br in walk.bullet_ranges
         ),
     ]
 

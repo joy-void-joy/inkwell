@@ -11,9 +11,7 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
-
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from lup.runtime.usage import CostAccumulator
 from lup.types import Usage
@@ -50,7 +48,11 @@ def traces_path() -> Path:
     return notes_path() / "traces"
 
 
-class SessionSetup(NamedTuple):
+class SessionSetup(BaseModel):
+    """What setting a session up produced: its notes, its trace, its state."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     notes: NotesConfig
     trace_logger: TraceLogger
     session_state: WritingSessionState

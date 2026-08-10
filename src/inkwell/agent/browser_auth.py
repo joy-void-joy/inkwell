@@ -5,11 +5,12 @@ independent of the user's main browser. Cookies persist across extractions
 and survive the user logging out of their personal Chrome.
 """
 
-# claude: ignore
-# pyright: reportMissingImports=false
-
 import logging
 from pathlib import Path
+
+from pydantic import BaseModel, ConfigDict
+
+from lup.types import StringMap
 
 from inkwell.devtools.setup import (
     PROFILES_DIR,
@@ -19,6 +20,29 @@ from inkwell.devtools.setup import (
 logger = logging.getLogger(__name__)
 
 BROWSER_CONTEXTS_DIR = PROJECT_ROOT / "credentials" / "browser"
+
+
+class BrowserCookie(BaseModel):
+    """One cookie the browser holds, as this project reads it.
+
+    Playwright declares every field of a cookie optional, so reading one means
+    deciding what an absent field means. This decides once, here, rather than
+    at each of the places that ask a cookie its name.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    name: str = ""
+    value: str = ""
+
+
+def cookie_value(cookies: StringMap, name: str) -> str:
+    """The value a cookie jar carries for `name`, empty where it carries none.
+
+    A jar holds whatever the browser put in it, so a miss is ordinary and
+    every caller here treats absent and blank the same way.
+    """
+    return cookies[name] if name in cookies else ""
 
 
 def browser_context_dir(profile: str | None = None) -> Path:
@@ -37,7 +61,7 @@ async def context_has_cookies(profile: str | None = None) -> bool:
     return "sessionKey" in cookies
 
 
-async def extract_cookies(profile: str | None = None) -> dict[str, str]:
+async def extract_cookies(profile: str | None = None) -> StringMap:
     """Read Claude.ai cookies from the persistent browser context.
 
     Launches a headless browser with the stored context, navigates to
@@ -57,7 +81,6 @@ async def extract_cookies(profile: str | None = None) -> dict[str, str]:
         )
         return {}
 
-    cookies: dict[str, str] = {}
     async with async_playwright() as p:
         browser = await p.chromium.launch_persistent_context(
             str(ctx_dir),
@@ -69,20 +92,18 @@ async def extract_cookies(profile: str | None = None) -> dict[str, str]:
             await page.goto(
                 "https://claude.ai", wait_until="domcontentloaded", timeout=15_000
             )
-            all_cookies = await browser.cookies("https://claude.ai")
-            for c in all_cookies:
-                name = c.get("name", "")
-                value = c.get("value", "")
-                if name:
-                    cookies[name] = value
+            held = [
+                BrowserCookie.model_validate(cookie)
+                for cookie in await browser.cookies("https://claude.ai")
+            ]
+            cookies = {cookie.name: cookie.value for cookie in held if cookie.name}
             if cookies:
                 logger.info(
                     "Extracted %d cookies from persistent browser context", len(cookies)
                 )
+            return cookies
         finally:
             await browser.close()
-
-    return cookies
 
 
 async def extract_cookie_header(profile: str | None = None) -> str | None:
@@ -95,8 +116,7 @@ async def extract_cookie_header(profile: str | None = None) -> str | None:
 
 async def extract_org_uuid(profile: str | None = None) -> str | None:
     """Read the lastActiveOrg cookie from the persistent browser context."""
-    cookies = await extract_cookies(profile)
-    return cookies.get("lastActiveOrg") or None
+    return cookie_value(await extract_cookies(profile), "lastActiveOrg") or None
 
 
 async def login_interactive(profile: str | None = None) -> bool:
@@ -129,8 +149,8 @@ async def login_interactive(profile: str | None = None) -> bool:
             page = browser.pages[0] if browser.pages else await browser.new_page()
 
             had_session = any(
-                c.get("name") == "sessionKey"
-                for c in await browser.cookies("https://claude.ai")
+                BrowserCookie.model_validate(cookie).name == "sessionKey"
+                for cookie in await browser.cookies("https://claude.ai")
             )
             if had_session:
                 await browser.clear_cookies()
@@ -144,8 +164,10 @@ async def login_interactive(profile: str | None = None) -> bool:
             logged_in = False
             while asyncio.get_event_loop().time() < deadline:
                 all_cookies = await browser.cookies("https://claude.ai")
-                cookie_names = {c.get("name", "") for c in all_cookies}
-                if "sessionKey" in cookie_names:
+                if any(
+                    BrowserCookie.model_validate(cookie).name == "sessionKey"
+                    for cookie in all_cookies
+                ):
                     logged_in = True
                     break
                 await page.wait_for_timeout(2000)

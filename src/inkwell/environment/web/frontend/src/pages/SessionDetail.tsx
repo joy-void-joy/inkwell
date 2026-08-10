@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { fetchProfiles, fetchStopStages } from "../api/client";
-import { SessionProvider, useSession } from "../context/SessionContext";
+import { SessionProvider } from "../context/SessionContext";
+import { useSession } from "../context/session";
 import { StageProgress } from "../components/StageProgress";
 import { LogStream } from "../components/LogStream";
 import { CostInfo, CostBreakdown } from "../components/CostPanel";

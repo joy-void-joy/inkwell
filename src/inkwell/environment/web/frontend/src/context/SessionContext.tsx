@@ -1,6 +1,7 @@
-import { createContext, useContext, useReducer, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useReducer, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useSessionWebSocket } from "../api/ws";
 import { getSession, resumeSession, restartSession, fetchPipelineStages } from "../api/client";
+import { SessionContext, type SessionState } from "./session";
 import type {
   CostSnapshot,
   SessionStateSnapshot,
@@ -8,21 +9,6 @@ import type {
   ServerMessage,
   SessionStatus,
 } from "../types";
-
-interface SessionState {
-  sessionId: string;
-  title: string;
-  status: SessionStatus;
-  stage: string;
-  profile: string | null;
-  sessionState: SessionStateSnapshot | null;
-  cost: CostSnapshot | null;
-  output: CompletionOutput | null;
-  events: ServerMessage[];
-  awaitingRevision: boolean;
-  error: string | null;
-  startedAt: string | null;
-}
 
 type Action =
   | { type: "INIT"; detail: { status: SessionStatus; title: string; state: SessionStateSnapshot; cost: CostSnapshot; created_at: string; profile: string | null; events: ServerMessage[]; output?: CompletionOutput | null } }
@@ -102,17 +88,6 @@ function initialState(sessionId: string): SessionState {
   };
 }
 
-interface SessionContextValue {
-  state: SessionState;
-  pipelineStages: string[];
-  send: (text: string) => void;
-  sendAction: (action: string) => void;
-  resume: (fromStage?: string, profile?: string, stopAfter?: string) => Promise<void>;
-  restart: (fromStage: string, profile?: string) => Promise<void>;
-}
-
-const SessionContext = createContext<SessionContextValue | null>(null);
-
 export function SessionProvider({
   sessionId,
   children,
@@ -132,12 +107,6 @@ export function SessionProvider({
   const onMessage = useCallback((msg: ServerMessage) => {
     dispatch({ type: "EVENT", event: msg });
   }, []);
-
-  const prevOnMessageRef = useRef(onMessage);
-  if (prevOnMessageRef.current !== onMessage) {
-    console.warn("[SessionProvider] onMessage ref CHANGED — this causes WS reconnect");
-    prevOnMessageRef.current = onMessage;
-  }
 
   const { send } = useSessionWebSocket(wsSessionId, onMessage);
 
@@ -205,10 +174,4 @@ export function SessionProvider({
       {children}
     </SessionContext.Provider>
   );
-}
-
-export function useSession(): SessionContextValue {
-  const ctx = useContext(SessionContext);
-  if (!ctx) throw new Error("useSession must be inside SessionProvider");
-  return ctx;
 }

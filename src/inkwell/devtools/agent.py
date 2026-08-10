@@ -24,13 +24,19 @@ import inspect as inspect_mod
 import io
 import json
 import logging
-import os
 import signal
 import sys
 import tempfile
+import textwrap
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
+
+from prompt_toolkit.key_binding import KeyPressEvent
+from pydantic import BaseModel, Field
+from pydantic.fields import FieldInfo
+
+from lup.types import JsonObject
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -74,68 +80,98 @@ manual testing. Use them directly when asked — this session is for
 exercising tools and inspecting their behavior, not for running the
 full writing pipeline."""
 
-PIPELINE_STAGES: dict[str, str] = {
-    "planner": PLANNER_SYSTEM,
-    "researcher": RESEARCHER_PROMPT,
-    "section_writer": SECTION_WRITER_PROMPT,
-    "merge": MERGE_PROMPT,
-    "narrative_reviewer": NARRATIVE_REVIEWER_PROMPT,
-    "fact_checker": FACT_CHECKER_PROMPT,
-    "style_reviewer": STYLE_REVIEWER_PROMPT,
-    "rewriter": REWRITER_SYSTEM,
-}
 
-MIME_TO_EXT: dict[str, str] = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-}
+class StagePrompt(BaseModel):
+    """One pipeline stage's system prompt, as the inspector reports it."""
+
+    name: str = Field(description="Stage name, as the inspector labels it")
+    prompt: str = Field(description="The system prompt that stage runs under")
 
 
-def save_images(
-    images: list[tuple[str, bytes]],
-    images_dir: Path,
-) -> list[Path]:
+STAGE_PROMPTS: tuple[StagePrompt, ...] = (
+    StagePrompt(name="planner", prompt=PLANNER_SYSTEM),
+    StagePrompt(name="researcher", prompt=RESEARCHER_PROMPT),
+    StagePrompt(name="section_writer", prompt=SECTION_WRITER_PROMPT),
+    StagePrompt(name="merge", prompt=MERGE_PROMPT),
+    StagePrompt(name="narrative_reviewer", prompt=NARRATIVE_REVIEWER_PROMPT),
+    StagePrompt(name="fact_checker", prompt=FACT_CHECKER_PROMPT),
+    StagePrompt(name="style_reviewer", prompt=STYLE_REVIEWER_PROMPT),
+    StagePrompt(name="rewriter", prompt=REWRITER_SYSTEM),
+)
+
+
+class ImageKind(BaseModel):
+    """One image type this REPL handles: how it is named, and how it is saved."""
+
+    media_type: str = Field(description="MIME type, as the clipboard names it")
+    suffix: str = Field(description="File extension the image is saved under")
+    from_clipboard: bool = Field(
+        default=True,
+        description="Whether to offer this type when reading the clipboard",
+    )
+
+
+IMAGE_KINDS: tuple[ImageKind, ...] = (
+    ImageKind(media_type="image/png", suffix=".png"),
+    ImageKind(media_type="image/jpeg", suffix=".jpg"),
+    ImageKind(media_type="image/webp", suffix=".webp"),
+    ImageKind(media_type="image/gif", suffix=".gif", from_clipboard=False),
+)
+
+
+class ClipboardImage(BaseModel):
+    """One image pasted from the clipboard, and what the clipboard called it."""
+
+    media_type: str = Field(description="MIME type the clipboard offered it under")
+    data: bytes = Field(description="The image's raw bytes")
+
+    @property
+    def suffix(self) -> str:
+        """The extension this image saves under, generic if unrecognized."""
+        return next(
+            (kind.suffix for kind in IMAGE_KINDS if kind.media_type == self.media_type),
+            ".bin",
+        )
+
+    def save_to(self, images_dir: Path) -> Path:
+        """Write the image under its content hash, keeping a copy already there."""
+        path = images_dir / (hashlib.sha256(self.data).hexdigest()[:12] + self.suffix)
+        if not path.exists():
+            path.write_bytes(self.data)
+        return path
+
+
+def save_images(images: list[ClipboardImage], images_dir: Path) -> list[Path]:
     """Save raw image data to disk, deduplicating by content hash."""
     images_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    for media_type, data in images:
-        ext = MIME_TO_EXT.get(media_type, ".bin")
-        name = hashlib.sha256(data).hexdigest()[:12] + ext
-        path = images_dir / name
-        if not path.exists():
-            path.write_bytes(data)
-        paths.append(path)
-    return paths
+    return [image.save_to(images_dir) for image in images]
 
 
 app = typer.Typer(no_args_is_help=True)
 
 xclip = sh.Command("xclip")
 
-CLIPBOARD_IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp")
 
-
-def read_clipboard_image() -> tuple[str, bytes] | None:
+def read_clipboard_image() -> ClipboardImage | None:
     """Read image data from the system clipboard via xclip.
 
-    Returns ``(media_type, raw_bytes)`` or ``None`` when no image is available.
+    Returns the first offered type this REPL handles, or None when the
+    clipboard holds no image it can read.
     """
     try:
         targets = str(xclip("-selection", "clipboard", "-o", "-t", "TARGETS"))
     except (sh.ErrorReturnCode, sh.CommandNotFound):
         return None
 
-    for mime in CLIPBOARD_IMAGE_MIMES:
-        if mime not in targets:
+    for kind in IMAGE_KINDS:
+        if not kind.from_clipboard or kind.media_type not in targets:
             continue
         try:
             buf = io.BytesIO()
-            xclip("-selection", "clipboard", "-o", "-t", mime, _out=buf)
+            xclip("-selection", "clipboard", "-o", "-t", kind.media_type, _out=buf)
             data = buf.getvalue()
             if data:
-                return (mime, data)
+                return ClipboardImage(media_type=kind.media_type, data=data)
         except sh.ErrorReturnCode:
             continue
     return None
@@ -172,8 +208,7 @@ def tool_location(tool: LupMcpTool) -> str:
     """Get file:line for the tool handler (unwraps decorators)."""
     handler = inspect_mod.unwrap(tool.handler)
     try:
-        filepath = inspect_mod.getfile(handler)
-        filename = os.path.basename(filepath)
+        filename = Path(inspect_mod.getfile(handler)).name
         _, lineno = inspect_mod.getsourcelines(handler)
         return f"{filename}:{lineno}"
     except (OSError, TypeError):
@@ -182,12 +217,17 @@ def tool_location(tool: LupMcpTool) -> str:
 
 def tool_signature(tool: LupMcpTool) -> str:
     """One-liner: input fields → output model name, file:line."""
-    parts: list[str] = []
-    for name, f in tool.input_model.model_fields.items():
-        ann = f.annotation
-        type_name = getattr(ann, "__name__", None) if ann is not None else None
-        parts.append(f"{name}: {type_name}" if type_name else name)
-    fields = ", ".join(parts)
+
+    def field_label(name: str, field: FieldInfo) -> str:
+        """One input field as the signature spells it: name, and type if known."""
+        annotation = field.annotation
+        type_name = getattr(annotation, "__name__", None) if annotation else None
+        return f"{name}: {type_name}" if type_name else name
+
+    fields = ", ".join(
+        field_label(name, field)
+        for name, field in tool.input_model.model_fields.items()
+    )
     output_part = f" → {tool.output_model.__name__}" if tool.output_model else ""
     return f"({fields}){output_part}  [{tool_location(tool)}]"
 
@@ -202,13 +242,8 @@ def print_tool_full(out: io.StringIO, tool: LupMcpTool) -> None:
     out.write(f"\n  {tool.name}\n")
     out.write(f"  {'─' * len(tool.name)}\n")
 
-    # lup: ignore[string-split] — a description is prose, and this wraps it
-    # one sentence per line for the terminal
-    desc_lines = tool.description.split(". ")
-    for line in desc_lines:
-        line = line.strip()
-        if line:
-            out.write(f"    {line}.\n")
+    for line in textwrap.wrap(tool.description, width=72):
+        out.write(f"    {line}\n")
 
     print_model_source(out, tool.input_model, "Input")
 
@@ -227,13 +262,14 @@ def collect_tools_by_server() -> dict[str, list[LupMcpTool]]:
 
 def collect_all_tools() -> list[LupMcpTool]:
     """Collect all LupMcpTool instances from known tool modules."""
-    tools: list[LupMcpTool] = []
-    for server_tools in collect_tools_by_server().values():
-        tools.extend(server_tools)
-    return tools
+    return [
+        tool
+        for server_tools in collect_tools_by_server().values()
+        for tool in server_tools
+    ]
 
 
-def tool_to_dict(t: LupMcpTool) -> dict[str, object]:
+def tool_to_dict(t: LupMcpTool) -> JsonObject:
     """Serialize a LupMcpTool for JSON output."""
     return {
         "name": t.name,
@@ -257,7 +293,7 @@ def page_output(text: str) -> None:
     except (sh.CommandNotFound, sh.ErrorReturnCode):
         sys.stdout.write(text)
     finally:
-        os.unlink(tmp.name)
+        Path(tmp.name).unlink()
 
 
 @app.command("inspect")
@@ -274,17 +310,17 @@ def inspect_cmd(
     """Inspect the full agent configuration: tools, schemas, prompt, agents."""
     tools_by_server = collect_tools_by_server()
     all_tools = collect_all_tools()
-    stages = PIPELINE_STAGES
+    stages = STAGE_PROMPTS
 
     if as_json:
-        data: dict[str, object] = {
+        data: JsonObject = {
             "model": settings.model,
             "max_thinking_tokens": settings.max_thinking_tokens,
             "tools": [tool_to_dict(t) for t in all_tools],
             "output_schema": WritingOutput.model_json_schema(),
-            "pipeline_stages": dict(stages)
+            "pipeline_stages": {stage.name: stage.prompt for stage in stages}
             if full
-            else {name: {"prompt_length": len(p)} for name, p in stages.items()},
+            else {stage.name: {"prompt_length": len(stage.prompt)} for stage in stages},
         }
         typer.echo(json.dumps(data, indent=2))
         return
@@ -329,10 +365,10 @@ def inspect_cmd(
     out.write(f"\n{'─' * 60}\n")
     out.write(f"  Pipeline Stage Prompts ({len(stages)})\n")
     out.write(f"{'─' * 60}\n")
-    for name, stage_prompt in stages.items():
-        out.write(f"\n  {name} ({len(stage_prompt)} chars)\n")
+    for stage in stages:
+        out.write(f"\n  {stage.name} ({len(stage.prompt)} chars)\n")
         if full:
-            for line in stage_prompt.splitlines():
+            for line in stage.prompt.splitlines():
                 out.write(f"    {line}\n")
 
     if not full:
@@ -481,7 +517,7 @@ def chat_cmd(
     finally:
         if mcp_config_path:
             try:
-                os.unlink(mcp_config_path)
+                Path(mcp_config_path).unlink()
             except OSError:
                 pass
 
@@ -614,7 +650,7 @@ async def repl(
 
     # -- prompt_toolkit session --
     session_cost = 0.0
-    pending_images: list[tuple[str, bytes]] = []
+    pending_images: list[ClipboardImage] = []
 
     def rprompt() -> FormattedText:
         parts = [effective_model]
@@ -632,24 +668,15 @@ async def repl(
     kb = KeyBindings()
 
     @kb.add("escape", "enter")  # Alt+Enter or Esc then Enter
-    def newline_binding(event: object) -> None:
-        from prompt_toolkit.key_binding import KeyPressEvent
-
-        assert isinstance(event, KeyPressEvent)
+    def newline_binding(event: KeyPressEvent) -> None:
         event.current_buffer.newline()
 
     @kb.add("enter")
-    def submit_binding(event: object) -> None:
-        from prompt_toolkit.key_binding import KeyPressEvent
-
-        assert isinstance(event, KeyPressEvent)
+    def submit_binding(event: KeyPressEvent) -> None:
         event.current_buffer.validate_and_handle()
 
     @kb.add("c-v")
-    def paste_binding(event: object) -> None:
-        from prompt_toolkit.key_binding import KeyPressEvent
-
-        assert isinstance(event, KeyPressEvent)
+    def paste_binding(event: KeyPressEvent) -> None:
         result = read_clipboard_image()
         if result is not None:
             pending_images.append(result)

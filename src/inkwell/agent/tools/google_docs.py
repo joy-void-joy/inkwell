@@ -15,18 +15,20 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator, Collection, Iterator
 from contextlib import asynccontextmanager
 from functools import cache
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from googleapiclient.errors import HttpError
 from pydantic import BaseModel, Field
 
 from inkwell.agent.google_auth import (
+    DocumentQuery,
     GoogleAuthError,
+    GoogleRequest,
     ServiceFactory,
     get_service_factory,
 )
@@ -45,6 +47,7 @@ from inkwell.agent.markdown_to_docs import (
     InsertInlineImage,
     LocationWithTab,
     Magnitude,
+    NewTabProperties,
     ObjectSize,
     clamp_ranges,
     clear_tab_request,
@@ -91,17 +94,6 @@ def require_doc_id() -> str:
 
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503}
-
-
-class GoogleRequest(Protocol):
-    """The one thing this project does with a googleapiclient request.
-
-    The client builds its resources dynamically and ships no types, so the
-    shape it hands back is named here rather than inferred: everything below
-    only ever executes it and reads JSON out.
-    """
-
-    def execute(self) -> JsonValue: ...
 
 
 async def execute_with_retry(
@@ -317,7 +309,7 @@ def styled_run(element: ParagraphElement) -> str:
     """One run of text wrapped in the markdown its style calls for."""
     if element.text_run is None:
         return ""
-    chunk = element.text_run.content.rstrip("\n")
+    chunk = element.text_run.content.removesuffix("\n")
     if not chunk:
         return ""
     style = element.text_run.text_style
@@ -504,7 +496,7 @@ async def do_create_tab(
     Idempotent: returns the existing tab ID if a tab with this title exists.
     """
     name = truncate_tab_title(name)
-    tab_props: dict[str, str] = {"title": name}
+    tab_props: NewTabProperties = {"title": name}
     if parent_tab_id is not None:
         tab_props["parentTabId"] = parent_tab_id
     svc = services()
@@ -636,19 +628,18 @@ async def write_with_continuation(
 
     chunks = split_on_headings(content)
 
-    merged: list[str] = []
-    current: list[str] = []
-    current_len = 0
-    for section in chunks:
-        chunk_text = section.text
-        if current_len + len(chunk_text) > TAB_CONTINUATION_CHARS and current:
-            merged.append("\n\n".join(current))
-            current = []
-            current_len = 0
-        current.append(chunk_text)
-        current_len += len(chunk_text)
-    if current:
-        merged.append("\n\n".join(current))
+    def packed() -> Iterator[str]:
+        """Group the sections into tab-sized chunks, greedily and in order."""
+        current = ""
+        for section in chunks:
+            if current and len(current) + len(section.text) > TAB_CONTINUATION_CHARS:
+                yield current
+                current = ""
+            current = f"{current}\n\n{section.text}" if current else section.text
+        if current:
+            yield current
+
+    merged = list(packed())
 
     if len(merged) > MAX_CONTINUATION_TABS:
         dropped = len(merged) - MAX_CONTINUATION_TABS
@@ -666,21 +657,20 @@ async def write_with_continuation(
         )
 
     total = len(merged)
-    tab_ids: list[str] = []
 
-    for i, chunk_content in enumerate(merged):
-        if i == 0:
-            name = tab_name
-        else:
-            name = f"{tab_name} ({i + 1}/{total})"
-
+    async def written_tab(index: int, chunk_content: str) -> str:
+        """Write one chunk into its tab, creating the tab if it is not there."""
+        name = tab_name if index == 0 else f"{tab_name} ({index + 1}/{total})"
         tab_id = await find_tab_by_title(doc_id, name)
         if tab_id is None:
             tab_id = await do_create_tab(doc_id, name, parent_tab_id)
         await do_write_tab(doc_id, tab_id, chunk_content, session_state)
-        tab_ids.append(tab_id)
+        return tab_id
 
-    return tab_ids
+    return [
+        await written_tab(index, chunk_content)
+        for index, chunk_content in enumerate(merged)
+    ]
 
 
 async def do_insert_comment(
@@ -732,59 +722,65 @@ async def do_insert_comments_batch(
         *(insert_one(spec) for spec in comments),
         return_exceptions=True,
     )
-    ids: list[str] = []
-    for result in results:
-        if isinstance(result, BaseException):
-            logger.warning("Batch comment failed: %s", result)
-            ids.append("")
-        else:
-            ids.append(result)
-    return ids
+
+    def collected() -> Iterator[str]:
+        """Each insert's comment id, empty for one that failed and was logged."""
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning("Batch comment failed: %s", result)
+                yield ""
+            else:
+                yield result
+
+    return list(collected())
 
 
 async def do_fetch_comments(
     doc_id: str,
     *,
-    exclude_ids: set[str] | None = None,
+    exclude_ids: Collection[str] = (),
     include_resolved: bool = False,
 ) -> list[CommentEntry]:
     """Fetch comments from any Google Doc by ID."""
     svc = services()
     drive = svc.drive_service()
-    skip = exclude_ids or set()
-    entries: list[CommentEntry] = []
-    page_token: str | None = None
 
-    while True:
-        kwargs: JsonObject = {
-            "fileId": doc_id,
-            "fields": "comments(id,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
-            "pageSize": 100,
-        }
-        if page_token:
-            kwargs["pageToken"] = page_token
+    async def wanted() -> AsyncIterator[CommentEntry]:
+        """Every comment the caller asked for, page by page through the API."""
+        page_token = ""
+        while True:
+            kwargs: JsonObject = {
+                "fileId": doc_id,
+                "fields": "comments(id,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
+                "pageSize": 100,
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
 
-        page = CommentPage.model_validate(
-            await execute_with_retry(drive.comments().list(**kwargs))
-        )
-        entries.extend(
-            CommentEntry(
-                comment_id=comment.id,
-                author=comment.author.display_name,
-                content=comment.content,
-                anchor_text=comment.anchor_text(),
-                replies=[reply.content for reply in comment.replies if reply.content],
-                resolved=comment.resolved,
+            page = CommentPage.model_validate(
+                await execute_with_retry(drive.comments().list(**kwargs))
             )
-            for comment in page.comments
-            if (include_resolved or not comment.resolved) and comment.id not in skip
-        )
+            for comment in page.comments:
+                if comment.resolved and not include_resolved:
+                    continue
+                if comment.id in exclude_ids:
+                    continue
+                yield CommentEntry(
+                    comment_id=comment.id,
+                    author=comment.author.display_name,
+                    content=comment.content,
+                    anchor_text=comment.anchor_text(),
+                    replies=[
+                        reply.content for reply in comment.replies if reply.content
+                    ],
+                    resolved=comment.resolved,
+                )
 
-        if not page.next_page_token:
-            break
-        page_token = page.next_page_token
+            if not page.next_page_token:
+                return
+            page_token = page.next_page_token
 
-    return entries
+    return [entry async for entry in wanted()]
 
 
 async def do_reply_to_comment(
@@ -831,7 +827,7 @@ async def do_read_tab(
     svc = services()
     docs = svc.docs_service()
 
-    kwargs: JsonObject = {
+    kwargs: DocumentQuery = {
         "documentId": doc_id,
         "includeTabsContent": True,
     }
@@ -1117,7 +1113,6 @@ async def update_overview(params: UpdateOverviewInput) -> UpdateOverviewOutput:
 
     if ov_batch["formatting"]:
         doc = await fetch_document(
-            # lup: ignore[dict-get] — the API resource's own verb, not a mapping
             docs.documents().get(documentId=doc_id, includeTabsContent=True)
         )
         actual_end = get_tab_end_index(find_tab_by_id(doc, overview_tab_id))
@@ -1154,12 +1149,21 @@ def collect_all_tabs(doc: Document) -> list[TabInfo]:
     ]
 
 
+def tab_id_titled(tabs: list[TabInfo], title: str) -> str:
+    """The tab titled `title`, case-insensitively, or empty where none is.
+
+    Tab titles are whatever the author named them, so a document without the
+    tab a caller is looking for is ordinary rather than exceptional.
+    """
+    lowered = title.lower()
+    return next((tab.tab_id for tab in tabs if tab.title.lower() == lowered), "")
+
+
 async def do_list_tabs(doc_id: str) -> list[TabInfo]:
     """List all tabs in a document, including nested children."""
     svc = services()
     docs = svc.docs_service()
     doc = await fetch_document(
-        # lup: ignore[dict-get] — the API resource's own verb, not a mapping
         docs.documents().get(documentId=doc_id, includeTabsContent=True)
     )
     return collect_all_tabs(doc)
@@ -1231,11 +1235,8 @@ async def attach_doc(params: AttachDocInput) -> AttachDocOutput:
         TabInfo(tab_id=tab.tab_properties.tab_id, title=tab.tab_properties.title)
         for tab in doc.tabs
     ]
-    by_title = {tab.title.lower(): tab.tab_id for tab in existing_tabs}
-    # lup: ignore[dict-get] — titles the author is free to have named anything
-    overview_tab_id = by_title.get("overview", "")
-    # lup: ignore[dict-get] — titles the author is free to have named anything
-    directions_tab_id = by_title.get("directions", "")
+    overview_tab_id = tab_id_titled(existing_tabs, "overview")
+    directions_tab_id = tab_id_titled(existing_tabs, "directions")
 
     for tab_name in ("Overview", "Directions"):
         is_overview = tab_name == "Overview"
@@ -1355,10 +1356,11 @@ async def insert_image(params: InsertImageInput) -> InsertImageOutput:
             "Sandbox not available — cannot resolve /shared/ path. "
             "Images must be created via execute_code in the sandbox."
         )
-    relative = params.file_path.lstrip("/")
-    if relative.startswith("shared/"):
-        relative = relative[len("shared/") :]
-    host_path = str(state.shared_dir / relative)
+    supplied = PurePosixPath(params.file_path)
+    parts = supplied.parts[1:] if supplied.is_absolute() else supplied.parts
+    if parts[:1] == ("shared",):
+        parts = parts[1:]
+    host_path = str(state.shared_dir.joinpath(*parts))
 
     inserted = await do_insert_image(
         doc_id,

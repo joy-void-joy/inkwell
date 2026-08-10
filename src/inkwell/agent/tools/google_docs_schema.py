@@ -138,6 +138,14 @@ class DocumentTab(DocsModel):
     body: Body = Body()
     lists: dict[str, ListDefinition] = Field(default_factory=dict)
 
+    def list_definition(self, list_id: str) -> ListDefinition | None:
+        """The list a bullet's id names, or None where this tab carries none.
+
+        Lists are keyed by ids the document invents, so a bullet naming one
+        this tab does not hold is ordinary rather than exceptional.
+        """
+        return self.lists[list_id] if list_id in self.lists else None
+
 
 class TabProperties(DocsModel):
     """How a tab identifies itself."""
@@ -157,9 +165,7 @@ class Tab(DocsModel):
 
     def ordered_list(self, bullet: Bullet) -> bool:
         """Whether the list this bullet belongs to numbers its items."""
-        definition = self.document_tab.lists.get(
-            bullet.list_id
-        )  # lup: ignore[dict-get] — lists are keyed by ids the document invents
+        definition = self.document_tab.list_definition(bullet.list_id)
         if definition is None:
             return False
         levels = definition.list_properties.nesting_levels

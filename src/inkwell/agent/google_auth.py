@@ -5,6 +5,7 @@
 
 import logging
 from pathlib import Path
+from typing import NotRequired, Protocol, TypedDict, Unpack
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -12,9 +13,55 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from lup.types import JsonValue
+
+from inkwell.agent.markdown_to_docs import BatchUpdateBody, NewDocumentBody
+
 logger = logging.getLogger(__name__)
 
-type DocsService = object
+
+class GoogleRequest(Protocol):
+    """The one thing this project does with a googleapiclient request.
+
+    The client builds its resources dynamically and ships no types, so the
+    shape it hands back is named here rather than inferred: every caller
+    only ever executes it and reads JSON out.
+    """
+
+    def execute(self) -> JsonValue: ...
+
+
+class DocumentQuery(TypedDict):
+    """The parameters a ``documents().get`` call takes."""
+
+    documentId: str
+    includeTabsContent: NotRequired[bool]
+    suggestionsViewMode: NotRequired[str]
+
+
+class DocumentsResource(Protocol):
+    """The Docs API's ``documents()`` resource, as this project calls it.
+
+    Naming the three verbs used keeps ``get`` legible as this resource's own
+    method: a checker resolves it here rather than mistaking it for a lookup
+    into a mapping, which is all an untyped handle leaves it looking like.
+    """
+
+    def get(self, **query: Unpack[DocumentQuery]) -> GoogleRequest: ...
+
+    def batchUpdate(
+        self, *, documentId: str, body: BatchUpdateBody
+    ) -> GoogleRequest: ...
+
+    def create(self, *, body: NewDocumentBody) -> GoogleRequest: ...
+
+
+class DocsService(Protocol):
+    """Google Docs API v1, as this project calls it."""
+
+    def documents(self) -> DocumentsResource: ...
+
+
 type DriveService = object
 
 SCOPES = [
@@ -113,10 +160,12 @@ class ServiceFactory:
 
     def docs_service(self) -> DocsService:
         """Google Docs API v1 service (lazy, cached)."""
-        if self.cached_docs is None:
-            creds = self.credentials()
-            self.cached_docs = build("docs", "v1", credentials=creds)
-        return self.cached_docs
+        cached = self.cached_docs
+        if cached is not None:
+            return cached
+        service: DocsService = build("docs", "v1", credentials=self.credentials())
+        self.cached_docs = service
+        return service
 
     def drive_service(self) -> DriveService:
         """Google Drive API v3 service (lazy, cached)."""

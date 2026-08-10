@@ -74,6 +74,19 @@ class InsertInlineImage(TypedDict):
     location: "LocationNoTab | LocationWithTab"
 
 
+class NewTabProperties(TypedDict, total=False):
+    """How a tab a request creates is named, and where it is nested."""
+
+    title: str
+    parentTabId: str
+
+
+class AddTab(TypedDict):
+    """A request creating one tab."""
+
+    tabProperties: NewTabProperties
+
+
 class DocsRequest(TypedDict, total=False):
     """One entry of a ``documents().batchUpdate`` request list.
 
@@ -89,6 +102,20 @@ class DocsRequest(TypedDict, total=False):
     createParagraphBullets: CreateParagraphBullets
     deleteContentRange: DeleteContentRange
     insertInlineImage: InsertInlineImage
+    addDocumentTab: AddTab
+    addTab: AddTab
+
+
+class BatchUpdateBody(TypedDict):
+    """The body of a ``documents().batchUpdate`` call."""
+
+    requests: list[DocsRequest]
+
+
+class NewDocumentBody(TypedDict):
+    """The body of a ``documents().create`` call."""
+
+    title: str
 
 
 class MarkdownBatch(TypedDict):

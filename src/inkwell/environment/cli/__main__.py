@@ -8,13 +8,13 @@ Usage:
 
 import asyncio
 import logging
-import os
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib.parse import urlparse
 
 import typer
 
+from inkwell.agent.config import select_profile
 from inkwell.agent.stages import OUTPUT_FORMATS
 
 FORMAT_HELP = "Suggested format (agent may override): " + ", ".join(
@@ -84,7 +84,7 @@ def callback(
 ) -> None:
     """AI writing agent — opens interactive chat when run with no arguments."""
     if profile:
-        os.environ["INKWELL_PROFILE"] = profile
+        select_profile(profile)
     if ctx.invoked_subcommand is None:
         from inkwell.environment.cli.chat import chat_session
 

@@ -19,12 +19,18 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from dotenv import dotenv_values
 from oauthlib.oauth2.rfc6749.errors import AccessDeniedError
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from lup.types import EnvVars
+
 from inkwell.agent.client import PROVIDER_LOGIN, RUNTIME
+from inkwell.agent.config import active_profile, select_profile
 
 app = typer.Typer(
     help="Interactive setup wizard",
@@ -49,8 +55,8 @@ CLAUDE_CONFIG_SUBDIR = "claude-config"
 
 
 def resolve_profile() -> str | None:
-    """Return the active profile name from the environment."""
-    return os.environ.get("INKWELL_PROFILE") or None
+    """Return the active profile name, as the agent's configuration resolves it."""
+    return active_profile()
 
 
 def env_file_for_profile(profile: str | None = None) -> Path:
@@ -65,11 +71,18 @@ def credentials_dir_for_profile(profile: str | None = None) -> Path:
     return CREDENTIALS_DIR
 
 
-def google_paths_for_profile(
-    profile: str | None = None,
-) -> tuple[Path, Path]:
+class GooglePaths(BaseModel):
+    """Where a profile keeps its Google OAuth client, and the token it earned."""
+
+    credentials: Path = Field(description="The OAuth client the user downloaded")
+    token: Path = Field(description="The token the browser flow wrote back")
+
+
+def google_paths_for_profile(profile: str | None = None) -> GooglePaths:
     creds_dir = credentials_dir_for_profile(profile)
-    return creds_dir / "google.json", creds_dir / "token.json"
+    return GooglePaths(
+        credentials=creds_dir / "google.json", token=creds_dir / "token.json"
+    )
 
 
 def claude_config_dir_for_profile(profile: str | None = None) -> Path:
@@ -92,23 +105,28 @@ def list_profiles() -> list[str]:
 # =====================================================================
 
 
-def read_env_file(path: Path) -> dict[str, str]:
-    """Parse an env file into a dict. Returns empty dict if file missing."""
+def read_env_file(path: Path) -> EnvVars:
+    """Parse an env file into a dict. Returns empty dict if file missing.
+
+    Through dotenv, which is the parser pydantic-settings itself reads these
+    files with — so what the wizard reports as configured is what a run will
+    actually load, quoting and continuations included.
+    """
     if not path.exists():
         return {}
-    values: dict[str, str] = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
-    return values
+    return {key: value for key, value in dotenv_values(path).items() if value}
 
 
-def write_env_file(path: Path, values: dict[str, str]) -> None:
+def env_value(env: EnvVars, key: str) -> str:
+    """The value an env file carries for `key`, or empty where it carries none.
+
+    An env file holds whatever keys someone put in it, so a miss is ordinary
+    and every caller here treats absent and blank the same way.
+    """
+    return env[key] if key in env else ""
+
+
+def write_env_file(path: Path, values: EnvVars) -> None:
     """Write values to an env file, preserving existing entries."""
     existing = read_env_file(path)
     existing.update(values)
@@ -125,12 +143,12 @@ def write_env_file(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(lines))
 
 
-def read_env_local(profile: str | None = None) -> dict[str, str]:
+def read_env_local(profile: str | None = None) -> EnvVars:
     """Parse the active profile's env file into a dict."""
     return read_env_file(env_file_for_profile(profile or resolve_profile()))
 
 
-def write_env_local(values: dict[str, str], profile: str | None = None) -> None:
+def write_env_local(values: EnvVars, profile: str | None = None) -> None:
     """Write values to the active profile's env file."""
     write_env_file(
         env_file_for_profile(profile or resolve_profile()),
@@ -138,7 +156,7 @@ def write_env_local(values: dict[str, str], profile: str | None = None) -> None:
     )
 
 
-def save_and_confirm(values: dict[str, str]) -> None:
+def save_and_confirm(values: EnvVars) -> None:
     """Write values to the active env file and print confirmation."""
     if values:
         profile = resolve_profile()
@@ -154,9 +172,19 @@ def mask(value: str, show: int = 6) -> str:
     return value[:show] + "..." + "*" * min(8, len(value) - show)
 
 
+class GraphicalSession(BaseSettings):
+    """Whether the host advertises a display server a browser could open on."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    display: str = Field(default="", validation_alias="DISPLAY")
+    wayland_display: str = Field(default="", validation_alias="WAYLAND_DISPLAY")
+
+
 def has_graphical_display() -> bool:
     """Check whether a graphical browser is likely available."""
-    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+    session = GraphicalSession()
+    if session.display or session.wayland_display:
         return True
     if shutil.which("open") and os.uname().sysname == "Darwin":
         return True
@@ -208,7 +236,8 @@ def build_status_table(profile: str | None = None) -> Table:
     """Build a rich table showing configuration status."""
     profile = profile or resolve_profile()
     env = read_env_local(profile)
-    google_creds, google_token = google_paths_for_profile(profile)
+    google = google_paths_for_profile(profile)
+    google_creds, google_token = google.credentials, google.token
 
     title = f"Profile: [bold]{profile}[/]" if profile else "Default configuration"
     table = Table(title=title, show_header=False, box=None, padding=(0, 2))
@@ -216,8 +245,7 @@ def build_status_table(profile: str | None = None) -> Table:
     table.add_column("Integration", min_width=30)
     table.add_column("Detail", style="dim")
 
-    # lup: ignore[dict-get] — a parsed env file, keyed by whatever it holds
-    config_dir = env.get(PROVIDER_LOGIN.config_home_env, "")
+    config_dir = env_value(env, PROVIDER_LOGIN.config_home_env)
     login_ok = bool(config_dir) and PROVIDER_LOGIN.logged_in(Path(config_dir))
     table.add_row(
         "[green]OK[/]" if login_ok else "[dim]--[/]",
@@ -239,7 +267,7 @@ def build_status_table(profile: str | None = None) -> Table:
         detail,
     )
 
-    exa_ok = bool(env.get("EXA_API_KEY"))
+    exa_ok = bool(env_value(env, "EXA_API_KEY"))
     table.add_row(
         "[green]OK[/]" if exa_ok else "[red]--[/]",
         "Exa",
@@ -251,7 +279,7 @@ def build_status_table(profile: str | None = None) -> Table:
     from inkwell.agent.browser_auth import context_has_cookies
 
     has_browser = asyncio.run(context_has_cookies(profile))
-    has_cookie = bool(env.get("CLAUDE_COOKIE"))
+    has_cookie = bool(env_value(env, "CLAUDE_COOKIE"))
     claude_ok = has_browser or has_cookie
     if has_browser:
         claude_detail = "browser session stored"
@@ -265,7 +293,7 @@ def build_status_table(profile: str | None = None) -> Table:
         claude_detail,
     )
 
-    fred_ok = bool(env.get("FRED_API_KEY"))
+    fred_ok = bool(env_value(env, "FRED_API_KEY"))
     table.add_row(
         "[green]OK[/]" if fred_ok else "[dim]--[/]",
         "FRED",
@@ -304,10 +332,11 @@ def place_google_credentials(target_dir: Path, target_path: Path) -> None:
     console.print(f"  Copied to [bold]{target_path}[/]")
 
 
-def setup_google() -> dict[str, str]:
+def setup_google() -> EnvVars:
     """Walk through Google OAuth setup step by step. Returns env vars to set."""
     profile = resolve_profile()
-    creds_path, token_path = google_paths_for_profile(profile)
+    google = google_paths_for_profile(profile)
+    creds_path, token_path = google.credentials, google.token
 
     console.print()
     console.rule("[bold]Google (Docs + Drive)[/]")
@@ -418,7 +447,7 @@ def setup_google() -> dict[str, str]:
 # =====================================================================
 
 
-def setup_exa() -> dict[str, str]:
+def setup_exa() -> EnvVars:
     """Walk through Exa configuration. Returns env vars to set."""
     console.print()
     console.rule("[bold]Exa[/]")
@@ -426,7 +455,7 @@ def setup_exa() -> dict[str, str]:
 
     env = read_env_local()
 
-    if env.get("EXA_API_KEY"):
+    if env_value(env, "EXA_API_KEY"):
         console.print("[green]Already configured.[/]")
         if not typer.confirm("Reconfigure?", default=False):
             return {}
@@ -437,7 +466,7 @@ def setup_exa() -> dict[str, str]:
 
     key = typer.prompt(
         "EXA_API_KEY",
-        default=env.get("EXA_API_KEY", ""),
+        default=env_value(env, "EXA_API_KEY"),
         show_default=False,
     ).strip()
 
@@ -451,7 +480,7 @@ def setup_exa() -> dict[str, str]:
 # =====================================================================
 
 
-def setup_claude() -> dict[str, str]:
+def setup_claude() -> EnvVars:
     """Walk through Claude.ai session setup via managed browser. Returns env vars to set."""
     import asyncio
 
@@ -514,7 +543,7 @@ def setup_claude() -> dict[str, str]:
 # =====================================================================
 
 
-def setup_fred() -> dict[str, str]:
+def setup_fred() -> EnvVars:
     """Walk through FRED API key setup. Returns env vars to set."""
     console.print()
     console.rule("[bold]FRED[/] [dim](optional)[/]")
@@ -522,7 +551,7 @@ def setup_fred() -> dict[str, str]:
 
     env = read_env_local()
 
-    if env.get("FRED_API_KEY"):
+    if env_value(env, "FRED_API_KEY"):
         console.print("[green]Already configured.[/]")
         if not typer.confirm("Reconfigure?", default=False):
             return {}
@@ -536,7 +565,7 @@ def setup_fred() -> dict[str, str]:
 
     key = typer.prompt(
         "FRED_API_KEY (or press Enter to skip)",
-        default=env.get("FRED_API_KEY", ""),
+        default=env_value(env, "FRED_API_KEY"),
         show_default=False,
     ).strip()
 
@@ -550,7 +579,7 @@ def setup_fred() -> dict[str, str]:
 # =====================================================================
 
 
-def setup_claude_login() -> dict[str, str]:
+def setup_claude_login() -> EnvVars:
     """Set up a separate Claude login for the writing agent."""
     import sh
 
@@ -562,8 +591,7 @@ def setup_claude_login() -> dict[str, str]:
     console.print()
 
     env = read_env_local(profile)
-    # lup: ignore[dict-get] — a parsed env file, keyed by whatever it holds
-    existing_dir = env.get(PROVIDER_LOGIN.config_home_env, "")
+    existing_dir = env_value(env, PROVIDER_LOGIN.config_home_env)
 
     if existing_dir and Path(existing_dir).exists():
         if PROVIDER_LOGIN.logged_in(Path(existing_dir)):
@@ -613,7 +641,7 @@ def setup_claude_login() -> dict[str, str]:
 # Integration registry
 # =====================================================================
 
-type SetupFunc = Callable[[], dict[str, str]]
+type SetupFunc = Callable[[], EnvVars]
 
 INTEGRATION_FUNCS: list[SetupFunc] = [
     setup_claude_login,
@@ -640,7 +668,7 @@ def claude_login_cmd(
 ) -> None:
     """Set up a separate Claude login for the writing agent."""
     if profile:
-        os.environ["INKWELL_PROFILE"] = profile
+        select_profile(profile)
     save_and_confirm(setup_claude_login())
 
 
@@ -655,7 +683,7 @@ def google_cmd(
 ) -> None:
     """Set up Google (Docs + Drive) OAuth."""
     if profile:
-        os.environ["INKWELL_PROFILE"] = profile
+        select_profile(profile)
     save_and_confirm(setup_google())
 
 
@@ -670,7 +698,7 @@ def exa_cmd(
 ) -> None:
     """Set up Exa API key."""
     if profile:
-        os.environ["INKWELL_PROFILE"] = profile
+        select_profile(profile)
     save_and_confirm(setup_exa())
 
 
@@ -685,7 +713,7 @@ def claude_cmd(
 ) -> None:
     """Set up Claude.ai session for conversation extraction."""
     if profile:
-        os.environ["INKWELL_PROFILE"] = profile
+        select_profile(profile)
     save_and_confirm(setup_claude())
 
 
@@ -700,7 +728,7 @@ def fred_cmd(
 ) -> None:
     """Set up FRED API key."""
     if profile:
-        os.environ["INKWELL_PROFILE"] = profile
+        select_profile(profile)
     save_and_confirm(setup_fred())
 
 
@@ -749,7 +777,7 @@ def main(
 ) -> None:
     """Walk through all integrations, skipping what's already configured."""
     if profile:
-        os.environ["INKWELL_PROFILE"] = profile
+        select_profile(profile)
     if ctx.invoked_subcommand is not None:
         return
 

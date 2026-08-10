@@ -7,25 +7,65 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Self
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from inkwell.agent.client import PROVIDER_LOGIN
 
 logger = logging.getLogger(__name__)
 
 
+class ProfileSelection(BaseSettings):
+    """Which profile the environment asks for.
+
+    Declares no `env_file`, so it reads the process environment and nothing
+    else — which is what keeps it clear of the circularity its own result
+    would otherwise create, since the profile chooses the env file chain
+    `Settings` reads and a profile read from one of those files could not.
+    """
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    profile: str | None = Field(default=None, validation_alias="INKWELL_PROFILE")
+
+
+class ProfileOverride(BaseModel):
+    """A profile chosen in-process, overriding what the environment asked for."""
+
+    name: str | None = None
+
+
+override = ProfileOverride()
+"""Set by an entry point that took a profile as an argument, so that the loads
+which follow resolve against it. A holder rather than a rebound module-level
+name, so `select_profile` needs no `global`."""
+
+
 def active_profile() -> str | None:
     """Return the active profile name, or None for the default config."""
-    return os.environ.get("INKWELL_PROFILE") or None
+    return override.name or ProfileSelection().profile or None
+
+
+def select_profile(profile: str | None) -> None:
+    """Make `profile` the active one for the loads that follow."""
+    override.name = profile
+
+
+def env_files_for(profile: str | None) -> tuple[str, ...]:
+    """The env file chain a profile reads, most general first."""
+    if profile:
+        return (".env", f"profiles/{profile}/env")
+    return (".env", ".env.local")
 
 
 def build_env_files() -> tuple[str, ...]:
     """Build the env file chain based on the active profile."""
-    profile = active_profile()
-    if profile:
-        return (".env", f"profiles/{profile}/env")
-    return (".env", ".env.local")
+    return env_files_for(active_profile())
 
 
 PIPELINE_STAGES: tuple[str, ...] = (
@@ -63,10 +103,25 @@ WRITER_MODES: tuple[str, ...] = ("auto", "parallel", "single")
 class Settings(BaseSettings):
     """Inkwell settings loaded from environment variables."""
 
-    model_config = SettingsConfigDict(
-        env_file=build_env_files(),
-        extra="ignore",
-    )
+    model_config = SettingsConfigDict(extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Resolve the env file chain when an instance is built rather than when
+        the class is defined, so a profile selected at runtime is what it reads."""
+        return (
+            init_settings,
+            env_settings,
+            DotEnvSettingsSource(settings_cls, env_file=build_env_files()),
+            file_secret_settings,
+        )
 
     @model_validator(mode="after")
     def warn_missing_optional_keys(self) -> Self:
@@ -265,26 +320,25 @@ class Settings(BaseSettings):
     )
 
 
+@contextmanager
+def profile_selected(profile: str | None) -> Iterator[None]:
+    """Run a block with `profile` active, restoring whatever was active before."""
+    previous = active_profile()
+    select_profile(profile)
+    try:
+        yield
+    finally:
+        select_profile(previous)
+
+
 def load_settings(profile: str | None = None) -> Settings:
     """Create a Settings instance for the given profile.
 
-    Temporarily sets INKWELL_PROFILE so build_env_files() resolves
-    the correct env file chain, then constructs Settings with that chain.
+    The profile has to be active while the instance is built, because it is
+    what `build_env_files` resolves the env file chain from.
     """
-    import os as _os
-
-    prev = _os.environ.get("INKWELL_PROFILE")
-    if profile:
-        _os.environ["INKWELL_PROFILE"] = profile
-    else:
-        _os.environ.pop("INKWELL_PROFILE", None)
-    try:
-        return Settings(_env_file=build_env_files())  # pyright: ignore[reportCallIssue]
-    finally:
-        if prev is not None:
-            _os.environ["INKWELL_PROFILE"] = prev
-        else:
-            _os.environ.pop("INKWELL_PROFILE", None)
+    with profile_selected(profile):
+        return Settings()
 
 
 settings = Settings.model_validate({})

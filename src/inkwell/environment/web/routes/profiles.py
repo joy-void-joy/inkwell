@@ -14,6 +14,7 @@ from inkwell.devtools.setup import (
     claude_config_dir_for_profile,
     credentials_dir_for_profile,
     env_file_for_profile,
+    env_value,
     google_paths_for_profile,
     list_profiles,
     mask,
@@ -104,12 +105,11 @@ async def build_profile_response(name: str) -> ProfileResponse:
     from pathlib import Path
 
     env = read_env_local(name)
-    _, google_token = google_paths_for_profile(name)
+    google = google_paths_for_profile(name)
 
     integrations: list[IntegrationStatus] = []
 
-    # lup: ignore[dict-get] — a parsed env file, keyed by whatever it holds
-    config_dir = env.get(PROVIDER_LOGIN.config_home_env, "")
+    config_dir = env_value(env, PROVIDER_LOGIN.config_home_env)
     login_ok = bool(config_dir) and PROVIDER_LOGIN.logged_in(Path(config_dir))
     integrations.append(
         IntegrationStatus(
@@ -119,11 +119,10 @@ async def build_profile_response(name: str) -> ProfileResponse:
         )
     )
 
-    google_creds, _ = google_paths_for_profile(name)
-    google_ok = google_token.exists()
+    google_ok = google.token.exists()
     if google_ok:
         google_detail = "authorized"
-    elif google_creds.exists():
+    elif google.credentials.exists():
         google_detail = "credentials uploaded, not yet authorized"
     else:
         google_detail = "not configured"
@@ -287,7 +286,8 @@ async def detect_claude_login(name: str) -> DetectResult:
 
 def build_google_status(profile: str) -> GoogleStatusResponse:
     """Check Google credentials and token file status for a profile."""
-    creds_path, token_path = google_paths_for_profile(profile)
+    google = google_paths_for_profile(profile)
+    creds_path, token_path = google.credentials, google.token
     has_creds = creds_path.exists()
     has_token = token_path.exists()
     if has_token:
@@ -324,7 +324,7 @@ async def upload_google_credentials(
             detail=f"Invalid JSON file: {exc}",
         ) from exc
 
-    creds_path, _ = google_paths_for_profile(name)
+    creds_path = google_paths_for_profile(name).credentials
     creds_path.parent.mkdir(parents=True, exist_ok=True)
     creds_path.write_bytes(content)
     return build_google_status(name)
@@ -337,7 +337,8 @@ async def authorize_google(name: str) -> GoogleStatusResponse:
 
     from inkwell.agent.google_auth import run_oauth_flow
 
-    creds_path, token_path = google_paths_for_profile(name)
+    google = google_paths_for_profile(name)
+    creds_path, token_path = google.credentials, google.token
 
     if not creds_path.exists():
         raise HTTPException(

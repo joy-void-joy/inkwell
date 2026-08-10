@@ -1,7 +1,10 @@
-"""Google OAuth and API service creation for Inkwell."""
+"""Google OAuth and API service creation for Inkwell.
 
-# claude: ignore
-# googleapiclient.discovery.Resource is untyped — opaque handles throughout.
+The client builds its resources dynamically and ships no types, so the slice
+of the Docs and Drive APIs this project calls is declared here as protocols:
+that is what lets a checker resolve `documents().get` as a resource verb
+rather than leave every call site reading into an opaque handle.
+"""
 
 import logging
 from pathlib import Path
@@ -12,8 +15,9 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-from lup.types import JsonValue
+from lup.types import JsonObject, JsonValue
 
 from inkwell.agent.markdown_to_docs import BatchUpdateBody, NewDocumentBody
 
@@ -62,7 +66,62 @@ class DocsService(Protocol):
     def documents(self) -> DocumentsResource: ...
 
 
-type DriveService = object
+class CommentQuery(TypedDict):
+    """The parameters a ``comments().list`` call takes."""
+
+    fileId: str
+    fields: str
+    pageSize: NotRequired[int]
+    pageToken: NotRequired[str]
+
+
+class CommentsResource(Protocol):
+    """The Drive ``comments()`` resource, as this project calls it."""
+
+    def list(self, **query: Unpack[CommentQuery]) -> GoogleRequest: ...
+
+    def create(
+        self, *, fileId: str, body: JsonObject, fields: str
+    ) -> GoogleRequest: ...
+
+
+class RepliesResource(Protocol):
+    """The Drive ``replies()`` resource, as this project calls it."""
+
+    def create(
+        self, *, fileId: str, commentId: str, body: JsonObject, fields: str
+    ) -> GoogleRequest: ...
+
+
+class PermissionsResource(Protocol):
+    """The Drive ``permissions()`` resource, as this project calls it."""
+
+    def create(
+        self, *, fileId: str, body: JsonObject, sendNotificationEmail: bool = True
+    ) -> GoogleRequest: ...
+
+
+class FilesResource(Protocol):
+    """The Drive ``files()`` resource, as this project calls it."""
+
+    def create(
+        self, *, body: JsonObject, media_body: MediaFileUpload, fields: str
+    ) -> GoogleRequest: ...
+
+    def update(self, *, fileId: str, body: JsonObject) -> GoogleRequest: ...
+
+
+class DriveService(Protocol):
+    """Google Drive API v3, as this project calls it."""
+
+    def comments(self) -> CommentsResource: ...
+
+    def replies(self) -> RepliesResource: ...
+
+    def permissions(self) -> PermissionsResource: ...
+
+    def files(self) -> FilesResource: ...
+
 
 SCOPES = [
     "https://www.googleapis.com/auth/documents",
@@ -169,10 +228,12 @@ class ServiceFactory:
 
     def drive_service(self) -> DriveService:
         """Google Drive API v3 service (lazy, cached)."""
-        if self.cached_drive is None:
-            creds = self.credentials()
-            self.cached_drive = build("drive", "v3", credentials=creds)
-        return self.cached_drive
+        cached = self.cached_drive
+        if cached is not None:
+            return cached
+        service: DriveService = build("drive", "v3", credentials=self.credentials())
+        self.cached_drive = service
+        return service
 
     def invalidate(self) -> None:
         """Clear cached services, forcing re-creation on next access."""

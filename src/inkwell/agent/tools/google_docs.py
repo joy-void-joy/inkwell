@@ -6,10 +6,6 @@ Uses tabs for parallel section writing and comments for async communication.
 Requires Google OAuth credentials configured via `inkwell setup`.
 """
 
-# claude: ignore
-# pyright: reportAttributeAccessIssue=false, reportIndexIssue=false, reportMissingImports=false
-# googleapiclient returns untyped Resource objects throughout.
-
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +22,7 @@ from googleapiclient.errors import HttpError
 from pydantic import BaseModel, Field
 
 from inkwell.agent.google_auth import (
+    CommentQuery,
     DocumentQuery,
     GoogleAuthError,
     GoogleRequest,
@@ -749,7 +746,7 @@ async def do_fetch_comments(
         """Every comment the caller asked for, page by page through the API."""
         page_token = ""
         while True:
-            kwargs: JsonObject = {
+            kwargs: CommentQuery = {
                 "fileId": doc_id,
                 "fields": "comments(id,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
                 "pageSize": 100,

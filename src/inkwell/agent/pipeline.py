@@ -3532,10 +3532,15 @@ class PipelineRunner:
                 self.state.source_doc_id = source_doc_id
                 self.source_is_extracted_gdoc = True
 
-        extracted_parts, unrecovered = assemble_sources(manifest)
+        assembled = assemble_sources(manifest)
+        extracted_parts = assembled.blocks
         covered = {e.raw_input for e in manifest.sources}
-        unrecovered += [value for value in original_inputs if value not in covered]
-        unrecovered = list(dict.fromkeys(unrecovered))
+        unrecovered = list(
+            dict.fromkeys(
+                assembled.unrecovered
+                + [value for value in original_inputs if value not in covered]
+            )
+        )
         source_set = {src for src in self.sources}
         if unrecovered:
             await self.hooks.on_progress(

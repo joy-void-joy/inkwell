@@ -4,9 +4,6 @@ Extracts source material from Claude conversations, URLs, and local files
 into structured text for the writing pipeline.
 """
 
-# claude: ignore
-# pyright: reportAttributeAccessIssue=false
-
 import logging
 import shutil
 from collections.abc import Iterator
@@ -271,9 +268,17 @@ def format_cookie_header(cookies: StringMap) -> str:
     return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
 
+def cookie_value(cookies: StringMap, name: str) -> str:
+    """The value a cookie jar carries for `name`, empty where it carries none.
+
+    A jar holds whatever the browser put in it, so a miss is ordinary and
+    every caller here treats absent and blank the same way.
+    """
+    return cookies[name] if name in cookies else ""
+
+
 def load_org_uuid_from_cookies(cookies: StringMap) -> str | None:
-    org_uuid = cookies.get("lastActiveOrg", "")
-    return org_uuid or None
+    return cookie_value(cookies, "lastActiveOrg") or None
 
 
 def load_cookie_from_browser() -> str | None:
@@ -614,22 +619,20 @@ def write_source_chunks(
         path.write_text(text, encoding="utf-8")
         return [path]
 
+    paragraphs = text.split(PARAGRAPH_SEPARATOR)  # lup: ignore[string-split] — prose
+
     def chunked() -> Iterator[str]:
         """Successive runs of whole paragraphs that fit the chunk budget."""
-        current: list[
-            str
-        ] = []  # lup: ignore[empty-collection] — a fold whose flush point depends on the running length
-        current_len = 0
-        # lup: ignore[string-split] — prose into paragraphs; no parser owns this
-        for para in text.split(PARAGRAPH_SEPARATOR):
-            para_len = len(para) + len(PARAGRAPH_SEPARATOR)
-            if current_len + para_len > CHUNK_CHARS and current:
-                yield PARAGRAPH_SEPARATOR.join(current)
-                current, current_len = [], 0
-            current.append(para)
-            current_len += para_len
+        current = ""
+        for para in paragraphs:
+            addition = para if not current else f"{PARAGRAPH_SEPARATOR}{para}"
+            if current and len(current) + len(addition) > CHUNK_CHARS:
+                yield current
+                current = para
+                continue
+            current += addition
         if current:
-            yield PARAGRAPH_SEPARATOR.join(current)
+            yield current
 
     def written(index: int, chunk: str) -> Path:
         """One chunk on disk, numbered from one the way a reader counts."""
@@ -680,11 +683,11 @@ async def extract_source_tab_only(url: str) -> str:
     if source_tabs:
         content = Path(source_tabs[0].content.path).read_text(encoding="utf-8")
     else:
-        parts = []
-        for t in result.tabs:
-            if t.title not in PIPELINE_TAB_NAMES:
-                parts.append(Path(t.content.path).read_text(encoding="utf-8"))
-        content = "\n\n".join(parts)
+        content = "\n\n".join(
+            Path(tab.content.path).read_text(encoding="utf-8")
+            for tab in result.tabs
+            if tab.title not in PIPELINE_TAB_NAMES
+        )
 
     comments_md = format_comments_as_markdown(result.comments)
     if comments_md:
@@ -984,13 +987,11 @@ def discover_links(text: str) -> list[DiscoveredLink]:
     """
     from inkwell.agent.tools.google_docs import doc_id_from_url
 
-    found: dict[str, DiscoveredLink] = {}
+    found: dict[str, DiscoveredLink] = {}  # lup: ignore[empty-collection] — a fold
     for match in LINKIFY.match(text) or []:
         if doc_id_from_url(match.url) is not None:
             continue
-        seen = found.get(
-            match.url
-        )  # lup: ignore[dict-get] — keyed by urls the prose happens to hold
+        seen = found[match.url] if match.url in found else None
         found[match.url] = (
             seen.again()
             if seen is not None
@@ -1061,15 +1062,17 @@ def format_comments_as_markdown(comments: list[GdocComment]) -> str:
     """Format extracted comments into markdown for inclusion in source text."""
     if not comments:
         return ""
-    parts: list[str] = []
-    for c in comments:
-        header = f"**{c.author}**" if c.author else "Comment"
-        if c.anchor_text:
-            header += f' (on "{c.anchor_text}")'
-        parts.append(f"- {header}: {c.content}")
-        for reply in c.replies:
-            parts.append(f"  - Reply: {reply}")
-    return "## Comments\n\n" + "\n".join(parts)
+
+    def lines() -> Iterator[str]:
+        """Each comment as a bullet, with its replies nested beneath it."""
+        for comment in comments:
+            header = f"**{comment.author}**" if comment.author else "Comment"
+            if comment.anchor_text:
+                header += f' (on "{comment.anchor_text}")'
+            yield f"- {header}: {comment.content}"
+            yield from (f"  - Reply: {reply}" for reply in comment.replies)
+
+    return "## Comments\n\n" + "\n".join(lines())
 
 
 async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
@@ -1085,7 +1088,6 @@ async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
     docs = svc.docs_service()
 
     doc = await fetch_document(
-        # lup: ignore[dict-get] — the API resource's own verb, not a mapping
         docs.documents().get(documentId=doc_id, includeTabsContent=True)
     )
 

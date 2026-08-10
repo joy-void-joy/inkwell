@@ -3,10 +3,6 @@
 Tracks doc_id, section status, pending questions, and author comments.
 """
 
-# claude: ignore
-# pyright: reportAttributeAccessIssue=false
-# Google API service objects are untyped.
-
 import asyncio
 import logging
 from collections.abc import Iterable, Iterator

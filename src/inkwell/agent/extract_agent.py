@@ -135,29 +135,47 @@ def read_source_content(entry: ExtractedSource) -> str:
     return ""
 
 
-def assemble_sources(manifest: ExtractionManifest) -> tuple[list[str], list[str]]:
+class AssembledSources(BaseModel):
+    """What a manifest yields: the blocks to read, and what could not be read."""
+
+    blocks: list[str] = Field(
+        default_factory=list,
+        description="Per-source sections ready to join into the conversation",
+    )
+    unrecovered: list[str] = Field(
+        default_factory=list,
+        description="Raw inputs whose content the caller must re-extract",
+    )
+
+
+def assemble_sources(manifest: ExtractionManifest) -> AssembledSources:
     """Turn a manifest into verbatim source blocks plus an unrecovered list.
 
-    Returns ``(blocks, unrecovered)``: ``blocks`` are the per-source
-    ``--- Source: ... ---`` / ``--- Reference: ... ---`` sections ready to join
-    into the conversation, and ``unrecovered`` holds the raw inputs whose content
-    could not be read and that the caller should deterministically re-extract.
+    A block is one ``--- Source: ... ---`` / ``--- Reference: ... ---``
+    section; an entry whose content could not be read is unrecovered instead,
+    for the caller to deterministically re-extract.
 
     Style references are skipped: their voice feeds the voice stage through a
     separate channel, never the content blob.
     """
-    blocks: list[str] = []
-    unrecovered: list[str] = []
-    for entry in manifest.sources:
-        if entry.role == "style_reference":
-            continue
+
+    def source_block(entry: ExtractedSource) -> str:
+        """One entry as the conversation reads it, empty when nothing was read."""
         text = read_source_content(entry)
-        if text.strip():
-            label = "Source" if entry.role == "source" else "Reference"
-            blocks.append(f"--- {label}: {entry.raw_input} ---\n\n{text}")
-        else:
-            unrecovered.append(entry.raw_input)
-    return blocks, unrecovered
+        if not text.strip():
+            return ""
+        label = "Source" if entry.role == "source" else "Reference"
+        return f"--- {label}: {entry.raw_input} ---\n\n{text}"
+
+    read = [
+        (entry, source_block(entry))
+        for entry in manifest.sources
+        if entry.role != "style_reference"
+    ]
+    return AssembledSources(
+        blocks=[block for _, block in read if block],
+        unrecovered=[entry.raw_input for entry, block in read if not block],
+    )
 
 
 async def run_extraction_agent(
@@ -207,7 +225,7 @@ async def run_extraction_agent(
         cost_accumulator=cost_accumulator,
     )
 
-    if not isinstance(result, ExtractionManifest):
+    if result is None:
         return ExtractionManifest(
             sources=[
                 ExtractedSource(

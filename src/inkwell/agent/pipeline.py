@@ -65,6 +65,18 @@ from inkwell.agent.models import (
     WritingOutput,
 )
 from inkwell.agent.content import ContentManifest
+from inkwell.agent.diversity import (
+    DEFAULT_DIVERSITY_RULES,
+    ContestedClaim,
+    DiversityReport,
+    DiversityRules,
+    JudgedClaim,
+    OneSidedVerdict,
+    contested_claims,
+    distribution_report,
+    judged_report,
+    merge_reports,
+)
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.reader_feedback import (
     ReaderFeedback,
@@ -87,6 +99,7 @@ from inkwell.agent.stages import (
     ORCHESTRATOR_PROMPT,
     PLANNER_SYSTEM,
     MERGE_PROMPT,
+    POSITION_DIVERSITY_PROMPT,
     READER_FEEDBACK_NOTE,
     REFINER_SYSTEM,
     RESEARCHER_PROMPT,
@@ -2341,6 +2354,87 @@ async def review_all(
     return list(reported())
 
 
+CITATION_DIVERSITY_ARTIFACT = "citation_diversity"
+"""Where the advisory citation rows are written for the rewrite stage to read."""
+
+
+async def judge_positions(
+    claims: list[ContestedClaim],
+    *,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> list[JudgedClaim]:
+    """Ask, per contested claim, whether every source cited for it argues one side.
+
+    One judge per claim and all of them at once: a claim's own citation set is
+    everything a verdict needs, so they share no context. A judge that fails or
+    reaches no verdict costs its own row and nothing else — the check is advisory,
+    so a missing verdict makes the report quieter rather than breaking the stage.
+    """
+
+    async def judged(claim: ContestedClaim) -> JudgedClaim | None:
+        """One claim's verdict, or nothing where the judge reached none."""
+        verdict = await query(
+            f"Judge whether the sources cited for this claim all argue the same "
+            f"side of it.\n\n{claim.render()}",
+            output_type=OneSidedVerdict,
+            model=stage_model("review"),
+            system_prompt=POSITION_DIVERSITY_PROMPT,
+            max_thinking_tokens=128_000 - 1,
+            autonomy="unattended",
+            prefix="[review:diversity] ",
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+        )
+        if verdict is None:
+            return None
+        return JudgedClaim(claim=claim, verdict=verdict)
+
+    verdicts = await asyncio.gather(
+        *(judged(claim) for claim in claims), return_exceptions=True
+    )
+
+    def reached() -> Iterator[JudgedClaim]:
+        """Every verdict that came back; a judge that failed is logged, not raised."""
+        for verdict in verdicts:
+            if isinstance(verdict, BaseException):
+                logger.error("Position-diversity judge failed: %s", verdict)
+                continue
+            if verdict is not None:
+                yield verdict
+
+    return list(reached())
+
+
+async def check_citation_diversity(
+    notes: PipelineNotes,
+    research: ResearchCompilation,
+    *,
+    plan: ArticlePlan | None = None,
+    drafts: dict[str, SectionDraft] | None = None,
+    rules: DiversityRules = DEFAULT_DIVERSITY_RULES,
+    judge: bool = True,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> DiversityReport:
+    """Both citation checks, saved where the rewrite reads them.
+
+    Advisory throughout: the report is written and returned, and nothing here
+    raises on what it found — a lean is a fact about the draft, and the stage that
+    can act on it is the one rewriting the prose. ``judge`` is what a run that
+    cannot spend a reviewer turns off; the distribution still runs, because it
+    costs only the counting.
+    """
+    computed = distribution_report(research, plan=plan, drafts=drafts, rules=rules)
+    claims = contested_claims(research, plan=plan, rules=rules) if judge else []
+    judged = await judge_positions(
+        claims, trace_logger=trace_logger, cost_accumulator=cost_accumulator
+    )
+    report = merge_reports(computed, judged_report(judged))
+    notes.save_text_artifact(CITATION_DIVERSITY_ARTIFACT, report.render())
+    return report
+
+
 class ConsolidatedFindings(BaseModel):
     """What survived the budget, and how much of it did not."""
 
@@ -2479,6 +2573,18 @@ async def rewrite_final(
                 "as corrections; they outrank other inputs on correctness"
             ),
         )
+    diversity_path = notes.text_artifact_path(CITATION_DIVERSITY_ARTIFACT)
+    if diversity_path.exists():
+        manifest.add(
+            diversity_path,
+            "review",
+            "Citation diversity",
+            instruction=(
+                "advisory — how the citations distribute, and which claims rest "
+                "on one side of an argument; nothing here is a defect to fix by "
+                "deleting a citation"
+            ),
+        )
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
     add_reader_section_refs(manifest, notes)
@@ -2489,6 +2595,15 @@ async def rewrite_final(
         manifest, notes, draft_content, draft_path, target_format=target_format
     )
 
+    diversity_note = (
+        "Where the citation diversity rows report a lean, or a claim whose "
+        "sources all argue one side, act on it in the prose: attribute the lean "
+        "where it stands, or say plainly that the claim rests on one camp and "
+        "name the side that is missing. Never answer a row by deleting a "
+        "citation. "
+        if diversity_path.exists()
+        else ""
+    )
     format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f"Produce the final version of this piece.\n\n"
@@ -2505,6 +2620,7 @@ async def rewrite_final(
         f"their quality while editing around them. "
         f"Apply all critical findings and worthwhile suggestions. "
         f"Use list_research + read_finding to verify corrections against research findings. "
+        f"{diversity_note}"
         f"If a style rules file is available, read it and enforce every "
         f"hard editing rule with zero remaining violations.\n\n"
         f"Write the final piece to: {output_path}\n\n"
@@ -4584,6 +4700,7 @@ class PipelineRunner:
                 cost_accumulator=self.cost_accumulator,
                 light=self.light,
             )
+        await self.check_diversity()
         await self.post_author_notes()
         consolidated = consolidate_findings(findings)
         findings = consolidated.findings
@@ -4598,6 +4715,32 @@ class PipelineRunner:
         )
         await self.write_review_tab(findings)
         await self.update_overview()
+
+    async def check_diversity(self) -> None:
+        """Report how the citations distribute and where they argue one side.
+
+        Advisory: the rows are saved for the rewrite to read, and the ones naming
+        a missing side join the author notes so they reach the author's document
+        as a comment. A run without research has no citations to weigh, and a
+        light run keeps the free distribution but not the judged pass.
+        """
+        research = self.snapshot.research
+        if research is None:
+            return
+        report = await check_citation_diversity(
+            self.ensure_notes(),
+            research,
+            plan=self.snapshot.plan,
+            drafts=self.snapshot.section_drafts,
+            judge=not self.light,
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        self.author_notes.extend(report.author_notes())
+        await self.hooks.on_progress(
+            f"Citation diversity: {len(report.rows)} advisory row(s) from "
+            f"{len(report.tallies)} tallies, {report.judged} contested claim(s) judged"
+        )
 
     async def stage_resolve(self) -> None:
         """Answer source-answerable open questions before the rewrite.

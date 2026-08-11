@@ -70,6 +70,18 @@ class CitedSource(BaseModel):
         default="",
         description=f"Publication date as recorded (ISO 8601), or {UNDATED!r}",
     )
+    organization: str = Field(
+        default="",
+        description=(
+            "Who published it, as research recorded it; empty where nobody did. "
+            "Cite three sources from one organization and the piece leans on one "
+            "organization, whatever their URLs look like"
+        ),
+    )
+    authors: list[str] = Field(
+        default_factory=list,
+        description="Whose names are on it, as research recorded them",
+    )
     role: EvidentialRole | None = Field(
         default=None,
         description=(
@@ -94,6 +106,8 @@ def cited_source(source: ResearchSource) -> CitedSource:
         published=source.published(),
         role=recorded.role if recorded is not None else None,
         attributed_to=recorded.attributed_to if recorded is not None else "",
+        organization=recorded.organization if recorded is not None else "",
+        authors=recorded.authors if recorded is not None else [],
     )
 
 

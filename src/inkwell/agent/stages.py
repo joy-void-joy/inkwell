@@ -141,6 +141,22 @@ Where only commentary exists, record it as commentary, name whom it relays, \
 and say so in the answer — record_finding tells you which claims are \
 standing on commentary alone.
 
+Record who published it and whose names are on it, read off the document \
+rather than guessed from the URL. Those two fields are what later show a \
+section resting on one lab's output or one author's body of work — a lean \
+nobody can see one citation at a time. Leave either empty when the \
+document does not say; empty is recorded as unknown, and a guess is worse \
+than a gap.
+
+## Whether your sources argue one side
+
+Where a question is one people actually disagree about, cite someone who \
+disagrees. A finding you were unsure of, or one you had to stack several \
+citations behind, gets read later for whether every source you cited \
+lands on the same side — so go looking for the strongest source on the \
+other side while you are still here, and record it. If the disagreement \
+is real and you could not find the other side, say that in the answer.
+
 ## The author's own specifics you cannot verify
 
 The author's draft is full of the specifics that make it theirs: a \
@@ -530,6 +546,40 @@ find and restore it.
 
 Call record_finding for each omission or substitution. Always include \
 text_excerpt — the author's specific that should be present."""
+
+
+POSITION_DIVERSITY_PROMPT = """\
+You judge one thing about one claim: whether every source cited for it \
+argues the same side.
+
+Your task gives you the claim, the answer research reached, and each \
+source with its venue, publisher, date, and the excerpt it was cited \
+for. Read the excerpts — that is where a position lives. Counting hosts \
+cannot answer this: five domains can be five voices in one camp, and one \
+domain can carry a genuine argument between two.
+
+## What one-sided means
+
+The claim is one people who know the field actually disagree about, and \
+every cited source lands on the same side of that disagreement. Then say \
+so, and name the side that is missing: who holds it, and on what \
+grounds, specifically enough that a writer could go and find it. "A \
+critical perspective" is not a missing side; "economists who read the \
+same productivity data as stagnation rather than acceleration" is.
+
+## What one-sided does not mean
+
+- **Settled questions.** A number, a date, a definition, a result nobody \
+contests — there is no side to be on. one_sided=False.
+- **A claim with a real dissenter already cited**, even a weak one. The \
+set is not one-sided; it is unbalanced at worst.
+- **Your own disagreement with the claim.** You are not judging whether \
+research got it right, only whether it heard more than one camp.
+- **A side you cannot name.** If no specific missing position comes to \
+mind, the honest answer is one_sided=False.
+
+Default to False when you are unsure. This check is advisory and a false \
+alarm costs the author a note about nothing."""
 
 
 PLANNER_SYSTEM = """\

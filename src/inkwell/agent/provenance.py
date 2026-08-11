@@ -414,13 +414,18 @@ class Acquisition(BaseModel):
 
 
 class SourceProvenance(BaseModel):
-    """The two axes and the date, as recorded for one cited source.
+    """What was recorded about one cited source: the two axes, the date, and who.
 
-    Nothing here is optional, because absence is carried one level up:
+    The axes and the date are required, because absence is carried one level up:
     ``ResearchSource.provenance`` is ``None`` on an artifact written before
     provenance was recorded. A block that is present was recorded deliberately,
     so ``published == UNDATED`` means a source with no date rather than a
     question nobody asked.
+
+    Where the document was served from, who published it, and whose names are on
+    it default to empty, and empty reads as unknown: a distribution over
+    organizations has to be able to say that nobody recorded one, rather than
+    counting the blank as an organization of its own.
     """
 
     venue: Venue = Field(
@@ -436,6 +441,29 @@ class SourceProvenance(BaseModel):
     )
     acquired_via: AcquisitionPath = Field(
         description="The acquisition path the venue was derived from"
+    )
+    domain: str = Field(
+        default="",
+        description=(
+            "Host the document was served from, taken off the acquisition when "
+            "the source was recorded; empty for the author's own material, which "
+            "came from a path rather than a host"
+        ),
+    )
+    organization: str = Field(
+        default="",
+        description=(
+            "Who published it — the journal, lab, agency, outlet, or site. Empty "
+            "where nobody recorded one, which reads as unknown rather than as "
+            "an organization of its own"
+        ),
+    )
+    authors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Whose names are on it, as the document gives them. Empty where the "
+            "document carries no byline or nobody recorded it"
+        ),
     )
     attributed_to: str = Field(
         default="",

@@ -12,8 +12,9 @@ import logging
 from typing import TypedDict
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field
 
+from inkwell.agent.provenance import Acquisition
 from lup.mcp import ToolError, lup_tool
 from lup.types import JsonValue
 
@@ -28,6 +29,10 @@ class MarketResult(TypedDict):
     volume: float | None
     liquidity: float | None
     close_date: str | None
+    acquisition: Acquisition
+    """How this price was acquired — record_finding takes it as it stands and
+    derives the venue from it. A market price is dated by when it was read, not
+    by a publication date, so record_finding asks for that date."""
 
 
 class PolymarketSearchInput(BaseModel):
@@ -169,11 +174,16 @@ async def query_polymarket(query: str, limit: int) -> list[MarketResult]:
         resp.raise_for_status()
         events = POLYMARKET_EVENTS.validate_python(resp.json())
 
+    def event_url(event: PolymarketEvent) -> str:
+        """Where a reader opens this market, empty when the event names no slug."""
+        return f"https://polymarket.com/event/{event.slug}" if event.slug else ""
+
     return [
         MarketResult(
             platform="polymarket",
             title=event.title or event.markets[0].question,
-            url=f"https://polymarket.com/event/{event.slug}" if event.slug else "",
+            url=event_url(event),
+            acquisition=Acquisition(path="prediction_market", url=event_url(event)),
             probability=event.markets[0].probability(),
             volume=safe_float(event.markets[0].volume),
             liquidity=safe_float(event.markets[0].liquidity_num),
@@ -198,15 +208,18 @@ async def query_manifold(query: str, limit: int) -> list[MarketResult]:
         resp.raise_for_status()
         markets = MANIFOLD_MARKETS.validate_python(resp.json())
 
+    def market_url(market: ManifoldMarket) -> str:
+        """Where a reader opens this market, empty when it names no slug."""
+        if not market.slug:
+            return ""
+        return f"https://manifold.markets/{market.creator_username}/{market.slug}"
+
     return [
         MarketResult(
             platform="manifold",
             title=m.question,
-            url=(
-                f"https://manifold.markets/{m.creator_username}/{m.slug}"
-                if m.slug
-                else ""
-            ),
+            url=market_url(m),
+            acquisition=Acquisition(path="prediction_market", url=market_url(m)),
             probability=safe_float(m.probability),
             volume=safe_float(m.volume),
             liquidity=safe_float(m.total_liquidity),
@@ -310,6 +323,12 @@ class PolymarketPriceOutput(BaseModel):
     history: list[PriceHistoryPoint] = Field(
         default_factory=list, description="Recent price history"
     )
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How this price was acquired — copy it into record_finding as it stands."""
+        return Acquisition(path="prediction_market", url=self.url)
 
 
 @lup_tool(

@@ -12,6 +12,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.config import current_settings
+from inkwell.agent.provenance import Acquisition
 from lup.workspace.content_safety import save_content
 from lup.mcp import ToolError, lup_tool
 from lup.types import JsonObject
@@ -43,6 +44,17 @@ class WireResult(BaseModel):
             return None
         return self.published_date.removesuffix(UTC_SUFFIX)
 
+    def acquisition(self) -> Acquisition:
+        """How this hit was acquired, carrying the date Exa reported for it.
+
+        A semantic search reaches whatever is indexed, so the path settles
+        nothing about the venue and the host decides — which is exactly why the
+        record travels with the result instead of being recalled later.
+        """
+        return Acquisition(
+            path="exa_search", url=self.url, published=self.published_at() or ""
+        )
+
 
 class WireSearchResponse(BaseModel):
     """What an Exa search answers with."""
@@ -61,6 +73,10 @@ class ExaResult(TypedDict):
     score: float | None
     full_text_path: str | None
     """Path to the full result text on disk — Read it for complete content."""
+    acquisition: Acquisition
+    """How this result was acquired, carrying the date Exa reported for it.
+    record_finding takes it as it stands: a semantic search reaches anything, so
+    the venue derived from it comes from the host rather than from the search."""
 
 
 class ExaSearchInput(BaseModel):
@@ -161,6 +177,7 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
 
     results = [
         ExaResult(
+            acquisition=hit.acquisition(),
             title=hit.title or None,
             url=hit.url or None,
             snippet=hit.text[:SNIPPET_LENGTH] or None,

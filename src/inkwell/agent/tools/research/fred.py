@@ -9,14 +9,17 @@ from typing import TypedDict
 
 import httpx
 from httpx import QueryParams
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from inkwell.agent.config import current_settings
+from inkwell.agent.provenance import Acquisition
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
 
 FRED_BASE = "https://api.stlouisfed.org/fred"
+SERIES_PAGE = "https://fred.stlouisfed.org/series"
+"""Where a series is read by a person, which is what a citation points at."""
 MISSING_VALUE = "."
 """What FRED writes in an observation it has no reading for."""
 
@@ -156,6 +159,21 @@ class FredSeriesOutput(BaseModel):
     info: FredSeriesInfo = Field(description="Series metadata")
     observations: list[FredObservation] = Field(description="Data points")
     count: int = Field(description="Number of observations returned")
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How this series was acquired — copy it into record_finding as it stands.
+
+        FRED serves datasets, so the venue follows from the path. The date a
+        dataset citation needs is its vintage, which is when the series was last
+        revised — cite a figure from a series and the revision is what dates it.
+        """
+        return Acquisition(
+            path="fred",
+            url=f"{SERIES_PAGE}/{self.series_id}",
+            published=self.info["last_updated"],
+        )
 
 
 def get_api_key() -> str:

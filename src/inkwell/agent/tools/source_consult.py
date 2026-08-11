@@ -19,10 +19,11 @@ from itertools import islice
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from inkwell.agent.config import stage_model
 from inkwell.agent.client import query, result_text
+from inkwell.agent.provenance import Acquisition
 from lup.runtime.usage import CostAccumulator
 from lup.mcp import LupMcpTool, ToolError, lup_tool
 from lup.telemetry.trace import TraceLogger
@@ -46,6 +47,17 @@ class SourceDocument(BaseModel):
         default="",
         description="Directory of per-page extracted text (navigation only)",
     )
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How a citation of this document was acquired — the author's own material.
+
+        The venue derived from it says exactly that: this is the source the piece
+        is about, and it is the authority for what it itself says. Its date is the
+        author's to state, so record_finding asks for it.
+        """
+        return Acquisition(path="source_document", url=self.path)
 
 
 def registry_path_for(artifacts_dir: Path) -> Path:
@@ -226,6 +238,12 @@ class ConsultSourceInput(BaseModel):
 class ConsultSourceOutput(BaseModel):
     answer: str = Field(description="Verbatim quotes with page numbers + synthesis")
     label: str = Field(description="Document consulted")
+    acquisition: Acquisition = Field(
+        description=(
+            "How this document was acquired — copy it into record_finding, "
+            "with the page number from the answer as the locator"
+        )
+    )
 
 
 class ListSourceDocumentsInput(BaseModel):
@@ -353,7 +371,9 @@ def make_source_consult_tools(
                 "The reader produced no answer; retry with a narrower question "
                 "or an explicit page range."
             )
-        return ConsultSourceOutput(answer=answer, label=doc.label)
+        return ConsultSourceOutput(
+            answer=answer, label=doc.label, acquisition=doc.acquisition
+        )
 
     @lup_tool(
         "List the source documents registered for this session, with labels, "

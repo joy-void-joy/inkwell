@@ -15,8 +15,10 @@ from inkwell.agent.models import (
     ArticlePlan,
     ResearchCompilation,
     ResearchFinding,
+    ResearchSource,
     SectionPlan,
 )
+from inkwell.agent.provenance import UNDATED, EvidentialRole, Venue
 from inkwell.agent.tools.citations import BibliographyEntry
 
 logger = logging.getLogger(__name__)
@@ -51,11 +53,55 @@ class ReadFindingInput(BaseModel):
     )
 
 
+class CitedSource(BaseModel):
+    """One source as a later stage needs it in order to weigh it.
+
+    A URL alone cannot say whether the document was peer-reviewed or posted to a
+    forum, or whether it is where the claim originated — so what research
+    recorded travels with it rather than being guessed at again here.
+    """
+
+    url: str = Field(description="Where the source is")
+    title: str = Field(description="Source title")
+    venue: Venue = Field(
+        default="unknown", description="Venue authority as research recorded it"
+    )
+    published: str = Field(
+        default="",
+        description=f"Publication date as recorded (ISO 8601), or {UNDATED!r}",
+    )
+    role: EvidentialRole | None = Field(
+        default=None,
+        description=(
+            "What this source is evidence of for this finding: 'commentary' "
+            "relays a claim that originated elsewhere, and attributed_to names "
+            "whose — cite the originator's own work for their thesis, or say in "
+            "the text whose reading this is. Absent on an older artifact"
+        ),
+    )
+    attributed_to: str = Field(
+        default="", description="Whose claim a commentary source relays"
+    )
+
+
+def cited_source(source: ResearchSource) -> CitedSource:
+    """One source with the axes research recorded, defaulted where it recorded none."""
+    recorded = source.provenance
+    return CitedSource(
+        url=source.url,
+        title=source.title,
+        venue=source.venue(),
+        published=source.published(),
+        role=recorded.role if recorded is not None else None,
+        attributed_to=recorded.attributed_to if recorded is not None else "",
+    )
+
+
 class FindingDetail(BaseModel):
     question: str
     answer: str
     confidence: float
-    source_urls: list[str]
+    sources: list[CitedSource]
     data_points: list[str]
 
 
@@ -66,6 +112,16 @@ class ReadFindingOutput(BaseModel):
 class ListSourcesOutput(BaseModel):
     sources: list[BibliographyEntry]
     total: int
+    provenance_gaps: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the recorded provenance shows the research is missing — a "
+            "claim reached only through commentary on it, a finding resting on "
+            "background alone. Read these before citing: a claim attributed to "
+            "someone whose own work was never read needs the attribution said "
+            "out loud in the text"
+        ),
+    )
 
 
 class QueryPlanInput(BaseModel):
@@ -161,7 +217,10 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
         "list_research first to see all available findings, then call this "
         "with the questions you want. Matches fuzzily — a substring or "
         "slight rewording of the original question works. Returns the "
-        "complete answer, source URLs, and extracted data points.",
+        "complete answer, extracted data points, and each source with the "
+        "venue and evidential role research recorded for it — a source marked "
+        "'commentary' relays someone else's claim, so cite the originator's own "
+        "work or say in the text whose reading it is.",
         name="read_finding",
     )
     async def read_finding(inp: ReadFindingInput) -> ReadFindingOutput:
@@ -183,7 +242,7 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
                 question=match.question,
                 answer=match.answer,
                 confidence=match.confidence,
-                source_urls=[s.url for s in match.sources],
+                sources=[cited_source(s) for s in match.sources],
                 data_points=match.data_points,
             )
 
@@ -229,9 +288,11 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
 
     @lup_tool(
         "List all unique sources from research findings as citation candidates. "
-        "Returns deduplicated sources with title, URL, and any available metadata. "
-        "Use before format_bibliography to see what sources are available for "
-        "building a reference section.",
+        "Returns deduplicated sources with title, URL, the venue and publication "
+        "date recorded during research, and any gaps that record shows — such as "
+        "a claim reached only through commentary on it. Use before "
+        "format_bibliography to see what sources are available for building a "
+        "reference section, and pass the venue and date through unchanged.",
         name="list_sources",
     )
     async def list_sources(_inp: EmptyInput) -> ListSourcesOutput:
@@ -241,14 +302,37 @@ def make_query_tools(artifacts_dir: Path) -> list[LupMcpTool]:
                 "No research artifact found — research stage hasn't run yet"
             )
 
+        def candidate(source: ResearchSource) -> BibliographyEntry:
+            """One citation candidate, carrying the venue and date research recorded.
+
+            An older artifact recorded neither, which is what the defaults stand
+            for — an unknown venue here means nobody derived one, not that the
+            derivation came back empty.
+            """
+            return BibliographyEntry(
+                title=source.title,
+                url=source.url,
+                key_excerpt=source.key_excerpt,
+                venue=source.venue(),
+                published=source.published(),
+            )
+
         cited = [source for finding in research.findings for source in finding.sources]
         entries = [
-            BibliographyEntry(
-                title=source.title, url=source.url, key_excerpt=source.key_excerpt
-            )
+            candidate(source)
             for index, source in enumerate(cited)
             if not any(earlier.url == source.url for earlier in cited[:index])
         ]
-        return ListSourcesOutput(sources=entries, total=len(entries))
+        return ListSourcesOutput(
+            sources=entries,
+            total=len(entries),
+            provenance_gaps=sorted(
+                {
+                    gap
+                    for finding in research.findings
+                    for gap in finding.provenance_gaps()
+                }
+            ),
+        )
 
     return [list_research, read_finding, query_plan, list_sources]

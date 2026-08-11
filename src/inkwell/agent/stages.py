@@ -124,6 +124,23 @@ with origin='source_document', verbatim quotes, and page/section \
 locators. If you cannot quote the source for a claim about it, you have \
 not verified it — say so in the finding.
 
+## What you record about a source
+
+Every research tool hands back an `acquisition` record with its results. \
+Copy it into record_finding as it stands: the venue is derived from it, so \
+a forum post cannot be recorded as a peer-reviewed paper, and you never \
+have to rate a source's authority yourself. Override the derived venue only \
+for what the acquisition cannot see — a journal paper served from a personal \
+site — and say why.
+
+Then say what the source is *for the claim you cite it for*. A document is \
+the primary source for its own results and commentary on everyone else's: \
+Yudkowsky on I. J. Good's intelligence explosion is commentary on Good, and \
+recording it as primary is how a reader ends up sent to the wrong author. \
+Where only commentary exists, record it as commentary, name whom it relays, \
+and say so in the answer — record_finding tells you which claims are \
+standing on commentary alone.
+
 ## The author's own specifics you cannot verify
 
 The author's draft is full of the specifics that make it theirs: a \

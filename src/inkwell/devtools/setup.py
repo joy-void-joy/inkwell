@@ -31,7 +31,7 @@ from lup.devtools.setup import clear_env_file
 from lup.types import EnvVars
 
 from inkwell.agent.client import PROVIDER_LOGIN, RUNTIME
-from inkwell.agent.config import active_profile, select_profile
+from inkwell.agent.config import PROFILES_DIR, active_profile, select_profile
 
 app = typer.Typer(
     help="Interactive setup wizard",
@@ -42,7 +42,6 @@ app = typer.Typer(
 console = Console()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PROFILES_DIR = PROJECT_ROOT / "profiles"
 ENV_LOCAL = PROJECT_ROOT / ".env.local"
 CREDENTIALS_DIR = PROJECT_ROOT / "credentials"
 GOOGLE_CREDS_PATH = CREDENTIALS_DIR / "google.json"

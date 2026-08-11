@@ -47,11 +47,11 @@ class TestSettingsContext:
 
         await asyncio.gather(
             asyncio.create_task(session("a", "claude-fable-5", "single")),
-            asyncio.create_task(session("b", "claude-opus-4-6", "parallel")),
+            asyncio.create_task(session("b", "claude-opus-5", "parallel")),
         )
 
         assert observed["a"] == ["claude-fable-5", "single", "claude-fable-5"]
-        assert observed["b"] == ["claude-opus-4-6", "parallel", "claude-opus-4-6"]
+        assert observed["b"] == ["claude-opus-5", "parallel", "claude-opus-5"]
 
     async def test_child_tasks_inherit_session_settings(self) -> None:
         token = active_settings.set(make_settings(model="claude-fable-5"))
@@ -68,12 +68,12 @@ class TestSettingsContext:
         assert current_settings() is config_mod.settings
 
     async def test_stage_override_wins_inside_context(self) -> None:
-        s = make_settings(model="claude-opus-4-6")
-        s.stage_models = {"reader": "claude-haiku-4-5-20251001"}
+        s = make_settings(model="claude-opus-5")
+        s.stage_models = {"reader": "claude-haiku-4-5"}
         token = active_settings.set(s)
         try:
-            assert stage_model("reader") == "claude-haiku-4-5-20251001"
-            assert stage_model("plan") == "claude-opus-4-6"
+            assert stage_model("reader") == "claude-haiku-4-5"
+            assert stage_model("plan") == "claude-opus-5"
         finally:
             active_settings.reset(token)
 

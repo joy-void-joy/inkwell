@@ -48,7 +48,30 @@ which follow resolve against it. A holder rather than a rebound module-level
 name, so `select_profile` needs no `global`."""
 
 
-ACTIVE_PROFILE_FILE = Path("profiles/.active")
+def profile_store_root() -> Path:
+    """The checkout holding ``profiles/``, shared by every worktree of this repo.
+
+    A profile is an account store rather than a per-branch artifact, and
+    ``profiles/`` is gitignored, so it exists only in the main working tree.
+    Resolving it against the running checkout instead would find nothing from a
+    worktree and fall back to the unprofiled defaults — billing whichever login
+    the process inherited and dropping every key the profile holds, silently.
+
+    A worktree's ``.git`` is the gitfile naming the shared directory, so the
+    main tree is two levels above what it points at.
+    """
+    checkout = Path(__file__).resolve().parents[3]
+    gitfile = checkout / ".git"
+    if not gitfile.is_file():
+        return checkout
+    gitdir = gitfile.read_text(encoding="utf-8").removeprefix("gitdir:").strip()
+    return Path(gitdir).resolve().parents[2]
+
+
+PROFILES_DIR = profile_store_root() / "profiles"
+"""Where every profile directory lives, for whichever checkout is running."""
+
+ACTIVE_PROFILE_FILE = PROFILES_DIR / ".active"
 """Where selecting a profile records it, for the runs that name none.
 
 Consulted last, so an explicit argument and ``INKWELL_PROFILE`` both still
@@ -77,7 +100,7 @@ def select_profile(profile: str | None) -> None:
 def env_files_for(profile: str | None) -> tuple[str, ...]:
     """The env file chain a profile reads, most general first."""
     if profile:
-        return (".env", f"profiles/{profile}/env")
+        return (".env", str(PROFILES_DIR / profile / "env"))
     return (".env", ".env.local")
 
 
@@ -110,9 +133,9 @@ PIPELINE_STAGES: tuple[PipelineStage, ...] = get_args(PipelineStage.__value__)
 """Stage names accepted by per-stage model overrides, in pipeline order."""
 
 SUGGESTED_MODELS: tuple[str, ...] = (
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
 )
 """Model ids offered in pickers; any model id string is accepted."""
 
@@ -241,7 +264,7 @@ class Settings(BaseSettings):
     # ==========================================================================
 
     model: str = Field(
-        default="claude-opus-4-6",
+        default="claude-opus-5",
         validation_alias="AGENT_MODEL",
         description="Default Claude model for all pipeline stages",
     )

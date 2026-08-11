@@ -17,7 +17,7 @@ from inkwell.agent.client import client_env, query, result_text
 pytestmark = pytest.mark.integration
 
 CODEWORD = "GANYMEDE"
-HAIKU = "claude-haiku-4-5-20251001"
+HAIKU = "claude-haiku-4-5"
 
 needs_api_key = pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"),

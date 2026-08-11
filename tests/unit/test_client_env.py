@@ -43,7 +43,7 @@ def test_client_env_reaches_the_session_request(
 
     token = client.client_env.set({CONFIG_HOME: "/tmp/cesia"})
     try:
-        client.provider_factory(model="claude-opus-4-6")
+        client.provider_factory(model="claude-opus-5")
     finally:
         client.client_env.reset(token)
 
@@ -56,6 +56,6 @@ def test_no_client_env_leaves_the_config_home_unset(
     captured.clear()
     monkeypatch.setattr(client, "RUNTIME", RECORDING_RUNTIME)
 
-    client.provider_factory(model="claude-opus-4-6")
+    client.provider_factory(model="claude-opus-5")
 
     assert CONFIG_HOME not in captured["request"].environment

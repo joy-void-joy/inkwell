@@ -287,6 +287,12 @@ def decide_sed_words(words: list[str]) -> KernelDecision:
             continue
         if word.startswith("--"):
             name, separator, value = word.partition("=")
+            # lup: Seems counterproductive not to just accept sed here. A real
+            # denial read: "escalated (renaming one keyword argument at 38
+            # identical call sites across 9 files; the substitution is
+            # exact-string and the result is verified by pyright plus the
+            # suite): in-place sed bypasses the edit policy — use Edit". An
+            # escalation carrying that reason should get through.
             if name in ("--in-place", "--inplace"):
                 return KernelDecision(
                     "deny", "in-place sed bypasses the edit policy — use Edit"
@@ -514,6 +520,88 @@ def decide_curl_words(
         if verdict.effect != "allow":
             return verdict
     return KernelDecision("allow", "read-only curl within declared scopes")
+
+
+# lup: (Re)-installing lup, or clearing the cache, should be auto-allowed.
+# `uv cache clean lup && uv lock --upgrade-package lup && uv sync --all-extras`
+# needed a leading escalate marker and *still* asked, on "dependency changes
+# fetch and execute external code" — for a refresh of a dependency the project
+# already declares. The gh block below sits between this note and `decide_uv`,
+# which is its subject.
+# lup: ignore[library-default] — gh's own value-taking flags; misreading one shifts the argument scan
+GH_API_VALUE_FLAGS = (
+    "-H",
+    "--header",
+    "-q",
+    "--jq",
+    "-t",
+    "--template",
+    "--cache",
+    "--hostname",
+    "-p",
+    "--preview",
+)
+# lup: ignore[library-default] — gh's own flags that send a request body, which is what makes a call a write however it is spelled
+GH_API_BODY_FLAGS = (
+    "-f",
+    "--raw-field",
+    "-F",
+    "--field",
+    "--input",
+)
+# lup: ignore[library-default] — the HTTP methods that do not change state; the same pair the curl screen reads, fixed by the protocol rather than by a project's taste
+GH_API_READ_METHODS = ("GET", "HEAD")
+
+
+def decide_gh_api_words(words: list[str]) -> KernelDecision:
+    """Allow only read-method ``gh api`` calls, the way curl is screened.
+
+    ``gh api`` is the read path for everything the typed ``gh`` subcommands
+    cannot express, so a blanket ask on it asks about the ordinary case. What
+    separates a read from a write here is the same thing that separates them
+    in curl: the method, plus whether a body is being sent. A field flag
+    implies POST even with no ``-X``, which is why it decides on its own
+    rather than only informing the method.
+    """
+    method = "GET"
+    expect_value = False
+    expect_method = False
+    for word in words[2:]:
+        if expect_value:
+            expect_value = False
+            continue
+        if expect_method:
+            method = word
+            expect_method = False
+            continue
+        if word in ("-X", "--method"):
+            expect_method = True
+            continue
+        if word.startswith("--method="):
+            method = word.partition("=")[2]
+            continue
+        if word in GH_API_BODY_FLAGS or word.partition("=")[0] in GH_API_BODY_FLAGS:
+            return KernelDecision(
+                "ask", "gh api sending a request body can change remote state"
+            )
+        if word in GH_API_VALUE_FLAGS:
+            expect_value = True
+            continue
+        if word.partition("=")[0] in GH_API_VALUE_FLAGS:
+            continue
+        if word.startswith("-"):
+            return unjudged(f"gh api option {word!r} is not classified")
+        if opaque_argument(word):
+            return unjudged(
+                "a gh api endpoint that expands at run time is not classified"
+            )
+    if expect_value or expect_method:
+        return unjudged("gh api option has no value")
+    if method.upper() not in GH_API_READ_METHODS:
+        return KernelDecision(
+            "ask", f"gh api {method} can change remote state — requires approval"
+        )
+    return KernelDecision("allow", "read-only gh api call")
 
 
 def decide_uv(words: list[str], runner_targets: list[str]) -> KernelDecision:

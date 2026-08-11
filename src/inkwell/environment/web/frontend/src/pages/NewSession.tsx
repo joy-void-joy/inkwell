@@ -229,7 +229,7 @@ export function NewSession() {
     fetchProfiles()
       .then((p) => {
         setProfiles(p);
-        if (p.length > 0 && !selectedProfile) setSelectedProfile(p[0].name);
+        if (p.length > 0) setSelectedProfile((current) => current || p[0].name);
       })
       .catch(() => {});
     fetchModelOptions()

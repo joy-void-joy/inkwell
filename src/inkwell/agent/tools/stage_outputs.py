@@ -21,6 +21,7 @@ from lup.mcp import LupMcpTool, ToolError, ToolResponse, mcp_response
 from lup.telemetry.metrics import collector as metrics_collector
 from lup.types import JsonObject
 
+from inkwell.agent.format_checks import DeclaredCheck
 from inkwell.agent.models import (
     Assumption,
     AssumptionsList,
@@ -273,6 +274,91 @@ def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
             ),
             AddSourceQuoteInput,
             handle_quote,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Format checks a custom format declares for itself
+# ---------------------------------------------------------------------------
+
+
+class DeclaredChecks(BaseModel):
+    """The rows a run declared for a format Python does not describe."""
+
+    checks: list[DeclaredCheck] = Field(
+        default_factory=list, description="The declared rows, in declared order"
+    )
+
+
+class DeclareFormatCheckInput(BaseModel):
+    check: DeclaredCheck = Field(
+        description=(
+            "The row to declare. `kind` selects which row it is and the rest "
+            "of the fields are that row's own; every kind carries a `name` the "
+            "report prints and a `rule` — the one sentence the row measures, "
+            "which the writer is shown before drafting."
+        )
+    )
+
+
+class FormatCheckCollector:
+    """Accumulates the rows a custom format declares, persisting after each.
+
+    A format invented for one run gets the same checking a built-in one has,
+    because the rows it declares here are the same declarations Python uses.
+    """
+
+    def __init__(self, output_path: Path) -> None:
+        self.output_path = output_path
+        self.declared = DeclaredChecks()
+
+    def save(self) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text(
+            self.declared.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+
+def load_declared_checks(path: Path) -> list[DeclaredCheck]:
+    """The rows a run declared for its format, or none when it declared any.
+
+    Validated back through the same union the tool validated them into, so a
+    row that survives the round trip is a row the checker can run.
+    """
+    if not path.exists():
+        return []
+    return DeclaredChecks.model_validate_json(path.read_text(encoding="utf-8")).checks
+
+
+def make_format_check_tools(collector: FormatCheckCollector) -> list[LupMcpTool]:
+    """The tool a custom-format run declares its own checkable rules with."""
+
+    async def handle_check(inp: DeclareFormatCheckInput) -> ToolOk:
+        collector.declared.checks.append(inp.check)
+        collector.save()
+        return ToolOk()
+
+    return [
+        build_stage_tool(
+            "declare_format_check",
+            (
+                "Declare one checkable rule for this run's output format. The "
+                "built-in formats declare their rules in Python; a format "
+                "invented for this run declares them here, so its rules are "
+                "measured rather than merely stated.\n\n"
+                "Reach for this when the format description carries a rule a "
+                "machine could verify off the finished draft — a banned "
+                "phrase, a length, a bolding convention, a rhythm — or a rule "
+                "only a reader could judge, which the `judged` kind spends a "
+                "reviewer on. Each row is re-read against every draft and "
+                "reported back to the rewrite stage. Rows are advisory: they "
+                "never block a stage, and the author's voice outranks them.\n\n"
+                "Declare a row once per rule. A format whose description "
+                "carries nothing measurable needs no rows."
+            ),
+            DeclareFormatCheckInput,
+            handle_check,
         ),
     ]
 

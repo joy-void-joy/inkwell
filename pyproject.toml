@@ -42,10 +42,20 @@ dependencies = [
     "pymupdf>=1.27.2.3",
     "pyvirtualdisplay>=3.0",
     "sh>=2.2.2",
+    "syntok>=1.4.4",
     "trafilatura>=2.0.0",
     "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
 ]
+
+[project.optional-dependencies]
+# Where a part-of-speech implementation of the sentence seam would go. Nothing
+# installs or imports this: spaCy publishes no wheel for the 3.14 floor this
+# project pins, so installing it would mean a source build of Cython, thinc,
+# and blis. The declaration records the drop-in point — SpacySegmenter behind
+# the same Segmenter seam, with the copula and participial-tail rows reading a
+# parse instead of a declared list — for once a wheel exists.
+pos = ["spacy>=3.8", "en-core-web-sm"]
 
 [project.scripts]
 inkwell = "inkwell.environment.cli.__main__:app"
@@ -75,6 +85,7 @@ agent_version = "0.2.0"
 
 [tool.uv.sources]
 lup = { git = "https://github.com/joy-void-joy/lup", branch = "dev", subdirectory = "packages/lup" }
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 
 [build-system]
 requires = ["setuptools>=61.0"]

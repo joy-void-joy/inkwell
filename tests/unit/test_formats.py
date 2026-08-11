@@ -27,6 +27,18 @@ class TestSplitSentences:
         result = split_sentences("Why? Because! That's how.")
         assert len(result) == 3
 
+    def test_abbreviation_does_not_end_a_sentence(self) -> None:
+        """A real segmenter, not a rule about the character before a space."""
+        assert split_sentences("Dr. Chen ran the study. It replicated.") == [
+            "Dr. Chen ran the study.",
+            "It replicated.",
+        ]
+
+    def test_decimal_does_not_end_a_sentence(self) -> None:
+        assert (
+            len(split_sentences("Accuracy hit 92.4 percent on the held-out set.")) == 1
+        )
+
 
 class TestFormatLesswrong:
     def test_adds_epistemic_status(self) -> None:

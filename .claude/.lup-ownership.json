@@ -380,7 +380,7 @@
     {
       "path": "docs/inkwell.md",
       "category": "generated",
-      "sha256": "4611b8abaa219c4284bc6f055de5cb5cc53c0bf68ed0690d4ddcefff06f1588b",
+      "sha256": "bc625e636c20759d2594802bc59652d81d6609c5620a90e57c3636c1cebdfa4f",
       "semantic_id": "docs.inkwell",
       "executable": false
     },

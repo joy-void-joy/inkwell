@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from inkwell.corpus.discovery import DiscoveryOutcome
 from inkwell.corpus.quality import QualityReport
 from inkwell.corpus.registry import Authority, SourceDeclaration
+from inkwell.corpus.tags import DocumentTags
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,11 @@ class StoredDocument(BaseModel):
     ``abstract`` and ``page_count`` are what make a PDF locatable without
     transcribing it: enough for a reader to decide the document is worth
     opening, and a page count so a page range is a meaningful request.
+
+    ``abstract`` and ``summary`` are separate fields and never fill in for one
+    another silently: the first is the document's own opening prose, the second
+    is a judgement *about* the document. Merging them would mean an index that
+    sometimes quotes and sometimes paraphrases without saying which.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -94,10 +100,12 @@ class StoredDocument(BaseModel):
     filename: str = ""
     content_sha256: str = ""
     abstract: str = ""
+    summary: str = ""
     page_count: int = 0
     words: int = 0
     fetched_at: str = ""
     quality: QualityReport = QualityReport()
+    tags: DocumentTags = DocumentTags()
 
     def is_pdf(self) -> bool:
         return self.kind == "pdf"
@@ -176,6 +184,21 @@ class SourceShard(BaseModel):
     def categories(self) -> tuple[str, ...]:
         """Every category this source's stored documents fall under."""
         return tuple(sorted({document.category for document in self.documents}))
+
+    def tags(self) -> tuple[str, ...]:
+        """Every tag this source's stored documents carry — what a browse of it
+        can actually narrow on, as opposed to what the vocabulary offers."""
+        return tuple(
+            sorted(
+                {tag for document in self.documents for tag in document.tags.applied()}
+            )
+        )
+
+    def untagged(self) -> tuple[StoredDocument, ...]:
+        """The documents a judgement looked at and found nothing to say about."""
+        return tuple(
+            document for document in self.documents if document.tags.untagged()
+        )
 
     def stored(self, slug: str) -> StoredDocument | None:
         by_slug = self.documents_by_slug()

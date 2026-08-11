@@ -30,6 +30,16 @@ from inkwell.corpus.discovery import (
     TableAvenue,
 )
 from inkwell.corpus.quality import DEFAULT_RULES, QualityRule
+from inkwell.corpus.tags import (
+    DEFAULT_VOCABULARY,
+    EVALUATIONS,
+    GOVERNANCE,
+    MODEL_RELEASE,
+    SYSTEM_CARD,
+    TagTerm,
+    TagVocabulary,
+    organization_term,
+)
 
 type Authority = Literal["first-party", "government", "institute", "independent"]
 """What kind of standing a source's documents have.
@@ -58,6 +68,14 @@ class SourceDeclaration(BaseModel):
     avenues: tuple[Avenue, ...] = Field(
         default=(), description="The publishing surfaces to enumerate"
     )
+    tags: tuple[TagTerm, ...] = Field(
+        default=(),
+        description=(
+            "What is true of every document this source publishes. Declared "
+            "here for the same reason venue and authority are: a per-source "
+            "fact belongs to the source, not to each document restating it"
+        ),
+    )
     active: bool = Field(
         default=True,
         description="Whether a run sweeps this source, or only tracks that it exists",
@@ -77,6 +95,26 @@ class SourceDeclaration(BaseModel):
     def owns(self, host: str) -> bool:
         """Whether a host's documents belong to this source."""
         return any(host == known or host.endswith(f".{known}") for known in self.hosts)
+
+    def organization_tag(self) -> TagTerm:
+        """The tag every document of this source carries for who published it."""
+        return organization_term(self.key, self.organization)
+
+    def tags_for(self, category: str) -> tuple[str, ...]:
+        """Every tag this declaration settles for a document in ``category``.
+
+        Derived rather than judged, which is what keeps a judgement spending
+        itself on the one thing it can answer that a declaration cannot: what
+        this particular document is about.
+        """
+        avenues = (
+            term.tag
+            for avenue in self.avenues
+            if avenue.category == category
+            for term in avenue.tags
+        )
+        declared = (term.tag for term in self.tags)
+        return tuple(sorted({self.organization_tag().tag, *declared, *avenues}))
 
 
 class DroppedSource(BaseModel):
@@ -132,6 +170,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
             ),
             TableAvenue(
                 category="system-cards",
+                tags=(SYSTEM_CARD, MODEL_RELEASE),
                 listing="https://www.anthropic.com/system-cards",
                 link_hosts=("anthropic.com",),
                 link_suffixes=(".pdf",),
@@ -214,6 +253,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         organization="Centre for the Governance of AI",
         venue="GovAI",
         authority="institute",
+        tags=(GOVERNANCE,),
         hosts=("governance.ai",),
         avenues=(
             ListingAvenue(
@@ -245,6 +285,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         organization="Institute for AI Policy and Strategy",
         venue="IAPS",
         authority="institute",
+        tags=(GOVERNANCE,),
         hosts=("iaps.ai",),
         avenues=(
             SitemapAvenue(
@@ -263,6 +304,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         organization="METR",
         venue="METR",
         authority="institute",
+        tags=(EVALUATIONS,),
         hosts=("metr.org",),
         avenues=(
             SitemapAvenue(category="blog", sitemap="https://metr.org/sitemap.xml"),
@@ -480,6 +522,24 @@ DROPPED_SOURCES: tuple[DroppedSource, ...] = (
 Its scrapers covered these; none is a publisher whose output can be enumerated,
 which is what a corpus source has to be.
 """
+
+
+def corpus_vocabulary(
+    declarations: tuple[SourceDeclaration, ...] = DECLARED_SOURCES,
+    base: TagVocabulary = DEFAULT_VOCABULARY,
+) -> TagVocabulary:
+    """The declared vocabulary, with one organization tag per declared source.
+
+    The organization facet is derived here rather than written out beside the
+    subjects, so declaring a source is the whole of adding its organization to
+    what a browse can filter on — the same declaration that already says where
+    it publishes and what its word is worth.
+    """
+    return base.model_copy(
+        update={
+            "organizations": tuple(entry.organization_tag() for entry in declarations)
+        }
+    )
 
 
 def declaration_for(key: str) -> SourceDeclaration | None:

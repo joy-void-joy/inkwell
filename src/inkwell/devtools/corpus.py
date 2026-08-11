@@ -14,6 +14,8 @@ declaration looked at.
     uv run lup-devtools corpus sync
     uv run lup-devtools corpus sync epoch metr --limit 20
     uv run lup-devtools corpus status
+    uv run lup-devtools corpus tags
+    uv run lup-devtools corpus retag
 """
 
 import asyncio
@@ -26,10 +28,16 @@ from inkwell.corpus.ingest import (
     DEFAULT_CONCURRENCY,
     IngestReport,
     UnknownSource,
+    resolve_sources,
     sync_corpus,
 )
-from inkwell.corpus.registry import DECLARED_SOURCES, DROPPED_SOURCES
+from inkwell.corpus.registry import (
+    DECLARED_SOURCES,
+    DROPPED_SOURCES,
+    corpus_vocabulary,
+)
 from inkwell.corpus.storage import CorpusStore
+from inkwell.corpus.tagging import retag_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -61,20 +69,82 @@ def status() -> None:
     """Report what the corpus currently holds, per source."""
     corpus = store()
     typer.echo(f"corpus root: {corpus.root}\n")
-    typer.echo(f"{'key':<12} {'stored':>7} {'listed':>7} {'failed':>7}  updated")
+    typer.echo(
+        f"{'key':<12} {'stored':>7} {'listed':>7} {'failed':>7} {'untagged':>9}  updated"
+    )
     for declaration in DECLARED_SOURCES:
         shard = corpus.load_by_name(declaration.key)
         if shard is None:
             typer.echo(
-                f"{declaration.key:<12} {'-':>7} {'-':>7} {'-':>7}  never synced"
+                f"{declaration.key:<12} {'-':>7} {'-':>7} {'-':>7} {'-':>9}  never synced"
             )
             continue
         listed = sum(1 for entry in shard.discovered if entry.present)
         flags = " DEGRADED" if shard.crawl_degraded else ""
         typer.echo(
             f"{declaration.key:<12} {len(shard.documents):>7} {listed:>7} "
-            f"{len(shard.failures):>7}  {shard.updated_at or 'unknown'}{flags}"
+            f"{len(shard.failures):>7} {len(shard.untagged()):>9}  "
+            f"{shard.updated_at or 'unknown'}{flags}"
         )
+
+
+@app.command("tags")
+def tags() -> None:
+    """List the declared tag vocabulary, and what the corpus is tagged with."""
+    vocabulary = corpus_vocabulary()
+    corpus = store()
+    held = {
+        tag
+        for declaration in DECLARED_SOURCES
+        if (shard := corpus.load_by_name(declaration.key)) is not None
+        for tag in shard.tags()
+    }
+    typer.echo(f"vocabulary {vocabulary.signature()}\n")
+    for term in vocabulary.terms():
+        mark = "in use" if term.tag in held else "unused"
+        typer.echo(f"{term.tag:<38} {mark:<7} {term.description}")
+
+
+@app.command("retag")
+def retag(
+    source: list[str] = typer.Argument(
+        default=None, help="Sources to re-tag (default: every source with an index)"
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-judge documents already tagged against this exact vocabulary",
+    ),
+    concurrency: int = typer.Option(
+        DEFAULT_CONCURRENCY, "--concurrency", help="Documents judged at once per source"
+    ),
+) -> None:
+    """Re-tag what is stored against the vocabulary as it now stands.
+
+    Fetches nothing: a vocabulary edit costs a reading of the corpus already on
+    disk, which is what makes editing it a reasonable thing to do.
+    """
+    corpus = store()
+    keys = tuple(source or ())
+    try:
+        declarations = (
+            resolve_sources(keys)
+            if keys
+            else tuple(
+                declaration
+                for declaration in DECLARED_SOURCES
+                if declaration.key in corpus.sources()
+            )
+        )
+    except UnknownSource as error:
+        raise typer.BadParameter(str(error)) from error
+
+    typer.echo(f"vocabulary {corpus_vocabulary().signature()}\n")
+    reports = asyncio.run(
+        retag_corpus(declarations, corpus, force=force, concurrency=concurrency)
+    )
+    for report in reports:
+        typer.echo(report.summary())
 
 
 def report_failures(report: IngestReport) -> None:

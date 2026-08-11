@@ -7,10 +7,15 @@ holds what its sources published, so the questions worth asking of it are
 sometimes "fetch more of this source before continuing".
 
 The corpus is files, so the reading half is deliberately thin: these tools give
-the paths, the per-source counts, and the title-and-category listing an agent
-judges coverage from, and then Grep and Read do the actual work. Adding a query
-layer here would put a worse search engine in front of tools that already do it
+the paths, the per-source counts, and the tagged title listing an agent judges
+coverage from, and then Grep and Read do the actual work. Adding a query layer
+here would put a worse search engine in front of tools that already do it
 better.
+
+Tags are what make that listing a filter rather than a scan. Every document
+carries them, the vocabulary they are drawn from ships with the overview, and
+``corpus_titles`` narrows on one — so an agent asks "what is here about
+evaluations" by naming a declared tag instead of guessing at wording.
 """
 
 import logging
@@ -23,9 +28,11 @@ from inkwell.corpus.ingest import SourceReport, ingest_source
 from inkwell.corpus.registry import (
     DECLARED_SOURCES,
     SourceDeclaration,
+    corpus_vocabulary,
     declaration_for,
 )
 from inkwell.corpus.storage import CorpusStore, SourceShard
+from inkwell.corpus.tags import TagTerm
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -78,6 +85,17 @@ class CorpusSourceSummary(BaseModel):
     categories: tuple[str, ...] = Field(
         default=(), description="The sections its stored documents fall under"
     )
+    tags: tuple[str, ...] = Field(
+        default=(),
+        description="Tags its stored documents carry — what a browse of it can narrow on",
+    )
+    untagged: int = Field(
+        default=0,
+        description=(
+            "Documents a tagging pass read and found nothing to say about, so "
+            "no subject browse reaches them"
+        ),
+    )
     failures: int = Field(
         default=0, description="Documents that failed to fetch and will be retried"
     )
@@ -108,6 +126,8 @@ def summarize(
         listed=sum(1 for entry in shard.discovered if entry.present),
         pdfs=sum(1 for document in shard.documents if document.is_pdf()),
         categories=shard.categories(),
+        tags=shard.tags(),
+        untagged=len(shard.untagged()),
         failures=len(shard.failures),
         updated_at=shard.updated_at,
         directory=directory,
@@ -135,6 +155,23 @@ class CorpusDocumentEntry(BaseModel):
         description="False for a PDF, whose text is never extracted to be judged",
     )
     abstract: str = Field(default="", description="Opening prose, for relevance")
+    summary: str = Field(
+        default="",
+        description=(
+            "What the document says, judged when it was tagged — this is what a "
+            "PDF has instead of an abstract, since its text is never extracted"
+        ),
+    )
+    tags: tuple[str, ...] = Field(
+        default=(), description="Every tag this document carries, for narrowing"
+    )
+    untagged: bool = Field(
+        default=False,
+        description=(
+            "True when a tagging pass read this document and nothing applied — "
+            "it is reachable by its source and by nothing else"
+        ),
+    )
 
 
 def document_entries(
@@ -142,9 +179,10 @@ def document_entries(
     directory: str,
     *,
     category: str = "",
+    tag: str = "",
     since: tuple[str, ...] = (),
 ) -> list[CorpusDocumentEntry]:
-    """The shard's stored documents, optionally one category or one added set."""
+    """The shard's stored documents, narrowed by category, tag, or added set."""
     return [
         CorpusDocumentEntry(
             slug=document.slug,
@@ -159,9 +197,13 @@ def document_entries(
             quality_flags=document.quality.fired,
             quality_assessed=document.quality.assessed,
             abstract=document.abstract,
+            summary=document.summary,
+            tags=document.tags.applied(),
+            untagged=document.tags.untagged(),
         )
         for document in shard.documents
         if not category or document.category == category
+        if not tag or document.tags.carries(tag)
         if not since or document.slug in since
     ]
 
@@ -175,6 +217,13 @@ class CorpusOverviewOutput(BaseModel):
     sources: list[CorpusSourceSummary] = Field(
         description="Every declared source and what the corpus holds for it"
     )
+    vocabulary: list[TagTerm] = Field(
+        default_factory=list,
+        description=(
+            "Every tag a browse can filter on, and what each covers. This is "
+            "the declared set — pass one to corpus_titles to narrow by it"
+        ),
+    )
     layout: str = Field(description="How the files under the root are arranged")
 
 
@@ -182,6 +231,13 @@ class CorpusTitlesInput(BaseModel):
     source: str = Field(description="Which source's documents to list")
     category: str = Field(
         default="", description="Restrict to one category (default: all)"
+    )
+    tag: str = Field(
+        default="",
+        description=(
+            "Restrict to documents carrying this tag, spelled as the overview's "
+            "vocabulary spells it (default: all)"
+        ),
     )
 
 
@@ -229,13 +285,14 @@ class TopUpCorpusOutput(BaseModel):
 
 @lup_tool(
     "List the research corpus: every tracked source, how many documents are "
-    "held for it, which categories they fall under, and where its files live. "
-    "Use this FIRST when a question is about AI labs, safety institutes, or AI "
-    "policy — the corpus already holds what these sources published, so reading "
-    "it beats searching for it. It also names each source's venue and authority, "
-    "so a citation can state standing without asserting it. Then Grep the "
-    "directory for wording and Read the files, or call corpus_titles to judge "
-    "whether coverage is good enough.",
+    "held for it, which categories and tags they fall under, and where its "
+    "files live. Use this FIRST when a question is about AI labs, safety "
+    "institutes, or AI policy — the corpus already holds what these sources "
+    "published, so reading it beats searching for it. It also returns the tag "
+    "vocabulary, which is what a browse narrows on, and names each source's "
+    "venue and authority so a citation can state standing without asserting "
+    "it. Then call corpus_titles with a tag to narrow, Grep the directory for "
+    "wording, and Read the files.",
     name="corpus_overview",
 )
 async def corpus_overview(_inp: CorpusOverviewInput) -> CorpusOverviewOutput:
@@ -250,17 +307,20 @@ async def corpus_overview(_inp: CorpusOverviewInput) -> CorpusOverviewOutput:
             )
             for declaration in DECLARED_SOURCES
         ],
+        vocabulary=list(corpus_vocabulary().terms()),
         layout=CORPUS_LAYOUT,
     )
 
 
 @lup_tool(
-    "List one corpus source's stored documents — title, category, path, "
-    "abstract, and quality — plus how many documents the source publishes that "
-    "are NOT stored yet. Use this to judge whether the corpus covers a question "
-    "before relying on it: titles and categories are what tell you a source has "
-    "the material, and listed_but_absent is what tells you it is thin. Read the "
-    "paths directly; for a PDF, Read with pages='N-M' using page_count.",
+    "List one corpus source's stored documents — title, tags, category, path, "
+    "abstract or summary, and quality — plus how many documents the source "
+    "publishes that are NOT stored yet. This is the primary way to retrieve "
+    "from the corpus: pass a tag from corpus_overview's vocabulary to narrow "
+    "hundreds of documents to the ones on your subject, then read those. "
+    "Titles and tags are what tell you a source has the material, and "
+    "listed_but_absent is what tells you it is thin. Read the paths directly; "
+    "for a PDF, Read with pages='N-M' using page_count.",
     name="corpus_titles",
 )
 async def corpus_titles(inp: CorpusTitlesInput) -> CorpusTitlesOutput:
@@ -273,7 +333,7 @@ async def corpus_titles(inp: CorpusTitlesInput) -> CorpusTitlesOutput:
             f"some, or corpus_overview to see which sources are held."
         )
     directory = str(corpus.source_dir(declaration.key))
-    held = document_entries(shard, directory, category=inp.category)
+    held = document_entries(shard, directory, category=inp.category, tag=inp.tag)
     stored_slugs = {document.slug for document in shard.documents}
     return CorpusTitlesOutput(
         source=inp.source,

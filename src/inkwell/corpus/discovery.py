@@ -34,6 +34,8 @@ from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from inkwell.corpus.tags import TagTerm
+
 logger = logging.getLogger(__name__)
 
 
@@ -500,6 +502,14 @@ class Avenue(BaseModel):
     category: str = Field(
         default="",
         description="The section of the source these documents belong to",
+    )
+    tags: tuple[TagTerm, ...] = Field(
+        default=(),
+        description=(
+            "What is true of everything published here, declared once rather "
+            "than re-judged per document — a system-card listing publishes "
+            "system cards, whatever each one is about"
+        ),
     )
 
     @abstractmethod

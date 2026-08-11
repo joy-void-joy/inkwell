@@ -8,8 +8,8 @@ After the pipeline completes, enters a revision loop where the user
 can request changes via the terminal.
 
 Usage:
-    await chat_session()                          # open chat
-    await chat_session(initial_task="write ...")   # pre-seeded with source
+    run_entry_point("write", {})                    # open chat, prompting for source
+    run_entry_point("write", {"sources": [...]})    # pre-seeded with source
 """
 
 import asyncio
@@ -27,17 +27,25 @@ from prompt_toolkit.styles import Style as PTStyle
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
+import typer
 
 from lup.telemetry.metrics import log_metrics_summary, reset_metrics
 from lup.types import StringMap
 from lup.workspace.paths import project_root
 from inkwell.agent.client import active_agents
 
-from inkwell.agent.core import SessionTrace, run_session
+from inkwell.agent.core import SessionTrace
 from inkwell.agent.models import StageCostBreakdown, WritingOutput
 from inkwell.agent.pipeline import DISPLAY_STAGES, PipelineError, PipelineListener
 from inkwell.agent.session import WritingSessionState
 from inkwell.agent.tools.google_docs import do_fetch_comments, do_insert_comment
+from inkwell.environment.entrypoints import (
+    SESSION_ID,
+    VERBOSE,
+    EntryPointValues,
+    SuppliedValues,
+)
+from inkwell.environment.launch import run_declared_session
 
 logger = logging.getLogger(__name__)
 
@@ -463,29 +471,23 @@ async def read_terminal_input(
         console.print(f"  [dim]Queued: {stripped[:60]}[/dim]")
 
 
-async def chat_session(
-    *,
-    sources: list[str] | None = None,
-    refs: list[str] | None = None,
-    session_id: str | None = None,
-    resume_session_id: str | None = None,
-    resume_from_stage: str | None = None,
-    target_format: str = "auto",
-    existing_doc_id: str | None = None,
-    stop_after: str | None = None,
-    verbose: bool = False,
-) -> None:
-    """Run the writing pipeline interactively.
+async def chat_session(values: EntryPointValues) -> None:
+    """Run one declared entry point interactively.
 
-    The pipeline runs the same stages as batch mode. The terminal
-    shows progress and accepts steering input. The Google Doc is the
-    primary collaboration surface.
+    Takes the declared parameter set rather than restating it: what the author
+    supplied is read off the declaration, here and in the launch path, so a
+    parameter added there needs no new argument along the way.
+
+    The pipeline runs the same stages as batch mode. The terminal shows progress
+    and accepts steering input. The Google Doc is the primary collaboration
+    surface.
     """
-    if verbose:
+    if VERBOSE.read(values):
         logging.basicConfig(level=logging.DEBUG)
 
-    if session_id is None:
-        session_id = resume_session_id or uuid.uuid4().hex[:16]
+    entry_point = values.declaration
+    resumed_session = entry_point.resumed_session(values)
+    session_id = SESSION_ID.read(values) or resumed_session or uuid.uuid4().hex[:16]
 
     console = Console(highlight=False)
     show_welcome(console)
@@ -497,8 +499,7 @@ async def chat_session(
     pt_session = build_prompt_session(listener)
 
     with patch_stdout(raw=True):
-        resolved_sources = list(sources or [])
-        if not resolved_sources and resume_session_id is None:
+        if not entry_point.sources(values) and resumed_session is None:
             try:
                 raw = await pt_session.prompt_async()
             except (EOFError, KeyboardInterrupt):
@@ -507,15 +508,16 @@ async def chat_session(
             raw = raw.strip()
             if not raw or raw in ("/quit", "/exit", "/q"):
                 return
-            resolved_sources = [raw]
+            values = entry_point.with_material(values, raw)
 
+        resolved_sources = entry_point.sources(values)
         if resolved_sources:
             label = ", ".join(s[:40] for s in resolved_sources)
             if len(label) > 80:
                 label = label[:77] + "..."
             console.print(f"  [dim]Sources: {label}[/dim]")
-        elif resume_session_id:
-            console.print(f"  [dim]Resuming session: {resume_session_id}[/dim]")
+        elif resumed_session:
+            console.print(f"  [dim]Resuming session: {resumed_session}[/dim]")
 
         trace = SessionTrace()
         session_state = WritingSessionState()
@@ -526,32 +528,14 @@ async def chat_session(
             )
         )
 
-        from inkwell.agent.config import active_profile, load_settings, use_settings
-
-        resolved_profile = active_profile()
-        if not resolved_profile and resume_session_id:
-            from inkwell.agent.core import load_snapshot
-
-            snapshot = load_snapshot(resume_session_id, from_stage=resume_from_stage)
-            if snapshot:
-                resolved_profile = snapshot.profile
-        session_settings = load_settings(resolved_profile)
-
         try:
-            with use_settings(session_settings):
-                result = await run_session(
-                    sources=resolved_sources,
-                    refs=refs,
-                    resume_session_id=resume_session_id,
-                    resume_from_stage=resume_from_stage,
-                    target_format=target_format,
-                    existing_doc_id=existing_doc_id,
-                    session_id=session_id,
-                    listener=listener,
-                    trace=trace,
-                    session_state=session_state,
-                    stop_after=stop_after,
-                )
+            result = await run_declared_session(
+                values,
+                session_id=session_id,
+                listener=listener,
+                trace=trace,
+                session_state=session_state,
+            )
 
             if result.cost_usd is not None:
                 console.print(f"  [dim]Cost: ${result.cost_usd:.2f}[/dim]")
@@ -605,3 +589,23 @@ async def chat_session(
 
     log_metrics_summary()
     console.print("\n[dim]Session ended.[/dim]")
+
+
+def run_entry_point(entry_point: str, supplied: SuppliedValues) -> None:
+    """Drive one declared entry point from the command line.
+
+    Every compiled command ends here: it collects the values its signature was
+    rendered from and this checks them against the declaration before starting
+    the session, so a stage that names no checkpoint or a malformed
+    ``stage=model`` pair is reported as a usage error rather than a traceback.
+    """
+    try:
+        values = EntryPointValues.declared(entry_point, supplied)
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    try:
+        asyncio.run(chat_session(values))
+    except KeyboardInterrupt:
+        pass

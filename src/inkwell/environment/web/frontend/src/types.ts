@@ -13,10 +13,77 @@ export interface ModelOptions {
   default_stage_models: Record<string, string>;
 }
 
-export interface ModelConfig {
-  model?: string;
-  stage_models?: Record<string, string>;
-  writer_mode?: string;
+// --- Entry points ---
+//
+// Every way a session starts, and the parameters it takes, are fetched from
+// GET /api/entry-points, which is rendered off the one declaration the typer
+// commands and the API request models are compiled from too. Nothing below
+// names a parameter: the form builds its controls from what arrives, so a
+// parameter added to the declaration shows up here without an edit.
+
+export type ParameterWidget =
+  | "text"
+  | "textarea"
+  | "lines"
+  | "flag"
+  | "select"
+  | "map";
+
+export type SuppliedValue =
+  | string
+  | boolean
+  | string[]
+  | Record<string, string>
+  | null;
+
+export type SuppliedValues = Record<string, SuppliedValue>;
+
+export interface ParameterDescriptor {
+  name: string;
+  label: string;
+  help: string;
+  widget: ParameterWidget;
+  default: SuppliedValue;
+  required: boolean;
+  options_endpoint: string;
+  // False when the page carries bespoke UI for this parameter — a source
+  // picker, a format description, a model grid — that no descriptor describes.
+  rendered: boolean;
+}
+
+export interface EntryPointDescriptor {
+  name: string;
+  summary: string;
+  detail: string;
+  parameters: ParameterDescriptor[];
+}
+
+export function declaredParameter(
+  entryPoint: EntryPointDescriptor | null,
+  name: string,
+): ParameterDescriptor | undefined {
+  return entryPoint?.parameters.find((p) => p.name === name);
+}
+
+export function carries(
+  entryPoint: EntryPointDescriptor | null,
+  name: string,
+): boolean {
+  return declaredParameter(entryPoint, name) !== undefined;
+}
+
+export function genericParameters(
+  entryPoint: EntryPointDescriptor | null,
+): ParameterDescriptor[] {
+  return (entryPoint?.parameters ?? []).filter((p) => p.rendered);
+}
+
+export function declaredDefaults(
+  entryPoint: EntryPointDescriptor | null,
+): SuppliedValues {
+  return Object.fromEntries(
+    genericParameters(entryPoint).map((p) => [p.name, p.default]),
+  );
 }
 
 export type SessionStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted" | "resuming" | "paused";

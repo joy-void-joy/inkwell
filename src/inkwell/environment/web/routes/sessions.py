@@ -7,6 +7,13 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile
 
 from inkwell.agent.stages import OUTPUT_FORMATS
+from inkwell.environment.entrypoints import (
+    RESUMED_SESSION,
+    EntryPointDescriptor,
+    EntryPointValues,
+    SuppliedValues,
+    entry_point_descriptors,
+)
 from inkwell.environment.web.models import (
     ActionAccepted,
     CreateSessionRequest,
@@ -15,6 +22,8 @@ from inkwell.environment.web.models import (
     ModelOptions,
     RestartSessionRequest,
     ResumeSessionRequest,
+    ReviseSessionRequest,
+    RunSessionRequest,
     SessionAction,
     SessionDetail,
     SessionLaunched,
@@ -103,6 +112,18 @@ async def get_pipeline_stages() -> list[str]:
     return list(DISPLAY_STAGES)
 
 
+@formats_router.get("/entry-points")
+async def get_entry_points() -> list[EntryPointDescriptor]:
+    """Every way a session starts, and the parameters each one takes.
+
+    Rendered off the entry point declaration the same way ``/api/formats`` is
+    rendered off ``OUTPUT_FORMATS``, so the New Session form builds its controls
+    from what the declaration says rather than from a TypeScript copy of it that
+    can fall behind.
+    """
+    return entry_point_descriptors()
+
+
 @formats_router.get("/stop-stages")
 async def get_stop_stages() -> list[str]:
     """Stages a run can be paused after — the valid ``stop_after`` targets.
@@ -116,29 +137,71 @@ async def get_stop_stages() -> list[str]:
     return list(CHECKPOINT_STAGES)
 
 
-@router.post("", status_code=201)
-async def create_session(req: CreateSessionRequest) -> SessionLaunched:
-    mgr = get_manager()
+def collected(entry_point: str, body: SuppliedValues) -> EntryPointValues:
+    """One request body as the declared values it supplies.
+
+    Every route funnels through here, so a parameter added to a declaration
+    reaches the manager without an argument being threaded through a route.
+    A value the declaration refuses raises ``ValueError``, which the routes
+    report as a bad request.
+    """
+    return EntryPointValues.declared(entry_point, body)
+
+
+async def launch_fresh(entry_point: str, body: SuppliedValues) -> SessionLaunched:
+    """Start one of the fresh entry points from the body it was posted."""
+    try:
+        values = collected(entry_point, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sources = values.declaration.sources(values)
     logger.info(
-        "create_session: %d source(s)=%s refs=%s format=%s",
-        len(req.sources),
-        [summarize_source(s) for s in req.sources],
-        [summarize_source(r) for r in (req.refs or [])],
-        req.target_format,
+        "%s: %d source(s)=%s",
+        entry_point,
+        len(sources),
+        [summarize_source(s) for s in sources],
     )
-    session_id = await mgr.create_session(
-        sources=req.sources,
-        refs=req.refs or None,
-        target_format=req.target_format,
-        existing_doc_id=req.existing_doc_id,
-        profile=req.profile,
-        model=req.model,
-        stage_models=req.stage_models,
-        writer_mode=req.writer_mode,
-        stop_after=req.stop_after,
-        light=req.light,
-    )
+    session_id = await get_manager().create_session(values)
     return SessionLaunched(session_id=session_id)
+
+
+async def launch_continued(
+    entry_point: str, session_id: str, body: SuppliedValues
+) -> SessionLaunched:
+    """Continue a saved session, resuming it or restarting a stage of it.
+
+    The session is the resource the path names rather than a body field, so it is
+    supplied under its declared name here and read back off the declaration like
+    any other parameter.
+    """
+    try:
+        values = collected(entry_point, {**body, RESUMED_SESSION.name: session_id})
+        sid = await get_manager().continue_session(values)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SessionLaunched(session_id=sid)
+
+
+@router.post("", status_code=201)
+@router.post("/write", status_code=201)
+async def create_session(req: CreateSessionRequest) -> SessionLaunched:
+    """Start a write session, at the entry point's own path and at the collection's.
+
+    Every fresh entry point answers at ``/api/sessions/<name>``, so the browser
+    addresses the one the author picked without a table mapping names to paths;
+    the bare collection path is where a write session has always been posted.
+    """
+    return await launch_fresh("write", req.model_dump(mode="json"))
+
+
+@router.post("/run", status_code=201)
+async def run_session_from_task(req: RunSessionRequest) -> SessionLaunched:
+    return await launch_fresh("run", req.model_dump(mode="json"))
+
+
+@router.post("/revise", status_code=201)
+async def revise_session(req: ReviseSessionRequest) -> SessionLaunched:
+    return await launch_fresh("revise", req.model_dump(mode="json"))
 
 
 @router.get("")
@@ -168,41 +231,15 @@ async def get_session_prompt(session_id: str) -> GeneratingPrompt:
 async def resume_session(
     session_id: str, req: ResumeSessionRequest | None = None
 ) -> SessionLaunched:
-    mgr = get_manager()
-    from_stage = req.from_stage if req else None
-    profile = req.profile if req else None
-    try:
-        sid = await mgr.resume_session(
-            session_id,
-            from_stage=from_stage,
-            profile=profile,
-            model=req.model if req else None,
-            stage_models=req.stage_models if req else None,
-            writer_mode=req.writer_mode if req else None,
-            stop_after=req.stop_after if req else None,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return SessionLaunched(session_id=sid)
+    body = req.model_dump(mode="json") if req else {}
+    return await launch_continued("resume", session_id, body)
 
 
 @router.post("/{session_id}/restart")
 async def restart_session(
     session_id: str, req: RestartSessionRequest
 ) -> SessionLaunched:
-    mgr = get_manager()
-    try:
-        sid = await mgr.restart_session(
-            session_id,
-            from_stage=req.from_stage,
-            profile=req.profile,
-            model=req.model,
-            stage_models=req.stage_models,
-            writer_mode=req.writer_mode,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return SessionLaunched(session_id=sid)
+    return await launch_continued("restart", session_id, req.model_dump(mode="json"))
 
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "inkwell_uploads"

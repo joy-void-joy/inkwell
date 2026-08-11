@@ -51,6 +51,8 @@ src/inkwell/
 │   ├── feedback/           # Feedback state, metrics, and session commits
 │   └── version.py          # Version display, changelog, and bump
 └── environment/            # I/O: how a run starts and what happens to a result
+    ├── entrypoints.py      # Every entry point, declared once for all surfaces
+    ├── launch.py           # The one path from declared values to a running run
     ├── cli/                # Typer CLI and the interactive chat session
     └── web/                # Session API and the browser surface
 ```
@@ -58,6 +60,27 @@ src/inkwell/
 Keeping `agent/` free of I/O is what makes it improvable: the self-improvement
 loop reads traces and changes prompts, tools, and models, and never has to
 reason about where a session came from.
+
+## Entry points
+
+A writing session starts in one of five ways — `write` from source material,
+`run` from a freeform task, `revise` from an existing draft, `resume` and
+`restart` from a saved session — and each declares its parameters once, in
+`environment/entrypoints.py`: type, default, help text, and which of the three
+surfaces carries it. The surfaces are then compiled from that declaration rather
+than written beside it.
+
+| Surface | Rendered by |
+| --- | --- |
+| Typer commands | `environment/cli/compile.py`, into the checked-in `cli/commands.py`, drift-checked by `dev check` |
+| API request models | `request_model`, constructing each at import time |
+| Browser form | `GET /api/entry-points`, which the New Session page builds its controls from |
+
+A parameter a surface leaves out has to say why, in the declaration, beside the
+parameter — which is what makes the omission a decision on the record rather
+than the drift nobody notices. Both environments hand the values they collect to
+`environment/launch.py`, the only place the declared set is unpacked, so a
+parameter reaches the pipeline without being threaded through either.
 
 ## Pipeline stages
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { fetchProfiles, fetchStopStages } from "../api/client";
+import { fetchEntryPoints, fetchProfiles } from "../api/client";
 import { SessionProvider } from "../context/SessionContext";
 import { useSession } from "../context/session";
 import { StageProgress } from "../components/StageProgress";
@@ -9,8 +9,14 @@ import { CostInfo, CostBreakdown } from "../components/CostPanel";
 import { DocLink } from "../components/DocEmbed";
 import { ActionBar } from "../components/ActionBar";
 import { PromptPanel } from "../components/PromptPanel";
-import { stageLabel, stageProgressIndex } from "../types";
-import type { ProfileResponse } from "../types";
+import { DeclaredFields } from "../components/DeclaredFields";
+import { declaredDefaults, stageLabel, stageProgressIndex } from "../types";
+import type {
+  EntryPointDescriptor,
+  ProfileResponse,
+  SuppliedValue,
+  SuppliedValues,
+} from "../types";
 
 function formatSessionTitle(sessionId: string): string {
   const m = sessionId.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/);
@@ -32,13 +38,28 @@ function ResumeControls() {
   const [error, setError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileResponse[]>([]);
   const [overrideProfile, setOverrideProfile] = useState("");
-  const [stopStages, setStopStages] = useState<string[]>([]);
-  const [stopAfter, setStopAfter] = useState("");
+  const [entryPoints, setEntryPoints] = useState<EntryPointDescriptor[]>([]);
+  const [declared, setDeclared] = useState<SuppliedValues>({});
+
+  // Resume's and restart's own declarations: the stage picker and the profile
+  // picker are bespoke here (they need this session's completed stages and the
+  // profile list), and everything else the declarations carry is rendered from
+  // the descriptor rather than hand-written beside them.
+  const resumeDeclaration =
+    entryPoints.find((e) => e.name === "resume") ?? null;
 
   useEffect(() => {
     fetchProfiles().then(setProfiles).catch(() => {});
-    fetchStopStages().then(setStopStages).catch(() => {});
+    fetchEntryPoints().then(setEntryPoints).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    setDeclared(declaredDefaults(resumeDeclaration));
+  }, [resumeDeclaration]);
+
+  const setDeclaredValue = (name: string, next: SuppliedValue) => {
+    setDeclared((prev) => ({ ...prev, [name]: next }));
+  };
 
   const hasKnownProfile = !!state.profile;
   const busy = resuming || restarting;
@@ -67,11 +88,11 @@ function ResumeControls() {
     setResuming(true);
     setError(null);
     try {
-      await resume(
-        resumeStage || undefined,
-        overrideProfile || undefined,
-        stopAfter || undefined,
-      );
+      await resume({
+        ...declared,
+        from_stage: resumeStage || null,
+        profile: overrideProfile || null,
+      });
     } catch (err) {
       reportError(err, "Resume failed");
     } finally {
@@ -83,7 +104,10 @@ function ResumeControls() {
     setRestarting(true);
     setError(null);
     try {
-      await restart(restartStage, overrideProfile || undefined);
+      await restart({
+        from_stage: restartStage,
+        profile: overrideProfile || null,
+      });
     } catch (err) {
       reportError(err, "Restart failed");
     } finally {
@@ -136,20 +160,12 @@ function ResumeControls() {
             ))}
           </select>
         )}
-        {stopStages.length > 0 && (
-          <select
-            value={stopAfter}
-            onChange={(e) => setStopAfter(e.target.value)}
-            className="resume-stage-select"
-            title="Pause again after this stage once resumed"
-          >
-            <option value="">Run to the end</option>
-            {stopStages.map((s) => (
-              <option key={s} value={s}>Pause after {stageLabel(s)}</option>
-            ))}
-          </select>
-        )}
       </div>
+      <DeclaredFields
+        parameters={resumeDeclaration?.parameters ?? []}
+        values={declared}
+        onChange={setDeclaredValue}
+      />
       <p className="resume-hint">
         <strong>Resume</strong> continues after the selected stage (or from where it
         stopped), picking up an interrupted agent mid-task. <strong>Restart</strong> re-runs

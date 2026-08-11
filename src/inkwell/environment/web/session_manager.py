@@ -17,8 +17,7 @@ from lup.types import JsonValue
 from lup.workspace.history import latest_session_record, list_all_session_ids
 from lup.workspace.paths import sessions_dir, trace_logs_dir
 
-from inkwell.agent.config import PipelineStage
-from inkwell.agent.core import SessionTrace, run_session
+from inkwell.agent.core import SessionTrace
 from inkwell.agent.google_auth import GoogleAuthError
 from inkwell.agent.models import (
     AgentSessionResult,
@@ -27,6 +26,8 @@ from inkwell.agent.models import (
 )
 from inkwell.agent.pipeline import PipelineInterrupted
 from inkwell.agent.session import WritingSessionState
+from inkwell.environment.entrypoints import PROFILE, EntryPointValues
+from inkwell.environment.launch import run_declared_session
 from inkwell.environment.web.listener import WebListener
 from inkwell.environment.web.models import (
     CompletionOutput,
@@ -112,90 +113,30 @@ class SessionManager:
         """The live handle for `session_id`, or None once the run is gone."""
         return self.sessions[session_id] if session_id in self.sessions else None
 
-    async def create_session(
-        self,
-        sources: list[str],
-        *,
-        refs: list[str] | None = None,
-        target_format: str = "auto",
-        existing_doc_id: str | None = None,
-        profile: str | None = None,
-        model: str | None = None,
-        stage_models: dict[PipelineStage, str] | None = None,
-        writer_mode: str | None = None,
-        stop_after: str | None = None,
-        light: bool = False,
-    ) -> str:
-        session_id = uuid.uuid4().hex[:16]
-        return self.launch(
-            session_id=session_id,
-            sources=sources,
-            refs=refs,
-            target_format=target_format,
-            existing_doc_id=existing_doc_id,
-            profile=profile,
-            model=model,
-            stage_models=stage_models,
-            writer_mode=writer_mode,
-            stop_after=stop_after,
-            light=light,
+    async def create_session(self, values: EntryPointValues) -> str:
+        """Start a fresh session from what one declared entry point was given."""
+        return self.launch(session_id=uuid.uuid4().hex[:16], values=values)
+
+    async def continue_session(self, values: EntryPointValues) -> str:
+        """Pick a saved session back up, resuming it or restarting a stage of it.
+
+        Which of the two is the entry point's own answer — a resume names the
+        stage it continues after, a restart the stage it regenerates — so this
+        one method serves both and gains nothing when a third is declared. The
+        billed profile is pinned before launching, because a run whose profile is
+        unknown must fail as a bad request rather than mid-pipeline.
+        """
+        entry_point = values.declaration
+        resumed = entry_point.resumed_session(values) or ""
+        handle = self.handle_for(resumed)
+        if handle and handle.status == "running":
+            return resumed
+
+        profile = self.resolve_session_profile(
+            resumed, PROFILE.read(values), entry_point.resume_from(values)
         )
-
-    async def resume_session(
-        self,
-        resume_session_id: str,
-        *,
-        from_stage: str | None = None,
-        profile: str | None = None,
-        model: str | None = None,
-        stage_models: dict[PipelineStage, str] | None = None,
-        writer_mode: str | None = None,
-        stop_after: str | None = None,
-    ) -> str:
-        if resume_session_id in self.sessions:
-            handle = self.sessions[resume_session_id]
-            if handle.status == "running":
-                return resume_session_id
-
         return self.launch(
-            session_id=resume_session_id,
-            resume_session_id=resume_session_id,
-            resume_from_stage=from_stage,
-            profile=self.resolve_session_profile(
-                resume_session_id, profile, from_stage
-            ),
-            model=model,
-            stage_models=stage_models,
-            writer_mode=writer_mode,
-            stop_after=stop_after,
-        )
-
-    async def restart_session(
-        self,
-        resume_session_id: str,
-        *,
-        from_stage: str,
-        profile: str | None = None,
-        model: str | None = None,
-        stage_models: dict[PipelineStage, str] | None = None,
-        writer_mode: str | None = None,
-    ) -> str:
-        """Rewind to before ``from_stage`` and regenerate it (and everything
-        after) from scratch with fresh agents — unlike resume, which continues
-        an interrupted agent's own conversation."""
-        if resume_session_id in self.sessions:
-            handle = self.sessions[resume_session_id]
-            if handle.status == "running":
-                return resume_session_id
-
-        return self.launch(
-            session_id=resume_session_id,
-            resume_session_id=resume_session_id,
-            restart_from_stage=from_stage,
-            profile=self.resolve_session_profile(resume_session_id, profile, None),
-            model=model,
-            stage_models=stage_models,
-            writer_mode=writer_mode,
+            session_id=resumed, values=values.replacing(PROFILE, profile)
         )
 
     def resolve_session_profile(
@@ -222,67 +163,28 @@ class SessionManager:
             "tracking, or the snapshot is missing. Please specify a profile."
         )
 
-    def launch(
-        self,
-        *,
-        session_id: str,
-        sources: list[str] | None = None,
-        refs: list[str] | None = None,
-        target_format: str = "auto",
-        existing_doc_id: str | None = None,
-        resume_session_id: str | None = None,
-        resume_from_stage: str | None = None,
-        restart_from_stage: str | None = None,
-        profile: str | None = None,
-        model: str | None = None,
-        stage_models: dict[PipelineStage, str] | None = None,
-        writer_mode: str | None = None,
-        stop_after: str | None = None,
-        light: bool = False,
-    ) -> str:
-        from inkwell.agent.config import load_settings, use_settings
+    def launch(self, *, session_id: str, values: EntryPointValues) -> str:
+        """Run one declared entry point as a background task, and register it.
 
-        session_settings = load_settings(profile)
-        if model:
-            session_settings.model = model
-        if stage_models:
-            session_settings.stage_models = {
-                **session_settings.stage_models,
-                **stage_models,
-            }
-        if writer_mode:
-            session_settings.writer_mode = writer_mode
-
+        Takes the declared parameter set rather than restating it: the launch
+        path reads every parameter off the declaration, so a parameter added
+        there reaches a web session without passing through this signature.
+        """
+        entry_point = values.declaration
         state = WritingSessionState()
         cost = CostAccumulator()
         listener = WebListener(session_id, self)
         trace = SessionTrace()
 
-        async def run_in_session_context() -> AgentSessionResult:
-            # Each task owns a contextvar copy, so this scopes the
-            # configuration to this session and everything it spawns —
-            # concurrent sessions with different profiles don't race, and
-            # the spawned claude CLI bills the profile's account.
-            with use_settings(session_settings):
-                return await run_session(
-                    sources=sources or [],
-                    refs=refs,
-                    target_format=target_format,
-                    existing_doc_id=existing_doc_id,
-                    resume_session_id=resume_session_id,
-                    resume_from_stage=resume_from_stage,
-                    restart_from_stage=restart_from_stage,
-                    session_id=session_id,
-                    listener=listener,
-                    session_state=state,
-                    cost_accumulator=cost,
-                    trace=trace,
-                    stop_after=stop_after,
-                    light=light,
-                )
-
         task = asyncio.create_task(
-            run_in_session_context(),
+            run_declared_session(
+                values,
+                session_id=session_id,
+                listener=listener,
+                session_state=state,
+                cost_accumulator=cost,
+                trace=trace,
+            ),
             name=f"inkwell-session-{session_id}",
         )
 
@@ -292,12 +194,13 @@ class SessionManager:
             state=state,
             cost=cost,
             listener=listener,
-            profile=profile,
-            sources=sources or [],
+            profile=PROFILE.read(values),
+            sources=entry_point.sources(values),
             trace=trace,
         )
-        if resume_session_id:
-            handle.events = self.load_events(resume_session_id)
+        resumed = entry_point.resumed_session(values)
+        if resumed:
+            handle.events = self.load_events(resumed)
         self.sessions[session_id] = handle
 
         task.add_done_callback(

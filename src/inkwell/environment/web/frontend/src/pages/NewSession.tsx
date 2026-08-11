@@ -1,16 +1,25 @@
 import { useCallback, useEffect, useState, type DragEvent, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  createSession,
+  fetchEntryPoints,
   fetchFormats,
   fetchModelOptions,
   fetchProfiles,
-  fetchStopStages,
+  startSession,
   uploadFile,
   uploadText,
 } from "../api/client";
-import type { FormatOption, ModelOptions, ProfileResponse } from "../types";
-import { stageLabel } from "../types";
+import { DeclaredFields } from "../components/DeclaredFields";
+import type {
+  EntryPointDescriptor,
+  FormatOption,
+  ModelOptions,
+  ParameterDescriptor,
+  ProfileResponse,
+  SuppliedValue,
+  SuppliedValues,
+} from "../types";
+import { carries, declaredDefaults } from "../types";
 
 const CUSTOM = "__custom__";
 
@@ -198,6 +207,9 @@ function FileChips({
 
 export function NewSession() {
   const navigate = useNavigate();
+  const [entryPoints, setEntryPoints] = useState<EntryPointDescriptor[]>([]);
+  const [entryPointName, setEntryPointName] = useState("write");
+  const [declared, setDeclared] = useState<SuppliedValues>({});
   const [formats, setFormats] = useState<FormatOption[]>([]);
   const [profiles, setProfiles] = useState<ProfileResponse[]>([]);
   const [source, setSource] = useState("");
@@ -220,11 +232,15 @@ export function NewSession() {
   const [writerMode, setWriterMode] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
   const [stageOverrides, setStageOverrides] = useState<Record<string, string>>({});
-  const [stopStages, setStopStages] = useState<string[]>([]);
-  const [stopAfter, setStopAfter] = useState("");
+
+  const entryPoint =
+    entryPoints.find((e) => e.name === entryPointName) ?? null;
+  // Only the entry points that start something new belong on this page;
+  // resume and restart act on a session that already exists.
+  const startable = entryPoints.filter((e) => carries(e, "target_format"));
 
   useEffect(() => {
-    fetchStopStages().then(setStopStages).catch(() => {});
+    fetchEntryPoints().then(setEntryPoints).catch(() => {});
     fetchFormats().then(setFormats).catch(() => {});
     fetchProfiles()
       .then((p) => {
@@ -241,6 +257,12 @@ export function NewSession() {
       .catch(() => {});
   }, []);
 
+  // Every generic control starts at the default the declaration gave it, so a
+  // parameter added there arrives with its default rather than as undefined.
+  useEffect(() => {
+    setDeclared(declaredDefaults(entryPoint));
+  }, [entryPoint]);
+
   useEffect(() => {
     sessionStorage.setItem(FILES_KEY, JSON.stringify(files));
   }, [files]);
@@ -248,6 +270,10 @@ export function NewSession() {
   useEffect(() => {
     sessionStorage.setItem(REF_FILES_KEY, JSON.stringify(refFiles));
   }, [refFiles]);
+
+  const setDeclaredValue = (name: string, next: SuppliedValue) => {
+    setDeclared((prev) => ({ ...prev, [name]: next }));
+  };
 
   const setStageModel = (stage: string, model: string) => {
     setStageOverrides((prev) => {
@@ -355,12 +381,31 @@ export function NewSession() {
     }
   };
 
-  const hasSource = source.trim() || files.length > 0;
+  const takesSources = carries(entryPoint, "sources");
+  const takesRefs = carries(entryPoint, "refs");
+  const hasSource = Boolean(source.trim()) || files.length > 0;
+
+  // A required parameter is satisfied by whatever surface carries it: the
+  // source picker for `sources`, the generic control for anything else.
+  const isSupplied = (parameter: ParameterDescriptor): boolean => {
+    if (!parameter.rendered) return parameter.name === "sources" ? hasSource : true;
+    const value = declared[parameter.name];
+    if (typeof value === "string") return value.trim().length > 0;
+    if (Array.isArray(value)) return value.length > 0;
+    return value !== null && value !== undefined;
+  };
+
+  const needsDescription = Boolean(
+    selected?.accepts_description && !customFormat.trim(),
+  );
+  const ready =
+    entryPoint !== null &&
+    entryPoint.parameters.filter((p) => p.required).every(isSupplied) &&
+    !needsDescription;
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!hasSource) return;
-    if (selected?.accepts_description && !customFormat.trim()) return;
+    if (!ready || !entryPoint) return;
     if (composer !== null) {
       setError("Save or cancel your pasted text first — it isn't attached yet.");
       return;
@@ -384,19 +429,25 @@ export function NewSession() {
       const overrides = Object.fromEntries(
         Object.entries(stageOverrides).filter(([, v]) => v.trim()),
       );
-      const hasOverrides = Object.keys(overrides).length > 0;
-      const result = await createSession(
-        sources,
-        resolvedFormat,
-        refList,
-        selectedProfile || profiles[0]?.name,
-        {
-          model: defaultModel.trim() || undefined,
-          writer_mode: writerMode || undefined,
-          stage_models: hasOverrides ? overrides : undefined,
-        },
-        stopAfter || undefined,
-      );
+
+      // The generic controls' values, plus the bespoke ones under the same
+      // declared names the descriptor gave them.
+      const bespoke: SuppliedValues = {
+        profile: selectedProfile || profiles[0]?.name || null,
+        model: defaultModel.trim() || null,
+        writer_mode: writerMode || null,
+        stage_models: overrides,
+      };
+      if (takesSources) bespoke.sources = sources;
+      if (takesRefs) bespoke.refs = refList;
+      if (carries(entryPoint, "target_format")) {
+        bespoke.target_format = resolvedFormat;
+      }
+
+      const result = await startSession(entryPoint.name, {
+        ...declared,
+        ...bespoke,
+      });
       sessionStorage.removeItem(FILES_KEY);
       sessionStorage.removeItem(REF_FILES_KEY);
       navigate(`/session/${result.session_id}`);
@@ -411,7 +462,24 @@ export function NewSession() {
     <div className="page new-session">
       <h1>New Writing Session</h1>
       <form onSubmit={handleSubmit}>
-        {profiles.length > 0 && (
+        {startable.length > 1 && (
+          <div className="form-group">
+            <label htmlFor="entry-point">Start from</label>
+            <select
+              id="entry-point"
+              value={entryPointName}
+              onChange={(e) => setEntryPointName(e.target.value)}
+            >
+              {startable.map((e) => (
+                <option key={e.name} value={e.name}>
+                  {e.summary}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {profiles.length > 0 && carries(entryPoint, "profile") && (
           <div className="form-group">
             <label htmlFor="profile">Profile</label>
             <select
@@ -440,179 +508,177 @@ export function NewSession() {
           </div>
         )}
 
-        <div className="form-group">
-          <label htmlFor="source">Source Material</label>
-          <textarea
-            id="source"
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-            placeholder="Paste a Claude share link, URL, or freeform text..."
-            rows={4}
-          />
-        </div>
+        {takesSources && (
+          <>
+            <div className="form-group">
+              <label htmlFor="source">Source Material</label>
+              <textarea
+                id="source"
+                value={source}
+                onChange={(e) => setSource(e.target.value)}
+                placeholder="Paste a Claude share link, URL, or freeform text..."
+                rows={4}
+              />
+            </div>
 
-        <div className="form-group">
-          <label>Upload Files</label>
-          <div
-            className={`file-drop-zone${dragOver ? " drag-over" : ""}`}
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={handleDrop}
-            onClick={() => document.getElementById("file-input")?.click()}
-          >
-            <input
-              id="file-input"
-              type="file"
-              accept=".pdf,.md,.txt,.html,.htm"
-              multiple
-              hidden
-              onChange={(e) => {
-                if (e.target.files?.length) handleFiles(e.target.files);
-                e.target.value = "";
-              }}
-            />
-            {uploading ? (
-              <span className="drop-label">Uploading...</span>
-            ) : (
-              <span className="drop-label">
-                Drop PDFs, markdown, or text files here — or click to browse
-              </span>
-            )}
-          </div>
+            <div className="form-group">
+              <label>Upload Files</label>
+              <div
+                className={`file-drop-zone${dragOver ? " drag-over" : ""}`}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+                onClick={() => document.getElementById("file-input")?.click()}
+              >
+                <input
+                  id="file-input"
+                  type="file"
+                  accept=".pdf,.md,.txt,.html,.htm"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    if (e.target.files?.length) handleFiles(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                {uploading ? (
+                  <span className="drop-label">Uploading...</span>
+                ) : (
+                  <span className="drop-label">
+                    Drop PDFs, markdown, or text files here — or click to browse
+                  </span>
+                )}
+              </div>
 
-          {composer?.area === "source" ? (
-            <TextFileComposer
-              key={`source-${composer.editIndex ?? "new"}`}
-              initialName={
-                composer.editIndex !== null
-                  ? (files[composer.editIndex]?.filename ?? "")
-                  : ""
-              }
-              initialText={
-                composer.editIndex !== null
-                  ? (files[composer.editIndex]?.text ?? "")
-                  : ""
-              }
-              placeholder="Paste or type text — saved as a source file the pipeline ingests like an upload"
-              saving={savingText}
-              error={composerError}
-              onSave={saveTextFile}
-              onCancel={closeComposer}
-            />
-          ) : (
-            <button
-              type="button"
-              className="paste-text-button"
-              onClick={() => openComposer({ area: "source", editIndex: null })}
-            >
-              + Paste text as file
-            </button>
-          )}
+              {composer?.area === "source" ? (
+                <TextFileComposer
+                  key={`source-${composer.editIndex ?? "new"}`}
+                  initialName={
+                    composer.editIndex !== null
+                      ? (files[composer.editIndex]?.filename ?? "")
+                      : ""
+                  }
+                  initialText={
+                    composer.editIndex !== null
+                      ? (files[composer.editIndex]?.text ?? "")
+                      : ""
+                  }
+                  placeholder="Paste or type text — saved as a source file the pipeline ingests like an upload"
+                  saving={savingText}
+                  error={composerError}
+                  onSave={saveTextFile}
+                  onCancel={closeComposer}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="paste-text-button"
+                  onClick={() => openComposer({ area: "source", editIndex: null })}
+                >
+                  + Paste text as file
+                </button>
+              )}
 
-          <FileChips
-            files={files}
-            onEdit={(i) => openComposer({ area: "source", editIndex: i })}
-            onRemove={removeFile}
-          />
-        </div>
+              <FileChips
+                files={files}
+                onEdit={(i) => openComposer({ area: "source", editIndex: i })}
+                onRemove={removeFile}
+              />
+            </div>
+          </>
+        )}
 
-        <div className="form-group">
-          <label htmlFor="format">Output Format</label>
-          <select
-            id="format"
-            value={format}
-            onChange={(e) => setFormat(e.target.value)}
-          >
-            {formats.map((f) => (
-              <option key={f.key} value={f.key}>
-                {f.accepts_description ? `${f.label}...` : f.label}
-              </option>
-            ))}
-          </select>
-          {selected?.accepts_description && (
-            <textarea
-              id="custom-format"
-              value={customFormat}
-              onChange={(e) => setCustomFormat(e.target.value)}
-              placeholder="Describe the desired format — tone, structure, audience, conventions. E.g. 'academic abstract with keywords' or 'diplomatic cable with numbered paragraphs'"
-              rows={3}
-              required
-            />
-          )}
-        </div>
+        <DeclaredFields
+          parameters={entryPoint?.parameters ?? []}
+          values={declared}
+          onChange={setDeclaredValue}
+          only={["task", "draft"]}
+        />
 
-        <div className="form-group">
-          <label htmlFor="refs">References (one per line, optional)</label>
-          <textarea
-            id="refs"
-            value={refs}
-            onChange={(e) => setRefs(e.target.value)}
-            placeholder="https://arxiv.org/abs/...\nhttps://example.com/paper.pdf"
-            rows={3}
-          />
-
-          {composer?.area === "reference" ? (
-            <TextFileComposer
-              key={`reference-${composer.editIndex ?? "new"}`}
-              initialName={
-                composer.editIndex !== null
-                  ? (refFiles[composer.editIndex]?.filename ?? "")
-                  : ""
-              }
-              initialText={
-                composer.editIndex !== null
-                  ? (refFiles[composer.editIndex]?.text ?? "")
-                  : ""
-              }
-              placeholder="Paste or type reference text — saved as a file and passed as a reference"
-              saving={savingText}
-              error={composerError}
-              onSave={saveTextFile}
-              onCancel={closeComposer}
-            />
-          ) : (
-            <button
-              type="button"
-              className="paste-text-button"
-              onClick={() => openComposer({ area: "reference", editIndex: null })}
-            >
-              + Paste text as file
-            </button>
-          )}
-
-          <FileChips
-            files={refFiles}
-            onEdit={(i) => openComposer({ area: "reference", editIndex: i })}
-            onRemove={removeRefFile}
-          />
-        </div>
-
-        {stopStages.length > 0 && (
+        {carries(entryPoint, "target_format") && (
           <div className="form-group">
-            <label htmlFor="stop-after">Pause after stage (optional)</label>
+            <label htmlFor="format">Output Format</label>
             <select
-              id="stop-after"
-              value={stopAfter}
-              onChange={(e) => setStopAfter(e.target.value)}
+              id="format"
+              value={format}
+              onChange={(e) => setFormat(e.target.value)}
             >
-              <option value="">Run all the way through</option>
-              {stopStages.map((s) => (
-                <option key={s} value={s}>
-                  {stageLabel(s)}
+              {formats.map((f) => (
+                <option key={f.key} value={f.key}>
+                  {f.accepts_description ? `${f.label}...` : f.label}
                 </option>
               ))}
             </select>
-            {stopAfter && (
-              <p className="form-note" style={{ opacity: 0.7 }}>
-                The pipeline will pause after {stageLabel(stopAfter)} so you can
-                review and comment in the Doc. Resume it from the session page to
-                continue.
-              </p>
+            {selected?.accepts_description && (
+              <textarea
+                id="custom-format"
+                value={customFormat}
+                onChange={(e) => setCustomFormat(e.target.value)}
+                placeholder="Describe the desired format — tone, structure, audience, conventions. E.g. 'academic abstract with keywords' or 'diplomatic cable with numbered paragraphs'"
+                rows={3}
+                required
+              />
             )}
           </div>
         )}
 
-        {modelOptions && (
+        {takesRefs && (
+          <div className="form-group">
+            <label htmlFor="refs">References (one per line, optional)</label>
+            <textarea
+              id="refs"
+              value={refs}
+              onChange={(e) => setRefs(e.target.value)}
+              placeholder="https://arxiv.org/abs/...\nhttps://example.com/paper.pdf"
+              rows={3}
+            />
+
+            {composer?.area === "reference" ? (
+              <TextFileComposer
+                key={`reference-${composer.editIndex ?? "new"}`}
+                initialName={
+                  composer.editIndex !== null
+                    ? (refFiles[composer.editIndex]?.filename ?? "")
+                    : ""
+                }
+                initialText={
+                  composer.editIndex !== null
+                    ? (refFiles[composer.editIndex]?.text ?? "")
+                    : ""
+                }
+                placeholder="Paste or type reference text — saved as a file and passed as a reference"
+                saving={savingText}
+                error={composerError}
+                onSave={saveTextFile}
+                onCancel={closeComposer}
+              />
+            ) : (
+              <button
+                type="button"
+                className="paste-text-button"
+                onClick={() => openComposer({ area: "reference", editIndex: null })}
+              >
+                + Paste text as file
+              </button>
+            )}
+
+            <FileChips
+              files={refFiles}
+              onEdit={(i) => openComposer({ area: "reference", editIndex: i })}
+              onRemove={removeRefFile}
+            />
+          </div>
+        )}
+
+        <DeclaredFields
+          parameters={(entryPoint?.parameters ?? []).filter(
+            (p) => p.name !== "task" && p.name !== "draft",
+          )}
+          values={declared}
+          onChange={setDeclaredValue}
+        />
+
+        {modelOptions && carries(entryPoint, "model") && (
           <details className="model-config">
             <summary>
               Models &amp; pipeline
@@ -673,7 +739,7 @@ export function NewSession() {
 
         {error && <div className="error-message">{error}</div>}
 
-        <button type="submit" disabled={submitting || !hasSource || (selected?.accepts_description && !customFormat.trim())}>
+        <button type="submit" disabled={submitting || !ready}>
           {submitting ? "Starting..." : "Start Writing"}
         </button>
       </form>

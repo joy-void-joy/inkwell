@@ -1,22 +1,26 @@
-"""Pydantic models for the web API — request/response schemas and WebSocket messages."""
+"""Pydantic models for the web API — request/response schemas and WebSocket messages.
+
+The models a *request* validates against are not written here. Each is compiled
+from the entry point declaration in :mod:`inkwell.environment.entrypoints`, whose
+parameters the typer commands and the browser form are rendered from too, and
+named below by subclassing what :func:`request_model` builds — which is what
+gives a route's body an annotation without respelling a single field.
+"""
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, SerializeAsAny
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
 from inkwell.agent.config import PipelineStage
-
-
-def normalize_stop_after(value: str | None) -> str | None:
-    """Validate a requested stop point against the pipeline's checkpoint stages."""
-    from inkwell.agent.pipeline import validate_stop_after
-
-    return validate_stop_after(value)
-
-
-StopAfter = Annotated[str | None, AfterValidator(normalize_stop_after)]
-"""A ``--stop-after`` stage for the API: normalized and validated, or None."""
+from inkwell.environment.entrypoints import (
+    RESTART,
+    RESUME,
+    REVISE,
+    RUN,
+    WRITE,
+    request_model,
+)
 
 type SessionStatus = Literal[
     "running", "completed", "failed", "cancelled", "interrupted", "paused"
@@ -50,44 +54,16 @@ class UploadTextRequest(BaseModel):
     )
 
 
-class ModelConfigOverrides(BaseModel):
-    """Per-session model/pipeline overrides, applied on top of the profile."""
-
-    model: str | None = Field(
-        default=None, description="Default model for all stages (AGENT_MODEL)"
-    )
-    stage_models: dict[PipelineStage, str] = Field(
-        default_factory=dict,
-        description="Per-stage model overrides, stage name -> model id",
-    )
-    writer_mode: str | None = Field(
-        default=None, description="Draft production mode: 'parallel' or 'single'"
-    )
+class CreateSessionRequest(request_model(WRITE)):
+    """Starts a write session. Every field is the write declaration's."""
 
 
-class CreateSessionRequest(ModelConfigOverrides):
-    sources: list[str] = Field(
-        description="Source materials: URLs, Claude share links, file paths, or freeform text"
-    )
-    refs: list[str] = Field(
-        default_factory=list, description="Supplementary reference URLs or file paths"
-    )
-    target_format: str = Field(default="auto", description="Output format")
-    existing_doc_id: str | None = Field(
-        default=None, description="Google Doc ID to write into"
-    )
-    profile: str | None = Field(
-        default=None, description="Configuration profile to use for this session"
-    )
-    stop_after: StopAfter = Field(
-        default=None,
-        description="Pause after this stage completes; resume the session to continue",
-    )
-    light: bool = Field(
-        default=False,
-        description="Run the light pipeline: single writer, fact-check-only "
-        "review, no deep research/resolve/rewrite. Implied by the LinkedIn format.",
-    )
+class RunSessionRequest(request_model(RUN)):
+    """Starts a run session from a freeform task."""
+
+
+class ReviseSessionRequest(request_model(REVISE)):
+    """Starts a revise session from an existing draft."""
 
 
 class ModelOptions(BaseModel):
@@ -112,29 +88,12 @@ class SessionAction(BaseModel):
     text: str | None = Field(default=None, description="Text for feedback action")
 
 
-class ResumeSessionRequest(ModelConfigOverrides):
-    from_stage: str | None = Field(
-        default=None, description="Resume from after this stage"
-    )
-    stop_after: StopAfter = Field(
-        default=None,
-        description="Pause again after this stage completes once resumed",
-    )
-    profile: str | None = Field(
-        default=None,
-        description="Override profile (required if original profile is unknown)",
-    )
+class ResumeSessionRequest(request_model(RESUME)):
+    """Continues a saved session. Every field is the resume declaration's."""
 
 
-class RestartSessionRequest(ModelConfigOverrides):
-    from_stage: str = Field(
-        description="Stage to re-run from scratch; this stage and everything "
-        "after it are regenerated with fresh agents, discarding their prior output"
-    )
-    profile: str | None = Field(
-        default=None,
-        description="Override profile (required if original profile is unknown)",
-    )
+class RestartSessionRequest(request_model(RESTART)):
+    """Regenerates a stage of a saved session onward with fresh agents."""
 
 
 class StageCostSummary(BaseModel):

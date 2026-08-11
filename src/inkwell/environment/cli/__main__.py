@@ -1,5 +1,11 @@
 """Inkwell CLI — interactive writing agent.
 
+The commands that start a writing session — write, run, revise, resume, restart —
+are not written here: they are compiled from the entry point declaration in
+:mod:`inkwell.environment.entrypoints` into ``cli/commands.py`` and mounted by
+``register``. What remains here is everything with no second surface: browsing
+past sessions, fetching Doc comments, the style corpus, the caches.
+
 Usage:
     inkwell                                          # open interactive chat
     inkwell write "https://claude.ai/share/abc123"   # run the pipeline
@@ -9,9 +15,8 @@ Usage:
 import asyncio
 import logging
 from collections.abc import Iterator
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlparse
 
 import typer
 from pydantic import BaseModel, Field
@@ -19,6 +24,7 @@ from pydantic import BaseModel, Field
 from inkwell.agent.config import select_profile
 from inkwell.agent.models import HistorySessionData
 from inkwell.agent.stages import OUTPUT_FORMATS
+from inkwell.environment.cli.commands import register as register_entry_points
 
 
 class CacheTarget(BaseModel):
@@ -28,41 +34,7 @@ class CacheTarget(BaseModel):
     path: Path = Field(description="Directory the cache lives in")
 
 
-FORMAT_HELP = "Suggested format (agent may override): " + ", ".join(
-    f"{f.key}:<description>" if f.accepts_description else f.key for f in OUTPUT_FORMATS
-)
-
-STOP_AFTER_HELP = (
-    "Pause after this stage finishes, then exit cleanly — review and comment in "
-    "the Doc, then `inkwell resume <id>` to continue. Stages: extract, voice, "
-    "plan, research, assumptions, refine, write, merge, review, rewrite, format"
-)
-
-
-def validate_stage_option(value: str | None, flag: str) -> None:
-    """Reject a stage flag that doesn't name a resumable checkpoint stage."""
-    if value is None:
-        return
-    from inkwell.agent.pipeline import CHECKPOINT_STAGES
-
-    if value not in CHECKPOINT_STAGES:
-        typer.echo(
-            f"Invalid {flag} '{value}'. Valid stages: {', '.join(CHECKPOINT_STAGES)}"
-        )
-        raise typer.Exit(1)
-
-
 logger = logging.getLogger(__name__)
-
-
-def extract_doc_id_from_url(url: str) -> str:
-    """Extract a Google Doc ID from a URL like docs.google.com/document/d/{id}/edit."""
-    path = PurePosixPath(urlparse(url).path)
-    parts = path.parts
-    for i, part in enumerate(parts):
-        if part == "d" and i + 1 < len(parts):
-            return parts[i + 1]
-    return ""
 
 
 app = typer.Typer(
@@ -97,130 +69,12 @@ def callback(
     if profile:
         select_profile(profile)
     if ctx.invoked_subcommand is None:
-        from inkwell.environment.cli.chat import chat_session
+        from inkwell.environment.cli.chat import run_entry_point
 
-        try:
-            asyncio.run(chat_session())
-        except KeyboardInterrupt:
-            pass
+        run_entry_point("write", {})
 
 
-@app.command()
-def write(
-    sources: Annotated[
-        list[str] | None,
-        typer.Argument(
-            help="Source materials: Claude share links, URLs, file paths, or a writing brief"
-        ),
-    ] = None,
-    ref: Annotated[
-        list[str] | None,
-        typer.Option("--ref", "-r", help="Supplementary reference URLs or file paths"),
-    ] = None,
-    target_format: Annotated[
-        str,
-        typer.Option("--format", "-f", help=FORMAT_HELP),
-    ] = "auto",
-    doc: Annotated[
-        str | None,
-        typer.Option("--doc", "-d", help="Existing Google Doc URL or ID to write into"),
-    ] = None,
-    session_id: Annotated[
-        str | None,
-        typer.Option("--session-id", "-s", help="Session identifier"),
-    ] = None,
-    stop_after: Annotated[
-        str | None,
-        typer.Option("--stop-after", help=STOP_AFTER_HELP),
-    ] = None,
-    verbose: Annotated[
-        bool,
-        typer.Option("--verbose", "-v", help="Enable verbose logging"),
-    ] = False,
-) -> None:
-    """Write an article from source material.
-
-    Each SOURCE can be:
-    - A Claude.ai share link (https://claude.ai/share/...)
-    - A URL to extract content from
-    - A local file path
-
-    Multiple sources are extracted and combined for the pipeline.
-
-    Examples:
-        inkwell write "https://claude.ai/share/abc123"
-        inkwell write "https://claude.ai/share/abc123" paper.pdf -f twitter
-        inkwell write conversation.md --stop-after plan   # pause to review the plan
-    """
-    from inkwell.environment.cli.chat import chat_session
-
-    validate_stage_option(stop_after, "--stop-after")
-
-    doc_id: str | None = None
-    if doc:
-        if doc.startswith("http"):
-            doc_id = extract_doc_id_from_url(doc)
-        else:
-            doc_id = doc
-
-    try:
-        asyncio.run(
-            chat_session(
-                sources=sources or [],
-                refs=ref,
-                session_id=session_id,
-                target_format=target_format,
-                existing_doc_id=doc_id,
-                stop_after=stop_after,
-                verbose=verbose,
-            )
-        )
-    except KeyboardInterrupt:
-        pass
-
-
-@app.command()
-def run(
-    task: Annotated[str, typer.Argument(help="Freeform task for the agent")],
-    target_format: Annotated[
-        str,
-        typer.Option("--format", "-f", help=FORMAT_HELP),
-    ] = "auto",
-    session_id: Annotated[
-        str | None,
-        typer.Option("--session-id", "-s", help="Session identifier"),
-    ] = None,
-    stop_after: Annotated[
-        str | None,
-        typer.Option("--stop-after", help=STOP_AFTER_HELP),
-    ] = None,
-    verbose: Annotated[
-        bool,
-        typer.Option("--verbose", "-v", help="Enable verbose logging"),
-    ] = False,
-) -> None:
-    """Run the pipeline with a freeform task as source material.
-
-    The task text is used as source for the planner — it extracts a
-    structure and runs the full pipeline. For source links, use
-    `inkwell write` instead.
-    """
-    from inkwell.environment.cli.chat import chat_session
-
-    validate_stage_option(stop_after, "--stop-after")
-
-    try:
-        asyncio.run(
-            chat_session(
-                sources=[task],
-                session_id=session_id,
-                target_format=target_format,
-                stop_after=stop_after,
-                verbose=verbose,
-            )
-        )
-    except KeyboardInterrupt:
-        pass
+register_entry_points(app)
 
 
 @app.command()
@@ -266,60 +120,6 @@ def sessions(
             )
             if checkpoints:
                 typer.echo(f"    checkpoints: {', '.join(checkpoints)}")
-
-
-@app.command()
-def resume(
-    session_id: Annotated[
-        str,
-        typer.Argument(help="Session ID to resume (see `inkwell sessions`)"),
-    ],
-    from_stage: Annotated[
-        str | None,
-        typer.Option(
-            "--from",
-            "-f",
-            help="Resume from after this stage (e.g. 'write' to re-run merge onward). "
-            "Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
-        ),
-    ] = None,
-    stop_after: Annotated[
-        str | None,
-        typer.Option("--stop-after", help=STOP_AFTER_HELP),
-    ] = None,
-    verbose: Annotated[
-        bool,
-        typer.Option("--verbose", "-v", help="Enable verbose logging"),
-    ] = False,
-) -> None:
-    """Resume a previous writing session from its saved pipeline state.
-
-    By default, picks up from the last completed stage. Use --from to
-    resume from an earlier checkpoint, and --stop-after to pause again at a
-    later one.
-
-    Examples:
-        inkwell sessions                              # find the session ID
-        inkwell resume 20260523_143022                # resume from last stage
-        inkwell resume 20260523_143022 --from write   # re-run merge onward
-        inkwell resume 20260523_143022 --stop-after review  # pause after review
-    """
-    validate_stage_option(from_stage, "--from")
-    validate_stage_option(stop_after, "--stop-after")
-
-    from inkwell.environment.cli.chat import chat_session
-
-    try:
-        asyncio.run(
-            chat_session(
-                resume_session_id=session_id,
-                resume_from_stage=from_stage,
-                stop_after=stop_after,
-                verbose=verbose,
-            )
-        )
-    except KeyboardInterrupt:
-        pass
 
 
 @app.command("fetch-comments")

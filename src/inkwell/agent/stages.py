@@ -1025,6 +1025,20 @@ class OutputFormatSpec(BaseModel):
     )
 
 
+# lup: Add a `textbook` format, carrying the author's normative guidance from
+# tmp/"Prompt - System - Voice - v00.md" and tmp/"Prompt - System - Writing
+# Paragraphs - v00.md": every paragraph opens with a bolded sentence summarizing
+# its claim, so a reader can follow the bold alone, plus the anti-LLM vocabulary,
+# structural, tone, and punctuation tells that document enumerates.
+# Most of that guidance is measurable rather than judgeable, so a format should
+# declare its checks beside its guidance — the `dev check` shape: named rows,
+# advisory rather than gating, read by the rewrite stage. Two tiers. Mechanical
+# checks are declared as data (banned vocabulary, em-dash density, formulaic
+# paragraph openings, sentence and paragraph length variance, copula frequency,
+# participial tails, bolded-summary conformance) and re-run on every draft for
+# nothing. Judged checks spend a reviewer and cover what counting cannot, such
+# as whether a passage is concrete enough to teach from. Custom-format mode must
+# let the agent declare its own through a tool rather than only in Python.
 OUTPUT_FORMATS: list[OutputFormatSpec] = [
     OutputFormatSpec(
         key="academic", label="Academic paper", guidance=ACADEMIC_GUIDANCE

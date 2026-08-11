@@ -63,6 +63,7 @@ from inkwell.agent.stages import (
 )
 from inkwell.agent.pipeline import build_research_tools
 from inkwell.agent.reader_feedback import (
+    EXPORT_SUFFIXES,
     ReaderFeedbackTree,
     SubstantiveRule,
     ingest_reader_feedback,
@@ -816,6 +817,10 @@ def reader_feedback_cmd(
         list[str] | None,
         typer.Option("--prose-field", help="Field whose prose counts (repeatable)"),
     ] = None,
+    suffix: Annotated[
+        list[str] | None,
+        typer.Option("--suffix", help="Suffix to read in a directory (repeatable)"),
+    ] = None,
 ) -> None:
     """Ingest a reader-feedback export into per-section notes and report the split.
 
@@ -827,12 +832,21 @@ def reader_feedback_cmd(
         min_length=min_length,
     )
     report = ingest_reader_feedback(
-        ReaderFeedbackTree(root=out.expanduser()), source.expanduser(), rule=rule
+        ReaderFeedbackTree(root=out.expanduser()),
+        source.expanduser(),
+        rule=rule,
+        suffixes=suffix or EXPORT_SUFFIXES,
     )
     typer.echo(report.summary())
     for row in report.malformed:
         typer.echo(f"  row {row.position}: {row.error}")
-    typer.echo(f"Filed under {out}")
+    for path in report.skipped:
+        typer.echo(f"  skipped (unreadable suffix): {path}")
+    typer.echo(
+        f"Filed under {out}"
+        if report.filed
+        else f"Nothing filed — whatever was already under {out} stands"
+    )
 
 
 @app.command("repl")

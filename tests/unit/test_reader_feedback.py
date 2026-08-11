@@ -23,6 +23,7 @@ from inkwell.agent.pipeline import (
     write_section,
 )
 from inkwell.agent.reader_feedback import (
+    AddressedFile,
     ReaderFeedback,
     ReaderFeedbackTree,
     ReaderSubmission,
@@ -162,19 +163,30 @@ class TestIdentityMapping:
         assert ordinal_prefix("1.3.2 Too deep") is None
         assert ordinal_prefix("") is None
 
-    def test_titled_sections_are_addressed_by_their_own_ordinal(self) -> None:
+    def test_titled_sections_are_placed_by_their_own_ordinal(self) -> None:
         book = SectionAddressBook.for_plan(plan_with("1.3 Intelligence", "7.3 Goals"))
-        assert book.chapter_scoped
-        assert book.address_of("7.3 Goals") == SectionAddress(chapter=7, section=3)
+        placed = book.entry_for("7.3 Goals")
+        assert placed is not None
+        assert (placed.chapter, placed.section) == (7, 3)
 
     def test_untitled_sections_fall_back_to_the_plans_ordering(self) -> None:
         book = SectionAddressBook.for_plan(plan_with("Intelligence", "Goals"))
-        assert not book.chapter_scoped
-        assert book.address_of("Goals") == SectionAddress(chapter=1, section=2)
+        placed = book.entry_for("Goals")
+        assert placed is not None
+        assert placed.section == 2
+        assert placed.chapter is None
 
-    def test_a_title_the_plan_does_not_carry_has_no_address(self) -> None:
+    def test_a_title_the_plan_does_not_carry_is_not_placed(self) -> None:
         book = SectionAddressBook.for_plan(plan_with("1.3 Intelligence"))
-        assert book.address_of("Nowhere") is None
+        assert book.entry_for("Nowhere") is None
+
+    def test_a_mixed_plan_places_only_its_numbered_sections(self) -> None:
+        book = SectionAddressBook.for_plan(
+            plan_with("Introduction", "1.1 Foo", "1.2 Bar", "Conclusion")
+        )
+        assert [entry.title for entry in book.entries] == ["1.1 Foo", "1.2 Bar"]
+        assert book.entry_for("Introduction") is None
+        assert book.entry_for("Conclusion") is None
 
 
 class TestIngestion:
@@ -279,6 +291,75 @@ class TestIngestion:
         assert report.substantive == 3
         assert report.votes == 5
 
+    def test_a_corrupt_re_export_leaves_a_good_ingestion_standing(
+        self, tree: ReaderFeedbackTree, tmp_path: Path
+    ) -> None:
+        good = ingest_reader_feedback(tree, EXPORT)
+        filed = tree.section_path(SectionAddress(chapter=7, section=3))
+        assert filed.exists()
+
+        broken = tmp_path / "truncated.json"
+        broken.write_text('{"submissions": [', encoding="utf-8")
+        report = ingest_reader_feedback(tree, broken)
+
+        assert report.read == 1
+        assert not report.filed
+        assert filed.exists()
+        assert tree.addressed_files() == [
+            AddressedFile(address=address, path=tree.section_path(address))
+            for address in good.addresses
+        ]
+
+    def test_a_source_that_vanished_leaves_a_good_ingestion_standing(
+        self, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, EXPORT)
+        filed = tree.section_path(SectionAddress(chapter=7, section=3))
+
+        report = ingest_reader_feedback(tree, tree.root / "absent.json")
+
+        assert report.read == 0
+        assert filed.exists()
+
+
+class TestScanningASource:
+    """Which files in a configured directory this reader reads, and which it says
+    it passed over."""
+
+    def test_an_unreadable_suffix_is_counted_not_dropped_silently(
+        self, tree: ReaderFeedbackTree, tmp_path: Path
+    ) -> None:
+        drop = tmp_path / "exports"
+        drop.mkdir()
+        (drop / "export.csv").write_text("chapter,section\n1,3\n", encoding="utf-8")
+
+        report = ingest_reader_feedback(tree, drop)
+
+        assert report.read == 0
+        assert report.skipped == [str(drop / "export.csv")]
+        assert "1 file(s) skipped" in report.summary()
+
+    def test_the_readable_suffixes_are_an_overridable_default(
+        self, tree: ReaderFeedbackTree, tmp_path: Path
+    ) -> None:
+        drop = tmp_path / "exports"
+        drop.mkdir()
+        renamed = drop / "export.formspree"
+        renamed.write_text(EXPORT.read_text(encoding="utf-8"), encoding="utf-8")
+
+        assert ingest_reader_feedback(tree, drop).read == 0
+
+        report = ingest_reader_feedback(tree, drop, suffixes=(".formspree",))
+        assert report.read == 9
+        assert report.skipped == []
+
+    def test_a_file_named_outright_is_read_whatever_it_is_called(
+        self, tree: ReaderFeedbackTree, tmp_path: Path
+    ) -> None:
+        renamed = tmp_path / "export.txt"
+        renamed.write_text(EXPORT.read_text(encoding="utf-8"), encoding="utf-8")
+        assert ingest_reader_feedback(tree, renamed).read == 9
+
 
 class TestReadingBySection:
     """A stage resolving its own section's file through the declared mapping."""
@@ -335,6 +416,48 @@ class TestReadingBySection:
         untitled = plan_with("Section 1", "Section 2", "Section 3")
         reader = ReaderFeedback.for_plan(notes.reader_dir, untitled)
         assert reader.for_section("Section 3") is None
+
+
+class TestMixedTitlePlan:
+    """A numbered plan with an unnumbered introduction beside its sections.
+
+    The ordinary textbook shape, and the one that can quietly go wrong: an
+    unnumbered title sits at no ordinal, so reading its position as one would
+    hand its writer the readers of whichever numbered section shares that
+    position. Nothing is the only correct answer.
+    """
+
+    def test_an_unnumbered_title_reaches_no_file(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, EXPORT)
+        # "Further reading" sits third, and section 1.3 is a section readers
+        # wrote about: reading that position as an ordinal would hand this
+        # writer 1.3's complaints.
+        mixed = plan_with("1.1 Foo", "1.2 Bar", "Further reading")
+        reader = ReaderFeedback.for_plan(notes.reader_dir, mixed)
+        assert reader.for_section("Further reading") is None
+
+    def test_its_numbered_siblings_still_reach_theirs(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, EXPORT)
+        mixed = plan_with("Introduction", "1.1 Foo", "1.3 Intelligence")
+        reader = ReaderFeedback.for_plan(notes.reader_dir, mixed)
+        assert reader.for_section("1.3 Intelligence") == tree.section_path(
+            SectionAddress(chapter=1, section=3)
+        )
+
+    def test_a_whole_draft_manifest_lists_each_file_once(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, EXPORT)
+        mixed = plan_with("Introduction", "1.3 Intelligence", "Conclusion")
+        reader = ReaderFeedback.for_plan(notes.reader_dir, mixed)
+        assert [entry.title for entry in reader.sections()] == ["1.3 Intelligence"]
+        assert [entry.path for entry in reader.sections()] == [
+            tree.section_path(SectionAddress(chapter=1, section=3))
+        ]
 
 
 class TestStageManifests:

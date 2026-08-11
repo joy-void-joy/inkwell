@@ -26,7 +26,7 @@ carrying prose.
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from itertools import groupby
 from pathlib import Path
 from typing import Self
@@ -47,7 +47,13 @@ from inkwell.agent.models import ArticlePlan
 logger = logging.getLogger(__name__)
 
 EXPORT_SUFFIXES: tuple[str, ...] = (".json",)
-"""Which files a configured reader-feedback directory is scanned for."""
+"""Default suffixes a configured reader-feedback directory is scanned for.
+
+Which shapes this reader can parse is a judgement about this reader, not a
+property of reader feedback, so it is a default every entry point takes as an
+argument — a form that also exports CSV needs a caller's override, not a fork.
+Whatever a scan passes over is counted and named, so a dropped file that this
+reader cannot read says so instead of reading as an empty inbox."""
 
 ORDINAL_CHARS = "0123456789.:-—"
 """Digits and the separators an outline number is written with. A token
@@ -144,11 +150,20 @@ def ordinal_prefix(title: str) -> SectionAddress | None:
     return SectionAddress(chapter=int(runs[0]), section=int(runs[1]))
 
 
-class AddressedSection(BaseModel):
-    """One plan section, and the ordinal path that addresses it."""
+class PlanSectionAddress(BaseModel):
+    """Where a plan section sits in the outline, as far as the plan says.
 
-    address: SectionAddress
+    The section ordinal is always known; the chapter is absent when the plan
+    does not say which chapter it is. A plan of plain titles is one chapter's
+    sections in order, and which chapter that is, is written down nowhere in
+    the plan — so the chapter stays unknown rather than being guessed at.
+    """
+
     title: str = Field(description="The plan's own title for the section")
+    section: int = Field(description="1-based section ordinal")
+    chapter: int | None = Field(
+        default=None, description="Chapter ordinal, where the plan names one"
+    )
 
 
 class AddressedFile(BaseModel):
@@ -159,52 +174,56 @@ class AddressedFile(BaseModel):
 
 
 class SectionAddressBook(BaseModel):
-    """Which plan section each ordinal path addresses.
+    """Where each plan section sits in the outline the export is keyed by.
 
     Built once from the plan and handed to whatever needs it, so the mapping
     between the export's keys and the plan's sections is read from one
     declaration rather than re-derived wherever a section is looked up.
+
+    A section the plan does not place has no entry at all. That is the point
+    of the type: an entry is an identity, and there is no way to write down a
+    position and have it read as one.
     """
 
-    entries: list[AddressedSection] = Field(default_factory=list)
-    chapter_scoped: bool = Field(
-        default=True,
-        description=(
-            "Whether a submission's chapter ordinal has to match as well. True "
-            "when the plan's own titles carry chapter ordinals, so the plan "
-            "spans identified chapters. False when none do: the plan is then "
-            "one chapter's worth of sections in order, and the section ordinal "
-            "alone addresses them."
-        ),
-    )
+    entries: list[PlanSectionAddress] = Field(default_factory=list)
 
     @classmethod
     def for_plan(cls, plan: ArticlePlan) -> Self:
-        """Address every section of ``plan``, by its own ordinal or its place.
+        """Place every section of ``plan`` the plan itself places.
 
-        A title that carries an ordinal keeps it. Where no title does, the
-        plan is one chapter's sections in order and position supplies the
-        section ordinal — which is why the chapter stops discriminating.
+        A title carrying its own ordinal is placed by it. Where no title in
+        the plan carries one, the plan is one chapter's sections in order, so
+        position supplies the section ordinal and the chapter stays unknown.
+
+        A mixed plan — numbered sections beside an unnumbered introduction or
+        conclusion — places only the numbered ones. Position inside a chapter
+        whose other sections have named themselves is not an identity: the
+        introduction of such a plan sits before section 1, not at it, so
+        reading its position as an ordinal would hand that writer section
+        1.1's readers. Unplaced is the honest answer, and the stage still has
+        the index and the unrouted file.
         """
         titled = [ordinal_prefix(section.title) for section in plan.sections]
-        scoped = any(address is not None for address in titled)
-        chapter = next((own.chapter for own in titled if own is not None), 1)
-
-        def addressed() -> Iterator[AddressedSection]:
-            """Each section under the address the rule above gives it."""
-            for position, (section, own) in enumerate(zip(plan.sections, titled), 1):
-                yield AddressedSection(
-                    address=own or SectionAddress(chapter=chapter, section=position),
-                    title=section.title,
-                )
-
-        return cls(entries=list(addressed()), chapter_scoped=scoped)
-
-    def address_of(self, title: str) -> SectionAddress | None:
-        """The ordinal path addressing a plan section, by the plan's own title."""
-        return next(
-            (entry.address for entry in self.entries if entry.title == title), None
+        if any(own is not None for own in titled):
+            return cls(
+                entries=[
+                    PlanSectionAddress(
+                        title=section.title, section=own.section, chapter=own.chapter
+                    )
+                    for section, own in zip(plan.sections, titled)
+                    if own is not None
+                ]
+            )
+        return cls(
+            entries=[
+                PlanSectionAddress(title=section.title, section=position)
+                for position, section in enumerate(plan.sections, 1)
+            ]
         )
+
+    def entry_for(self, title: str) -> PlanSectionAddress | None:
+        """Where the plan places one of its sections, by the plan's own title."""
+        return next((entry for entry in self.entries if entry.title == title), None)
 
 
 class ReaderSubmission(BaseModel):
@@ -417,13 +436,39 @@ def read_export(path: Path) -> ParsedExport:
         )
 
 
-def export_files(source: Path) -> list[Path]:
-    """Every export file a configured path names — one file, or a directory."""
-    if source.is_dir():
-        return sorted(
-            path for path in source.iterdir() if path.suffix in EXPORT_SUFFIXES
+class ExportScan(BaseModel):
+    """What a configured path holds: the files to read, and the ones passed over.
+
+    The skipped list is why this is a model rather than a list of paths. A
+    directory scan that silently dropped a file this reader cannot parse would
+    report an empty inbox to an author who had just dropped their export in it.
+    """
+
+    files: list[Path] = Field(default_factory=list)
+    skipped: list[Path] = Field(default_factory=list)
+
+
+def scan_exports(source: Path, suffixes: Sequence[str] = EXPORT_SUFFIXES) -> ExportScan:
+    """Sort what a configured path names into what this reader can read and not.
+
+    A file named outright is read whatever it is called — the author pointed at
+    it, so the suffix filter has nothing to decide. Only a directory scan
+    chooses, and it says what it passed over.
+    """
+    if not source.is_dir():
+        return ExportScan(files=[source] if source.is_file() else [])
+    entries = sorted(path for path in source.iterdir() if path.is_file())
+    scan = ExportScan(
+        files=[path for path in entries if path.suffix in suffixes],
+        skipped=[path for path in entries if path.suffix not in suffixes],
+    )
+    for path in scan.skipped:
+        logger.warning(
+            "Reader feedback: skipped %s — not one of the readable suffixes (%s)",
+            path,
+            ", ".join(suffixes),
         )
-    return [source] if source.is_file() else []
+    return scan
 
 
 class Routed(BaseModel):
@@ -493,6 +538,14 @@ class IngestionReport(BaseModel):
     sources: list[str] = Field(
         default_factory=list, description="Export files this run read"
     )
+    skipped: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files in a configured directory whose suffix this reader does not "
+            "parse — named so a dropped export in the wrong format is visible "
+            "rather than reading as an empty inbox"
+        ),
+    )
     read: int = Field(default=0, description="Submissions read across every file")
     substantive: int = Field(
         default=0, description="Submissions carrying prose the rule counts"
@@ -514,6 +567,13 @@ class IngestionReport(BaseModel):
     malformed: list[MalformedRow] = Field(
         default_factory=list, description="Rows that failed validation, by position"
     )
+    filed: bool = Field(
+        default=False,
+        description=(
+            "Whether this run wrote the tree. False when it read no submission "
+            "and so left whatever an earlier ingestion filed standing"
+        ),
+    )
 
     @computed_field
     @property
@@ -526,7 +586,8 @@ class IngestionReport(BaseModel):
         return (
             f"{self.read} reader submissions read, {self.substantive} substantive "
             f"across {self.sections} section(s), {self.votes} bare vote(s), "
-            f"{self.unrouted} unroutable, {len(self.malformed)} malformed"
+            f"{self.unrouted} unroutable, {len(self.malformed)} malformed, "
+            f"{len(self.skipped)} file(s) skipped"
         )
 
 
@@ -709,6 +770,7 @@ class ReaderFeedbackTree(BaseModel):
             )
 
         report.addresses = [entry.address for entry in written]
+        report.filed = True
         self.index_path.write_text(
             render_index_file(report, written, self.unrouted_path), encoding="utf-8"
         )
@@ -721,6 +783,7 @@ def ingest_reader_feedback(
     source: Path,
     *,
     rule: SubstantiveRule | None = None,
+    suffixes: Sequence[str] = EXPORT_SUFFIXES,
 ) -> IngestionReport:
     """Read every export ``source`` names and file it one section per file.
 
@@ -729,8 +792,15 @@ def ingest_reader_feedback(
     dropped. Bare votes are counted and left out — a stage revising prose has
     nothing to do with an up-arrow, and hundreds of them would bury the
     handful that say something.
+
+    An export that yields no submission at all files nothing and clears
+    nothing. A resume re-reads the configured path, and a truncated or corrupt
+    export replacing a good ingestion with an empty one would leave every
+    stage of that run with no reader evidence — so what is already on disk
+    stands, and the run reports that it read nothing.
     """
-    files = export_files(source)
+    scan = scan_exports(source, suffixes)
+    files = scan.files
     parsed = [read_export(path) for path in files]
     submissions = [one for export in parsed for one in export.submissions]
     malformed = [
@@ -744,12 +814,21 @@ def ingest_reader_feedback(
     split = sort_submissions(submissions, rule or SubstantiveRule())
     report = IngestionReport(
         sources=[str(path) for path in files],
+        skipped=[str(path) for path in scan.skipped],
         read=len(submissions) + len(malformed),
         substantive=len(split.routed) + len(split.unroutable),
         votes=split.votes,
         unrouted=len(split.unroutable),
         malformed=malformed,
     )
+    if not submissions:
+        logger.warning(
+            "Reader feedback: no submission read from %s — keeping what is "
+            "already filed under %s",
+            source,
+            tree.root,
+        )
+        return report
     return tree.write(report, by_address(split.routed), split.unroutable)
 
 
@@ -757,7 +836,6 @@ class SectionFeedbackFile(BaseModel):
     """One plan section's reader feedback, and where it sits on disk."""
 
     title: str = Field(description="The plan's own title for the section")
-    address: SectionAddress
     path: Path
 
 
@@ -796,24 +874,28 @@ class ReaderFeedback(BaseModel):
     def for_section(self, title: str) -> Path | None:
         """The file for one plan section, where readers wrote about it.
 
-        A plan whose titles carry ordinals names a file outright. A plan whose
-        titles do not is one chapter's sections in order, so position supplies
-        the section ordinal while the chapter stays unknown: the file is then
-        the one filed under that section ordinal, and nothing at all when
-        several chapters have one. Putting another chapter's readers in front
-        of this section would be worse than showing none — the stage still has
-        the index and the unrouted file either way.
+        A section the plan places by chapter and ordinal names a file
+        outright. A section placed by position alone — the plan says which
+        ordinal, not which chapter — takes the file filed under that ordinal,
+        and nothing at all when several chapters have one. A section the plan
+        does not place gets nothing.
+
+        Every "nothing" here is deliberate: handing a writer another
+        section's readers is worse than handing them none, and the stage still
+        has the index and the unrouted file either way.
         """
-        address = self.book.address_of(title)
-        if address is None:
+        entry = self.book.entry_for(title)
+        if entry is None:
             return None
-        if self.book.chapter_scoped:
-            path = self.tree.section_path(address)
+        if entry.chapter is not None:
+            path = self.tree.section_path(
+                SectionAddress(chapter=entry.chapter, section=entry.section)
+            )
             return path if path.exists() else None
         candidates = [
-            entry
-            for entry in self.tree.addressed_files()
-            if entry.address.section == address.section
+            filed
+            for filed in self.tree.addressed_files()
+            if filed.address.section == entry.section
         ]
         return candidates[0].path if len(candidates) == 1 else None
 
@@ -824,8 +906,6 @@ class ReaderFeedback(BaseModel):
             """Each section the same lookup a single writer would make resolves."""
             for entry in self.book.entries:
                 if (path := self.for_section(entry.title)) is not None:
-                    yield SectionFeedbackFile(
-                        title=entry.title, address=entry.address, path=path
-                    )
+                    yield SectionFeedbackFile(title=entry.title, path=path)
 
         return list(found())

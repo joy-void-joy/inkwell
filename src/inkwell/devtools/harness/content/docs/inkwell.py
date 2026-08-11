@@ -31,6 +31,9 @@ src/inkwell/
 │   ├── prompts.py          # System prompt for the writing agent
 │   ├── stages.py           # Stage prompts and tool lists, per pipeline stage
 │   ├── pipeline.py         # The unified pipeline and its listener
+│   ├── format_checks.py    # The rows a format declares beside its guidance
+│   ├── prose.py            # A draft read as blocks and sentences
+│   ├── segmenter.py        # The syntok segmenter filling the sentence seam
 │   ├── session.py          # WritingSessionState, WritingContext
 │   ├── tool_policy.py      # Conditional tool availability
 │   ├── watcher.py          # Background agent watching for author feedback
@@ -76,6 +79,47 @@ keyed on, so it is the unit the feedback loop reports against.
 
 Section writers run in parallel and never share a tab, which is what makes the
 Google Doc safe to write into while the author is reading it.
+
+## Output formats and the checks they declare
+
+An `OutputFormatSpec` in `agent/stages.py` carries a format's prose guidance
+and, beside it, the rows that guidance is re-read against. Both come off one
+declaration: `get_format_guidance` renders the rows into what the writer reads,
+and the rewrite stage measures the same rows off the finished draft, so a rule
+the writer was given and a rule the draft was checked by cannot drift apart.
+Adding a row to a format is a constructor call in that format's list; adding a
+*kind* of row is one class in `agent/format_checks.py`.
+
+Two tiers, one row shape. **Mechanical** rows are data — a threshold and the
+guidance sentence they measure — and read the draft structurally through
+`agent/prose.py`: blocks from markdown-it, sentences and tokens from the
+segmenter in `agent/segmenter.py`. **Judged** rows spend a reviewer on what
+counting cannot settle, and land the verdict in the same `CheckRow`, so the
+rewrite stage reads one report.
+
+`Segmenter` is the seam that decides how much a row can know about a sentence,
+and syntok fills it: boundaries an abbreviation or a decimal does not fool, plus
+tokens a row can match a construction against by position. syntok is here
+because it is pure Python and the project floor is 3.14, which no spaCy wheel
+covers; `pyproject.toml` declares spaCy as the `pos` extra to record where a
+parser-backed implementation drops in. The two rows that would read a parse —
+copula avoidance and participial tails — ship as declared detectors over those
+tokens, matching the tells the author enumerated, and generalize the day the
+seam is filled by a parser without changing.
+
+Rows are **advisory in the `dev check` sense**: they report and never gate. A
+fired row is a line in an artifact the rewriter is handed, a failure to measure
+at all is logged and dropped, and the author's voice outranks every row —
+where one fires against how the author actually writes, the author wins. A
+format whose guidance states nothing measurable declares no rows. A format
+invented for one run declares its own at runtime through
+`declare_format_check`, validated against the same models Python uses.
+
+Where two formats want opposite things from the same measurement, the row
+carries the difference as data rather than the code carrying a special case:
+`BoldedSummaries` states the textbook floor and the memo ceiling, and
+`BoldEmphasis` takes the exemption that lets bold be navigation in a format
+whose convention asks for it while staying overuse everywhere else.
 
 ## Test principles
 

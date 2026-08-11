@@ -25,9 +25,9 @@ from inkwell.agent.tools.voice import (
 )
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def style_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Create a temporary style corpus directory."""
+    """Point the corpus — and the voice cache under it — at a per-test directory."""
     corpus = tmp_path / "style"
     corpus.mkdir()
     import inkwell.agent.config as config_mod

@@ -4,19 +4,24 @@ import asyncio
 import json
 import shutil
 from html import escape
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from lup.types import EnvVars
+
 from inkwell.agent.browser_auth import context_has_cookies, login_interactive
+from inkwell.agent.client import PROVIDER_LOGIN, RUNTIME
 from inkwell.agent.google_auth import probe_disabled_apis
 from inkwell.devtools.setup import (
     PROFILES_DIR,
     claude_config_dir_for_profile,
     credentials_dir_for_profile,
     env_file_for_profile,
+    env_value,
     google_paths_for_profile,
     list_profiles,
     mask,
@@ -24,7 +29,7 @@ from inkwell.devtools.setup import (
     reset_integration,
     write_env_local,
 )
-from lup.google_oauth import MANUAL_REDIRECT_URI, client_type
+from lup.web.google_oauth import MANUAL_REDIRECT_URI, client_type
 
 router = APIRouter(prefix="/api/profiles", tags=["profiles"])
 
@@ -51,9 +56,7 @@ class ProfileResponse(BaseModel):
 
 
 class UpdateProfileRequest(BaseModel):
-    values: dict[str, str] = Field(
-        description="Environment variable key-value pairs to set"
-    )
+    values: EnvVars = Field(description="Environment variable key-value pairs to set")
 
 
 class RenameProfileRequest(BaseModel):
@@ -108,20 +111,43 @@ class DetectResult(BaseModel):
     )
 
 
-SETTABLE_KEYS = frozenset(
-    {
-        "EXA_API_KEY",
-        "FRED_API_KEY",
-        "CLAUDE_COOKIE",
-        "CLAUDE_ORG_UUID",
-        "CLAUDE_CONFIG_DIR",
-        "INKWELL_AUTHOR_EMAIL",
-        "INKWELL_GOOGLE_WORKSPACE_DOMAIN",
-        "AGENT_MODEL",
-        "AGENT_MAX_BUDGET_USD",
-        "OPENROUTER_API_KEY",
-    }
+class LoginCandidate(BaseModel):
+    """A directory that might hold a Claude login, and how it is described."""
+
+    directory: Path = Field(description="Where the credentials would live")
+    label: str = Field(description="Human-readable name for this location")
+    is_profile_match: bool = Field(
+        default=False, description="Whether this is the profile's own directory"
+    )
+
+    @property
+    def holds_login(self) -> bool:
+        """Whether this directory carries a login rather than just existing."""
+        return self.directory.is_dir() and PROVIDER_LOGIN.logged_in(self.directory)
+
+    @property
+    def detected(self) -> DetectedLogin:
+        """This candidate in the shape the detect endpoint reports."""
+        return DetectedLogin(
+            path=str(self.directory),
+            label=self.label,
+            is_profile_match=self.is_profile_match,
+        )
+
+
+SETTABLE_KEYS: tuple[str, ...] = (
+    "EXA_API_KEY",
+    "FRED_API_KEY",
+    "CLAUDE_COOKIE",
+    "CLAUDE_ORG_UUID",
+    PROVIDER_LOGIN.config_home_env,
+    "INKWELL_AUTHOR_EMAIL",
+    "INKWELL_GOOGLE_WORKSPACE_DOMAIN",
+    "AGENT_MODEL",
+    "AGENT_MAX_BUDGET_USD",
+    "OPENROUTER_API_KEY",
 )
+"""The env keys the profile API may write; anything else is rejected."""
 
 
 @router.get("/capabilities")
@@ -139,29 +165,26 @@ async def get_capabilities(request: Request) -> ServerCapabilities:
 
 async def build_profile_response(name: str) -> ProfileResponse:
     """Build integration status for a named profile."""
-    from pathlib import Path
-
     env = read_env_local(name)
-    _, google_token = google_paths_for_profile(name)
+    google = google_paths_for_profile(name)
 
     integrations: list[IntegrationStatus] = []
 
-    config_dir = env.get("CLAUDE_CONFIG_DIR", "")
-    login_ok = bool(config_dir) and (Path(config_dir) / ".credentials.json").exists()
+    config_dir = env_value(env, PROVIDER_LOGIN.config_home_env)
+    login_ok = bool(config_dir) and PROVIDER_LOGIN.logged_in(Path(config_dir))
     integrations.append(
         IntegrationStatus(
             id="claude-login",
-            name="Claude login",
+            name=f"{RUNTIME.name} login",
             configured=login_ok,
             detail=config_dir if login_ok else "not configured",
         )
     )
 
-    google_creds, _ = google_paths_for_profile(name)
-    google_ok = google_token.exists()
+    google_ok = google.token.exists()
     if google_ok:
         google_detail = "authorized"
-    elif google_creds.exists():
+    elif google.credentials.exists():
         google_detail = "credentials uploaded, not yet authorized"
     else:
         google_detail = "not configured"
@@ -174,7 +197,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
         )
     )
 
-    author_email = env.get("INKWELL_AUTHOR_EMAIL", "")
+    author_email = env_value(env, "INKWELL_AUTHOR_EMAIL")
     integrations.append(
         IntegrationStatus(
             id="author",
@@ -184,7 +207,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
         )
     )
 
-    exa_key = env.get("EXA_API_KEY", "")
+    exa_key = env_value(env, "EXA_API_KEY")
     integrations.append(
         IntegrationStatus(
             id="exa",
@@ -195,7 +218,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
     )
 
     has_browser = await context_has_cookies(name)
-    claude_cookie = env.get("CLAUDE_COOKIE", "")
+    claude_cookie = env_value(env, "CLAUDE_COOKIE")
     claude_ok = has_browser or bool(claude_cookie)
     if has_browser:
         claude_detail = "browser session stored"
@@ -212,7 +235,7 @@ async def build_profile_response(name: str) -> ProfileResponse:
         )
     )
 
-    fred_key = env.get("FRED_API_KEY", "")
+    fred_key = env_value(env, "FRED_API_KEY")
     integrations.append(
         IntegrationStatus(
             id="fred",
@@ -240,7 +263,7 @@ async def get_profile(name: str) -> ProfileResponse:
 
 @router.put("/{name}")
 async def update_profile(name: str, req: UpdateProfileRequest) -> ProfileResponse:
-    disallowed = set(req.values.keys()) - SETTABLE_KEYS
+    disallowed = {key for key in req.values if key not in SETTABLE_KEYS}
     if disallowed:
         raise HTTPException(
             status_code=400,
@@ -333,8 +356,6 @@ async def trigger_login(name: str) -> ProfileResponse:
 @router.post("/{name}/claude-login/detect")
 async def detect_claude_login(name: str) -> DetectResult:
     """Scan known locations for Claude credentials. Does not auto-save."""
-    from pathlib import Path
-
     env_path = env_file_for_profile(name)
     if not env_path.exists():
         raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
@@ -342,24 +363,26 @@ async def detect_claude_login(name: str) -> DetectResult:
     profile_dir = claude_config_dir_for_profile(name)
     default_dir = claude_config_dir_for_profile(None)
 
-    candidates: list[tuple[Path, str, bool]] = [
-        (profile_dir, f'Profile "{name}"', True),
-        (default_dir, "Default (shared across profiles)", False),
-        (Path.home() / ".claude", "Claude Code login (your dev account)", False),
+    candidates = [
+        LoginCandidate(
+            directory=profile_dir, label=f'Profile "{name}"', is_profile_match=True
+        ),
+        LoginCandidate(directory=default_dir, label="Default (shared across profiles)"),
+        LoginCandidate(
+            directory=Path.home() / ".claude",
+            label="Claude Code login (your dev account)",
+        ),
     ]
 
-    found = [
-        DetectedLogin(path=str(d), label=label, is_profile_match=match)
-        for d, label, match in candidates
-        if d.is_dir() and (d / ".credentials.json").exists()
-    ]
-
-    return DetectResult(found=found)
+    return DetectResult(
+        found=[candidate.detected for candidate in candidates if candidate.holds_login]
+    )
 
 
 def build_google_status(profile: str) -> GoogleStatusResponse:
     """Check Google credentials and token file status for a profile."""
-    creds_path, token_path = google_paths_for_profile(profile)
+    google = google_paths_for_profile(profile)
+    creds_path, token_path = google.credentials, google.token
     has_creds = creds_path.exists()
     has_token = token_path.exists()
     if has_token:
@@ -386,7 +409,7 @@ async def google_status(name: str) -> GoogleStatusResponse:
     """
     status = build_google_status(name)
     if status.has_token:
-        _, token_path = google_paths_for_profile(name)
+        token_path = google_paths_for_profile(name).token
         status.disabled_apis = await asyncio.to_thread(
             probe_disabled_apis, str(token_path)
         )
@@ -408,7 +431,7 @@ async def upload_google_credentials(
             detail=f"Invalid JSON file: {exc}",
         ) from exc
 
-    creds_path, _ = google_paths_for_profile(name)
+    creds_path = google_paths_for_profile(name).credentials
     creds_path.parent.mkdir(parents=True, exist_ok=True)
     creds_path.write_bytes(content)
     return build_google_status(name)
@@ -421,7 +444,8 @@ async def authorize_google(name: str) -> GoogleStatusResponse:
 
     from inkwell.agent.google_auth import run_oauth_flow
 
-    creds_path, token_path = google_paths_for_profile(name)
+    google = google_paths_for_profile(name)
+    creds_path, token_path = google.credentials, google.token
 
     if not creds_path.exists():
         raise HTTPException(
@@ -469,9 +493,10 @@ async def authorize_google(name: str) -> GoogleStatusResponse:
 def extract_code(pasted: str) -> str:
     """Accept either a bare authorization code or the full redirect URL."""
     text = pasted.strip()
-    if "code=" in text:
-        return parse_qs(urlparse(text).query).get("code", [text])[0]
-    return text
+    if "code=" not in text:
+        return text
+    query = parse_qs(urlparse(text).query)
+    return query["code"][0] if "code" in query else text
 
 
 def validated_callback(callback_url: str) -> str:
@@ -481,7 +506,7 @@ def validated_callback(callback_url: str) -> str:
     the dashboard's ``/inkwell`` proxy, a prefix this server is unaware of — so the
     frontend supplies the full URL and this guards it before it reaches Google.
     """
-    trimmed = callback_url.rstrip("/")
+    trimmed = callback_url.removesuffix("/")
     parsed = urlparse(trimmed)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Invalid dashboard callback URL")
@@ -525,22 +550,23 @@ async def start_consent(name: str, redirect_uri: str, *, use_pkce: bool) -> str:
     """
     from inkwell.agent.google_auth import build_consent_url
 
-    creds_path, token_path = google_paths_for_profile(name)
+    google = google_paths_for_profile(name)
+    creds_path, token_path = google.credentials, google.token
     if not creds_path.exists():
         raise HTTPException(
             status_code=400, detail="Upload OAuth client credentials JSON first."
         )
-    auth_url, state, verifier = await asyncio.to_thread(
+    consent = await asyncio.to_thread(
         build_consent_url, str(creds_path), redirect_uri, use_pkce=use_pkce
     )
-    PENDING_GOOGLE_AUTH[state] = PendingGoogleAuth(
+    PENDING_GOOGLE_AUTH[consent.state] = PendingGoogleAuth(
         credentials_path=str(creds_path),
         redirect_uri=redirect_uri,
         token_path=str(token_path),
         profile=name,
-        code_verifier=verifier,
+        code_verifier=consent.code_verifier,
     )
-    return auth_url
+    return consent.url
 
 
 @router.post("/{name}/google/auth-url-callback")
@@ -570,7 +596,7 @@ async def google_auth_url(
     the user reads the code off of. PKCE is off — a bare pasted code carries no
     ``state`` to recover a verifier by.
     """
-    creds_path, _ = google_paths_for_profile(name)
+    creds_path = google_paths_for_profile(name).credentials
     if not creds_path.exists():
         raise HTTPException(
             status_code=400, detail="Upload OAuth client credentials JSON first."
@@ -589,7 +615,8 @@ async def google_auth_complete(
 
     from inkwell.agent.google_auth import exchange_code
 
-    creds_path, token_path = google_paths_for_profile(name)
+    google = google_paths_for_profile(name)
+    creds_path, token_path = google.credentials, google.token
     code = extract_code(req.code)
     if not code:
         raise HTTPException(status_code=400, detail="Paste the authorization code.")

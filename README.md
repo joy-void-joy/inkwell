@@ -149,6 +149,5 @@ To speed up development, many claude commands and meta-commands are built in thi
 ### Human
 
 - agent.py
-- charts.py
 - dev.py
 - usage.py

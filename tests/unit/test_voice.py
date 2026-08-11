@@ -7,6 +7,8 @@ import pytest
 
 from inkwell.agent.tools.voice import (
     StyleEntry,
+    StyleSample,
+    VoiceAnalysis,
     add_format_example,
     add_style_reference,
     analyze_single_source,
@@ -18,15 +20,14 @@ from inkwell.agent.tools.voice import (
     load_format_examples,
     load_style_corpus,
     merge_voice_analyses,
-    parse_prescriptive_flag,
     voice_cache_dir,
     voice_cache_key,
 )
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def style_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Create a temporary style corpus directory."""
+    """Point the corpus — and the voice cache under it — at a per-test directory."""
     corpus = tmp_path / "style"
     corpus.mkdir()
     import inkwell.agent.config as config_mod
@@ -37,54 +38,47 @@ def style_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 class TestLoadStyleCorpus:
     async def test_empty_dir(self, style_dir: Path) -> None:
-        samples, sources, source_types = await load_style_corpus()
-        assert samples == []
-        assert sources == []
-        assert source_types == []
+        assert await load_style_corpus() == []
 
     async def test_loads_md_files(self, style_dir: Path) -> None:
         (style_dir / "essay.md").write_text("This is my writing style.")
-        samples, sources, source_types = await load_style_corpus()
-        assert len(samples) == 1
-        assert sources == ["essay.md"]
-        assert source_types == ["prose"]
+        samples = await load_style_corpus()
+        assert [s.label for s in samples] == ["essay.md"]
+        assert [s.source_type for s in samples] == ["prose"]
 
     async def test_loads_txt_files(self, style_dir: Path) -> None:
         (style_dir / "notes.txt").write_text("Some notes here.")
-        samples, sources, source_types = await load_style_corpus()
-        assert len(samples) == 1
-        assert sources == ["notes.txt"]
-        assert source_types == ["prose"]
+        samples = await load_style_corpus()
+        assert [s.label for s in samples] == ["notes.txt"]
+        assert [s.source_type for s in samples] == ["prose"]
 
     async def test_skips_urls_txt(self, style_dir: Path) -> None:
         (style_dir / "urls.txt").write_text("https://example.com\n")
         (style_dir / "real.md").write_text("Real content.")
-        samples, sources, _types = await load_style_corpus()
-        assert "urls.txt" not in sources
-        assert "real.md" in sources
+        labels = [s.label for s in await load_style_corpus()]
+        assert "urls.txt" not in labels
+        assert "real.md" in labels
 
     async def test_loads_all_samples(self, style_dir: Path) -> None:
         for i in range(10):
             (style_dir / f"sample_{i:02d}.md").write_text(f"Sample {i}")
-        samples, _, _types = await load_style_corpus()
-        assert len(samples) == 10
+        assert len(await load_style_corpus()) == 10
 
     async def test_preserves_full_content(self, style_dir: Path) -> None:
         (style_dir / "long.md").write_text("x" * 5000)
-        samples, _, _types = await load_style_corpus()
-        assert len(samples[0]) == 5000
+        samples = await load_style_corpus()
+        assert len(samples[0].text) == 5000
 
     async def test_loads_prescriptive_subdir(self, style_dir: Path) -> None:
         presc_dir = style_dir / "prescriptive"
         presc_dir.mkdir()
         (presc_dir / "rules.md").write_text("Never use em dashes.")
         (style_dir / "essay.md").write_text("My essay.")
-        samples, sources, source_types = await load_style_corpus()
+        samples = await load_style_corpus()
         assert len(samples) == 2
-        prose_idx = sources.index("essay.md")
-        presc_idx = sources.index("prescriptive/rules.md")
-        assert source_types[prose_idx] == "prose"
-        assert source_types[presc_idx] == "prescriptive"
+        by_label = {s.label: s for s in samples}
+        assert by_label["essay.md"].source_type == "prose"
+        assert by_label["prescriptive/rules.md"].prescriptive
 
     async def test_nonexistent_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import inkwell.agent.config as config_mod
@@ -92,10 +86,7 @@ class TestLoadStyleCorpus:
         monkeypatch.setattr(
             config_mod.settings, "style_corpus_path", "/nonexistent/path"
         )
-        samples, sources, source_types = await load_style_corpus()
-        assert samples == []
-        assert sources == []
-        assert source_types == []
+        assert await load_style_corpus() == []
 
 
 class TestExtractAuthorText:
@@ -186,22 +177,21 @@ class TestAddStyleReference:
 
 class TestListStyleReferences:
     def test_empty_corpus(self, style_dir: Path) -> None:
-        voice, prescriptive = list_style_references()
-        assert voice == []
-        assert prescriptive == []
+        listing = list_style_references()
+        assert listing.voice == []
+        assert listing.prescriptive == []
 
     def test_lists_files_and_urls(self, style_dir: Path) -> None:
         (style_dir / "essay.md").write_text("Content")
         (style_dir / "urls.txt").write_text("https://example.com\n")
 
-        voice, _prescriptive = list_style_references()
-        kinds = {e.kind for e in voice}
+        kinds = {e.kind for e in list_style_references().voice}
         assert "file" in kinds
         assert "url" in kinds
 
     def test_entry_types(self, style_dir: Path) -> None:
         (style_dir / "test.md").write_text("hello")
-        voice, _prescriptive = list_style_references()
+        voice = list_style_references().voice
         assert len(voice) == 1
         assert isinstance(voice[0], StyleEntry)
         assert voice[0].kind == "file"
@@ -212,7 +202,7 @@ class TestListStyleReferences:
         presc_dir = style_dir / "prescriptive"
         presc_dir.mkdir()
         (presc_dir / "guide.md").write_text("No em dashes.")
-        _voice, prescriptive = list_style_references()
+        prescriptive = list_style_references().prescriptive
         assert len(prescriptive) == 1
         assert prescriptive[0].name == "guide.md"
 
@@ -224,33 +214,29 @@ class TestListStyleReferences:
 
 class TestLoadFormatExamples:
     async def test_no_format_dir(self, style_dir: Path) -> None:
-        samples, sources = await load_format_examples("lesswrong")
-        assert samples == []
-        assert sources == []
+        assert await load_format_examples("lesswrong") == []
 
     async def test_loads_format_files(self, style_dir: Path) -> None:
         fmt_dir = style_dir / "formats" / "memo"
         fmt_dir.mkdir(parents=True)
         (fmt_dir / "good-memo.md").write_text("TO: Leadership\nFROM: Author")
-        samples, sources = await load_format_examples("memo")
-        assert len(samples) == 1
-        assert sources == ["good-memo.md"]
+        samples = await load_format_examples("memo")
+        assert [s.label for s in samples] == ["good-memo.md"]
 
     async def test_skips_urls_txt(self, style_dir: Path) -> None:
         fmt_dir = style_dir / "formats" / "blog"
         fmt_dir.mkdir(parents=True)
         (fmt_dir / "urls.txt").write_text("https://example.com/post\n")
         (fmt_dir / "example.md").write_text("Blog content.")
-        samples, sources = await load_format_examples("blog")
-        assert "urls.txt" not in sources
-        assert "example.md" in sources
+        labels = [s.label for s in await load_format_examples("blog")]
+        assert "urls.txt" not in labels
+        assert "example.md" in labels
 
     async def test_handles_custom_format_prefix(self, style_dir: Path) -> None:
         fmt_dir = style_dir / "formats" / "custom"
         fmt_dir.mkdir(parents=True)
         (fmt_dir / "example.md").write_text("Custom format content.")
-        samples, _ = await load_format_examples("custom:academic abstract")
-        assert len(samples) == 1
+        assert len(await load_format_examples("custom:academic abstract")) == 1
 
 
 class TestAddFormatExample:
@@ -314,38 +300,40 @@ class TestListFormatExamples:
 
 class TestParsePrescriptiveFlag:
     def test_no_frontmatter(self) -> None:
-        body, flag = parse_prescriptive_flag("Just a regular analysis.")
-        assert body == "Just a regular analysis."
-        assert not flag
+        one = VoiceAnalysis.from_cached("s", "Just a regular analysis.")
+        assert one.analysis == "Just a regular analysis."
+        assert not one.prescriptive
 
     def test_prescriptive_true(self) -> None:
         text = "---\nprescriptive: true\n---\nBrief summary."
-        body, flag = parse_prescriptive_flag(text)
-        assert body == "Brief summary."
-        assert flag
+        one = VoiceAnalysis.from_cached("s", text)
+        assert one.analysis == "Brief summary."
+        assert one.prescriptive
 
     def test_prescriptive_false(self) -> None:
         text = "---\nprescriptive: false\n---\nFull voice analysis."
-        body, flag = parse_prescriptive_flag(text)
-        assert body == "Full voice analysis."
-        assert not flag
+        one = VoiceAnalysis.from_cached("s", text)
+        assert one.analysis == "Full voice analysis."
+        assert not one.prescriptive
 
     def test_case_insensitive(self) -> None:
         text = "---\nPrescriptive: True\n---\nContent."
-        _body, flag = parse_prescriptive_flag(text)
-        assert flag
+        assert VoiceAnalysis.from_cached("s", text).prescriptive
 
     def test_missing_closing_fence(self) -> None:
         text = "---\nprescriptive: true\nNo closing fence."
-        body, flag = parse_prescriptive_flag(text)
-        assert body == text
-        assert not flag
+        one = VoiceAnalysis.from_cached("s", text)
+        assert one.analysis == text
+        assert not one.prescriptive
 
     def test_empty_body_returns_original(self) -> None:
         text = "---\nprescriptive: true\n---\n"
-        body, flag = parse_prescriptive_flag(text)
-        assert body == text
-        assert flag
+        one = VoiceAnalysis.from_cached("s", text)
+        assert one.analysis == text
+        assert one.prescriptive
+
+    def test_keeps_the_label_it_was_given(self) -> None:
+        assert VoiceAnalysis.from_cached("my-label", "text").label == "my-label"
 
 
 # ---------------------------------------------------------------------------
@@ -376,11 +364,9 @@ class TestVoiceCaching:
             "---\nprescriptive: false\n---\nCached analysis: dry humor, short sentences."
         )
 
-        label, analysis, is_prescriptive = await analyze_single_source(
-            text, "test-sample"
-        )
-        assert "dry humor" in analysis
-        assert not is_prescriptive
+        one = await analyze_single_source(StyleSample(label="test-sample", text=text))
+        assert "dry humor" in one.analysis
+        assert not one.prescriptive
 
     @pytest.mark.asyncio
     async def test_analyze_single_source_caches_prescriptive(
@@ -392,9 +378,9 @@ class TestVoiceCaching:
         cache_path = cache / f"{key}.md"
         cache_path.write_text("---\nprescriptive: true\n---\nBrief summary of rules.")
 
-        label, analysis, is_prescriptive = await analyze_single_source(text, "rules")
-        assert is_prescriptive
-        assert "summary" in analysis
+        one = await analyze_single_source(StyleSample(label="rules", text=text))
+        assert one.prescriptive
+        assert "summary" in one.analysis
 
     @pytest.mark.asyncio
     async def test_analyze_single_source_old_cache_no_frontmatter(
@@ -406,9 +392,9 @@ class TestVoiceCaching:
         cache_path = cache / f"{key}.md"
         cache_path.write_text("Old analysis without YAML frontmatter.")
 
-        label, analysis, is_prescriptive = await analyze_single_source(text, "legacy")
-        assert analysis == "Old analysis without YAML frontmatter."
-        assert not is_prescriptive
+        one = await analyze_single_source(StyleSample(label="legacy", text=text))
+        assert one.analysis == "Old analysis without YAML frontmatter."
+        assert not one.prescriptive
 
     @pytest.mark.asyncio
     async def test_analyze_single_source_calls_query_on_miss(
@@ -429,12 +415,12 @@ class TestVoiceCaching:
             new_callable=AsyncMock,
             side_effect=fake_query,
         ):
-            label, analysis, is_prescriptive = await analyze_single_source(
-                text, "new-sample"
+            one = await analyze_single_source(
+                StyleSample(label="new-sample", text=text)
             )
 
-        assert analysis == "Fresh analysis result."
-        assert not is_prescriptive
+        assert one.analysis == "Fresh analysis result."
+        assert not one.prescriptive
 
     @pytest.mark.asyncio
     async def test_analyze_single_source_label_identity(self, style_dir: Path) -> None:
@@ -445,9 +431,9 @@ class TestVoiceCaching:
         cache_path = cache / f"{key}.md"
         cache_path.write_text("---\nprescriptive: false\n---\nAnalysis.")
 
-        label, analysis, is_prescriptive = await analyze_single_source(text, "my-label")
-        assert label == "my-label"
-        assert "Analysis" in analysis
+        one = await analyze_single_source(StyleSample(label="my-label", text=text))
+        assert one.label == "my-label"
+        assert "Analysis" in one.analysis
 
 
 class TestMergeVoiceAnalyses:
@@ -465,7 +451,10 @@ class TestMergeVoiceAnalyses:
             side_effect=fake_query,
         ):
             result = await merge_voice_analyses(
-                [("source-1", "Analysis 1"), ("source-2", "Analysis 2")],
+                [
+                    VoiceAnalysis(label="source-1", analysis="Analysis 1"),
+                    VoiceAnalysis(label="source-2", analysis="Analysis 2"),
+                ],
                 output_path,
             )
         assert result == "Merged guide content."
@@ -484,9 +473,13 @@ class TestMergeVoiceAnalyses:
             side_effect=fake_query,
         ) as mock_query:
             await merge_voice_analyses(
-                [("source-1", "Analysis 1")],
+                [VoiceAnalysis(label="source-1", analysis="Analysis 1")],
                 output_path,
-                format_examples=[("good-post.md", "Example LW post content")],
+                format_examples=[
+                    VoiceAnalysis(
+                        label="good-post.md", analysis="Example LW post content"
+                    )
+                ],
             )
         prompt = mock_query.call_args[0][0]
         assert "merge_input.md" in prompt

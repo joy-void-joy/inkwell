@@ -34,7 +34,8 @@ def test_reset_google_clears_keys_and_deletes_files(
 ) -> None:
     monkeypatch.setattr(setup, "PROFILES_DIR", tmp_path / "profiles")
     profile = "alice"
-    creds, token = setup.google_paths_for_profile(profile)
+    google = setup.google_paths_for_profile(profile)
+    creds, token = google.credentials, google.token
     creds.parent.mkdir(parents=True)
     creds.write_text("{}")
     token.write_text("{}")

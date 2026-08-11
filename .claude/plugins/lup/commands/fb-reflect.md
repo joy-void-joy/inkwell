@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(uv run lup-devtools:*), Read, Grep, Glob, Edit, Write, AskUserQuestion
-description: Meta and meta-meta reflection on the feedback loop process itself
+description: "Meta and meta-meta reflection on the feedback loop process itself"
+allowed-tools: Bash(uv run lup-devtools:*), Read, Edit, Write, AskUserQuestion
 ---
 
 # Reflect: Process Quality Assessment
@@ -41,4 +41,4 @@ Were the `/fb-*` subcommands helpful? Anything confusing, missing, or redundant?
 
 ### 6. Devtools assessment
 
-Any repetitive analysis that should be automated as a devtools command? Add commands to `src/lup_template/devtools/`.
+Any repetitive analysis that should be automated as a devtools command? Add it to `packages/lup/src/lup/devtools/` when another project on lup would want it, to `src/lup_template/devtools/` when only this one would.

@@ -15,22 +15,26 @@ Usage:
 import asyncio
 import logging
 import uuid
+from datetime import timedelta
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.formatted_text.base import StyleAndTextTuples
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
+from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
 
-from lup.metrics import log_metrics_summary, reset_metrics
-from lup.paths import project_root
-from lup.trace import active_agents
+from lup.telemetry.metrics import log_metrics_summary, reset_metrics
+from lup.types import StringMap
+from lup.workspace.paths import project_root
+from inkwell.agent.client import active_agents
 
 from inkwell.agent.core import SessionTrace, run_session
-from inkwell.agent.models import WritingOutput
+from inkwell.agent.models import StageCostBreakdown, WritingOutput
 from inkwell.agent.pipeline import DISPLAY_STAGES, PipelineError, PipelineListener
 from inkwell.agent.session import WritingSessionState
 from inkwell.agent.tools.google_docs import do_fetch_comments, do_insert_comment
@@ -38,8 +42,7 @@ from inkwell.agent.tools.google_docs import do_fetch_comments, do_insert_comment
 logger = logging.getLogger(__name__)
 
 
-STAGE_LABELS: dict[str, str] = {
-    "preprocess": "🗂️ Classifying sources",
+STAGE_LABELS: StringMap = {
     "extract": "📄 Extracting source material",
     "voice": "🎙️ Analyzing author's voice",
     "plan": "🗺️ Planning article structure",
@@ -58,7 +61,59 @@ STAGE_LABELS: dict[str, str] = {
 }
 
 
+"""How the terminal announces each stage. A stage with no entry here shows
+its own name, so one added to the pipeline still renders."""
+
+
+def stage_label(stage: str) -> str:
+    """How the terminal announces `stage`, falling back to the name itself."""
+    return STAGE_LABELS[stage] if stage in STAGE_LABELS else stage
+
+
+GROUPED_STAGE_PREFIXES = ("write", "review", "patch")
+"""Stages that run one worker per section or lens, reported as one line each."""
+
+
+def cost_group(stage_name: str) -> str:
+    """The heading a stage's spend is reported under."""
+    return next(
+        (
+            prefix
+            for prefix in GROUPED_STAGE_PREFIXES
+            if stage_name.startswith(f"{prefix}:")
+        ),
+        stage_name,
+    )
+
+
+class GroupedCost(BaseModel):
+    """What one group of stages spent, summed across the stages in it."""
+
+    cost_usd: float = Field(default=0.0, description="Dollars the group spent")
+    duration_s: float = Field(default=0.0, description="Seconds the group ran")
+    calls: int = Field(default=0, description="Turns the group took")
+
+    def including(self, stage: StageCostBreakdown) -> "GroupedCost":
+        """This group with one more stage's spend added into it."""
+        return GroupedCost(
+            cost_usd=self.cost_usd + stage["cost_usd"],
+            duration_s=self.duration_s + stage["duration_s"],
+            calls=self.calls + stage["calls"],
+        )
+
+
 SPINNER_FRAMES = "◇◈◆◈"
+
+
+def running_for(elapsed: timedelta) -> str:
+    """How long a turn has been working, at toolbar precision.
+
+    Seconds under a minute, then whole minutes: the toolbar redraws several
+    times a second, and a figure whose last digit never settles reads as
+    noise rather than as progress.
+    """
+    seconds = int(elapsed.total_seconds())
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m"
 
 
 def build_toolbar(listener: InteractiveListener | None = None):
@@ -71,9 +126,9 @@ def build_toolbar(listener: InteractiveListener | None = None):
 
     def get_toolbar():
         nonlocal frame
-        parts: list[tuple[str, str]] = []
+        parts: StyleAndTextTuples = []
         stage = listener.current_stage if listener else ""
-        label = STAGE_LABELS.get(stage, "")
+        label = stage_label(stage)
         if label and stage in DISPLAY_STAGES:
             label = f"[{DISPLAY_STAGES.index(stage) + 1}/{len(DISPLAY_STAGES)}] {label}"
         if label or active_agents:
@@ -87,7 +142,10 @@ def build_toolbar(listener: InteractiveListener | None = None):
         if label:
             parts.append(("class:toolbar.stage", f"{label} "))
         if active_agents:
-            agents_str = "  ".join(sorted(active_agents))
+            agents_str = "  ".join(
+                f"{agent.label} {running_for(agent.elapsed())}"
+                for agent in sorted(active_agents, key=lambda a: a.started)
+            )
             parts.append(("class:toolbar.agents", f" {agents_str} "))
         return parts or None
 
@@ -116,7 +174,7 @@ class InteractiveListener(PipelineListener):
 
     async def on_stage(self, stage: str, description: str) -> None:
         self.current_stage = stage
-        label = STAGE_LABELS.get(stage, stage)
+        label = stage_label(stage)
         counter = ""
         if stage in DISPLAY_STAGES:
             counter = f" [dim]\\[{DISPLAY_STAGES.index(stage) + 1}/{len(DISPLAY_STAGES)}][/dim]"
@@ -142,7 +200,7 @@ class InteractiveListener(PipelineListener):
         )
 
     async def on_pause(self, stage: str, doc_url: str) -> None:
-        label = STAGE_LABELS.get(stage, stage)
+        label = stage_label(stage)
         resume_cmd = (
             f"inkwell resume {self.session_id}"
             if self.session_id
@@ -218,17 +276,11 @@ def build_prompt_session(
     kb = KeyBindings()
 
     @kb.add("escape", "enter")
-    def newline_binding(event: object) -> None:
-        from prompt_toolkit.key_binding import KeyPressEvent
-
-        assert isinstance(event, KeyPressEvent)
+    def newline_binding(event: KeyPressEvent) -> None:
         event.current_buffer.newline()
 
     @kb.add("enter")
-    def submit_binding(event: object) -> None:
-        from prompt_toolkit.key_binding import KeyPressEvent
-
-        assert isinstance(event, KeyPressEvent)
+    def submit_binding(event: KeyPressEvent) -> None:
         event.current_buffer.validate_and_handle()
 
     return PromptSession(
@@ -291,19 +343,20 @@ async def fetch_and_queue_comments(
     session_state: WritingSessionState | None = None,
 ) -> None:
     """Fetch comments from a Google Doc and queue them as feedback."""
-    from inkwell.agent.tools.extract import GDOC_URL_PATTERN, parse_gdoc_id
+    from inkwell.agent.tools.extract import is_gdoc_url, parse_gdoc_id
 
     try:
-        if GDOC_URL_PATTERN.search(doc_arg):
+        if is_gdoc_url(doc_arg):
             doc_id = parse_gdoc_id(doc_arg)
         else:
             doc_id = doc_arg
 
-        already_seen = set[str]()
+        already_seen: list[str] = []
         if session_state:
-            already_seen = (
-                session_state.seen_comment_ids | session_state.agent_comment_ids
-            )
+            already_seen = [
+                *session_state.seen_comments.handled,
+                *session_state.agent_comments.handled,
+            ]
 
         comments = await do_fetch_comments(
             doc_id, exclude_ids=already_seen, include_resolved=True
@@ -375,13 +428,13 @@ async def read_terminal_input(
         if stripped.startswith("/style"):
             from inkwell.agent.tools.voice import list_style_references
 
-            voice_entries, prescriptive_entries = list_style_references()
-            if not voice_entries and not prescriptive_entries:
+            listing = list_style_references()
+            if not listing.voice and not listing.prescriptive:
                 console.print("  [dim]No style corpus. Use `inkwell style add`.[/dim]")
             else:
-                for e in voice_entries:
+                for e in listing.voice:
                     console.print(f"  [dim][{e.kind}] {e.name}[/dim]")
-                for e in prescriptive_entries:
+                for e in listing.prescriptive:
                     console.print(f"  [dim][prescriptive] {e.name}[/dim]")
             continue
         if stripped == "/sync":
@@ -464,7 +517,7 @@ async def chat_session(
         elif resume_session_id:
             console.print(f"  [dim]Resuming session: {resume_session_id}[/dim]")
 
-        trace_holder: list[SessionTrace] = []
+        trace = SessionTrace()
         session_state = WritingSessionState()
 
         input_task = asyncio.create_task(
@@ -495,7 +548,7 @@ async def chat_session(
                     existing_doc_id=existing_doc_id,
                     session_id=session_id,
                     listener=listener,
-                    trace_holder=trace_holder,
+                    trace=trace,
                     session_state=session_state,
                     stop_after=stop_after,
                 )
@@ -504,29 +557,34 @@ async def chat_session(
                 console.print(f"  [dim]Cost: ${result.cost_usd:.2f}[/dim]")
                 stage_costs = result.output.stage_costs if result.output else {}
                 if stage_costs:
-                    grouped: dict[str, list[float]] = {}
-                    for name, data in stage_costs.items():
-                        if name.startswith("write:"):
-                            group = "write"
-                        elif name.startswith("review:"):
-                            group = "review"
-                        elif name.startswith("patch:"):
-                            group = "patch"
-                        else:
-                            group = name
-                        if group not in grouped:
-                            grouped[group] = [0.0, 0.0, 0]
-                        grouped[group][0] += data.get("cost_usd", 0)
-                        grouped[group][1] += data.get("duration_s", 0)
-                        grouped[group][2] += data.get("calls", 0)
-                    for name, vals in sorted(grouped.items(), key=lambda kv: -kv[1][0]):
-                        cost, dur, calls = vals[0], vals[1], int(vals[2])
-                        pct = (cost / result.cost_usd * 100) if result.cost_usd else 0
-                        label = f"{name} ({calls})" if calls > 1 else name
+
+                    def total_for(group: str) -> GroupedCost:
+                        """Everything the stages reported under `group` spent."""
+                        summed = GroupedCost()
+                        for name, cost in stage_costs.items():
+                            if cost_group(name) == group:
+                                summed = summed.including(cost)
+                        return summed
+
+                    grouped = {
+                        group: total_for(group)
+                        for group in dict.fromkeys(
+                            cost_group(name) for name in stage_costs
+                        )
+                    }
+                    for name, total in sorted(
+                        grouped.items(), key=lambda kv: -kv[1].cost_usd
+                    ):
+                        pct = (
+                            (total.cost_usd / result.cost_usd * 100)
+                            if result.cost_usd
+                            else 0
+                        )
+                        label = f"{name} ({total.calls})" if total.calls > 1 else name
                         console.print(
                             f"    [dim]{label:.<30s} "
-                            f"${cost:>6.2f}  ({pct:4.1f}%)  "
-                            f"{dur:>5.0f}s[/dim]"
+                            f"${total.cost_usd:>6.2f}  ({pct:4.1f}%)  "
+                            f"{total.duration_s:>5.0f}s[/dim]"
                         )
 
         except PipelineError as exc:
@@ -541,8 +599,8 @@ async def chat_session(
                 await input_task
             except asyncio.CancelledError:
                 pass
-            if trace_holder:
-                trace_path = trace_holder[0].save()
+            trace_path = trace.save()
+            if trace_path:
                 console.print(f"\n  [dim]Trace saved to: {trace_path}[/dim]")
 
     log_metrics_summary()

@@ -2,31 +2,74 @@
 
 import contextvars
 import logging
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Self
+from typing import Literal, Self, get_args
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+from lup.types import EnvVars
+
+from inkwell.agent.client import PROVIDER_LOGIN
 
 logger = logging.getLogger(__name__)
 
 
+class ProfileSelection(BaseSettings):
+    """Which profile the environment asks for.
+
+    Declares no `env_file`, so it reads the process environment and nothing
+    else — which is what keeps it clear of the circularity its own result
+    would otherwise create, since the profile chooses the env file chain
+    `Settings` reads and a profile read from one of those files could not.
+    """
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    profile: str | None = Field(default=None, validation_alias="INKWELL_PROFILE")
+
+
+class ProfileOverride(BaseModel):
+    """A profile chosen in-process, overriding what the environment asked for."""
+
+    name: str | None = None
+
+
+override = ProfileOverride()
+"""Set by an entry point that took a profile as an argument, so that the loads
+which follow resolve against it. A holder rather than a rebound module-level
+name, so `select_profile` needs no `global`."""
+
+
 def active_profile() -> str | None:
     """Return the active profile name, or None for the default config."""
-    return os.environ.get("INKWELL_PROFILE") or None
+    return override.name or ProfileSelection().profile or None
 
 
-def build_env_files() -> tuple[str, ...]:
-    """Build the env file chain based on the active profile."""
-    profile = active_profile()
+def select_profile(profile: str | None) -> None:
+    """Make `profile` the active one for the loads that follow."""
+    override.name = profile
+
+
+def env_files_for(profile: str | None) -> tuple[str, ...]:
+    """The env file chain a profile reads, most general first."""
     if profile:
         return (".env", f"profiles/{profile}/env")
     return (".env", ".env.local")
 
 
-PIPELINE_STAGES: tuple[str, ...] = (
+def build_env_files() -> tuple[str, ...]:
+    """Build the env file chain based on the active profile."""
+    return env_files_for(active_profile())
+
+
+type PipelineStage = Literal[
     "preprocess",
     "extract",
     "voice",
@@ -43,8 +86,11 @@ PIPELINE_STAGES: tuple[str, ...] = (
     "orchestrate",
     "reader",
     "format",
-)
-"""Stage names accepted by per-stage model overrides."""
+]
+"""One stage of the writing pipeline, as a per-stage model override names it."""
+
+PIPELINE_STAGES: tuple[PipelineStage, ...] = get_args(PipelineStage.__value__)
+"""Stage names accepted by per-stage model overrides, in pipeline order."""
 
 SUGGESTED_MODELS: tuple[str, ...] = (
     "claude-opus-4-6",
@@ -60,10 +106,25 @@ WRITER_MODES: tuple[str, ...] = ("auto", "parallel", "single")
 class Settings(BaseSettings):
     """Inkwell settings loaded from environment variables."""
 
-    model_config = SettingsConfigDict(
-        env_file=build_env_files(),
-        extra="ignore",
-    )
+    model_config = SettingsConfigDict(extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Resolve the env file chain when an instance is built rather than when
+        the class is defined, so a profile selected at runtime is what it reads."""
+        return (
+            init_settings,
+            env_settings,
+            DotEnvSettingsSource(settings_cls, env_file=build_env_files()),
+            file_secret_settings,
+        )
 
     @model_validator(mode="after")
     def warn_missing_optional_keys(self) -> Self:
@@ -96,6 +157,12 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="INKWELL_AUTHOR_EMAIL",
         description="Author's email for Google Doc sharing (editor access)",
+    )
+
+    base_path: str = Field(
+        default="/",
+        validation_alias="INKWELL_BASE_PATH",
+        description="Sub-path the dashboard is served under behind a reverse proxy",
     )
 
     google_workspace_domain: str | None = Field(
@@ -142,8 +209,8 @@ class Settings(BaseSettings):
 
     claude_config_dir: str | None = Field(
         default=None,
-        validation_alias="CLAUDE_CONFIG_DIR",
-        description="Separate Claude config directory for agent login",
+        validation_alias=PROVIDER_LOGIN.config_home_env,
+        description="Separate runtime config directory for agent login",
     )
 
     openrouter_api_key: str | None = Field(
@@ -162,7 +229,7 @@ class Settings(BaseSettings):
         description="Default Claude model for all pipeline stages",
     )
 
-    stage_models: dict[str, str] = Field(
+    stage_models: dict[PipelineStage, str] = Field(
         default_factory=dict,
         validation_alias="AGENT_STAGE_MODELS",
         description=(
@@ -185,9 +252,9 @@ class Settings(BaseSettings):
         ),
     )
 
-    def model_for(self, stage: str) -> str:
+    def model_for(self, stage: PipelineStage) -> str:
         """Model for a pipeline stage: stage override, else the default model."""
-        return self.stage_models.get(stage, self.model)
+        return self.stage_models[stage] if stage in self.stage_models else self.model
 
     max_thinking_tokens: int | None = Field(
         default=128_000 - 1,
@@ -262,26 +329,25 @@ class Settings(BaseSettings):
     )
 
 
+@contextmanager
+def profile_selected(profile: str | None) -> Iterator[None]:
+    """Run a block with `profile` active, restoring whatever was active before."""
+    previous = active_profile()
+    select_profile(profile)
+    try:
+        yield
+    finally:
+        select_profile(previous)
+
+
 def load_settings(profile: str | None = None) -> Settings:
     """Create a Settings instance for the given profile.
 
-    Temporarily sets INKWELL_PROFILE so build_env_files() resolves
-    the correct env file chain, then constructs Settings with that chain.
+    The profile has to be active while the instance is built, because it is
+    what `build_env_files` resolves the env file chain from.
     """
-    import os as _os
-
-    prev = _os.environ.get("INKWELL_PROFILE")
-    if profile:
-        _os.environ["INKWELL_PROFILE"] = profile
-    else:
-        _os.environ.pop("INKWELL_PROFILE", None)
-    try:
-        return Settings(_env_file=build_env_files())  # pyright: ignore[reportCallIssue]
-    finally:
-        if prev is not None:
-            _os.environ["INKWELL_PROFILE"] = prev
-        else:
-            _os.environ.pop("INKWELL_PROFILE", None)
+    with profile_selected(profile):
+        return Settings()
 
 
 settings = Settings.model_validate({})
@@ -310,27 +376,25 @@ def current_settings() -> Settings:
     return override if override is not None else settings
 
 
-def stage_model(stage: str) -> str:
+def stage_model(stage: PipelineStage) -> str:
     """Model for a pipeline stage from the active settings."""
     return current_settings().model_for(stage)
 
 
-def subprocess_auth_env(session_settings: Settings) -> dict[str, str]:
+def subprocess_auth_env(session_settings: Settings) -> EnvVars:
     """Auth env routing a session's spawned ``claude`` CLI to its profile.
 
     The CLI decides which account pays for inference from its own
-    environment, so a profile only affects billing if these vars reach the
+    environment, so a profile only affects billing if this reaches the
     subprocess. Without it, every session inherits the server's ambient
     login and bills that account regardless of the selected profile.
+
+    Routing through a compatible endpoint is not here: that is a transform
+    over the runtime's own configuration, applied in ``agent.client``.
     """
-    env: dict[str, str] = {}
-    if session_settings.claude_config_dir:
-        env["CLAUDE_CONFIG_DIR"] = session_settings.claude_config_dir
-    if session_settings.openrouter_api_key:
-        env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
-        env["ANTHROPIC_AUTH_TOKEN"] = session_settings.openrouter_api_key
-        env["ANTHROPIC_API_KEY"] = ""
-    return env
+    if not session_settings.claude_config_dir:
+        return {}
+    return {PROVIDER_LOGIN.config_home_env: session_settings.claude_config_dir}
 
 
 @contextmanager
@@ -342,7 +406,7 @@ def use_settings(session_settings: Settings) -> Iterator[None]:
     profile's account. Both the web and CLI entry points wrap session
     execution in this, so profile selection is honored end to end.
     """
-    from lup.client import client_env
+    from inkwell.agent.client import client_env
 
     settings_token = active_settings.set(session_settings)
     env_token = client_env.set(subprocess_auth_env(session_settings))
@@ -351,10 +415,3 @@ def use_settings(session_settings: Settings) -> Iterator[None]:
     finally:
         client_env.reset(env_token)
         active_settings.reset(settings_token)
-
-
-if settings.openrouter_api_key:
-    os.environ.setdefault("ANTHROPIC_BASE_URL", "https://openrouter.ai/api")
-    os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", settings.openrouter_api_key)
-    os.environ.setdefault("ANTHROPIC_API_KEY", "")
-    logger.info("OpenRouter enabled")

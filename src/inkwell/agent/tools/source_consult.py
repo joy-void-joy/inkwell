@@ -12,18 +12,20 @@ match tells you which page to read, never what the page says.
 import asyncio
 import json
 import logging
-import re
+import re  # lup: ignore[import-re] — this tool's input is a pattern to search
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from itertools import islice
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import stage_model
-from lup.client import CostAccumulator, query
+from inkwell.agent.client import query, result_text
+from lup.runtime.usage import CostAccumulator
 from lup.mcp import LupMcpTool, ToolError, lup_tool
-from lup.trace import TraceLogger
+from lup.telemetry.trace import TraceLogger
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +176,23 @@ class FindInSourceInput(BaseModel):
     )
 
 
+class SourcePage(BaseModel):
+    """One page of a source document, and the file holding its text."""
+
+    number: int = Field(description="1-based page number")
+    path: Path = Field(description="File holding this page's extracted text")
+
+
+def source_pages(doc: SourceDocument) -> list[SourcePage]:
+    """A document's pages: one file per page for a PDF, one for anything else."""
+    if doc.kind == "pdf" and doc.text_dir:
+        return [
+            SourcePage(number=int(path.stem), path=path)
+            for path in sorted(Path(doc.text_dir).glob("[0-9]*.txt"))
+        ]
+    return [SourcePage(number=1, path=Path(doc.path))]
+
+
 class SourceMatch(BaseModel):
     label: str = Field(description="Document the match is in")
     page: int = Field(description="1-based page number")
@@ -268,40 +287,33 @@ def make_source_consult_tools(
             if not documents:
                 raise ToolError(f"No source document labeled {inp.label!r}")
         try:
-            pattern = re.compile(inp.pattern, re.IGNORECASE)
+            pattern = re.compile(inp.pattern, re.IGNORECASE)  # lup: ignore[re-call]
         except re.error as exc:
             raise ToolError(f"Invalid regular expression: {exc}") from exc
 
-        matches: list[SourceMatch] = []
-        truncated = False
-        for doc in documents:
-            pages: list[tuple[int, Path]]
-            if doc.kind == "pdf" and doc.text_dir:
-                text_dir = Path(doc.text_dir)
-                pages = [(int(p.stem), p) for p in sorted(text_dir.glob("[0-9]*.txt"))]
-            else:
-                pages = [(1, Path(doc.path))]
-            for page_number, page_path in pages:
-                try:
-                    text = page_path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                for m in pattern.finditer(text):
-                    if len(matches) >= MAX_MATCHES:
-                        truncated = True
-                        break
-                    start = max(0, m.start() - SNIPPET_CHARS // 2)
-                    snippet = " ".join(
-                        text[start : m.end() + SNIPPET_CHARS // 2].split()
-                    )
-                    matches.append(
-                        SourceMatch(label=doc.label, page=page_number, snippet=snippet)
-                    )
-                if truncated:
-                    break
-            if truncated:
-                break
-        return FindInSourceOutput(matches=matches, truncated=truncated)
+        def found() -> Iterator[SourceMatch]:
+            """Every match in every document, in page order."""
+            for doc in documents:
+                for page in source_pages(doc):
+                    try:
+                        text = page.path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    for m in pattern.finditer(text):
+                        start = max(0, m.start() - SNIPPET_CHARS // 2)
+                        yield SourceMatch(
+                            label=doc.label,
+                            page=page.number,
+                            snippet=" ".join(
+                                text[start : m.end() + SNIPPET_CHARS // 2].split()
+                            ),
+                        )
+
+        # One past the cap, so the caller can be told there were more.
+        capped = list(islice(found(), MAX_MATCHES + 1))
+        return FindInSourceOutput(
+            matches=capped[:MAX_MATCHES], truncated=len(capped) > MAX_MATCHES
+        )
 
     @lup_tool(
         "Ask a focused question of a source document. A nested reader agent "
@@ -332,10 +344,10 @@ def make_source_consult_tools(
             system_prompt=SOURCE_READER_PROMPT,
             tools=["Read"],
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix=f"[consult:{doc.label}] ",
         )
-        answer = collector.text
+        answer = result_text(collector)
         if not answer:
             raise ToolError(
                 "The reader produced no answer; retry with a narrower question "
@@ -419,7 +431,7 @@ async def build_reading_notes(
                 system_prompt=READING_NOTES_PROMPT,
                 tools=["Read", "Write"],
                 max_thinking_tokens=128_000 - 1,
-                permission_mode="bypassPermissions",
+                autonomy="unattended",
                 prefix=f"[reading:{doc.label}:{start}-{end}] ",
                 trace_logger=trace_logger,
                 cost_accumulator=cost_accumulator,

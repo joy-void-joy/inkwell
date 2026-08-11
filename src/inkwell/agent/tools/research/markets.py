@@ -12,9 +12,10 @@ import logging
 from typing import TypedDict
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from lup.mcp import ToolError, lup_tool
+from lup.types import JsonValue
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,8 @@ class SearchMarketsOutput(BaseModel):
     count: int = Field(description="Total results")
 
 
-def safe_float(value: object) -> float | None:
+def safe_float(value: JsonValue) -> float | None:
+    """One wire number, however the platform chose to spell it."""
     if value is None:
         return None
     try:
@@ -73,17 +75,83 @@ def safe_float(value: object) -> float | None:
         return None
 
 
-def parse_polymarket_probability(market: dict[str, object]) -> float | None:
-    prices = market.get("outcomePrices")
-    if not prices or not isinstance(prices, str):
-        return None
-    try:
-        parsed = json.loads(prices)
-        if isinstance(parsed, list) and parsed:
-            return safe_float(parsed[0])
-    except (json.JSONDecodeError, IndexError):
-        pass
-    return None
+class PolymarketMarket(BaseModel):
+    """One market inside a Polymarket event, by the names the API sends."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    question: str = ""
+    volume: JsonValue = None
+    liquidity_num: JsonValue = Field(default=None, alias="liquidityNum")
+    end_date: str | None = Field(default=None, alias="endDate")
+    outcome_prices: str = Field(default="", alias="outcomePrices")
+    clob_token_ids: str = Field(default="", alias="clobTokenIds")
+
+    def probability(self) -> float | None:
+        """The first outcome's price, which Polymarket sends as JSON in a string."""
+        if not self.outcome_prices:
+            return None
+        try:
+            prices = json.loads(self.outcome_prices)
+        except json.JSONDecodeError:
+            return None
+        return safe_float(prices[0]) if isinstance(prices, list) and prices else None
+
+    def token_ids(self) -> list[str]:
+        """The CLOB tokens, which arrive the same JSON-in-a-string way."""
+        if not self.clob_token_ids:
+            return []
+        try:
+            ids = json.loads(self.clob_token_ids)
+        except json.JSONDecodeError:
+            return []
+        return [str(token) for token in ids] if isinstance(ids, list) else []
+
+
+class PolymarketEvent(BaseModel):
+    """One event, which groups the markets asking about it."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    title: str = ""
+    slug: str = ""
+    description: str = ""
+    markets: list[PolymarketMarket] = Field(default_factory=list)
+
+
+class ManifoldMarket(BaseModel):
+    """One Manifold market, by the names that API sends."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    question: str = ""
+    slug: str = ""
+    creator_username: str = Field(default="", alias="creatorUsername")
+    probability: JsonValue = None
+    volume: JsonValue = None
+    total_liquidity: JsonValue = Field(default=None, alias="totalLiquidity")
+
+
+class PricePoint(BaseModel):
+    """One price reading, at the second Polymarket recorded it."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    t: int = 0
+    p: float = 0.0
+
+
+class PriceHistory(BaseModel):
+    """What a prices-history request answers with."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    history: list[PricePoint] = Field(default_factory=list)
+
+
+POLYMARKET_EVENTS = TypeAdapter(list[PolymarketEvent])
+MANIFOLD_MARKETS = TypeAdapter(list[ManifoldMarket])
+"""Both APIs answer with a bare array, which is what these validate."""
 
 
 async def query_polymarket(query: str, limit: int) -> list[MarketResult]:
@@ -99,26 +167,21 @@ async def query_polymarket(query: str, limit: int) -> list[MarketResult]:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, params=query_params)
         resp.raise_for_status()
-        data = resp.json()
+        events = POLYMARKET_EVENTS.validate_python(resp.json())
 
-    results: list[MarketResult] = []
-    for event in data if isinstance(data, list) else []:
-        markets = event.get("markets", [])
-        for market in markets[:1]:
-            slug = event.get("slug", "")
-            results.append(
-                MarketResult(
-                    platform="polymarket",
-                    title=event.get("title", market.get("question", "")),
-                    url=f"https://polymarket.com/event/{slug}" if slug else "",
-                    probability=parse_polymarket_probability(market),
-                    volume=safe_float(market.get("volume")),
-                    liquidity=safe_float(market.get("liquidityNum")),
-                    close_date=market.get("endDate"),
-                )
-            )
-
-    return results[:limit]
+    return [
+        MarketResult(
+            platform="polymarket",
+            title=event.title or event.markets[0].question,
+            url=f"https://polymarket.com/event/{event.slug}" if event.slug else "",
+            probability=event.markets[0].probability(),
+            volume=safe_float(event.markets[0].volume),
+            liquidity=safe_float(event.markets[0].liquidity_num),
+            close_date=event.markets[0].end_date,
+        )
+        for event in events
+        if event.markets
+    ][:limit]
 
 
 async def query_manifold(query: str, limit: int) -> list[MarketResult]:
@@ -133,25 +196,24 @@ async def query_manifold(query: str, limit: int) -> list[MarketResult]:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, params=query_params)
         resp.raise_for_status()
-        data = resp.json()
+        markets = MANIFOLD_MARKETS.validate_python(resp.json())
 
-    results: list[MarketResult] = []
-    for m in data if isinstance(data, list) else []:
-        slug = m.get("slug", "")
-        creator = m.get("creatorUsername", "")
-        results.append(
-            MarketResult(
-                platform="manifold",
-                title=m.get("question", ""),
-                url=f"https://manifold.markets/{creator}/{slug}" if slug else "",
-                probability=safe_float(m.get("probability")),
-                volume=safe_float(m.get("volume")),
-                liquidity=safe_float(m.get("totalLiquidity")),
-                close_date=None,
-            )
+    return [
+        MarketResult(
+            platform="manifold",
+            title=m.question,
+            url=(
+                f"https://manifold.markets/{m.creator_username}/{m.slug}"
+                if m.slug
+                else ""
+            ),
+            probability=safe_float(m.probability),
+            volume=safe_float(m.volume),
+            liquidity=safe_float(m.total_liquidity),
+            close_date=None,
         )
-
-    return results[:limit]
+        for m in markets
+    ][:limit]
 
 
 @lup_tool(
@@ -265,39 +327,22 @@ async def polymarket_price(
                 params={"slug": params.slug},
             )
             resp.raise_for_status()
-            data = resp.json()
+            events = POLYMARKET_EVENTS.validate_python(resp.json())
     except httpx.HTTPError as e:
         raise ToolError(f"Failed to fetch Polymarket event: {e}") from e
 
-    events = data if isinstance(data, list) else [data]
     if not events:
         raise ToolError(f"No event found for slug '{params.slug}'")
 
     event = events[0]
-    if not isinstance(event, dict):
-        raise ToolError("Invalid event data from Polymarket")
 
-    title = str(event.get("title", ""))
-    description = str(event.get("description", ""))
-    markets = event.get("markets", [])
+    title = event.title
+    description = event.description
 
-    probability = 0.5
-    token_id: str | None = None
-    if isinstance(markets, list) and markets:
-        market = markets[0]
-        if isinstance(market, dict):
-            probability = parse_polymarket_probability(market) or 0.5
-
-            clob_ids = market.get("clobTokenIds")
-            if isinstance(clob_ids, str):
-                try:
-                    parsed = json.loads(clob_ids)
-                    if isinstance(parsed, list) and parsed:
-                        token_id = str(parsed[0])
-                except (json.JSONDecodeError, IndexError):
-                    pass
-            elif isinstance(clob_ids, list) and clob_ids:
-                token_id = str(clob_ids[0])
+    market = event.markets[0] if event.markets else None
+    probability = 0.5 if market is None else (market.probability() or 0.5)
+    tokens = market.token_ids() if market is not None else []
+    token_id = tokens[0] if tokens else None
 
     history: list[PriceHistoryPoint] = []
     if params.include_history and token_id:
@@ -314,17 +359,14 @@ async def polymarket_price(
                     params={"market": token_id, "startTs": start_ts, "endTs": end_ts},
                 )
                 resp.raise_for_status()
-                hist_data = resp.json()
+                series = PriceHistory.model_validate(resp.json())
 
-            by_day: dict[str, float] = {}
-            for point in hist_data.get("history", []):
-                if isinstance(point, dict):
-                    ts = point.get("t", 0)
-                    price = point.get("p", 0)
-                    day = datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime(
-                        "%Y-%m-%d"
-                    )
-                    by_day[day] = float(price)
+            by_day = {
+                datetime.fromtimestamp(point.t, tz=timezone.utc).strftime("%Y-%m-%d"): (
+                    point.p
+                )
+                for point in series.history
+            }
 
             history = [
                 PriceHistoryPoint(date=d, probability=p)

@@ -8,65 +8,70 @@ rather than receiving everything in the prompt.
 
 import asyncio
 import difflib
-import json
 import logging
 import shutil
 import tempfile
 import unicodedata
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+)
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import NamedTuple
 
 
-from claude_agent_sdk import McpServerConfig
-from pydantic import BaseModel, Field
+from markdown_it import MarkdownIt
+from pydantic import BaseModel, ConfigDict, Field
 
-from lup.client import (
-    CostAccumulator,
+from inkwell.agent.client import (
     HeartbeatCallback,
     SessionPolicy,
     active_block_callback,
     is_interrupt,
     query,
+    result_text,
     session_policy,
 )
-from lup.mcp import LupMcpTool, create_mcp_server, extract_sdk_tools
-from lup.paths import find_project_root
-from lup.sandbox import Sandbox
-from lup.trace import TraceLogger, extract_block_info
+from lup.mcp import LupMcpTool, McpServerEntry, create_mcp_server
+from lup.types import StringMap
+from lup.runtime.models import AnyTurnBlock
+from lup.runtime.usage import CostAccumulator
+from lup.workspace.paths import find_project_root
+from lup.sandbox.container import Sandbox
+from lup.telemetry.blocks import extract_block_info
+from lup.telemetry.trace import TraceLogger
 
 from inkwell.agent.config import current_settings, load_settings, stage_model
 from inkwell.agent.models import (
-    AddAction,
     ArticlePlan,
     AssumptionsList,
+    AssumptionTag,
+    AuthorNote,
     ClassifiedComment,
-    DropAction,
     MergedDraft,
-    PatchAction,
     PipelineSnapshot,
-    PreserveAction,
     ResearchCompilation,
+    RestartQueue,
     RestartStrategy,
     ReviewFinding,
     ReviewOutput,
-    RewriteAction,
     SectionDraft,
     SectionPlan,
     WritingOutput,
 )
-from lup.background import BackgroundAgent
-
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.watcher import (
     ACKNOWLEDGE_TEMPLATES,
+    PollingWatcher,
     create_comment_watcher,
     create_source_watcher,
 )
-from inkwell.agent.session import AuthorComment, WritingSessionState
+from inkwell.agent.session import AuthorComment, CommentLedger, WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
     COMMENT_CLASSIFIER_PROMPT,
@@ -86,11 +91,11 @@ from inkwell.agent.stages import (
     STYLE_REVIEWER_PROMPT,
     get_format_guidance,
 )
-from inkwell.agent.stages import EXTRACTOR_PROMPT
+from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import (
     EXTRACT_TOOLS as EXTRACT_MCP_TOOLS,
-    GDOC_URL_PATTERN,
+    is_gdoc_url,
     do_extract_conversation,
     do_extract_file,
     do_extract_gdoc,
@@ -146,8 +151,8 @@ from inkwell.agent.tools.research.markets import MARKET_TOOLS
 from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 from inkwell.agent.tools.stage_outputs import (
     AssumptionsCollector,
-    AuthorNote,
     PlanCollector,
+    PlanFile,
     ResearchCollector,
     ReviewCollector,
     make_assumptions_tools,
@@ -160,6 +165,7 @@ from inkwell.agent.tools.stage_outputs import (
 )
 from inkwell.agent.tools.query_artifacts import make_query_tools
 from inkwell.agent.tools.voice import (
+    StyleSample,
     analyze_voice_individually,
     compute_voice_fingerprint,
     invalidate_merged_cache,
@@ -223,6 +229,26 @@ def validate_stop_after(stage: str | None) -> str | None:
     return normalized
 
 
+def summarize_inputs(inputs: list[str]) -> str:
+    """A compact, log-safe preview of the inputs a run received.
+
+    Labels each input a file, URL, or freeform text with a short preview, so a
+    dropped attachment — only the author's directions arrived — is obvious in
+    the log rather than hidden behind a bare "1 source(s)" count.
+    """
+
+    def describe(value: str) -> str:
+        stripped = value.strip()
+        if Path(stripped).is_file():
+            return f"[file] {Path(stripped).name}"
+        if stripped.startswith(("http://", "https://")):
+            return f"[url] {stripped[:60]}"
+        return f"[text {len(stripped)}ch] {stripped[:50]!r}"
+
+    parts = [describe(value) for value in inputs]
+    return "; ".join(parts) if parts else "(none)"
+
+
 REACTIVE_LABELS = ("classify", "orchestrator")
 """Trace-label prefixes for one-shot reactive helpers (comment classification,
 restart orchestration): persisted but never resumed, since each invocation is a
@@ -242,8 +268,8 @@ def is_resumable_label(label: str) -> bool:
 def relocate_transcripts(
     src_config: str | None,
     dst_config: str | None,
-    session_ids: dict[str, str],
-) -> dict[str, str]:
+    session_ids: StringMap,
+) -> StringMap:
     """Mirror recorded session transcripts into the resuming profile's dir.
 
     A transcript is filed under the creating profile's ``CLAUDE_CONFIG_DIR``;
@@ -259,17 +285,20 @@ def relocate_transcripts(
         return dict(session_ids)
     src, dst = Path(src_config), Path(dst_config)
     label_for = {sid: label for label, sid in session_ids.items()}
-    placed: dict[str, str] = {}
-    for transcript in (src / "projects").glob("**/*.jsonl"):
-        label = label_for.get(transcript.stem)
-        if label is None:
-            continue
-        target = dst / transcript.relative_to(src)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            shutil.copy2(transcript, target)
-        placed[label] = transcript.stem
-    return placed
+
+    def placed() -> Iterator[str]:
+        """The labels whose transcript was found under `src` and copied across."""
+        for transcript in (src / "projects").glob("**/*.jsonl"):
+            if transcript.stem not in label_for:
+                continue
+            label = label_for[transcript.stem]
+            target = dst / transcript.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.copy2(transcript, target)
+            yield label
+
+    return {label: session_ids[label] for label in placed()}
 
 
 class PipelineError(Exception):
@@ -302,9 +331,10 @@ class PipelineStopRequested(Exception):
     snapshot is already saved, so a later resume picks up from the next stage.
     """
 
-    def __init__(self, stage: str) -> None:
+    def __init__(self, stage: str, message: str = "") -> None:
         super().__init__(stage)
         self.stage = stage
+        self.message = message
 
 
 class TabEdit(BaseModel):
@@ -318,24 +348,32 @@ class TabEdit(BaseModel):
     )
 
 
-GDOC_CHAR_MAP = [
-    ("‘", "'"),
-    ("’", "'"),
-    ("“", '"'),
-    ("”", '"'),
-    ("—", "--"),
-    ("–", "-"),
-    (" ", " "),
-]
+class SectionTab(BaseModel):
+    """A planned section paired with the GDoc tab that holds its draft."""
+
+    title: str = Field(description="Section title, as the plan names it")
+    tab_id: str = Field(description="Tab the section's draft is written to")
+
+
+GDOC_CHAR_MAP = str.maketrans(
+    {
+        "‘": "'",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "—": "--",
+        "–": "-",
+        " ": " ",
+    }
+)
+"""Smart punctuation a GDoc substitutes as the author types, mapped back to the
+ASCII the pipeline compares against."""
 
 
 def normalize_gdoc_text(text: str) -> str:
     """Normalize text for comparison, stripping GDoc formatting artifacts."""
-    text = unicodedata.normalize("NFC", text)
-    text = " ".join(text.split())
-    for old, new in GDOC_CHAR_MAP:
-        text = text.replace(old, new)
-    return text
+    collapsed = " ".join(unicodedata.normalize("NFC", text).split())
+    return collapsed.translate(GDOC_CHAR_MAP)
 
 
 def extract_edit_summary(original: str, current: str, context_lines: int = 2) -> str:
@@ -344,32 +382,30 @@ def extract_edit_summary(original: str, current: str, context_lines: int = 2) ->
     curr_lines = current.splitlines()
     matcher = difflib.SequenceMatcher(None, orig_lines, curr_lines)
 
-    blocks: list[str] = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-
+    def rendered(tag: str, i1: int, i2: int, j1: int, j2: int) -> Iterator[str]:
+        """One changed region: the lines before it, the change, the lines after."""
         ctx_before = orig_lines[max(0, i1 - context_lines) : i1]
-        ctx_after = orig_lines[i2 : i2 + context_lines]
-
-        parts: list[str] = []
         if ctx_before:
-            parts.append("  " + "\n  ".join(ctx_before))
+            yield "  " + "\n  ".join(ctx_before)
 
         match tag:
             case "replace":
-                parts.append("- " + "\n- ".join(orig_lines[i1:i2]))
-                parts.append("+ " + "\n+ ".join(curr_lines[j1:j2]))
+                yield "- " + "\n- ".join(orig_lines[i1:i2])
+                yield "+ " + "\n+ ".join(curr_lines[j1:j2])
             case "delete":
-                parts.append("- " + "\n- ".join(orig_lines[i1:i2]))
+                yield "- " + "\n- ".join(orig_lines[i1:i2])
             case "insert":
-                parts.append("+ " + "\n+ ".join(curr_lines[j1:j2]))
+                yield "+ " + "\n+ ".join(curr_lines[j1:j2])
 
+        ctx_after = orig_lines[i2 : i2 + context_lines]
         if ctx_after:
-            parts.append("  " + "\n  ".join(ctx_after))
+            yield "  " + "\n  ".join(ctx_after)
 
-        blocks.append("\n".join(parts))
-
+    blocks = [
+        "\n".join(rendered(tag, i1, i2, j1, j2))
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    ]
     return "\n---\n".join(blocks)
 
 
@@ -378,10 +414,12 @@ def extract_deleted_text(original: str, current: str) -> str:
     orig_lines = original.splitlines()
     curr_lines = current.splitlines()
     matcher = difflib.SequenceMatcher(None, orig_lines, curr_lines)
-    deleted: list[str] = []
-    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
-        if tag in ("delete", "replace"):
-            deleted.extend(orig_lines[i1:i2])
+    deleted = [
+        line
+        for tag, i1, i2, _j1, _j2 in matcher.get_opcodes()
+        if tag in ("delete", "replace")
+        for line in orig_lines[i1:i2]
+    ]
     return "\n".join(deleted)
 
 
@@ -390,17 +428,33 @@ def extract_deleted_text(original: str, current: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+SLUG_CHAR_MAP = str.maketrans({**dict.fromkeys("/:.,;!?\"'()[]{}"), "-": " "})
+"""Punctuation a slug drops outright, plus the hyphen, which becomes a separator
+so that runs of them collapse with the surrounding whitespace."""
+
+SLUG_MAX_CHARS = 80
+
+
 def slugify(label: str) -> str:
     """Turn a section title or label into a filesystem-safe slug."""
-    slug = label.lower().replace(" ", "-")
-    for ch in "/:.,;!?\"'()[]{}":
-        slug = slug.replace(ch, "")
-    while "--" in slug:
-        slug = slug.replace("--", "-")
-    return slug.strip("-")[:80]
+    return "-".join(label.lower().translate(SLUG_CHAR_MAP).split())[:SLUG_MAX_CHARS]
+
+
+ASSUMPTION_TAG_PREFIX: dict[AssumptionTag, str] = {
+    "direction_check": "[DIRECTION]",
+    "assumption": "[ASSUMPTION]",
+    "question": "[QUESTION]",
+    "confusion": "[UNCLEAR]",
+}
+"""How each surfaced uncertainty announces itself in the comment it posts."""
 
 
 AUTHOR_MARKERS = ("TODO", "FIXME", "BOTEC", "XXX")
+
+MARKDOWN = MarkdownIt()
+"""Reads a prose line's text content, so the block markers an author typed
+around a marker — heading, bullet, quote, ordered item — are the parser's
+business rather than a prefix this module strips by hand."""
 
 
 def extract_author_markers(text: str) -> list[str]:
@@ -411,13 +465,17 @@ def extract_author_markers(text: str) -> list[str]:
     tasks; otherwise the pipeline treats the surrounding prose as finished and
     the flagged work silently disappears.
     """
-    found: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip().lstrip("#-*>").strip()
-        upper = line.upper()
-        if any(marker in upper for marker in AUTHOR_MARKERS) and line not in found:
-            found.append(line)
-    return found
+
+    def marked() -> Iterator[str]:
+        for raw in text.splitlines():
+            for token in MARKDOWN.parse(raw):
+                if token.type != "inline":
+                    continue
+                upper = token.content.upper()
+                if any(marker in upper for marker in AUTHOR_MARKERS):
+                    yield token.content
+
+    return list(dict.fromkeys(marked()))
 
 
 def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
@@ -642,38 +700,47 @@ class PipelineListener:
 # ---------------------------------------------------------------------------
 
 
+class WrittenTab(BaseModel):
+    """What this run last wrote into one tab, and what it called it."""
+
+    label: str
+    content: str
+
+
 class TabTracker:
     """Tracks written tab content and detects author edits/suggestions."""
 
     def __init__(self, doc_id: str) -> None:
         self.doc_id = doc_id
-        self.written: dict[str, tuple[str, str]] = {}
+        self.written: dict[str, WrittenTab] = {}
 
     def record(self, tab_id: str, label: str, content: str) -> None:
-        self.written[tab_id] = (label, content)
+        self.written[tab_id] = WrittenTab(label=label, content=content)
 
     async def record_from_doc(self, tab_id: str, label: str) -> None:
         actual = await do_read_tab(self.doc_id, tab_id, as_markdown=True)
-        self.written[tab_id] = (label, actual)
+        self.record(tab_id, label, actual)
 
     async def detect_edits(self) -> list[TabEdit]:
-        edits: list[TabEdit] = []
-        for tab_id, (label, original) in self.written.items():
-            try:
-                current = await do_read_tab(
-                    self.doc_id, tab_id, accept_suggestions=True, as_markdown=True
+        async def edited() -> AsyncGenerator[TabEdit]:
+            """Each tab the author has touched since this run last wrote it."""
+            for tab_id, written in list(self.written.items()):
+                try:
+                    current = await do_read_tab(
+                        self.doc_id, tab_id, accept_suggestions=True, as_markdown=True
+                    )
+                except (RuntimeError, OSError):
+                    continue
+                if not self.has_meaningful_diff(written.content, current):
+                    continue
+                yield TabEdit(
+                    tab=written.label,
+                    diff=extract_edit_summary(written.content, current),
+                    original_snippet=extract_deleted_text(written.content, current),
                 )
-            except (RuntimeError, OSError):
-                continue
-            if not self.has_meaningful_diff(original, current):
-                continue
-            diff = extract_edit_summary(original, current)
-            original_snippet = extract_deleted_text(original, current)
-            edits.append(
-                TabEdit(tab=label, diff=diff, original_snippet=original_snippet)
-            )
-            self.written[tab_id] = (label, current)
-        return edits
+                self.record(tab_id, written.label, current)
+
+        return [edit async for edit in edited()]
 
     @staticmethod
     def has_meaningful_diff(original: str, current: str) -> bool:
@@ -691,55 +758,55 @@ def render_plan_progress(plan_path: Path) -> str:
     """Render the current plan JSON as markdown for the GDoc Plan tab."""
     if not plan_path.exists():
         return "# Planning...\n"
-    data = json.loads(plan_path.read_text(encoding="utf-8"))
-    parts: list[str] = []
-    parts.append(f"# {data.get('title', 'Planning...')}\n")
-    if thesis := data.get("thesis"):
-        parts.append(f"**Thesis:** {thesis}\n")
-    if direction := data.get("author_direction"):
-        parts.append(f"**Author direction:** {direction}\n")
-    sections = data.get("sections", [])
-    if sections:
-        parts.append("\n## Sections\n")
-        for s in sections:
-            parts.append(f"### {s.get('title', '???')}")
-            parts.append(f"{s.get('summary', '')}\n")
-            kp = s.get("key_points", [])
-            if kp:
-                parts.append("Key points: " + ", ".join(kp))
-    questions = data.get("research_questions", [])
-    if questions:
-        parts.append("\n## Research Questions\n")
-        for q in questions:
-            parts.append(
-                f"- [{q.get('priority', '?')}] {q.get('question', '')} "
-                f"(for: {q.get('section', '')})"
-            )
-    quotes = data.get("source_quotes", [])
-    if quotes:
-        parts.append("\n## Source Quotes\n")
-        for q in quotes:
-            parts.append(f'- "{q.get("text", "")}" — {q.get("speaker", "")}')
-    return "\n".join(parts)
+    plan = PlanFile.model_validate_json(plan_path.read_text(encoding="utf-8"))
+
+    def lines() -> Iterator[str]:
+        yield f"# {plan.title or 'Planning...'}\n"
+        if plan.thesis:
+            yield f"**Thesis:** {plan.thesis}\n"
+        if plan.author_direction:
+            yield f"**Author direction:** {plan.author_direction}\n"
+        if plan.sections:
+            yield "\n## Sections\n"
+            for section in plan.sections:
+                yield f"### {section.title or '???'}"
+                yield f"{section.summary}\n"
+                if section.key_points:
+                    yield "Key points: " + ", ".join(section.key_points)
+        if plan.research_questions:
+            yield "\n## Research Questions\n"
+            for question in plan.research_questions:
+                yield (
+                    f"- [{question.priority}] {question.question} "
+                    f"(for: {question.section})"
+                )
+        if plan.source_quotes:
+            yield "\n## Source Quotes\n"
+            for quote in plan.source_quotes:
+                yield f'- "{quote.text}" — {quote.speaker}'
+
+    return "\n".join(lines())
 
 
 def render_research_progress(research_path: Path) -> str:
     """Render the current research JSON as markdown for the GDoc Research tab."""
     if not research_path.exists():
         return "# Researching...\n"
-    data = json.loads(research_path.read_text(encoding="utf-8"))
-    findings = data.get("findings", [])
-    parts = [f"# Research Findings\n\n{len(findings)} findings\n"]
-    for f in findings:
-        parts.append(f"\n## {f.get('question', '???')}\n")
-        parts.append(f"{f.get('answer', '')}\n")
-        parts.append(f"**Confidence:** {f.get('confidence', '?')}")
-        sources = f.get("sources", [])
-        if sources:
-            urls = ", ".join(s.get("url", "") for s in sources if isinstance(s, dict))
+    research = ResearchCompilation.model_validate_json(
+        research_path.read_text(encoding="utf-8")
+    )
+
+    def lines() -> Iterator[str]:
+        yield f"# Research Findings\n\n{len(research.findings)} findings\n"
+        for finding in research.findings:
+            yield f"\n## {finding.question or '???'}\n"
+            yield f"{finding.answer}\n"
+            yield f"**Confidence:** {finding.confidence}"
+            urls = ", ".join(source.url for source in finding.sources)
             if urls:
-                parts.append(f"\n**Sources:** {urls}")
-    return "\n".join(parts)
+                yield f"\n**Sources:** {urls}"
+
+    return "\n".join(lines())
 
 
 class DraftSyncer:
@@ -832,9 +899,35 @@ def build_research_tools() -> list[LupMcpTool]:
     ]
 
 
+class ToolServers(BaseModel):
+    """MCP servers a stage is given, and the tool names they expose.
+
+    The two travel together everywhere: a session needs the servers to reach
+    the tools and the names to allow them, and a stage that merged one without
+    the other would be handed tools it may not call.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    servers: dict[str, McpServerEntry]
+    tool_names: list[str]
+
+    def merged(self, *others: "ToolServers") -> "ToolServers":
+        """This set of servers and tool names, plus every other, as one."""
+        groups = [self, *others]
+        return ToolServers(
+            servers={
+                name: server
+                for group in groups
+                for name, server in group.servers.items()
+            },
+            tool_names=[name for group in groups for name in group.tool_names],
+        )
+
+
 def build_source_server(
     registry_provider: Callable[[], Path] | None = None,
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+) -> ToolServers:
     """MCP server for source fetching/extraction — available to ALL pipeline stages.
 
     With ``registry_provider``, also exposes the source-document tools
@@ -844,13 +937,10 @@ def build_source_server(
     tools = [*FETCH_TOOLS, *EXTRACT_MCP_TOOLS]
     if registry_provider is not None:
         tools.extend(make_source_consult_tools(registry_provider))
-    server = create_mcp_server(
-        name="source",
-        version="1.0.0",
-        tools=extract_sdk_tools(tools),
+    return ToolServers(
+        servers={"source": create_mcp_server(name="source", tools=tools)},
+        tool_names=[f"mcp__source__{t.name}" for t in tools],
     )
-    tool_names = [f"mcp__source__{t.sdk_tool.name}" for t in tools]
-    return {"source": server}, tool_names
 
 
 def build_compute_server(
@@ -858,10 +948,9 @@ def build_compute_server(
     artifacts_dir: Path,
     *,
     include_latex: bool = False,
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+) -> ToolServers:
     """MCP server with code execution (sandbox) and artifact query tools.
 
-    Returns (servers_dict, tool_name_list) ready to merge into any stage.
     With ``include_latex``, also exposes ``compile_latex`` so a document-owning
     stage can verify and repair its assembled paper against the compiler.
     """
@@ -882,62 +971,46 @@ def build_compute_server(
         *CITATION_TOOLS,
         *(make_latex_tools(sandbox) if include_latex else []),
     ]
-    server = create_mcp_server(
-        name="compute",
-        version="1.0.0",
-        tools=extract_sdk_tools(tools),
+    return ToolServers(
+        servers={"compute": create_mcp_server(name="compute", tools=tools)},
+        tool_names=[f"mcp__compute__{t.name}" for t in tools],
     )
-    tool_names = [f"mcp__compute__{t.sdk_tool.name}" for t in tools]
-    return {"compute": server}, tool_names
 
 
-class StageCompute(NamedTuple):
+class StageCompute(BaseModel):
     """Per-stage compute handle: the compute MCP server, its tool names, the
     dedicated read-write path the stage writes its deliverable to, and the
     live sandbox (None when Docker is unavailable) for direct shell use."""
 
-    servers: dict[str, McpServerConfig]
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    servers: dict[str, McpServerEntry]
     tool_names: list[str]
     output_path: Path
     sandbox: Sandbox | None
 
 
-def build_research_servers() -> dict[str, McpServerConfig]:
+def build_research_servers() -> dict[str, McpServerEntry]:
     """MCP servers for research-capable stages."""
-    research_server = create_mcp_server(
-        name="research",
-        version="1.0.0",
-        tools=extract_sdk_tools(build_research_tools()),
-    )
-    return {"research": research_server}
+    return {
+        "research": create_mcp_server(name="research", tools=build_research_tools())
+    }
 
 
-def build_output_server(
-    server_name: str,
-    tools: list[LupMcpTool],
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+def build_output_server(server_name: str, tools: list[LupMcpTool]) -> ToolServers:
     """MCP server + allowed tool names for stage output tools."""
-    server = create_mcp_server(
-        name=server_name,
-        version="1.0.0",
-        tools=extract_sdk_tools(tools),
+    return ToolServers(
+        servers={server_name: create_mcp_server(name=server_name, tools=tools)},
+        tool_names=[f"mcp__{server_name}__{t.name}" for t in tools],
     )
-    tool_names = [f"mcp__{server_name}__{t.sdk_tool.name}" for t in tools]
-    return {server_name: server}, tool_names
 
 
-def build_note_server(
-    stage: str,
-    notes_collector: list[AuthorNote],
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+def build_note_server(stage: str, notes_collector: list[AuthorNote]) -> ToolServers:
     """Build an MCP server containing just the note_for_author tool."""
-    note_tool = make_note_tool(notes_collector, stage)
-    return build_output_server("notes", [note_tool])
+    return build_output_server("notes", [make_note_tool(notes_collector, stage)])
 
 
-def build_glossary_server(
-    glossary_path: Path,
-) -> tuple[dict[str, McpServerConfig], list[str]]:
+def build_glossary_server(glossary_path: Path) -> ToolServers:
     """Build an MCP server with the shared glossary tools bound to a file."""
     return build_output_server("glossary", make_glossary_tools(glossary_path))
 
@@ -958,22 +1031,25 @@ def annotate_draft_with_findings(draft: str, findings: list[ReviewFinding]) -> s
     ]
     anchorable.sort(key=lambda f: len(f.text_excerpt), reverse=True)
 
-    anchored: set[int] = set()
-    for f in anchorable:
-        if f.severity == "praise":
-            annotation = f"\n[PRESERVE:{f.reviewer}] {f.issue}\n"
-        else:
-            annotation = (
-                f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}\n  → {f.suggestion}\n"
-            )
-        if f.text_excerpt in annotated:
-            annotated = annotated.replace(  # claude: ignore
-                f.text_excerpt,
-                f"{f.text_excerpt}{annotation}",
-                1,
-            )
-            anchored.add(id(f))
+    def inline() -> Iterator[ReviewFinding]:
+        """Splice each finding in after the excerpt it quotes, yielding the ones
+        whose excerpt was still there to anchor against."""
+        nonlocal annotated
+        for f in anchorable:
+            if f.text_excerpt not in annotated:
+                continue
+            if f.severity == "praise":
+                annotation = f"\n[PRESERVE:{f.reviewer}] {f.issue}\n"
+            else:
+                annotation = (
+                    f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}\n"
+                    f"  → {f.suggestion}\n"
+                )
+            after = annotated.index(f.text_excerpt) + len(f.text_excerpt)
+            annotated = f"{annotated[:after]}{annotation}{annotated[after:]}"
+            yield f
 
+    anchored = {id(f) for f in inline()}
     remaining = [
         f
         for f in findings
@@ -996,7 +1072,7 @@ async def extract_single_source(url: str, existing_doc_id: str | None) -> str:
         result = await do_extract_conversation(url)
         return Path(result.content.path).read_text(encoding="utf-8")
 
-    if GDOC_URL_PATTERN.search(url):
+    if is_gdoc_url(url):
         doc_id = parse_gdoc_id(url)
         if existing_doc_id and doc_id == existing_doc_id:
             return await extract_source_tab_only(url)
@@ -1017,45 +1093,6 @@ async def extract_single_source(url: str, existing_doc_id: str | None) -> str:
     return Path(result.content.path).read_text(encoding="utf-8")
 
 
-async def extract_with_agent_fallback(
-    failed_urls: list[str],
-    source_dir: Path,
-    *,
-    source_servers: dict[str, McpServerConfig],
-    source_tool_names: list[str],
-    trace_logger: TraceLogger | None = None,
-    cost_accumulator: CostAccumulator | None = None,
-) -> list[str]:
-    """Fall back to an agent for URLs that failed deterministic extraction."""
-    source_list = "\n".join(f"- {url}" for url in failed_urls)
-    task = (
-        f"These sources failed automatic extraction. Try alternatives:\n"
-        f"1. Use exa_search to find the content elsewhere\n"
-        f"2. Try a different URL format (remove tracking params, try archive)\n"
-        f"3. Search for the page title\n\n"
-        f"Sources:\n{source_list}\n\n"
-        f"Write extracted content to: {source_dir / 'recovered.md'}\n"
-        f"Separate each with '--- Source: <url> ---' headers."
-    )
-    await query(
-        task,
-        model=stage_model("extract"),
-        system_prompt=EXTRACTOR_PROMPT,
-        tools=BUILTIN_WRITE_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
-        mcp_servers=source_servers,
-        allowed_tools=source_tool_names,
-        prefix="[extract:fallback] ",
-        trace_logger=trace_logger,
-        cost_accumulator=cost_accumulator,
-    )
-    recovered_path = source_dir / "recovered.md"
-    if recovered_path.exists():
-        return [recovered_path.read_text(encoding="utf-8")]
-    return []
-
-
 async def plan_article(
     notes: PipelineNotes,
     *,
@@ -1064,9 +1101,9 @@ async def plan_article(
     source_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
     author_directions: str = "",
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1075,13 +1112,12 @@ async def plan_article(
     """Stage 1: Extract a structured article plan from source material."""
     plan_path = notes.artifact_path("plan")
     collector = PlanCollector(plan_path, on_save=on_plan_update)
-    output_servers, output_tool_names = build_output_server(
-        "output", make_plan_tools(collector)
-    )
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("plan", note_collector)
-    output_servers = {**output_servers, **note_servers}
-    output_tool_names = output_tool_names + note_tool_names
+    stage_tools = build_output_server("output", make_plan_tools(collector)).merged(
+        build_note_server("plan", note_collector)
+    )
+    output_servers = stage_tools.servers
+    output_tool_names = stage_tools.tool_names
 
     from inkwell.agent.stages import FORMAT_KEYS
 
@@ -1144,7 +1180,7 @@ async def plan_article(
         system_prompt=PLANNER_SYSTEM,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         prefix="[plan] ",
@@ -1162,9 +1198,9 @@ async def refine_plan(
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1174,11 +1210,11 @@ async def refine_plan(
     plan_path = notes.artifact_path("plan")
     refined_path = notes.artifacts_dir / "plan_refined.json"
     collector = PlanCollector(refined_path, on_save=on_plan_update)
-    output_servers, output_tool_names = build_output_server(
-        "output", make_plan_tools(collector)
-    )
+    outputs = build_output_server("output", make_plan_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("refine", note_collector)
+    note_group = build_note_server("refine", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     output_servers = {**output_servers, **note_servers}
     output_tool_names = output_tool_names + note_tool_names
 
@@ -1211,7 +1247,7 @@ async def refine_plan(
         system_prompt=REFINER_SYSTEM,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         prefix="[refine] ",
@@ -1238,11 +1274,11 @@ async def research_plan(
     notes: PipelineNotes,
     *,
     feedback_path: Path | None = None,
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1255,11 +1291,11 @@ async def research_plan(
     plan_path = notes.artifact_path("plan")
     research_path = notes.artifact_path("research")
     collector = ResearchCollector(research_path, on_save=on_research_update)
-    output_servers, output_tool_names = build_output_server(
-        "output", make_research_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_research_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("research", note_collector)
+    note_group = build_note_server("research", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **servers,
         **output_servers,
@@ -1292,7 +1328,7 @@ async def research_plan(
         system_prompt=RESEARCHER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
@@ -1310,10 +1346,10 @@ async def research_questions(
     notes: PipelineNotes,
     questions: list[str],
     *,
-    servers: dict[str, McpServerConfig] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1329,14 +1365,12 @@ async def research_questions(
     research_path = notes.artifact_path("research")
     collector = ResearchCollector(research_path)
     if research_path.exists():
-        existing = json.loads(research_path.read_text(encoding="utf-8"))
-        collector.findings = list(existing.get("findings", []))
-        collector.suggested_additions = list(existing.get("suggested_additions", []))
-        collector.additional_context = str(existing.get("additional_context", ""))
+        collector.research = ResearchCompilation.model_validate_json(
+            research_path.read_text(encoding="utf-8")
+        )
 
-    output_servers, output_tool_names = build_output_server(
-        "output", make_research_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_research_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     all_servers = {
         **servers,
         **output_servers,
@@ -1363,7 +1397,7 @@ async def research_questions(
         system_prompt=RESEARCHER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
@@ -1384,13 +1418,13 @@ async def write_section(
     feedback_path: Path | None = None,
     section_context: str = "",
     target_format: str = "auto",
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
-    glossary_servers: dict[str, McpServerConfig] | None = None,
+    glossary_servers: dict[str, McpServerEntry] | None = None,
     glossary_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1400,9 +1434,8 @@ async def write_section(
         servers = build_research_servers()
 
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server(
-        f"write:{section_title}", note_collector
-    )
+    note_group = build_note_server(f"write:{section_title}", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **servers,
         **note_servers,
@@ -1455,7 +1488,7 @@ async def write_section(
             system_prompt=SECTION_WRITER_PROMPT,
             tools=BUILTIN_WRITE_TOOLS,
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             mcp_servers=all_servers,
             allowed_tools=all_tools,
             trace_logger=trace_logger,
@@ -1499,11 +1532,11 @@ async def write_full_draft(
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
     target_format: str = "auto",
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     heartbeat: HeartbeatCallback | None = None,
@@ -1518,7 +1551,8 @@ async def write_full_draft(
         servers = build_research_servers()
 
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("write", note_collector)
+    note_group = build_note_server("write", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **servers,
         **note_servers,
@@ -1563,7 +1597,7 @@ async def write_full_draft(
         system_prompt=SINGLE_WRITER_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         prefix="[write] ",
@@ -1586,11 +1620,11 @@ async def merge_sections(
     feedback_path: Path | None = None,
     target_format: str = "auto",
     author_notes: list[AuthorNote] | None = None,
-    glossary_servers: dict[str, McpServerConfig] | None = None,
+    glossary_servers: dict[str, McpServerEntry] | None = None,
     glossary_tool_names: list[str] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     heartbeat: HeartbeatCallback | None = None,
@@ -1603,7 +1637,8 @@ async def merge_sections(
     phase: the glossary already carries the cross-section term decisions.
     """
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("merge", note_collector)
+    note_group = build_note_server("merge", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     merge_servers = {
         **note_servers,
         **(glossary_servers or {}),
@@ -1659,7 +1694,7 @@ async def merge_sections(
         system_prompt=MERGE_PROMPT,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=merge_servers,
         allowed_tools=merge_tools,
         trace_logger=trace_logger,
@@ -1676,15 +1711,37 @@ async def merge_sections(
     return MergedDraft(content=content, changes_made=[])
 
 
+def tab_id_for(tabs: StringMap, name: str) -> str:
+    """The tab recorded under `name`, or empty where the doc has no such tab.
+
+    The tab maps are keyed by titles the plan and the author invent, so a miss
+    is ordinary rather than exceptional and every caller branches on the empty
+    string it gets back.
+    """
+    return tabs[name] if name in tabs else ""
+
+
+def load_review(review_path: Path) -> ReviewOutput:
+    """What a reviewer recorded, or nothing where the stage wrote no file.
+
+    Every reviewer persists through a `ReviewCollector`, so the artifact is a
+    `ReviewOutput` whichever reviewer produced it — a reviewer that recorded
+    no findings and one that never ran read the same here.
+    """
+    if not review_path.exists():
+        return ReviewOutput(findings=[])
+    return ReviewOutput.model_validate_json(review_path.read_text(encoding="utf-8"))
+
+
 async def review_narrative(
     notes: PipelineNotes,
     draft_path: Path,
     *,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1693,13 +1750,11 @@ async def review_narrative(
     plan_path = notes.artifact_path("plan")
     review_path = notes.artifacts_dir / "review_narrative.json"
     collector = ReviewCollector(review_path, "narrative")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server(
-        "review:narrative", note_collector
-    )
+    note_group = build_note_server("review:narrative", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **output_servers,
         **note_servers,
@@ -1734,30 +1789,25 @@ async def review_narrative(
         system_prompt=NARRATIVE_REVIEWER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
         prefix="[review:narrative] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_facts(
     notes: PipelineNotes,
     draft_path: Path,
     *,
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1768,11 +1818,11 @@ async def review_facts(
 
     review_path = notes.artifacts_dir / "review_factcheck.json"
     collector = ReviewCollector(review_path, "factcheck")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("review:facts", note_collector)
+    note_group = build_note_server("review:facts", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **servers,
         **output_servers,
@@ -1805,19 +1855,14 @@ async def review_facts(
         system_prompt=FACT_CHECKER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
         prefix="[review:facts] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_style(
@@ -1826,9 +1871,9 @@ async def review_style(
     *,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1836,11 +1881,11 @@ async def review_style(
     """Review for writing quality and voice consistency."""
     review_path = notes.artifacts_dir / "review_style.json"
     collector = ReviewCollector(review_path, "style")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("review:style", note_collector)
+    note_group = build_note_server("review:style", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **output_servers,
         **note_servers,
@@ -1871,19 +1916,14 @@ async def review_style(
         system_prompt=STYLE_REVIEWER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
         prefix="[review:style] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_source_fidelity(
@@ -1891,9 +1931,9 @@ async def review_source_fidelity(
     draft_path: Path,
     *,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1901,11 +1941,11 @@ async def review_source_fidelity(
     """Verify the draft against the registered source documents."""
     review_path = notes.artifacts_dir / "review_source_fidelity.json"
     collector = ReviewCollector(review_path, "source_fidelity")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("review:source", note_collector)
+    note_group = build_note_server("review:source", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **output_servers,
         **note_servers,
@@ -1935,19 +1975,14 @@ async def review_source_fidelity(
         system_prompt=SOURCE_FIDELITY_REVIEWER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
         prefix="[review:source] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_coverage(
@@ -1956,9 +1991,9 @@ async def review_coverage(
     *,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -1966,11 +2001,11 @@ async def review_coverage(
     """Flag the author's concrete specifics that the draft dropped or replaced."""
     review_path = notes.artifacts_dir / "review_coverage.json"
     collector = ReviewCollector(review_path, "coverage")
-    output_servers, output_tool_names = build_output_server(
-        "output", make_review_output_tools(collector)
-    )
+    outputs = build_output_server("output", make_review_output_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("review:coverage", note_collector)
+    note_group = build_note_server("review:coverage", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     all_servers = {
         **output_servers,
         **note_servers,
@@ -2006,31 +2041,26 @@ async def review_coverage(
         system_prompt=COVERAGE_REVIEWER_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
         prefix="[review:coverage] ",
         cost_accumulator=cost_accumulator,
     )
-    if review_path.exists():
-        data = json.loads(review_path.read_text(encoding="utf-8"))
-        findings = [ReviewFinding.model_validate(f) for f in data.get("findings", [])]
-    else:
-        findings = []
-    return ReviewOutput(findings=findings)
+    return load_review(review_path)
 
 
 async def review_all(
     notes: PipelineNotes,
     draft_path: Path,
     *,
-    servers: dict[str, McpServerConfig] | None = None,
+    servers: dict[str, McpServerEntry] | None = None,
     voice_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -2111,19 +2141,37 @@ async def review_all(
 
     results = await asyncio.gather(*review_tasks, return_exceptions=True)
 
-    all_findings: list[ReviewFinding] = []
-    for result in results:
-        if isinstance(result, BaseException):
-            logger.error("Reviewer failed: %s", result)
-        else:
-            all_findings.extend(result.findings)
+    def reported() -> Iterator[ReviewFinding]:
+        """Findings from the reviewers that returned; a failure is logged, not raised,
+        so one reviewer going down does not cost the others their findings."""
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("Reviewer failed: %s", result)
+                continue
+            yield from result.findings
 
-    return all_findings
+    return list(reported())
 
 
-class ConsolidatedFindings(NamedTuple):
+class ConsolidatedFindings(BaseModel):
+    """What survived the budget, and how much of it did not."""
+
     findings: list[ReviewFinding]
     dropped_suggestions: int
+
+
+class StandbyWake(BaseModel):
+    """Why standby woke: an author revision, a sync request, or both."""
+
+    revision: str | None
+    from_sync: bool
+
+
+class StyleSamples(BaseModel):
+    """The prose of the style references that could be read, and their labels."""
+
+    prose: list[str] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
 
 
 def consolidate_findings(
@@ -2131,29 +2179,28 @@ def consolidate_findings(
     max_suggestions: int = 15,
 ) -> ConsolidatedFindings:
     """Deduplicate and budget review findings to prevent cumulative smoothing."""
-    critical: list[ReviewFinding] = []
-    praise: list[ReviewFinding] = []
-    suggestions: list[ReviewFinding] = []
+    critical = [f for f in findings if f.severity == "critical"]
+    praise = [f for f in findings if f.severity == "praise"]
 
-    seen_excerpts: dict[str, ReviewFinding] = {}
-
-    for f in findings:
-        if f.severity == "critical":
-            critical.append(f)
-            continue
-        if f.severity == "praise":
-            praise.append(f)
-            continue
-        if f.text_excerpt:
-            key = f.text_excerpt[:200]
-            if key in seen_excerpts:
-                existing = seen_excerpts[key]
-                existing.suggestion = (
-                    f"{existing.suggestion}\n[Also from {f.reviewer}]: {f.suggestion}"
-                )
+    def deduplicated() -> Iterator[ReviewFinding]:
+        """Suggestions, with later ones quoting the same passage folded into the
+        first — two reviewers flagging one sentence is one thing to fix."""
+        seen: dict[str, ReviewFinding] = {}  # lup: ignore[empty-collection] — a fold
+        for f in findings:
+            if f.severity in ("critical", "praise"):
                 continue
-            seen_excerpts[key] = f
-        suggestions.append(f)
+            if f.text_excerpt:
+                key = f.text_excerpt[:200]
+                if key in seen:
+                    first = seen[key]
+                    first.suggestion = (
+                        f"{first.suggestion}\n[Also from {f.reviewer}]: {f.suggestion}"
+                    )
+                    continue
+                seen[key] = f
+            yield f
+
+    suggestions = list(deduplicated())
 
     anchored = [s for s in suggestions if s.text_excerpt]
     unanchored = [s for s in suggestions if not s.text_excerpt]
@@ -2181,16 +2228,17 @@ async def rewrite_final(
     target_format: str = "auto",
     dropped_suggestions: int = 0,
     author_notes: list[AuthorNote] | None = None,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
     note_collector = author_notes if author_notes is not None else []
-    note_servers, note_tool_names = build_note_server("rewrite", note_collector)
+    note_group = build_note_server("rewrite", note_collector)
+    note_servers, note_tool_names = note_group.servers, note_group.tool_names
     rewrite_servers = {
         **note_servers,
         **(source_servers or {}),
@@ -2275,7 +2323,7 @@ async def rewrite_final(
         system_prompt=REWRITER_SYSTEM,
         tools=BUILTIN_WRITE_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=rewrite_servers,
         allowed_tools=rewrite_tools,
         trace_logger=trace_logger,
@@ -2290,7 +2338,7 @@ async def rewrite_final(
 
     plan = notes.load_artifact("plan", ArticlePlan)
     title = plan.title if plan else "Untitled"
-    summary = collector.text.strip() if collector.text else ""
+    summary = result_text(collector).strip()
 
     return WritingOutput(
         title=title,
@@ -2388,9 +2436,9 @@ async def surface_assumptions(
     *,
     has_research: bool = False,
     session_state: WritingSessionState,
-    source_servers: dict[str, McpServerConfig] | None = None,
+    source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
-    compute_servers: dict[str, McpServerConfig] | None = None,
+    compute_servers: dict[str, McpServerEntry] | None = None,
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
@@ -2399,9 +2447,8 @@ async def surface_assumptions(
     plan_path = notes.artifact_path("plan")
     assumptions_path = notes.artifact_path("assumptions")
     collector = AssumptionsCollector(assumptions_path)
-    output_servers, output_tool_names = build_output_server(
-        "output", make_assumptions_tools(collector)
-    )
+    outputs = build_output_server("output", make_assumptions_tools(collector))
+    output_servers, output_tool_names = outputs.servers, outputs.tool_names
 
     file_refs = f"Article plan: {plan_path}\n"
 
@@ -2433,7 +2480,7 @@ async def surface_assumptions(
         system_prompt=ASSUMPTIONS_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         prefix="[assumptions] ",
@@ -2448,17 +2495,11 @@ async def surface_assumptions(
     else:
         result = AssumptionsList(items=[])
 
-    tag_prefix = {
-        "direction_check": "[DIRECTION]",
-        "assumption": "[ASSUMPTION]",
-        "question": "[QUESTION]",
-        "confusion": "[UNCLEAR]",
-    }
     if result.items:
         specs = [
             CommentSpec(
                 content=(
-                    f"{tag_prefix.get(item.tag, '[NOTE]')} {item.content}\n\n"
+                    f"{ASSUMPTION_TAG_PREFIX[item.tag]} {item.content}\n\n"
                     f"My best guess: {item.best_guess}"
                 ),
                 anchor_text=item.anchor_section,
@@ -2514,7 +2555,7 @@ async def plan_restart(
         system_prompt=ORCHESTRATOR_PROMPT,
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         prefix="[orchestrator] ",
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
@@ -2549,6 +2590,8 @@ class PipelineRunner:
     ) -> None:
         self.sources = sources
         self.refs = refs or []
+        self.style_refs: list[str] = []
+        self.context_refs: list[str] = list(self.refs)
         self.target_format = target_format
         self.existing_doc_id = existing_doc_id
         self.state = session_state or WritingSessionState()
@@ -2563,29 +2606,31 @@ class PipelineRunner:
         self.cost_accumulator = cost_accumulator
 
         self.snapshot = PipelineSnapshot()
-        self.pending_resume: dict[str, str] = {}
+        self.pending_resume: StringMap = {}
         self.plan_breaking = asyncio.Event()
         self.restart_count = 0
         self.max_restarts = 2
 
         self.author_notes: list[AuthorNote] = []
         self.research_servers = build_research_servers()
-        self.source_servers, self.source_tool_names = build_source_server(
+        source_tools = build_source_server(
             lambda: registry_path_for(self.ensure_notes().artifacts_dir)
         )
+        self.source_servers = source_tools.servers
+        self.source_tool_names = source_tools.tool_names
 
         self.doc_id = ""
         self.doc_url = ""
-        self.known_tabs: dict[str, str] = {}
-        self.tab_ids: dict[str, str] = {}
+        self.known_tabs: StringMap = {}
+        self.tab_ids: StringMap = {}
         self.tabs: TabTracker | None = None
 
         self.overview_tab_id = ""
         self.draft_tab_id = ""
         self.final_tab_id = ""
 
-        self.watcher: BackgroundAgent | None = None
-        self.source_watcher: BackgroundAgent | None = None
+        self.watcher: PollingWatcher | None = None
+        self.source_watcher: PollingWatcher | None = None
         self.source_is_extracted_gdoc = False
 
     @property
@@ -2618,9 +2663,9 @@ class PipelineRunner:
         """Return notes, creating a temp dir if needed."""
         if self.notes is None:
             self.notes = PipelineNotes(Path(tempfile.mkdtemp(prefix="inkwell-notes-")))
-        from lup.content_safety import configure_content_safety
+        from lup.workspace.content_safety import configure
 
-        configure_content_safety(self.notes.base_dir / "content")
+        configure(directory=self.notes.base_dir / "content")
         if self.state.agent_ids_path is None:
             self.state.attach_agent_ids_registry(self.notes.base_dir / "agent_ids.txt")
         return self.notes
@@ -2642,7 +2687,7 @@ class PipelineRunner:
             return INKWELL_SANDBOX_IMAGE
         return Sandbox.DEFAULT_DOCKER_IMAGE
 
-    def fallback_compute(self) -> tuple[dict[str, McpServerConfig], list[str]]:
+    def fallback_compute(self) -> ToolServers:
         """Compute server without code execution, for when Docker is absent."""
         from inkwell.agent.tools.citations import CITATION_TOOLS
 
@@ -2676,19 +2721,34 @@ class PipelineRunner:
             read_only_mounts={notes.base_dir: "/notes", **self.source_mounts()},
             rw_mounts={out_dir: str(out_dir)},
         )
-        if not sandbox.try_start():
-            servers, names = self.fallback_compute()
-            yield StageCompute(servers, names, output_path, None)
+        try:
+            sandbox.start()
+        except Exception:
+            # Docker absent or refusing the container: the stage still runs,
+            # with a compute server that cannot execute code.
+            logger.exception("Sandbox unavailable for stage %s", label)
+            fallback = self.fallback_compute()
+            yield StageCompute(
+                servers=fallback.servers,
+                tool_names=fallback.tool_names,
+                output_path=output_path,
+                sandbox=None,
+            )
             return
         if self.state is not None:
             self.state.shared_dir = shared_dir
         try:
-            servers, names = build_compute_server(
+            compute = build_compute_server(
                 sandbox,
                 notes.artifacts_dir,
                 include_latex=self.effective_format == "academic",
             )
-            yield StageCompute(servers, names, output_path, sandbox)
+            yield StageCompute(
+                servers=compute.servers,
+                tool_names=compute.tool_names,
+                output_path=output_path,
+                sandbox=sandbox,
+            )
         finally:
             sandbox.stop()
 
@@ -2720,13 +2780,7 @@ class PipelineRunner:
                 self.known_tabs["Final"] = tab_ids[0]
 
     def get_draft_path(self, label: str) -> Path:
-        slug = label.lower().replace(" ", "-")
-        for ch in "/:.,;!?\"'()[]{}":
-            slug = slug.replace(ch, "")
-        while "--" in slug:
-            slug = slug.replace("--", "-")
-        slug = slug.strip("-")
-        return self.ensure_notes().drafts_dir / f"{slug}.md"
+        return self.ensure_notes().drafts_dir / f"{slugify(label)}.md"
 
     def rehydrate_draft_files(self) -> None:
         """Project the snapshot's draft content back onto disk for a resume.
@@ -2783,7 +2837,7 @@ class PipelineRunner:
             return
         for i, section in enumerate(plan.sections):
             tab_name = truncate_tab_title(f"§{i + 1} {section.title}")
-            tid = self.known_tabs.get(tab_name, "")
+            tid = tab_id_for(self.known_tabs, tab_name)
             if tid:
                 self.tab_ids[section.title] = tid
             drafted = self.section_already_drafted(section.title)
@@ -2813,18 +2867,22 @@ class PipelineRunner:
         interruption instead of paying to redraft them. A
         ``[Section failed: ...]`` placeholder does not count — those retry.
         """
-        draft = self.snapshot.section_drafts.get(title)
-        return draft is not None and not draft.content.startswith("[Section failed")
+        if title not in self.snapshot.section_drafts:
+            return False
+        draft = self.snapshot.section_drafts[title]
+        return not draft.content.startswith("[Section failed")
 
     async def save_snapshot(self) -> None:
         self.snapshot.doc_id = self.state.doc_id
         self.snapshot.doc_url = self.state.doc_url
         self.snapshot.source_doc_id = self.state.source_doc_id
-        self.snapshot.seen_comment_ids = set(self.state.seen_comment_ids)
-        self.snapshot.agent_comment_ids = set(self.state.agent_comment_ids)
-        self.snapshot.seen_source_comment_ids = set(self.state.seen_source_comment_ids)
+        self.snapshot.seen_comment_ids = list(self.state.seen_comments.handled)
+        self.snapshot.agent_comment_ids = list(self.state.agent_comments.handled)
+        self.snapshot.seen_source_comment_ids = list(
+            self.state.seen_source_comments.handled
+        )
         self.snapshot.pending_questions = list(self.state.pending_questions)
-        self.snapshot.cost_state = self.cost_accumulator.state_dict()
+        self.snapshot.cost_state = self.cost_accumulator
 
         notes = self.ensure_notes()
         data = self.snapshot.model_dump_json()
@@ -2847,10 +2905,9 @@ class PipelineRunner:
 
     def install_block_callback(self) -> None:
         """Set the contextvar so all query() calls forward blocks to the listener."""
-        from claude_agent_sdk import ContentBlock
 
-        async def forward_block(block: ContentBlock, prefix: str) -> None:
-            info = extract_block_info(block)
+        async def forward_block(block: AnyTurnBlock, prefix: str) -> None:
+            info = extract_block_info(block.telemetry_block)
             await self.hooks.on_block(info.label, info.content, prefix)
 
         active_block_callback.set(forward_block)
@@ -2881,12 +2938,13 @@ class PipelineRunner:
         """Persist a resumable agent's SDK session id the moment it is known."""
         if not is_resumable_label(label):
             return
-        if self.snapshot.session_ids.get(label) == session_id:
+        recorded = self.snapshot.session_ids
+        if label in recorded and recorded[label] == session_id:
             return
         self.snapshot.session_ids[label] = session_id
         await self.save_snapshot()
 
-    def prepare_resumable_sessions(self, snapshot: PipelineSnapshot) -> dict[str, str]:
+    def prepare_resumable_sessions(self, snapshot: PipelineSnapshot) -> StringMap:
         """Session ids to resume, mirroring transcripts across a profile switch.
 
         Same profile: transcripts already sit under the active config dir.
@@ -2938,16 +2996,20 @@ class PipelineRunner:
         if self.stop_after is not None and stage == self.stop_after:
             raise PipelineStopRequested(stage)
 
-    async def handle_pause(self, stage: str) -> WritingOutput:
+    async def handle_pause(self, stage: str, message: str = "") -> WritingOutput:
         """Finalize a clean pause at a configured stop point.
 
         The stage's snapshot is already saved, so a resume continues from the
         next stage. Refreshes the Overview tab, tells the listener so the
         environment can surface the pause and how to resume, and returns a
         marker output (``paused_after`` set, no finished content) so the caller
-        reports a pause rather than a completion.
+        reports a pause rather than a completion. ``message`` overrides the
+        default summary when the halt has a specific reason (e.g. a missing
+        source), so the author sees why rather than a generic stage name.
         """
-        logger.info("Paused after stage %r — stop point reached", stage)
+        logger.info(
+            "Paused after stage %r — %s", stage, message or "stop point reached"
+        )
         await self.update_overview(paused=True)
         await self.hooks.on_pause(stage, self.doc_url)
         plan = self.snapshot.plan
@@ -2956,7 +3018,8 @@ class PipelineRunner:
             google_doc_id=self.doc_id,
             google_doc_url=self.doc_url,
             paused_after=stage,
-            summary=(
+            summary=message
+            or (
                 f"Paused after the {stage} stage. Review the Google Doc and "
                 "comment, then resume to continue."
             ),
@@ -2982,7 +3045,7 @@ class PipelineRunner:
             try:
                 for index, stage_name in enumerate(stages):
                     if index == watch_from:
-                        self.start_watcher()
+                        await self.start_watcher()
                     await self.run_stage(stage_name)
 
                 output = self.snapshot.output
@@ -2996,7 +3059,7 @@ class PipelineRunner:
             finally:
                 await self.stop_watcher()
         except PipelineStopRequested as stop:
-            return await self.handle_pause(stop.stage)
+            return await self.handle_pause(stop.stage, stop.message)
         finally:
             session_policy.reset(policy_token)
 
@@ -3024,18 +3087,20 @@ class PipelineRunner:
         elif snapshot.output and snapshot.output.google_doc_id:
             self.existing_doc_id = snapshot.output.google_doc_id
 
-        self.state.seen_comment_ids = set(snapshot.seen_comment_ids)
-        self.state.agent_comment_ids.update(snapshot.agent_comment_ids)
+        self.state.seen_comments = CommentLedger(handled=snapshot.seen_comment_ids)
+        self.state.agent_comments.mark_all(snapshot.agent_comment_ids)
         self.ensure_notes()
         self.rehydrate_draft_files()
-        self.state.seen_source_comment_ids = set(snapshot.seen_source_comment_ids)
+        self.state.seen_source_comments = CommentLedger(
+            handled=snapshot.seen_source_comment_ids
+        )
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
-            self.cost_accumulator.load_state(snapshot.cost_state)
+            self.cost_accumulator.merge(snapshot.cost_state)
         if restart:
             self.rehydrate_artifacts()
-            self.pending_resume = {}
+            self.pending_resume.clear()
         else:
             self.pending_resume = self.prepare_resumable_sessions(snapshot)
 
@@ -3047,12 +3112,12 @@ class PipelineRunner:
         try:
             stages = self.stages_for_run()
             last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
-            remaining = stages[last_idx + 1 :]
+            remaining = [s for s in stages[last_idx + 1 :] if s != "preprocess"]
             if "write" not in remaining and self.write_stage_produced_nothing():
                 remaining = stages[stages.index("write") :]
 
             if snapshot.plan:
-                self.start_watcher()
+                await self.start_watcher()
 
             try:
                 for stage_name in remaining:
@@ -3069,7 +3134,7 @@ class PipelineRunner:
                 await self.hooks.on_complete(output)
                 await self.standby_loop()
             except PipelineStopRequested as stop:
-                return await self.handle_pause(stop.stage)
+                return await self.handle_pause(stop.stage, stop.message)
             except (
                 Exception
             ) as exc:  # claude: ignore — SDK raises generic Exception for exit codes
@@ -3090,7 +3155,7 @@ class PipelineRunner:
             return output
         raise PipelineInterrupted(current_stage)
 
-    def start_watcher(self) -> None:
+    async def start_watcher(self) -> None:
         if self.notes is None:
             return
         self.watcher = create_comment_watcher(
@@ -3098,7 +3163,7 @@ class PipelineRunner:
             notes=self.notes,
             plan_breaking_signal=self.plan_breaking,
         )
-        self.watcher.start()
+        await self.watcher.start()
         logger.info("Comment watcher started")
 
         if self.state.source_doc_id and not self.source_is_extracted_gdoc:
@@ -3107,7 +3172,7 @@ class PipelineRunner:
                 notes=self.notes,
                 plan_breaking_signal=self.plan_breaking,
             )
-            self.source_watcher.start()
+            await self.source_watcher.start()
             logger.info("Source document watcher started")
 
     async def stop_watcher(self) -> None:
@@ -3129,11 +3194,12 @@ class PipelineRunner:
             existing = await do_list_tabs(self.doc_id)
             self.known_tabs = {t.title: t.tab_id for t in existing}
         else:
-            self.doc_id, self.doc_url = await do_create_doc(
+            created = await do_create_doc(
                 f"Inkwell — {', '.join(s[:30] for s in self.sources)[:60]}",
                 share_with=current_settings().author_email,
                 session_state=self.state,
             )
+            self.doc_id, self.doc_url = created.doc_id, created.url
             await self.hooks.on_progress(f"Google Doc: {self.doc_url}")
 
         for tab_name in ("Overview", "Source", "Voice", "Plan", "Research"):
@@ -3209,7 +3275,7 @@ class PipelineRunner:
             model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix="[classify-comment] ",
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
@@ -3231,7 +3297,7 @@ class PipelineRunner:
         notes = self.ensure_notes()
         await notes.add_comment(classified)
 
-        reply_text = ACKNOWLEDGE_TEMPLATES.get(classified.impact)
+        reply_text = ACKNOWLEDGE_TEMPLATES[classified.impact]
         if reply_text:
             async with gdoc_nonfatal("acknowledge comment"):
                 await do_reply_to_comment(
@@ -3277,7 +3343,7 @@ class PipelineRunner:
             model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix=f"[classify-edit:{edit.tab}] ",
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
@@ -3329,7 +3395,7 @@ class PipelineRunner:
             model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix="[classify-terminal] ",
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
@@ -3409,38 +3475,47 @@ class PipelineRunner:
         )
         return len(comments)
 
-    async def stage_preprocess(self) -> None:
-        """Classify sources by role and extract author instructions."""
-        await self.announce_stage("preprocess", "Classifying sources")
+    async def warn_missing_source(self, note: str) -> None:
+        """Halt when the instructions reference source material that never
+        arrived, rather than silently writing from the directions alone.
 
-        from inkwell.agent.tools.preprocess import preprocess_sources
+        The author pasted directions that lean on a document, file, or link, but
+        no such source reached the pipeline (a dropped upload, an unsent paste).
+        Surface it loudly and pause so they can re-attach and start again.
+        """
+        detail = f" ({note})" if note else ""
+        await self.hooks.on_progress(
+            "⚠ Your instructions reference source material that didn't arrive"
+            f"{detail}. Only your directions came through — no document, file, "
+            "or link. Pausing instead of writing from the instructions alone; "
+            "re-create the session with the source attached, then start again."
+        )
+        raise PipelineStopRequested(
+            "extract",
+            "Paused: the instructions reference source material that wasn't "
+            "provided. Re-create the session with the document attached.",
+        )
 
-        result = await preprocess_sources(self.sources)
-        notes = self.ensure_notes()
-        notes.save_artifact("preprocess", result)
-
-        self.snapshot.raw_sources = result.raw_inputs
-        self.snapshot.author_instructions = result.instructions
-        self.snapshot.author_deliverables = result.deliverables
-        self.snapshot.runtime_style_refs = result.style_refs
-        self.snapshot.stage = "preprocess"
-
-        routed_sources = result.sources
-        if routed_sources:
-            self.sources = routed_sources
-        self.refs = list(set(self.refs + result.style_refs + result.context_refs))
-
-        await self.save_snapshot()
-
-        parts: list[str] = []
-        if result.instructions:
-            parts.append("instructions extracted")
-        parts.append(f"{len(result.sources)} source(s)")
-        if result.style_refs:
-            parts.append(f"{len(result.style_refs)} style ref(s)")
-        if result.context_refs:
-            parts.append(f"{len(result.context_refs)} context ref(s)")
-        await self.hooks.on_progress(f"Preprocess: {', '.join(parts)}")
+    async def extract_style_samples(self) -> StyleSamples:
+        """Extract the prose of runtime style references for voice analysis."""
+        if not self.style_refs:
+            return StyleSamples()
+        results = await asyncio.gather(
+            *(
+                extract_single_source(url, self.existing_doc_id)
+                for url in self.style_refs
+            ),
+            return_exceptions=True,
+        )
+        extracted = [
+            (url, sample)
+            for url, sample in zip(self.style_refs, results)
+            if sample and not isinstance(sample, BaseException)
+        ]
+        return StyleSamples(
+            prose=[sample for _url, sample in extracted],
+            labels=[url for url, _sample in extracted],
+        )
 
     async def stage_extract(self) -> None:
         await self.announce_stage("extract", "Extracting source material")
@@ -3451,44 +3526,86 @@ class PipelineRunner:
         source_dir.mkdir(parents=True, exist_ok=True)
         output_path = source_dir / "conversation.md"
 
+        original_inputs = list(self.sources) + list(self.refs)
+
+        self_doc_sources = [
+            s
+            for s in self.sources
+            if self.existing_doc_id
+            and is_gdoc_url(s)
+            and parse_gdoc_id(s) == self.existing_doc_id
+        ]
+        agent_inputs = [s for s in self.sources if s not in self_doc_sources]
+
+        manifest = await run_extraction_agent(
+            agent_inputs,
+            source_dir,
+            source_servers=self.source_servers,
+            source_tool_names=self.source_tool_names,
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        notes.save_artifact("extract", manifest)
+
+        await self.hooks.on_progress(
+            "Inputs received: " + summarize_inputs(original_inputs)
+        )
+        if manifest.references_absent_source and not manifest.has_concrete_source:
+            await self.warn_missing_source(manifest.absent_source_note)
+
+        self.snapshot.raw_sources = list(self.sources)
+        self.snapshot.author_instructions = manifest.instructions
+        self.snapshot.author_deliverables = manifest.deliverables
+        self.style_refs = [
+            e.raw_input for e in manifest.sources if e.role == "style_reference"
+        ]
+        routed = [e.raw_input for e in manifest.sources if e.role == "source"]
+        self.sources = (routed or agent_inputs) + self_doc_sources
+        context = [e.raw_input for e in manifest.sources if e.role == "context"]
+        self.context_refs = list(dict.fromkeys(self.context_refs + context))
+
         source_doc_id = ""
         for src in self.sources:
-            if not source_doc_id and GDOC_URL_PATTERN.search(src):
+            if not source_doc_id and is_gdoc_url(src):
                 source_doc_id = parse_gdoc_id(src)
                 self.state.source_doc_id = source_doc_id
                 self.source_is_extracted_gdoc = True
 
-        all_urls = list(self.sources) + list(self.refs)
-        results = await asyncio.gather(
-            *(extract_single_source(url, self.existing_doc_id) for url in all_urls),
-            return_exceptions=True,
+        assembled = assemble_sources(manifest)
+        extracted_parts = assembled.blocks
+        covered = {e.raw_input for e in manifest.sources}
+        unrecovered = list(
+            dict.fromkeys(
+                assembled.unrecovered
+                + [value for value in original_inputs if value not in covered]
+            )
         )
-
-        extracted_parts: list[str] = []
-        failed: list[str] = []
-        for url, result in zip(all_urls, results):
-            if isinstance(result, Exception):
-                logger.warning("Extraction failed for %s: %s", url, result)
-                failed.append(url)
-            elif result:
-                extracted_parts.append(f"--- Source: {url} ---\n\n{result}")
-
-        if failed:
+        source_set = {src for src in self.sources}
+        if unrecovered:
             await self.hooks.on_progress(
-                f"Retrying {len(failed)} failed source(s) with agent fallback"
+                f"Deterministically extracting {len(unrecovered)} source(s) "
+                f"the agent left unrecovered"
             )
-            recovered = await extract_with_agent_fallback(
-                failed,
-                source_dir,
-                source_servers=self.source_servers,
-                source_tool_names=self.source_tool_names,
-                trace_logger=self.trace_logger,
-                cost_accumulator=self.cost_accumulator,
+            results = await asyncio.gather(
+                *(
+                    extract_single_source(url, self.existing_doc_id)
+                    for url in unrecovered
+                ),
+                return_exceptions=True,
             )
-            extracted_parts.extend(recovered)
+            for url, result in zip(unrecovered, results):
+                if isinstance(result, BaseException):
+                    logger.warning("Extraction failed for %s: %s", url, result)
+                elif result.strip():
+                    role = "Source" if url in source_set else "Reference"
+                    extracted_parts.append(f"--- {role}: {url} ---\n\n{result}")
 
         conversation = "\n\n".join(extracted_parts)
         output_path.write_text(conversation, encoding="utf-8")
+
+        style = await self.extract_style_samples()
+        self.snapshot.style_ref_samples = style.prose
+        self.snapshot.runtime_style_refs = style.labels
 
         all_source_paths = [str(p) for p in sorted(source_dir.glob("*")) if p.is_file()]
 
@@ -3561,11 +3678,18 @@ class PipelineRunner:
     async def stage_voice(self) -> None:
         await self.announce_stage("voice", "Analyzing author's writing voice")
         await self.update_overview(active_stage="voice")
-        corpus_samples, corpus_sources, corpus_types = await load_style_corpus()
+        corpus = await load_style_corpus() + [
+            StyleSample(label=label, text=text, source_type="descriptive")
+            for text, label in zip(
+                self.snapshot.style_ref_samples, self.snapshot.runtime_style_refs
+            )
+        ]
         notes = self.ensure_notes()
 
         fingerprint = await compute_voice_fingerprint(
-            self.snapshot.conversation, corpus_samples, self.target_format
+            self.snapshot.conversation,
+            [sample.text for sample in corpus],
+            self.target_format,
         )
         if (
             self.snapshot.voice_fingerprint == fingerprint
@@ -3586,23 +3710,15 @@ class PipelineRunner:
             invalidate_merged_cache()
             logger.info("Voice inputs changed — re-analyzing")
 
-        explicit_prescriptive: list[tuple[str, str]] = []
-        analyzable_samples: list[str] = []
-        analyzable_sources: list[str] = []
-        for sample, source, stype in zip(corpus_samples, corpus_sources, corpus_types):
-            if stype == "prescriptive":
-                explicit_prescriptive.append((sample, source))
-            else:
-                analyzable_samples.append(sample)
-                analyzable_sources.append(source)
+        explicit_prescriptive = [entry for entry in corpus if entry.prescriptive]
+        analyzable = [entry for entry in corpus if not entry.prescriptive]
 
         async with self.stage_compute("voice") as sc:
             all_servers = {**self.research_servers, **sc.servers}
             all_tool_names = research_tool_names() + sc.tool_names
             analyses = await analyze_voice_individually(
                 self.snapshot.conversation,
-                analyzable_samples,
-                corpus_sources=analyzable_sources,
+                analyzable,
                 target_format=self.target_format,
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
@@ -3612,23 +3728,20 @@ class PipelineRunner:
         if not analyses and not explicit_prescriptive:
             raise PipelineError("Voice analysis produced no output")
 
-        voice_file_paths: list[str] = []
-        voice_tab_parts: list[str] = []
+        voice_file_paths: list[
+            str
+        ] = []  # lup: ignore[empty-collection] — a 3-loop fold
+        voice_tab_parts: list[str] = []  # lup: ignore[empty-collection] — a 3-loop fold
         n_voice = 0
         n_auto_prescriptive = 0
         presc_idx = 0
 
-        source_by_label: dict[str, str] = {}
-        if analyzable_samples:
-            labels = analyzable_sources or [
-                f"sample-{i}" for i in range(len(analyzable_samples))
-            ]
-            for sample, label in zip(analyzable_samples, labels):
-                source_by_label[label] = sample
+        source_by_label: StringMap = {entry.label: entry.text for entry in analyzable}
 
-        for i, (label, text, is_prescriptive) in enumerate(analyses):
+        for one in analyses:
+            label, text = one.label, one.analysis
             slug = slugify(label)
-            if is_prescriptive and label in source_by_label:
+            if one.prescriptive and label in source_by_label:
                 raw = source_by_label[label]
                 envelope = await notes.save_content(
                     f"prescriptive_{presc_idx}_{slug}",
@@ -3654,37 +3767,30 @@ class PipelineRunner:
                 n_voice += 1
             voice_file_paths.append(str(path))
 
-        for sample, source in explicit_prescriptive:
-            slug = slugify(source)
+        for entry in explicit_prescriptive:
+            slug = slugify(entry.label)
             envelope = await notes.save_content(
                 f"prescriptive_{presc_idx}_{slug}",
-                sample,
+                entry.text,
                 stage="voice",
                 content_type="prescriptive",
-                label=source,
+                label=entry.label,
             )
             voice_file_paths.append(envelope.path)
-            voice_tab_parts.append(f"## Prescriptive: {source}\n\n{sample}")
+            voice_tab_parts.append(f"## Prescriptive: {entry.label}\n\n{entry.text}")
             presc_idx += 1
 
-        for i, (sample, source) in enumerate(
-            zip(analyzable_samples, analyzable_sources)
-        ):
-            if source not in source_by_label:
+        saved_verbatim = {one.label for one in analyses if one.prescriptive}
+        for i, entry in enumerate(analyzable):
+            if entry.label in saved_verbatim:
                 continue
-            label_entry = next(
-                (a for a in analyses if a[0] == source and a[2]),
-                None,
-            )
-            if label_entry:
-                continue
-            slug = slugify(source)
+            slug = slugify(entry.label)
             envelope = await notes.save_content(
                 f"corpus_{i}_{slug}",
-                sample,
+                entry.text,
                 stage="voice",
                 content_type="source",
-                label=source,
+                label=entry.label,
             )
             voice_file_paths.append(envelope.path)
 
@@ -3961,13 +4067,14 @@ class PipelineRunner:
         notes = self.ensure_notes()
         glossary_path = notes.artifacts_dir / "glossary.json"
         seed_glossary(glossary_path, plan.conventions)
-        glossary_servers, glossary_tool_names = build_glossary_server(glossary_path)
+        glossary = build_glossary_server(glossary_path)
+        glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         completed = already
 
         async def write_and_publish(section: SectionPlan) -> SectionDraft:
             nonlocal completed
-            tid = self.tab_ids.get(section.title, "")
+            tid = tab_id_for(self.tab_ids, section.title)
             draft_path = self.get_draft_path(section.title)
             async with self.stage_compute(f"write:{section.title}") as sc:
                 syncer: DraftSyncer | None = None
@@ -4132,9 +4239,8 @@ class PipelineRunner:
         await self.update_overview(active_stage="merge")
         feedback_path = await self.prepare_feedback("merge")
         notes = self.ensure_notes()
-        glossary_servers, glossary_tool_names = build_glossary_server(
-            notes.artifacts_dir / "glossary.json"
-        )
+        glossary = build_glossary_server(notes.artifacts_dir / "glossary.json")
+        glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         async def merge_heartbeat(elapsed: float) -> None:
             mins, secs = divmod(int(elapsed), 60)
@@ -4272,7 +4378,7 @@ class PipelineRunner:
                 system_prompt=RESOLVER_PROMPT,
                 tools=BUILTIN_WRITE_TOOLS,
                 max_thinking_tokens=128_000 - 1,
-                permission_mode="bypassPermissions",
+                autonomy="unattended",
                 mcp_servers={**self.source_servers, **sc.servers},
                 allowed_tools=self.source_tool_names + sc.tool_names,
                 prefix="[resolve] ",
@@ -4429,10 +4535,10 @@ class PipelineRunner:
             )
             if artifacts.tex_path:
                 async with gdoc_nonfatal("upload paper.tex"):
-                    _, tex_url = await do_upload_artifact(
+                    tex = await do_upload_artifact(
                         artifacts.tex_path, "application/x-tex"
                     )
-                    await self.hooks.on_progress(f"Uploaded paper.tex: {tex_url}")
+                    await self.hooks.on_progress(f"Uploaded paper.tex: {tex.url}")
             if not artifacts.pdf_path:
                 logger.warning("LaTeX compile incomplete: %s", artifacts.log[-300:])
                 await self.hooks.on_progress(
@@ -4440,10 +4546,8 @@ class PipelineRunner:
                 )
                 return tex_source
             async with gdoc_nonfatal("upload paper.pdf"):
-                _, pdf_url = await do_upload_artifact(
-                    artifacts.pdf_path, "application/pdf"
-                )
-                await self.hooks.on_progress(f"Uploaded paper.pdf: {pdf_url}")
+                pdf = await do_upload_artifact(artifacts.pdf_path, "application/pdf")
+                await self.hooks.on_progress(f"Uploaded paper.pdf: {pdf.url}")
             await self.write_preview_tab(sc.sandbox)
             return tex_source
 
@@ -4535,28 +4639,12 @@ class PipelineRunner:
             await self.write_plan_tab(strategy.new_plan)
             await self.create_section_tabs(strategy.new_plan)
 
-        rewrite_tasks: list[tuple[SectionPlan, list[str]]] = []
-        add_tasks: list[SectionPlan] = []
-
+        queue = RestartQueue()
         for action in strategy.actions:
-            match action:
-                case PreserveAction():
-                    pass
-                case PatchAction(
-                    section=section, target_text=target, instruction=instr
-                ):
-                    await self.patch_section(section, target, instr)
-                case RewriteAction(section=section, new_research_questions=questions):
-                    section_plan = self.find_section_plan(section)
-                    if section_plan:
-                        rewrite_tasks.append((section_plan, questions))
-                case AddAction(section_plan=section_plan):
-                    add_tasks.append(section_plan)
-                case DropAction(section=section):
-                    self.snapshot.section_drafts.pop(section, None)
+            await action.carry_out(self, queue)
 
-        if rewrite_tasks or add_tasks:
-            await self.execute_rewrites(rewrite_tasks, add_tasks)
+        if queue.pending():
+            await self.execute_rewrites(queue)
 
         # Only remerge once the linear merge stage has already run: a restart
         # before it (research/write checkpoints) is picked up by the merge stage
@@ -4576,10 +4664,10 @@ class PipelineRunner:
     async def patch_section(
         self, section: str, target_text: str, instruction: str
     ) -> None:
-        draft = self.snapshot.section_drafts.get(section)
-        if draft is None:
+        if section not in self.snapshot.section_drafts:
             logger.warning("Cannot patch missing section: %s", section)
             return
+        draft = self.snapshot.section_drafts[section]
 
         patch_path = self.get_draft_path(section)
         patch_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4607,7 +4695,7 @@ class PipelineRunner:
                 system_prompt=SECTION_WRITER_PROMPT,
                 tools=BUILTIN_WRITE_TOOLS,
                 max_thinking_tokens=128_000 - 1,
-                permission_mode="bypassPermissions",
+                autonomy="unattended",
                 mcp_servers=all_servers,
                 allowed_tools=all_tools,
                 prefix=f"[patch:{section}] ",
@@ -4623,18 +4711,14 @@ class PipelineRunner:
             word_count=len(content.split()),
         )
 
-    async def execute_rewrites(
-        self,
-        rewrite_tasks: list[tuple[SectionPlan, list[str]]],
-        add_tasks: list[SectionPlan],
-    ) -> None:
+    async def execute_rewrites(self, queue: RestartQueue) -> None:
         plan = self.snapshot.plan
         if plan is None:
             return
 
         notes = self.ensure_notes()
 
-        new_questions = [q for _section_plan, qs in rewrite_tasks for q in qs]
+        new_questions = [q for task in queue.rewrites for q in task.research_questions]
         if new_questions:
             await self.hooks.on_progress(
                 f"Researching {len(new_questions)} new question(s) before rewriting"
@@ -4653,9 +4737,8 @@ class PipelineRunner:
                 )
 
         feedback_path = await self.prepare_feedback("restart")
-        glossary_servers, glossary_tool_names = build_glossary_server(
-            notes.artifacts_dir / "glossary.json"
-        )
+        glossary = build_glossary_server(notes.artifacts_dir / "glossary.json")
+        glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         async def rewrite_coro(section_plan: SectionPlan) -> SectionDraft:
             draft_path = self.get_draft_path(section_plan.title)
@@ -4684,7 +4767,7 @@ class PipelineRunner:
             draft_path.write_text(draft.content, encoding="utf-8")
             return draft
 
-        all_plans = [sp for sp, _qs in rewrite_tasks] + add_tasks
+        all_plans = [task.section_plan for task in queue.rewrites] + queue.additions
         all_coros = [rewrite_coro(sp) for sp in all_plans]
 
         results = await asyncio.gather(*all_coros, return_exceptions=True)
@@ -4694,6 +4777,10 @@ class PipelineRunner:
             else:
                 result.title = all_plans[i].title
                 self.snapshot.section_drafts[all_plans[i].title] = result
+
+    def drop_section(self, section: str) -> None:
+        """Forget a section's draft, which is what dropping one leaves."""
+        self.snapshot.section_drafts.pop(section, None)
 
     def find_section_plan(self, section_title: str) -> SectionPlan | None:
         plan = self.snapshot.plan
@@ -4730,7 +4817,7 @@ class PipelineRunner:
 
     async def wait_for_revision_or_sync(
         self, state: WritingSessionState
-    ) -> tuple[str | None, bool]:
+    ) -> StandbyWake:
         revision_task = asyncio.ensure_future(self.hooks.collect_revision(state))
         sync_task = asyncio.ensure_future(self.hooks.sync_requested.wait())
         done, pending = await asyncio.wait(
@@ -4744,15 +4831,18 @@ class PipelineRunner:
                 pass
 
         if revision_task in done:
-            return revision_task.result(), sync_task in done
+            return StandbyWake(
+                revision=revision_task.result(), from_sync=sync_task in done
+            )
         self.hooks.sync_requested.clear()
-        return None, True
+        return StandbyWake(revision=None, from_sync=True)
 
     async def standby_loop(
         self, initial_wait: float = 120.0, quiet_wait: float = 90.0
     ) -> None:
         while True:
-            revision, from_sync = await self.wait_for_revision_or_sync(self.state)
+            woke = await self.wait_for_revision_or_sync(self.state)
+            revision, from_sync = woke.revision, woke.from_sync
             if revision is None and not from_sync:
                 continue
 
@@ -4937,19 +5027,26 @@ class PipelineRunner:
             self.known_tabs["Sections"] = sections_parent_id
         sections_parent_id = self.known_tabs["Sections"]
 
-        self.tab_ids = {}
-        for i, section in enumerate(plan.sections):
-            tab_name = truncate_tab_title(f"§{i + 1} {section.title}")
-            tid = self.known_tabs.get(tab_name, "")
-            if not tid:
-                async with gdoc_nonfatal(f"create tab '{tab_name}'"):
-                    tid = await do_create_tab(
-                        self.doc_id, tab_name, parent_tab_id=sections_parent_id
-                    )
-                    self.known_tabs[tab_name] = tid
-            if tid:
-                self.tab_ids[section.title] = tid
-                self.state.add_section(section.title, tid)
+        async def placed() -> AsyncIterator[SectionTab]:
+            """Each section paired with its tab, creating the ones not there yet.
+
+            A tab creation that fails is non-fatal and yields nothing for that
+            section, so the run continues against the tabs it did get.
+            """
+            for i, section in enumerate(plan.sections):
+                tab_name = truncate_tab_title(f"§{i + 1} {section.title}")
+                tid = tab_id_for(self.known_tabs, tab_name)
+                if not tid:
+                    async with gdoc_nonfatal(f"create tab '{tab_name}'"):
+                        tid = await do_create_tab(
+                            self.doc_id, tab_name, parent_tab_id=sections_parent_id
+                        )
+                        self.known_tabs[tab_name] = tid
+                if tid:
+                    self.state.add_section(section.title, tid)
+                    yield SectionTab(title=section.title, tab_id=tid)
+
+        self.tab_ids = {tab.title: tab.tab_id async for tab in placed()}
 
         async with gdoc_nonfatal("write sections index"):
             sections_summary = "\n".join(
@@ -4994,24 +5091,24 @@ class PipelineRunner:
                 self.known_tabs["Review"] = await do_create_tab(self.doc_id, "Review")
 
             review_text = f"# Review Findings\n\n{len(findings)} total findings\n"
-            critical_specs: list[CommentSpec] = []
-            for finding in findings:
-                review_text += (
-                    f"\n## [{finding.reviewer}] {finding.location}\n\n"
-                    f"**Severity:** {finding.severity}\n\n"
-                    f"{finding.issue}\n\n"
-                    f"**Suggestion:** {finding.suggestion}\n"
+            review_text += "".join(
+                f"\n## [{finding.reviewer}] {finding.location}\n\n"
+                f"**Severity:** {finding.severity}\n\n"
+                f"{finding.issue}\n\n"
+                f"**Suggestion:** {finding.suggestion}\n"
+                for finding in findings
+            )
+            critical_specs = [
+                CommentSpec(
+                    content=(
+                        f"[{finding.reviewer.upper()}] {finding.issue}\n\n"
+                        f"Suggestion: {finding.suggestion}"
+                    ),
+                    anchor_text=finding.text_excerpt or None,
                 )
-                if finding.severity == "critical":
-                    critical_specs.append(
-                        CommentSpec(
-                            content=(
-                                f"[{finding.reviewer.upper()}] {finding.issue}\n\n"
-                                f"Suggestion: {finding.suggestion}"
-                            ),
-                            anchor_text=finding.text_excerpt or None,
-                        )
-                    )
+                for finding in findings
+                if finding.severity == "critical"
+            ]
 
             if critical_specs:
                 async with gdoc_nonfatal("post review comments"):
@@ -5049,14 +5146,13 @@ class PipelineRunner:
                 if active_stage and active_stage in all_stages
                 else -1
             )
-            progress: list[str] = []
-            for i, s in enumerate(all_stages):
-                if i == active_idx:
-                    progress.append(f"[>] {s}")
-                elif i <= completed_idx:
-                    progress.append(f"[x] {s}")
-                else:
-                    progress.append(f"[ ] {s}")
+
+            def marker(index: int) -> str:
+                if index == active_idx:
+                    return "[>]"
+                return "[x]" if index <= completed_idx else "[ ]"
+
+            progress = [f"{marker(i)} {s}" for i, s in enumerate(all_stages)]
             parts.append(" ".join(progress) + "\n")
 
             if plan:
@@ -5073,14 +5169,17 @@ class PipelineRunner:
 
             if plan:
                 parts.append("\n## Sections\n")
-                for i, s in enumerate(plan.sections):
-                    draft = snap.section_drafts.get(s.title)
-                    if draft and not draft.content.startswith("[Section failed"):
-                        parts.append(f"- [x] {s.title} ({draft.word_count} words)")
-                    elif active_stage == "write" and s.title not in snap.section_drafts:
-                        parts.append(f"- [>] {s.title}")
-                    else:
-                        parts.append(f"- [ ] {s.title}")
+
+                def section_line(title: str) -> str:
+                    if title not in snap.section_drafts:
+                        pending = active_stage == "write"
+                        return f"- [{'>' if pending else ' '}] {title}"
+                    draft = snap.section_drafts[title]
+                    if draft.content.startswith("[Section failed"):
+                        return f"- [ ] {title}"
+                    return f"- [x] {title} ({draft.word_count} words)"
+
+                parts.extend(section_line(s.title) for s in plan.sections)
                 total_words = sum(d.word_count for d in snap.section_drafts.values())
                 if total_words:
                     parts.append(

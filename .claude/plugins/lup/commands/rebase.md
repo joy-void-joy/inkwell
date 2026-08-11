@@ -1,7 +1,7 @@
 ---
-allowed-tools: Bash(uv run lup-devtools:*, git:*), Read, Glob, Grep, AskUserQuestion, Skill(lup:commit)
-argument-hint: [target-branch]
-description: Clean up commit history on the feature branch and open/update a PR
+description: "Clean up commit history on the feature branch and open/update a PR"
+allowed-tools: Bash(uv run lup-devtools:*, git:*), Read, AskUserQuestion, Skill(lup:commit)
+argument-hint: "[target-branch]"
 ---
 
 # Rebase and PR
@@ -12,7 +12,9 @@ Clean up the commit history on the current feature branch, push it, and open (or
 
 ### Base branch (`<base>`)
 
-Run `uv run lup-devtools dev pr sync-base --json` (step 1 below) -- it auto-detects the base branch. If ambiguous, use AskUserQuestion to ask which branch to use.
+Run `uv run lup-devtools dev pr sync-base --json` (step 1 below) -- it reports the base branch and a `base_source`. `recorded` (from worktree creation) and `explicit` are authoritative. `guessed` means topology alone picked it: the command merges nothing and exits non-zero. Ask the user with the AskUserQuestion tool, offering concrete options plus a free-text choice: which branch is the true base, then rerun as `sync-base --base <branch>`.
+
+Confirm against the divergence, not the name that sounds right. `git log --oneline <candidate>..HEAD` on the true base shows this branch's own commits; on a wrong one it shows hundreds, which is the tell that the whole history between the two branches is about to be treated as yours.
 
 ### PR target (`<target>`)
 
@@ -30,32 +32,31 @@ Invoke `/lup:commit` to commit any uncommitted work before starting the rebase.
 uv run lup-devtools dev pr sync-base --json
 ```
 
-If conflicts are reported, resolve with `/lup:merge-conflict` first.
+A `guessed` base exits non-zero having merged nothing -- settle the base as above and rerun with `--base <branch>`. If conflicts are reported, resolve with `/lup:merge` (no argument) first.
 
-### 3. Merge local settings into shared config
+### 3. Fold local grants into the canonical policy
 
-Check if `.claude/settings.local.json` exists. If so, merge all sensible settings into `.claude/settings.json` -- permissions, auto-accept patterns, etc. Skip user-specific items. Commit as a separate commit.
+Check whether `.claude/settings.local.json` exists. Its permission entries are ad-hoc grants one person accepted; leaving them there means the next person re-approves the same prompts.
+
+`.claude/settings.json` is a generated artifact (`harness.project-settings`) -- never hand-merge into it. The next `lup-devtools harness generate all` regenerates it from the policy and drops the edit. Shell, fetch, and edit permissions belong to the canonical semantic policy instead.
+
+Classify each entry:
+
+- **Already covered by the policy** -- drop it from the local file. Most read-only commands are.
+- **A genuine gap** -- invoke `/lup:hooks` to add it to the canonical policy, regenerate both native plugins, and commit that as a separate commit.
+- **User-specific** (plugin toggles, personal model choice) -- leave it in `.claude/settings.local.json`.
 
 ### 4. Run checks
 
 ```bash
-uv run lup-devtools dev pr checks --json
+uv run lup-devtools dev check
 ```
 
 Fix any failures before proceeding.
 
-### 5. Review PLAN.md
-
-If `PLAN.md` exists, verify:
-- All items completed (`[x]`) or explicitly deferred
-- No items in-progress (`[~]`)
-- Plan reflects what was built
-
-If incomplete items exist, confirm via AskUserQuestion.
-
 ## Process
 
-### 6. Push and open PR
+### 5. Push and open PR
 
 ```bash
 uv run lup-devtools dev pr push --json
@@ -69,14 +70,14 @@ uv run lup-devtools dev pr create --base "<target>" --title "<title>" --body "<b
 
 **If PR already exists**, skip -- we'll force-push the cleaned history later.
 
-### 7. Understand all changes
+### 6. Understand all changes
 
 - Review the full diff: `git diff <base>...HEAD`
 - Read changed files to understand the complete set of modifications
 - Think about logical units of work (features, refactors, fixes, tests, docs)
 - **Ignore existing commit history** -- focus on what makes sense as a clean sequence
 
-### 8. Reset and rebuild commits
+### 7. Reset and rebuild commits
 
 ```bash
 git reset --soft <base>
@@ -88,7 +89,7 @@ All changes are now staged. For each logical unit of work:
 - Order logically: dependencies first, then features, then polish
 - Use conventional format: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`
 
-### 9. Force push and update PR
+### 8. Force push and update PR
 
 ```bash
 uv run lup-devtools dev pr push --force --json

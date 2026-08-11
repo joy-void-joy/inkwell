@@ -3,14 +3,18 @@
 Tracks doc_id, section status, pending questions, and author comments.
 """
 
-# claude: ignore
-# pyright: reportAttributeAccessIssue=false
-# Google API service objects are untyped.
-
 import asyncio
 import logging
+from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+from pydantic import BaseModel, Field, ValidationError
+
+from lup.types import JsonValue
+
+if TYPE_CHECKING:
+    from inkwell.agent.tools.google_docs_schema import CommentPage
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +25,54 @@ class SectionStatus(TypedDict):
     status: str
 
 
+class CommentLedger(BaseModel):
+    """The comment ids a session has already accounted for.
+
+    Membership is the only question ever asked of it — has this comment been
+    surfaced to the author, did the agent write it — so it answers that
+    instead of handing out the collection it keeps. The order it keeps them
+    in is the order the append-only registry file on disk records them.
+    """
+
+    handled: list[str] = Field(
+        default_factory=list, description="Ids accounted for, in the order seen"
+    )
+
+    def __contains__(self, comment_id: str) -> bool:
+        """Whether `comment_id` has already been accounted for."""
+        return comment_id in self.handled
+
+    def mark(self, comment_id: str) -> None:
+        """Account for `comment_id`, unless it already is."""
+        if comment_id not in self.handled:
+            self.handled.append(comment_id)
+
+    def mark_all(self, comment_ids: Iterable[str]) -> None:
+        """Account for every id in `comment_ids`."""
+        for comment_id in comment_ids:
+            self.mark(comment_id)
+
+
 class AuthorComment(TypedDict):
     comment_id: str
     content: str
     anchor_text: str
     reply: str
+
+
+def comment_page(result: JsonValue) -> "CommentPage":
+    """The comments a Drive response carries, empty when it carries none.
+
+    A page that does not validate is logged and read as empty rather than
+    raised: a polling loop should skip a malformed response, not die on it.
+    """
+    from inkwell.agent.tools.google_docs_schema import CommentPage
+
+    try:
+        return CommentPage.model_validate(result)
+    except ValidationError:
+        logger.warning("Unreadable Drive comments payload", exc_info=True)
+        return CommentPage()
 
 
 class WritingSessionState:
@@ -43,9 +90,9 @@ class WritingSessionState:
         self.stage: str = "starting"
         self.sections: list[SectionStatus] = []
         self.pending_questions: list[str] = []
-        self.seen_comment_ids: set[str] = set()
-        self.agent_comment_ids: set[str] = set()
-        self.seen_source_comment_ids: set[str] = set()
+        self.seen_comments = CommentLedger()
+        self.agent_comments = CommentLedger()
+        self.seen_source_comments = CommentLedger()
         self.sleep_entered: asyncio.Event = asyncio.Event()
         self.directions_tab_id: str = ""
         self.last_directions_content: str = ""
@@ -85,42 +132,40 @@ class WritingSessionState:
 
         try:
             from inkwell.agent.tools.google_docs import execute_with_retry, services
+            from inkwell.agent.tools.google_docs_schema import Comment, CommentPage
 
             svc = services()
             drive = svc.drive_service()
 
-            result = await execute_with_retry(
-                drive.comments().list(
-                    fileId=self.doc_id,
-                    fields="comments(id,replies(id,content),resolved)",
-                    pageSize=100,
+            page = CommentPage.model_validate(
+                await execute_with_retry(
+                    drive.comments().list(
+                        fileId=self.doc_id,
+                        fields="comments(id,replies(id,content),resolved)",
+                        pageSize=100,
+                    )
                 )
             )
 
-            unread = 0
-            for item in result.get("comments", []):
-                if not isinstance(item, dict):
-                    continue
-                if item.get("resolved", False):
-                    continue
-                comment_id = str(item.get("id", ""))
-                if comment_id in self.seen_comment_ids:
-                    continue
+            def unread(comment: Comment) -> bool:
+                """Whether this comment is something the author is waiting on.
 
-                is_agent_comment = comment_id in self.agent_comment_ids
-                reply_list = item.get("replies", [])
-                has_author_reply = isinstance(reply_list, list) and any(
-                    isinstance(r, dict)
-                    and str(r.get("id", "")) not in self.agent_comment_ids
-                    for r in reply_list
-                )
+                A comment inkwell did not write is unread on its own; one it
+                did is unread only once somebody else has replied under it.
+                """
+                if comment.id in self.agent_comments:
+                    return any(
+                        reply.id not in self.agent_comments for reply in comment.replies
+                    )
+                return True
 
-                if has_author_reply and is_agent_comment:
-                    unread += 1
-                elif not is_agent_comment:
-                    unread += 1
-
-            return unread
+            return sum(
+                1
+                for comment in page.comments
+                if not comment.resolved
+                and comment.id not in self.seen_comments
+                and unread(comment)
+            )
         except Exception:
             logger.warning("Failed to check unread comments", exc_info=True)
             return 0
@@ -135,20 +180,20 @@ class WritingSessionState:
         """
         self.agent_ids_path = path
         if path.exists():
-            self.agent_comment_ids.update(
+            self.agent_comments.mark_all(
                 line.strip()
                 for line in path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             )
 
     def mark_agent_comment(self, comment_id: str) -> None:
-        self.agent_comment_ids.add(comment_id)
+        self.agent_comments.mark(comment_id)
         if self.agent_ids_path is not None and comment_id:
             with self.agent_ids_path.open("a", encoding="utf-8") as fh:
                 fh.write(f"{comment_id}\n")
 
     def mark_comments_seen(self, comment_ids: list[str]) -> None:
-        self.seen_comment_ids.update(comment_ids)
+        self.seen_comments.mark_all(comment_ids)
 
     async def get_new_author_comments(self) -> list[AuthorComment]:
         """Fetch author replies not yet seen (async with retry)."""
@@ -226,97 +271,47 @@ class WritingSessionState:
             logger.warning("Failed to fetch source doc comments (sync)", exc_info=True)
             return []
 
-    def parse_source_comments(self, result: object) -> list[AuthorComment]:
-        """Parse source doc comments, tracking seen IDs separately."""
-        if not isinstance(result, dict):
-            return []
+    def parse_source_comments(self, result: JsonValue) -> list[AuthorComment]:
+        """Read source-doc comments, tracking their seen ids separately."""
 
-        new_comments: list[AuthorComment] = []
-        for item in result.get("comments", []):
-            if not isinstance(item, dict):
-                continue
-            if item.get("resolved", False):
-                continue
-
-            comment_id = str(item.get("id", ""))
-            if comment_id in self.seen_source_comment_ids:
-                continue
-
-            content = str(item.get("content", ""))
-            anchor = ""
-            quoted = item.get("quotedFileContent")
-            if isinstance(quoted, dict):
-                anchor = str(quoted.get("value", ""))
-
-            reply_list = item.get("replies", [])
-            reply_text = ""
-            if isinstance(reply_list, list) and reply_list:
-                last_reply = reply_list[-1]
-                if isinstance(last_reply, dict):
-                    reply_text = str(last_reply.get("content", ""))
-
-            new_comments.append(
-                AuthorComment(
-                    comment_id=comment_id,
-                    content=content,
-                    anchor_text=anchor,
-                    reply=reply_text,
+        def fresh() -> Iterator[AuthorComment]:
+            for comment in comment_page(result).comments:
+                if comment.resolved or comment.id in self.seen_source_comments:
+                    continue
+                self.seen_source_comments.mark(comment.id)
+                yield AuthorComment(
+                    comment_id=comment.id,
+                    content=comment.content,
+                    anchor_text=comment.anchor_text(),
+                    reply=comment.replies[-1].content if comment.replies else "",
                 )
-            )
-            self.seen_source_comment_ids.add(comment_id)
 
-        return new_comments
+        return list(fresh())
 
-    def parse_comments(self, result: object) -> list[AuthorComment]:
-        """Parse comments API response into AuthorComment list, updating seen set."""
-        if not isinstance(result, dict):
-            return []
+    def parse_comments(self, result: JsonValue) -> list[AuthorComment]:
+        """Read the comments API response, marking each comment it yields seen.
 
-        new_comments: list[AuthorComment] = []
-        for item in result.get("comments", []):
-            if not isinstance(item, dict):
-                continue
-            if item.get("resolved", False):
-                continue
+        A comment the agent posted is only news once somebody else has replied
+        under it; one the author opened is news on its own.
+        """
 
-            comment_id = str(item.get("id", ""))
-            if comment_id in self.seen_comment_ids:
-                continue
-
-            content = str(item.get("content", ""))
-            anchor = ""
-            quoted = item.get("quotedFileContent")
-            if isinstance(quoted, dict):
-                anchor = str(quoted.get("value", ""))
-
-            is_agent_comment = comment_id in self.agent_comment_ids
-            reply_list = item.get("replies", [])
-            author_replies = (
-                [
-                    r
-                    for r in reply_list
-                    if isinstance(r, dict)
-                    and str(r.get("id", "")) not in self.agent_comment_ids
+        def fresh() -> Iterator[AuthorComment]:
+            for comment in comment_page(result).comments:
+                if comment.resolved or comment.id in self.seen_comments:
+                    continue
+                author_replies = [
+                    reply
+                    for reply in comment.replies
+                    if reply.id not in self.agent_comments
                 ]
-                if isinstance(reply_list, list)
-                else []
-            )
-
-            if author_replies:
-                reply_text = str(author_replies[-1].get("content", ""))
-            elif not is_agent_comment:
-                reply_text = ""
-            else:
-                continue
-
-            new_comments.append(
-                AuthorComment(
-                    comment_id=comment_id,
-                    content=content,
-                    anchor_text=anchor,
-                    reply=reply_text,
+                if not author_replies and comment.id in self.agent_comments:
+                    continue
+                self.seen_comments.mark(comment.id)
+                yield AuthorComment(
+                    comment_id=comment.id,
+                    content=comment.content,
+                    anchor_text=comment.anchor_text(),
+                    reply=author_replies[-1].content if author_replies else "",
                 )
-            )
-            self.seen_comment_ids.add(comment_id)
 
-        return new_comments
+        return list(fresh())

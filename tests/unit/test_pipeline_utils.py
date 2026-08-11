@@ -164,16 +164,18 @@ class TestBriefPropagation:
 class TestConstraintsFlowThroughPlan:
     def test_constraints_reach_the_loaded_plan(self, tmp_path) -> None:
         collector = PlanCollector(tmp_path / "plan.json")
-        collector.header = SetPlanHeaderInput(
-            title="T",
-            thesis="th",
-            target_format="academic",
-            author_direction="d",
-            deliverables=["the paper"],
-            constraints=["self-contained; do not cite the source"],
-            conventions=[],
-            voice_notes="v",
-        ).model_dump()
+        collector.plan = collector.plan.model_copy(
+            update=SetPlanHeaderInput(
+                title="T",
+                thesis="th",
+                target_format="academic",
+                author_direction="d",
+                deliverables=["the paper"],
+                constraints=["self-contained; do not cite the source"],
+                conventions=[],
+                voice_notes="v",
+            ).model_dump()
+        )
         collector.save()
         plan = ArticlePlan.model_validate_json(
             (tmp_path / "plan.json").read_text(encoding="utf-8")

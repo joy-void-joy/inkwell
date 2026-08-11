@@ -10,10 +10,11 @@ references for pipeline stage inputs. Agents see the role tag before
 reading a file, so they know its purpose without guessing.
 """
 
-import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
+from markdown_it import MarkdownIt
 from pydantic import BaseModel, Field
 
 ContentRole = Literal[
@@ -59,42 +60,65 @@ class ContentEnvelope(BaseModel):
     )
 
 
-HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
+MARKDOWN = MarkdownIt()
+"""Reads content as the blocks its author wrote, so which lines are headings
+is the parser's business rather than a '#' prefix matched by hand — and a '#'
+inside a code fence is not one."""
+
+DEEPEST_NAVIGABLE_HEADING = 3
+"""Headings deeper than this are body structure, not a section to navigate to."""
+
+
+class HeadingAt(BaseModel):
+    """One heading of a document, and where in it the heading sits."""
+
+    line: int = Field(description="Zero-based line the heading is written on")
+    depth: int = Field(description="Heading level: 1 for '#', 2 for '##'")
+    text: str = Field(description="The heading's text, without its markers")
+
+
+def headings_in(content: str) -> list[HeadingAt]:
+    """Every heading of `content`, in document order."""
+
+    def found() -> Iterator[HeadingAt]:
+        depth = 0
+        line = 0
+        for token in MARKDOWN.parse(content):
+            if token.type == "heading_open":
+                depth = int(token.tag.removeprefix("h"))
+                line = token.map[0] if token.map else 0
+            elif token.type == "inline" and depth:
+                yield HeadingAt(line=line, depth=depth, text=token.content.strip())
+                depth = 0
+
+    return list(found())
 
 
 def extract_sections(content: str) -> list[ContentSection]:
     """Extract navigable sections from markdown content.
 
-    Splits on ## and ### headings. Each section runs from its heading
-    to the next heading of equal or higher level (or end of content).
+    Splits on # through ### headings. Each section runs from its heading to
+    the next one at that depth or shallower (or the end of the content).
     """
-    lines = content.split("\n")
-    matches: list[tuple[int, str]] = []
-    for i, line in enumerate(lines):
-        m = HEADING_RE.match(line)
-        if m and len(m.group(1)) <= 3:
-            matches.append((i, m.group(2).strip()))
+    lines = content.splitlines()
+    headings = [
+        heading
+        for heading in headings_in(content)
+        if heading.depth <= DEEPEST_NAVIGABLE_HEADING
+    ]
 
-    if not matches:
-        return []
-
-    sections: list[ContentSection] = []
-    for idx, (line_offset, heading) in enumerate(matches):
-        if idx + 1 < len(matches):
-            end = matches[idx + 1][0]
-        else:
-            end = len(lines)
-        section_lines = lines[line_offset:end]
-        section_text = "\n".join(section_lines)
-        sections.append(
-            ContentSection(
-                heading=heading,
-                offset=line_offset,
-                line_count=end - line_offset,
-                word_count=len(section_text.split()),
-            )
+    def section(index: int, heading: HeadingAt) -> ContentSection:
+        """One heading, and everything written under it up to the next."""
+        end = headings[index + 1].line if index + 1 < len(headings) else len(lines)
+        text = "\n".join(lines[heading.line : end])
+        return ContentSection(
+            heading=heading.text,
+            offset=heading.line,
+            line_count=end - heading.line,
+            word_count=len(text.split()),
         )
-    return sections
+
+    return [section(index, heading) for index, heading in enumerate(headings)]
 
 
 def build_envelope(

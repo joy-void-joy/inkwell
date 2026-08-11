@@ -1,7 +1,7 @@
 ---
-allowed-tools: Bash(git:*, uv run lup-devtools:*), Read, Write, Edit, Glob, Grep, AskUserQuestion
-description: Rewrite a file or folder from scratch while respecting coding conventions
-argument-hint: <path>
+description: "Rewrite a file or folder from scratch while respecting coding conventions"
+allowed-tools: Bash(git:*, uv run lup-devtools:*), Read, Write, Edit, AskUserQuestion
+argument-hint: "<path>"
 ---
 
 # Refactor from Scratch
@@ -14,7 +14,7 @@ Rewrite a file (or folder) from scratch, preserving intent but enforcing coding 
 
 ### Parse Arguments
 
-The argument is a **file or folder path**. If no path is provided, use AskUserQuestion to ask which file or folder to refactor.
+The argument is a **file or folder path**. If no path is provided, Ask the user with the AskUserQuestion tool, offering concrete options plus a free-text choice: which file or folder to refactor
 
 Resolve relative paths against the current working directory.
 
@@ -23,7 +23,7 @@ Resolve relative paths against the current working directory.
 ### 1. Validate the target
 
 - Confirm the path exists (file or directory)
-- If it's a directory, list all files that will be refactored using Glob
+- If it's a directory, list all files that will be refactored using `find`
 - Show the user what will be refactored and ask for confirmation
 
 ### 2. Create a backup
@@ -46,11 +46,11 @@ For each file being refactored:
 - Identify its **public interface**: exports, function signatures, class APIs
 - Identify its **dependencies**: imports, external calls
 - Identify its **side effects**: file I/O, network calls, state mutations
-- Note any tests that import from or test this file (use Grep to find references)
+- Note any tests that import from or test this file (use `find_references` to resolve them)
 
 ### 4. Read coding conventions
 
-Read the project's CLAUDE.md (`.claude/CLAUDE.md`) to understand:
+Read the project's guidance file (`.claude/CLAUDE.md`) to understand:
 
 - Type safety requirements
 - Error handling philosophy
@@ -66,9 +66,21 @@ For each file, **write it fresh** using the Write tool — do not edit the origi
 
 - **Preserve the full public interface** (same exports, same function signatures, same behavior)
 - **Include everything the original included** — no features dropped, no edge cases lost
-- **Follow all coding conventions** from CLAUDE.md (types, error handling, style, etc.)
+- **Follow all coding conventions** from the guidance file (types, error handling, style, etc.)
 - **Improve structure** where the original was unclear or poorly organized
 - **Keep the same filename and location**
+
+### Prompt Content Is Code
+
+Prompt strings (system prompts, agent instructions, guidance templates) are code — they have intent, structure, and conventions. When refactoring files containing prompts, apply the same guidance principles:
+
+- **DRY**: If the same advice appears in multiple sections, consolidate. Every token in a system prompt is paid on every invocation.
+- **Code as Documentation**: No defensive language added after a single bad outcome. No references to historical performance. Instructions should be structural, not reactive.
+- **Avoid over-engineering**: Every section must earn its token cost. Guidance for rare cases shouldn't bloat the universal prompt that all invocations pay for. Move case-specific strategy into case-specific guidance blocks.
+- **No redundant emphasis**: Saying the same thing 3 times in different sections isn't reinforcement — it's noise. State advice once in the right place.
+- **Structural over behavioral**: "Always do X" is better than "Don't do Y, we've seen this go wrong." Frame instructions as what TO do, not what mistakes to avoid.
+
+Present prompt content changes as a review with findings — prompt changes affect agent behavior and may require a version bump.
 
 ### 6. Verify
 

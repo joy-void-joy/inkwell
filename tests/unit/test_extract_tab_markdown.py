@@ -1,41 +1,47 @@
-"""Tests for extract_tab_markdown — reconstructing markdown from GDoc API structures."""
+"""Tests for extract_tab_markdown — reconstructing markdown from GDoc API structures.
+
+The fixtures build the wire JSON the Docs API actually sends and validate it
+into ``Tab``, so these cover the parsing as well as the reconstruction: a
+field renamed in the schema fails here rather than quietly reading as absent.
+"""
 
 from collections.abc import Mapping
 
 from inkwell.agent.tools.google_docs import extract_tab_markdown
+from inkwell.agent.tools.google_docs_schema import Tab
+
+type Wire = Mapping[str, object]
+"""One object of the JSON the Docs API sends, as a fixture writes it.
+
+Deliberately loose: a fixture's job here is to write what the API really
+sends and let ``Tab`` be the thing that says what that means.
+"""
 
 
-def make_tab(
-    paragraphs: list[dict[str, object]],  # type: ignore[type-arg]
-    lists: Mapping[str, object] | None = None,
-) -> dict[str, object]:  # type: ignore[type-arg]
+def make_tab(paragraphs: list[Wire], lists: Wire | None = None) -> Tab:
     """Build a minimal GDoc tab structure for testing."""
-    tab: dict[str, object] = {"documentTab": {"body": {"content": paragraphs}}}
+    document_tab: dict[str, object] = {"body": {"content": paragraphs}}
     if lists is not None:
-        tab["documentTab"]["lists"] = lists  # type: ignore[index]
-    return tab
+        document_tab["lists"] = lists
+    return Tab.model_validate({"documentTab": document_tab})
 
 
 def make_paragraph(
-    runs: list[dict[str, object]],  # type: ignore[type-arg]
+    runs: list[Wire],
     named_style: str = "NORMAL_TEXT",
-    bullet: dict[str, object] | None = None,  # type: ignore[type-arg]
-) -> dict[str, object]:  # type: ignore[type-arg]
-    para: dict[str, object] = {  # type: ignore[type-arg]
-        "paragraph": {
-            "elements": [{"textRun": r} for r in runs],
-            "paragraphStyle": {"namedStyleType": named_style},
-        }
+    bullet: Wire | None = None,
+) -> Wire:
+    paragraph: dict[str, object] = {
+        "elements": [{"textRun": r} for r in runs],
+        "paragraphStyle": {"namedStyleType": named_style},
     }
     if bullet is not None:
-        para["paragraph"]["bullet"] = bullet  # type: ignore[index]
-    return para
+        paragraph["bullet"] = bullet
+    return {"paragraph": paragraph}
 
 
-def run(
-    text: str, bold: bool = False, italic: bool = False, url: str = ""
-) -> dict[str, object]:  # type: ignore[type-arg]
-    style: dict[str, object] = {}  # type: ignore[type-arg]
+def run(text: str, bold: bool = False, italic: bool = False, url: str = "") -> Wire:
+    style: dict[str, object] = {}
     if bold:
         style["bold"] = True
     if italic:
@@ -158,8 +164,14 @@ class TestEdgeCases:
         tab = make_tab([])
         assert extract_tab_markdown(tab) == "\n"
 
-    def test_not_a_dict(self) -> None:
-        assert extract_tab_markdown("not a dict") == ""  # type: ignore[arg-type]
+    def test_a_tab_the_api_sent_nothing_for(self) -> None:
+        """An absent documentTab reads as an empty one, not as a crash.
+
+        This used to be a guard against a non-dict argument; the schema makes
+        that unrepresentable, so what is left to check is the response the
+        API really can send — one with the content key missing entirely.
+        """
+        assert extract_tab_markdown(Tab.model_validate({})) == "\n"
 
     def test_empty_paragraph(self) -> None:
         tab = make_tab([make_paragraph([])])

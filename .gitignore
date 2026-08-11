@@ -215,7 +215,7 @@ __marimo__/
 notes/traces/
 worktrees/
 tmp/
-downstream.json.local
+sync.json.local
 .cache/
 refs/
 **/*.bak

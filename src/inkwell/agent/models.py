@@ -9,14 +9,24 @@ restart strategies, assumptions, and pipeline snapshot state.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, TypedDict, Union
+from typing import Annotated, Literal, Protocol, TypedDict
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from lup.client import CostState
-from lup.history import SessionResult
+from lup.runtime.usage import CostAccumulator
+from lup.types import JsonObject, JsonValue, StringMap
+from lup.workspace.history import SessionResult
 
-from inkwell.agent.tools.stage_outputs import AuthorNote
+
+class AuthorNote(BaseModel):
+    """A note from any pipeline stage addressed to the author."""
+
+    note: str = Field(description="The question, flag, or suggestion")
+    anchor: str = Field(
+        default="",
+        description="Section title, quote, or text this note refers to",
+    )
+    stage: str = Field(default="", description="Pipeline stage that produced this note")
 
 
 class SourceQuote(BaseModel):
@@ -184,8 +194,8 @@ class SectionDraft(BaseModel):
     @field_validator("questions_for_author", mode="before")
     @classmethod
     def coerce_strings_to_author_notes(
-        cls, v: list[str | AuthorNote | dict[str, str]]
-    ) -> list[AuthorNote | dict[str, str]]:
+        cls, v: list[str | AuthorNote | JsonObject]
+    ) -> list[AuthorNote | JsonObject]:
         """Accept plain strings from old snapshots."""
         return [AuthorNote(note=item) if isinstance(item, str) else item for item in v]
 
@@ -229,6 +239,16 @@ class MergedDraft(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+type CommentImpact = Literal[
+    "plan_breaking", "stage_local", "clarification", "dismiss", "revert_suggested"
+]
+"""How an author's GDoc comment bears on the run in flight."""
+
+
+type AssumptionTag = Literal["direction_check", "assumption", "question", "confusion"]
+"""What kind of uncertainty the assumptions stage surfaced."""
+
+
 class ClassifiedComment(BaseModel):
     """A GDoc comment classified by impact on the pipeline."""
 
@@ -240,9 +260,7 @@ class ClassifiedComment(BaseModel):
     reply: str = Field(
         default="", description="Author's reply text, if replying to an agent comment"
     )
-    impact: Literal[
-        "plan_breaking", "stage_local", "clarification", "dismiss", "revert_suggested"
-    ] = Field(
+    impact: CommentImpact = Field(
         description=(
             "plan_breaking: invalidates thesis/structure, requires re-planning. "
             "stage_local: affects current/next stage only. "
@@ -266,7 +284,7 @@ class ClassifiedComment(BaseModel):
 class Assumption(BaseModel):
     """A single uncertainty surfaced by the assumptions stage."""
 
-    tag: Literal["direction_check", "assumption", "question", "confusion"] = Field(
+    tag: AssumptionTag = Field(
         description=(
             "direction_check: which way should this go? "
             "assumption: something the agent is assuming without confirmation. "
@@ -294,7 +312,58 @@ class AssumptionsList(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PatchAction(BaseModel):
+class RewriteTask(BaseModel):
+    """One section queued for a full re-research and re-write."""
+
+    section_plan: SectionPlan
+    research_questions: list[str] = Field(default_factory=list)
+
+
+class RestartQueue(BaseModel):
+    """What carrying out a restart strategy leaves for the rewrite stage.
+
+    Two of the five actions cannot be done one at a time — a rewrite and an
+    addition are both scheduled work — so they collect here while the ones
+    that act immediately act.
+    """
+
+    rewrites: list[RewriteTask] = Field(default_factory=list)
+    additions: list[SectionPlan] = Field(default_factory=list)
+
+    def pending(self) -> bool:
+        """Whether anything was queued for the rewrite stage."""
+        return bool(self.rewrites or self.additions)
+
+
+class RestartTarget(Protocol):
+    """What an action needs of the run carrying it out.
+
+    Named as a protocol so the actions stay in this module: a run imports
+    them, and an action that imported the run back would close the loop.
+    """
+
+    async def patch_section(
+        self, section: str, target_text: str, instruction: str
+    ) -> None: ...
+
+    def find_section_plan(self, section_title: str) -> "SectionPlan | None": ...
+
+    def drop_section(self, section: str) -> None: ...
+
+
+class RestartStep(BaseModel):
+    """One step of the orchestrator's rework plan.
+
+    The base declares what carrying a step out means and each kind answers or
+    declines, so adding a kind is one class rather than an edit to every walk
+    that would otherwise have to notice it.
+    """
+
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        """Do nothing, which is what a step that changes nothing means."""
+
+
+class PatchAction(RestartStep):
     """Rewrite a specific passage within a section."""
 
     kind: Literal["patch"] = "patch"
@@ -302,8 +371,11 @@ class PatchAction(BaseModel):
     target_text: str = Field(description="The paragraph or passage to replace")
     instruction: str = Field(description="What to change and why")
 
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        await run.patch_section(self.section, self.target_text, self.instruction)
 
-class RewriteAction(BaseModel):
+
+class RewriteAction(RestartStep):
     """Full re-research and re-write of a section."""
 
     kind: Literal["rewrite"] = "rewrite"
@@ -314,24 +386,40 @@ class RewriteAction(BaseModel):
         description="Additional research questions for the rewritten section",
     )
 
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        section_plan = run.find_section_plan(self.section)
+        if section_plan is not None:
+            queue.rewrites.append(
+                RewriteTask(
+                    section_plan=section_plan,
+                    research_questions=self.new_research_questions,
+                )
+            )
 
-class AddAction(BaseModel):
+
+class AddAction(RestartStep):
     """Add a new section to the article."""
 
     kind: Literal["add"] = "add"
     section_plan: SectionPlan = Field(description="Plan for the new section")
     insert_after: str = Field(description="Title of the section to insert after")
 
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        queue.additions.append(self.section_plan)
 
-class DropAction(BaseModel):
+
+class DropAction(RestartStep):
     """Remove a section from the article."""
 
     kind: Literal["drop"] = "drop"
     section: str = Field(description="Section title to remove")
     reason: str = Field(description="Why this section should be dropped")
 
+    async def carry_out(self, run: RestartTarget, queue: RestartQueue) -> None:
+        run.drop_section(self.section)
 
-class PreserveAction(BaseModel):
+
+class PreserveAction(RestartStep):
     """Keep a section as-is — no changes needed."""
 
     kind: Literal["preserve"] = "preserve"
@@ -339,7 +427,7 @@ class PreserveAction(BaseModel):
 
 
 RestartAction = Annotated[
-    Union[PatchAction, RewriteAction, AddAction, DropAction, PreserveAction],
+    PatchAction | RewriteAction | AddAction | DropAction | PreserveAction,
     Field(discriminator="kind"),
 ]
 
@@ -385,7 +473,12 @@ class PipelineSnapshot(BaseModel):
         description="Deliverables extracted from the author's instructions",
     )
     runtime_style_refs: list[str] = Field(
-        default_factory=list, description="Style reference inputs supplied at runtime"
+        default_factory=list,
+        description="Labels of runtime style references whose voice was analyzed",
+    )
+    style_ref_samples: list[str] = Field(
+        default_factory=list,
+        description="Extracted prose of runtime style references, fed to voice analysis",
     )
     source_file_paths: list[str] = Field(
         default_factory=list, description="Extracted source file paths"
@@ -408,14 +501,14 @@ class PipelineSnapshot(BaseModel):
 
     doc_id: str = Field(default="", description="Google Doc ID (for resume)")
     doc_url: str = Field(default="", description="Google Doc URL (for resume)")
-    seen_comment_ids: set[str] = Field(
-        default_factory=set, description="Comment IDs already processed"
+    seen_comment_ids: list[str] = Field(
+        default_factory=list, description="Comment IDs already processed"
     )
-    agent_comment_ids: set[str] = Field(
-        default_factory=set, description="Comment IDs posted by the agent"
+    agent_comment_ids: list[str] = Field(
+        default_factory=list, description="Comment IDs posted by the agent"
     )
-    seen_source_comment_ids: set[str] = Field(
-        default_factory=set, description="Source-doc comment IDs already processed"
+    seen_source_comment_ids: list[str] = Field(
+        default_factory=list, description="Source-doc comment IDs already processed"
     )
     source_doc_id: str = Field(
         default="", description="Google Doc ID of the source document, if any"
@@ -423,11 +516,11 @@ class PipelineSnapshot(BaseModel):
     pending_questions: list[str] = Field(
         default_factory=list, description="Unanswered questions for the author"
     )
-    cost_state: CostState | None = Field(
+    cost_state: CostAccumulator | None = Field(
         default=None,
         description="Accumulated cost/token state, carried across process restarts",
     )
-    session_ids: dict[str, str] = Field(
+    session_ids: StringMap = Field(
         default_factory=dict,
         description=(
             "Stage/section label -> SDK session id, so a resumed run can "
@@ -440,6 +533,35 @@ class PipelineSnapshot(BaseModel):
 # ---------------------------------------------------------------------------
 # Final output
 # ---------------------------------------------------------------------------
+
+
+class HistoryOutputData(BaseModel):
+    """A saved record's output, read as tolerantly as a reader of one must.
+
+    A record on disk was written by whichever version produced it, so every
+    field is optional and anything newer is ignored: a listing of past
+    sessions should show what it can rather than refuse the whole record.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = ""
+    google_doc_url: str = ""
+    word_count: int = 0
+    paused_after: str = ""
+    review_findings: list[JsonValue] = Field(default_factory=list)
+
+
+class HistorySessionData(BaseModel):
+    """One session read back from the record format `lup.workspace.history` saves."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    cost_usd: float | None = None
+    duration_seconds: float | None = None
+    timestamp: str = ""
+    output: HistoryOutputData | None = None
+    profile: str | None = None
 
 
 class StageCostBreakdown(TypedDict):
@@ -488,4 +610,14 @@ class WritingOutput(BaseModel):
     )
 
 
-AgentSessionResult = SessionResult[WritingOutput]
+class AgentSessionResult(SessionResult[WritingOutput]):
+    """One writing session's result, and the account that paid for it.
+
+    The profile is inkwell's own: a run is billed to whichever credentials
+    its profile names, and a resume has to reach the same one, so the answer
+    travels with the result rather than being reconstructed from a snapshot.
+    """
+
+    profile: str | None = Field(
+        default=None, description="Config profile the session ran under"
+    )

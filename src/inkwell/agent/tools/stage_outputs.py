@@ -13,13 +13,26 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, Literal, cast
+from typing import Awaitable, Callable, Literal
 
-from claude_agent_sdk import SdkMcpTool
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from lup.mcp import LupMcpTool, ToolError, ToolResponse, mcp_response
-from lup.metrics import collector as metrics_collector
+from lup.telemetry.metrics import collector as metrics_collector
+from lup.types import JsonObject
+
+from inkwell.agent.models import (
+    Assumption,
+    AssumptionsList,
+    AuthorNote,
+    ResearchCompilation,
+    ResearchFinding,
+    ResearchQuestion,
+    ReviewFinding,
+    ReviewOutput,
+    SectionPlan,
+    SourceQuote,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +45,7 @@ def build_stage_tool(
 ) -> LupMcpTool:
     """Construct an MCP tool from a handler closure."""
 
-    async def wrapper(args: dict[str, object]) -> ToolResponse:
+    async def wrapper(args: JsonObject) -> ToolResponse:
         start = time.perf_counter()
         is_error = False
         try:
@@ -54,16 +67,12 @@ def build_stage_tool(
             duration_ms = (time.perf_counter() - start) * 1000
             metrics_collector.record(tool_name, duration_ms, is_error)
 
-    sdk = SdkMcpTool(
+    return LupMcpTool(
         name=tool_name,
         description=description,
         input_schema=input_model.model_json_schema(),
-        handler=cast(
-            Callable[[dict[str, object]], Awaitable[dict[str, object]]], wrapper
-        ),
-    )
-    return LupMcpTool(
-        sdk_tool=sdk,
+        handler=wrapper,
+        call_handler=handler,
         input_model=input_model,
         output_model=BaseModel,
     )
@@ -145,6 +154,32 @@ class AddSourceQuoteInput(BaseModel):
     context: str = Field(description="Why this quote matters for the article")
 
 
+class PlanFile(BaseModel):
+    """The plan artifact as it stands mid-stage — a prefix of an `ArticlePlan`.
+
+    `PlanCollector` rewrites it after every incremental tool call, so a reader
+    can arrive before `set_plan_header` has fired or between two `add_section`
+    calls. The header fields stay `None` until that tool sets them and are
+    written out only once they are, so a completed plan whose header never
+    arrived still fails `ArticlePlan` validation loudly rather than reaching
+    the next stage with an empty title.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    title: str | None = None
+    thesis: str | None = None
+    target_format: str | None = None
+    author_direction: str | None = None
+    voice_notes: str | None = None
+    constraints: list[str] | None = None
+    deliverables: list[str] | None = None
+    conventions: list[str] | None = None
+    sections: list[SectionPlan] = Field(default_factory=list)
+    research_questions: list[ResearchQuestion] = Field(default_factory=list)
+    source_quotes: list[SourceQuote] = Field(default_factory=list)
+
+
 class PlanCollector:
     """Accumulates incremental plan tool calls. Persists to JSON after each call."""
 
@@ -155,21 +190,12 @@ class PlanCollector:
     ) -> None:
         self.output_path = output_path
         self.on_save = on_save
-        self.header: dict[str, str] = {}
-        self.sections: list[dict[str, object]] = []
-        self.research_questions: list[dict[str, object]] = []
-        self.source_quotes: list[dict[str, str]] = []
+        self.plan = PlanFile()
 
     def save(self) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            **self.header,
-            "sections": self.sections,
-            "research_questions": self.research_questions,
-            "source_quotes": self.source_quotes,
-        }
         self.output_path.write_text(
-            json.dumps(data, indent=2, default=str), encoding="utf-8"
+            self.plan.model_dump_json(indent=2, exclude_none=True), encoding="utf-8"
         )
 
     async def save_and_notify(self) -> None:
@@ -185,22 +211,26 @@ def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
     """Create MCP tools for incremental plan building."""
 
     async def handle_header(inp: SetPlanHeaderInput) -> ToolOk:
-        collector.header = inp.model_dump()
+        collector.plan = collector.plan.model_copy(update=inp.model_dump())
         await collector.save_and_notify()
         return ToolOk()
 
     async def handle_section(inp: AddSectionInput) -> ToolOk:
-        collector.sections.append(inp.model_dump())
+        collector.plan.sections.append(SectionPlan.model_validate(inp.model_dump()))
         await collector.save_and_notify()
         return ToolOk()
 
     async def handle_question(inp: AddResearchQuestionInput) -> ToolOk:
-        collector.research_questions.append(inp.model_dump())
+        collector.plan.research_questions.append(
+            ResearchQuestion.model_validate(inp.model_dump())
+        )
         await collector.save_and_notify()
         return ToolOk()
 
     async def handle_quote(inp: AddSourceQuoteInput) -> ToolOk:
-        collector.source_quotes.append(inp.model_dump())
+        collector.plan.source_quotes.append(
+            SourceQuote.model_validate(inp.model_dump())
+        )
         await collector.save_and_notify()
         return ToolOk()
 
@@ -315,19 +345,12 @@ class ResearchCollector:
     ) -> None:
         self.output_path = output_path
         self.on_save = on_save
-        self.findings: list[dict[str, object]] = []
-        self.suggested_additions: list[str] = []
-        self.additional_context: str = ""
+        self.research = ResearchCompilation(findings=[])
 
     def save(self) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "findings": self.findings,
-            "additional_context": self.additional_context,
-            "suggested_additions": self.suggested_additions,
-        }
         self.output_path.write_text(
-            json.dumps(data, indent=2, default=str), encoding="utf-8"
+            self.research.model_dump_json(indent=2), encoding="utf-8"
         )
 
     async def save_and_notify(self) -> None:
@@ -343,17 +366,19 @@ def make_research_output_tools(collector: ResearchCollector) -> list[LupMcpTool]
     """MCP tools for the researcher to record findings incrementally."""
 
     async def handle_finding(inp: RecordFindingInput) -> ToolOk:
-        collector.findings.append(inp.model_dump())
+        collector.research.findings.append(
+            ResearchFinding.model_validate(inp.model_dump())
+        )
         await collector.save_and_notify()
         return ToolOk()
 
     async def handle_suggestion(inp: SuggestAdditionInput) -> ToolOk:
-        collector.suggested_additions.append(inp.suggestion)
+        collector.research.suggested_additions.append(inp.suggestion)
         await collector.save_and_notify()
         return ToolOk()
 
     async def handle_context(inp: SetAdditionalContextInput) -> ToolOk:
-        collector.additional_context = inp.context
+        collector.research.additional_context = inp.context
         await collector.save_and_notify()
         return ToolOk()
 
@@ -429,13 +454,12 @@ class ReviewCollector:
         self.output_path = output_path
         self.reviewer = reviewer
         self.on_save = on_save
-        self.findings: list[dict[str, object]] = []
+        self.review = ReviewOutput(findings=[])
 
     def save(self) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"findings": self.findings}
         self.output_path.write_text(
-            json.dumps(data, indent=2, default=str), encoding="utf-8"
+            self.review.model_dump_json(indent=2), encoding="utf-8"
         )
 
     async def save_and_notify(self) -> None:
@@ -451,9 +475,9 @@ def make_review_output_tools(collector: ReviewCollector) -> list[LupMcpTool]:
     """MCP tools for a reviewer to record findings incrementally."""
 
     async def handle_finding(inp: RecordReviewFindingInput) -> ToolOk:
-        finding = inp.model_dump()
-        finding["reviewer"] = collector.reviewer
-        collector.findings.append(finding)
+        collector.review.findings.append(
+            ReviewFinding(reviewer=collector.reviewer, **inp.model_dump())
+        )
         await collector.save_and_notify()
         return ToolOk()
 
@@ -503,13 +527,12 @@ class AssumptionsCollector:
     ) -> None:
         self.output_path = output_path
         self.on_save = on_save
-        self.items: list[dict[str, str]] = []
+        self.assumptions = AssumptionsList(items=[])
 
     def save(self) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"items": self.items}
         self.output_path.write_text(
-            json.dumps(data, indent=2, default=str), encoding="utf-8"
+            self.assumptions.model_dump_json(indent=2), encoding="utf-8"
         )
 
     async def save_and_notify(self) -> None:
@@ -525,7 +548,7 @@ def make_assumptions_tools(collector: AssumptionsCollector) -> list[LupMcpTool]:
     """MCP tools for surfacing assumptions incrementally."""
 
     async def handle_assumption(inp: RecordAssumptionInput) -> ToolOk:
-        collector.items.append(inp.model_dump())
+        collector.assumptions.items.append(Assumption.model_validate(inp.model_dump()))
         await collector.save_and_notify()
         return ToolOk()
 
@@ -547,17 +570,6 @@ def make_assumptions_tools(collector: AssumptionsCollector) -> list[LupMcpTool]:
 # ---------------------------------------------------------------------------
 # Note for author (migrated from drafts.py)
 # ---------------------------------------------------------------------------
-
-
-class AuthorNote(BaseModel):
-    """A note from any pipeline stage addressed to the author."""
-
-    note: str = Field(description="The question, flag, or suggestion")
-    anchor: str = Field(
-        default="",
-        description="Section title, quote, or text this note refers to",
-    )
-    stage: str = Field(default="", description="Pipeline stage that produced this note")
 
 
 class NoteForAuthorInput(BaseModel):
@@ -638,49 +650,56 @@ class LookupTermsInput(BaseModel):
 
 
 class GlossaryView(BaseModel):
+    """The shared glossary: what the plan seeded, and what writers coined."""
+
+    model_config = ConfigDict(extra="ignore")
+
     conventions: list[str] = Field(
-        description="Plan-level conventions seeded before writing"
+        default_factory=list,
+        description="Plan-level conventions seeded before writing",
     )
     terms: list[GlossaryEntry] = Field(
-        description="Terms coined by section writers so far"
+        default_factory=list,
+        description="Terms coined by section writers so far",
     )
 
 
-def load_glossary(path: Path) -> tuple[list[str], list[GlossaryEntry]]:
-    """Read the shared glossary file: (seeded conventions, coined terms)."""
+def load_glossary(path: Path) -> GlossaryView:
+    """Read the shared glossary file, empty when nothing has been written yet."""
     if not path.exists():
-        return [], []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    conventions = [str(c) for c in data.get("conventions", [])]
-    terms = [GlossaryEntry.model_validate(e) for e in data.get("terms", [])]
-    return conventions, terms
+        return GlossaryView()
+    return GlossaryView.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def write_glossary(
-    path: Path, conventions: list[str], terms: list[GlossaryEntry]
-) -> None:
+def write_glossary(path: Path, glossary: GlossaryView) -> None:
     """Persist the shared glossary file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"conventions": conventions, "terms": [e.model_dump() for e in terms]}
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    path.write_text(glossary.model_dump_json(indent=2), encoding="utf-8")
 
 
 def seed_glossary(path: Path, conventions: list[str]) -> None:
     """Seed the glossary with the plan's conventions, preserving coined terms."""
-    _, terms = load_glossary(path)
-    write_glossary(path, conventions, terms)
+    write_glossary(
+        path,
+        GlossaryView(conventions=conventions, terms=load_glossary(path).terms),
+    )
 
 
 def define_term_in_glossary(path: Path, term: str, meaning: str) -> DefineTermResult:
     """Register a term unless a sibling already defined it — first definition wins."""
-    conventions, terms = load_glossary(path)
-    for entry in terms:
+    glossary = load_glossary(path)
+    for entry in glossary.terms:
         if entry.term.casefold() == term.casefold():
             return DefineTermResult(
                 term=entry.term, meaning=entry.meaning, already_defined=True
             )
-    terms.append(GlossaryEntry(term=term, meaning=meaning))
-    write_glossary(path, conventions, terms)
+    write_glossary(
+        path,
+        GlossaryView(
+            conventions=glossary.conventions,
+            terms=[*glossary.terms, GlossaryEntry(term=term, meaning=meaning)],
+        ),
+    )
     return DefineTermResult(term=term, meaning=meaning, already_defined=False)
 
 
@@ -698,11 +717,14 @@ def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
         return define_term_in_glossary(glossary_path, inp.term, inp.meaning)
 
     async def handle_lookup(inp: LookupTermsInput) -> GlossaryView:
-        conventions, terms = load_glossary(glossary_path)
-        if inp.contains:
-            needle = inp.contains.casefold()
-            terms = [e for e in terms if needle in e.term.casefold()]
-        return GlossaryView(conventions=conventions, terms=terms)
+        glossary = load_glossary(glossary_path)
+        if not inp.contains:
+            return glossary
+        needle = inp.contains.casefold()
+        return GlossaryView(
+            conventions=glossary.conventions,
+            terms=[e for e in glossary.terms if needle in e.term.casefold()],
+        )
 
     return [
         build_stage_tool(

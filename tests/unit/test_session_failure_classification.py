@@ -11,25 +11,24 @@ from claude_agent_sdk import ProcessError
 
 from inkwell.agent.pipeline import PipelineInterrupted
 from inkwell.environment.web.session_manager import classify_session_failure
-from lup.client import is_interrupt
+from inkwell.agent.client import is_interrupt
 
 
 def test_resume_interrupt_is_resumable_and_names_stage() -> None:
-    status, message = classify_session_failure(PipelineInterrupted("merge"))
-    assert status == "interrupted"
-    assert "merge" in message
+    failure = classify_session_failure(PipelineInterrupted("merge"))
+    assert failure.status == "interrupted"
+    assert "merge" in failure.message
 
 
 def test_sigint_subprocess_is_resumable() -> None:
     exc = ProcessError("Command failed with exit code -2", exit_code=-2, stderr="")
-    status, _message = classify_session_failure(exc)
-    assert status == "interrupted"
+    assert classify_session_failure(exc).status == "interrupted"
 
 
 def test_genuine_crash_is_a_failure() -> None:
-    status, message = classify_session_failure(ValueError("boom"))
-    assert status == "failed"
-    assert "boom" in message
+    failure = classify_session_failure(ValueError("boom"))
+    assert failure.status == "failed"
+    assert "boom" in failure.message
 
 
 def test_interrupted_exception_is_not_mistaken_for_a_sigint() -> None:

@@ -60,13 +60,18 @@ class TestWritingSessionState:
         state = WritingSessionState()
         state.mark_agent_comment("c1")
         state.mark_agent_comment("c2")
-        assert "c1" in state.agent_comment_ids
-        assert "c2" in state.agent_comment_ids
+        assert "c1" in state.agent_comments
+        assert "c2" in state.agent_comments
 
     def test_mark_comments_seen(self) -> None:
         state = WritingSessionState()
         state.mark_comments_seen(["c1", "c2", "c3"])
-        assert state.seen_comment_ids == {"c1", "c2", "c3"}
+        assert state.seen_comments.handled == ["c1", "c2", "c3"]
+
+    def test_marking_the_same_comment_twice_records_it_once(self) -> None:
+        state = WritingSessionState()
+        state.mark_comments_seen(["c1", "c1"])
+        assert state.seen_comments.handled == ["c1"]
 
     async def test_check_unread_no_doc(self) -> None:
         state = WritingSessionState()

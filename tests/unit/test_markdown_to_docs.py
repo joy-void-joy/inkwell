@@ -1,11 +1,26 @@
 """Tests for markdown_to_docs — Google Docs request generation."""
 
 from inkwell.agent.markdown_to_docs import (
+    DocsRequest,
+    RequestTextStyle,
+    TextRange,
+    UpdateTextStyle,
     clamp_ranges,
     markdown_to_requests,
     split_markdown_batch,
     utf16_len,
 )
+
+
+def styled(start: int, end: int) -> DocsRequest:
+    """One bold-style request over the given range."""
+    return DocsRequest(
+        updateTextStyle=UpdateTextStyle(
+            range=TextRange(startIndex=start, endIndex=end),
+            textStyle=RequestTextStyle(bold=True),
+            fields="bold",
+        )
+    )
 
 
 def test_utf16_len_ascii() -> None:
@@ -36,28 +51,24 @@ def test_formatting_indices_account_for_surrogates() -> None:
 
 
 def test_clamp_ranges_drops_out_of_bounds() -> None:
-    requests: list[dict[str, object]] = [  # claude: ignore
-        {
-            "updateTextStyle": {
-                "range": {"startIndex": 100, "endIndex": 200},
-                "textStyle": {},
-            }
-        }
-    ]
-    result = clamp_ranges(requests, segment_end=50)
-    assert result == []
+    assert clamp_ranges([styled(100, 200)], segment_end=50) == []
+
+
+def only_style(requests: list[DocsRequest]) -> UpdateTextStyle:
+    """The single text-style request in a clamped result."""
+    assert len(requests) == 1
+    style = requests[0].get("updateTextStyle")
+    assert style is not None
+    return style
 
 
 def test_clamp_ranges_clamps_end() -> None:
-    requests: list[dict[str, object]] = [  # claude: ignore
-        {
-            "updateTextStyle": {
-                "range": {"startIndex": 10, "endIndex": 200},
-                "textStyle": {},
-            }
-        }
-    ]
-    result = clamp_ranges(requests, segment_end=50)
-    assert len(result) == 1
-    rng = result[0]["updateTextStyle"]["range"]  # type: ignore[index]
-    assert rng["endIndex"] == 50
+    style = only_style(clamp_ranges([styled(10, 200)], segment_end=50))
+    assert style["range"]["endIndex"] == 50
+
+
+def test_clamp_ranges_keeps_the_rest_of_the_request() -> None:
+    """Clamping rewrites the range and nothing else about the request."""
+    style = only_style(clamp_ranges([styled(10, 200)], segment_end=50))
+    assert style["fields"] == "bold"
+    assert style["textStyle"] == RequestTextStyle(bold=True)

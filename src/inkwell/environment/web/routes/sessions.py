@@ -1,5 +1,6 @@
 """REST endpoints for session management."""
 
+import logging
 import tempfile
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from fastapi import APIRouter, HTTPException, UploadFile
 
 from inkwell.agent.stages import OUTPUT_FORMATS
 from inkwell.environment.web.models import (
+    ActionAccepted,
     CreateSessionRequest,
     FormatOption,
     GeneratingPrompt,
@@ -15,27 +17,44 @@ from inkwell.environment.web.models import (
     ResumeSessionRequest,
     SessionAction,
     SessionDetail,
+    SessionLaunched,
     SessionSummary,
     UploadResult,
     UploadTextRequest,
 )
-from inkwell.environment.web.session_manager import SessionManager
+from inkwell.environment.web.session_manager import ManagerHolder, SessionManager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 formats_router = APIRouter(prefix="/api", tags=["config"])
 
-manager: SessionManager | None = None
+holder = ManagerHolder()
+"""Filled in at app startup, so a route reaches the manager without a global."""
 
 
 def set_manager(m: SessionManager) -> None:
-    global manager  # noqa: PLW0603
-    manager = m
+    holder.manager = m
 
 
 def get_manager() -> SessionManager:
-    if manager is None:
-        raise RuntimeError("SessionManager not initialized")
-    return manager
+    return holder.require()
+
+
+def summarize_source(value: str) -> str:
+    """A short, log-safe description of one source/ref input.
+
+    Distinguishes an uploaded file path from a URL from freeform text and
+    previews it, so a dropped attachment is obvious in the log without dumping
+    a whole pasted document.
+    """
+    stripped = value.strip()
+    path = Path(stripped)
+    if path.is_file():
+        return f"file:{path} ({path.stat().st_size} B)"
+    if stripped.startswith(("http://", "https://")):
+        return f"url:{stripped[:80]}"
+    return f"text[{len(stripped)}]:{stripped[:60]!r}"
 
 
 @formats_router.get("/formats")
@@ -98,8 +117,15 @@ async def get_stop_stages() -> list[str]:
 
 
 @router.post("", status_code=201)
-async def create_session(req: CreateSessionRequest) -> dict[str, str]:
+async def create_session(req: CreateSessionRequest) -> SessionLaunched:
     mgr = get_manager()
+    logger.info(
+        "create_session: %d source(s)=%s refs=%s format=%s",
+        len(req.sources),
+        [summarize_source(s) for s in req.sources],
+        [summarize_source(r) for r in (req.refs or [])],
+        req.target_format,
+    )
     session_id = await mgr.create_session(
         sources=req.sources,
         refs=req.refs or None,
@@ -112,7 +138,7 @@ async def create_session(req: CreateSessionRequest) -> dict[str, str]:
         stop_after=req.stop_after,
         light=req.light,
     )
-    return {"session_id": session_id, "status": "running"}
+    return SessionLaunched(session_id=session_id)
 
 
 @router.get("")
@@ -141,7 +167,7 @@ async def get_session_prompt(session_id: str) -> GeneratingPrompt:
 @router.post("/{session_id}/resume")
 async def resume_session(
     session_id: str, req: ResumeSessionRequest | None = None
-) -> dict[str, str]:
+) -> SessionLaunched:
     mgr = get_manager()
     from_stage = req.from_stage if req else None
     profile = req.profile if req else None
@@ -157,13 +183,13 @@ async def resume_session(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"session_id": sid, "status": "running"}
+    return SessionLaunched(session_id=sid)
 
 
 @router.post("/{session_id}/restart")
 async def restart_session(
     session_id: str, req: RestartSessionRequest
-) -> dict[str, str]:
+) -> SessionLaunched:
     mgr = get_manager()
     try:
         sid = await mgr.restart_session(
@@ -176,7 +202,7 @@ async def restart_session(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"session_id": sid, "status": "running"}
+    return SessionLaunched(session_id=sid)
 
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "inkwell_uploads"
@@ -205,6 +231,7 @@ async def upload_file(file: UploadFile) -> UploadResult:
         dest = UPLOAD_DIR / f"{Path(file.filename).stem}_{counter}{suffix}"
         counter += 1
     dest.write_bytes(content)
+    logger.info("upload: %s (%d B) -> %s", file.filename, len(content), dest)
     return UploadResult(path=str(dest), filename=dest.name, size=len(content))
 
 
@@ -256,12 +283,19 @@ async def upload_text(req: UploadTextRequest) -> UploadResult:
 
     dest = free_upload_path(coerce_text_filename(req.filename))
     dest.write_text(req.content, encoding="utf-8")
+    logger.info(
+        "upload-text: %r (%d B) -> %s (replace=%s)",
+        req.filename,
+        len(raw),
+        dest,
+        req.replace_path,
+    )
     return UploadResult(path=str(dest), filename=dest.name, size=len(raw))
 
 
 @router.post("/{session_id}/action")
-async def session_action(session_id: str, req: SessionAction) -> dict[str, bool]:
+async def session_action(session_id: str, req: SessionAction) -> ActionAccepted:
     ok = await get_manager().send_action(session_id, req.action, req.text)
     if not ok:
         raise HTTPException(status_code=404, detail="Session not found or not running")
-    return {"ok": True}
+    return ActionAccepted()

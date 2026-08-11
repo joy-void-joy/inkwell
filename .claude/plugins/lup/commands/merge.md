@@ -1,18 +1,24 @@
 ---
-allowed-tools: Bash(git:*), Read, Grep, Glob, Edit, Write, AskUserQuestion, Skill(lup:commit)
-description: Carefully merge changes from another branch, using manual application when conflicts are complex
-argument-hint: [branch]
+description: "Merge a branch or resolve existing merge conflicts"
+allowed-tools: Bash(git:*, uv run lup-devtools:*, .venv/bin/lup-devtools:*), Read, Edit, Write, AskUserQuestion, Skill(lup:commit)
+argument-hint: "[target]"
 ---
 
-# Merge Branch
+# Merge
 
-Carefully merge changes from a source branch into the current branch. Unlike `git merge`, this command can read, understand, and manually apply changes piece-by-piece when a naive merge would produce messy conflicts.
+Two modes depending on arguments:
+
+- **`/lup:merge <target>`** — Merge `<target>` branch into the current branch, with intelligent conflict handling.
+- **`/lup:merge`** (no argument) — Detect and resolve conflicts from an in-progress merge, rebase, or cherry-pick.
 
 **Arguments provided:** $ARGUMENTS
 
-Parse the first argument as the source branch name. If no branch is provided, ask the user which branch to merge.
+If an argument is provided, parse it as the target branch name and go to **Mode A**.
+If no argument is provided, go to **Mode B**.
 
-## Process
+---
+
+## Mode A: Merge a Target Branch
 
 ### 1. Commit pending changes
 
@@ -80,10 +86,7 @@ Classify the merge into one of:
 - **Light conflicts**: A few files with small, clearly-resolvable conflicts. Proceed with `git merge`, then resolve in-place.
 - **Heavy conflicts**: Many files, structural reorganization on both sides, or changes that interleave in ways `git merge` handles poorly. Use **manual application** (step 4b).
 
-Present the assessment to the user via AskUserQuestion:
-- Show the conflict prediction
-- Recommend a strategy (merge vs manual)
-- Let the user choose
+Show the conflict prediction and recommend a strategy, then Ask the user with the AskUserQuestion tool, offering concrete options plus a free-text choice: whether to run a standard merge and resolve in place, or apply the source branch manually file by file
 
 ### 5a. Standard merge (clean or light conflicts)
 
@@ -91,13 +94,7 @@ Present the assessment to the user via AskUserQuestion:
 git merge --no-ff <branch>
 ```
 
-If conflicts arise:
-1. For each conflicted file, read the full file
-2. Classify each conflict hunk by branch scope (see merge-conflict command's decision tree)
-3. Resolve: in-scope changes from current branch take priority; out-of-scope changes from source branch take priority; mixed conflicts get combined where possible
-4. Stage resolved files and complete the merge
-
-**Bias toward inclusion** — never silently drop code from either side.
+If conflicts arise, resolve them using the **Resolution Decision Tree** below, then stage resolved files and complete the merge.
 
 ### 5b. Manual application (heavy conflicts)
 
@@ -123,7 +120,7 @@ When the conflict surface is too large or structural, apply changes manually ins
    - If the source branch changed imports, merge the import lists
    - If both sides restructured, use the current branch's structure and port the source's features into it
 
-4. **For ambiguous cases**, use AskUserQuestion:
+4. **For ambiguous cases**, put the choice to the user:
    - Show both versions
    - Explain what each side intended
    - Recommend an approach
@@ -181,6 +178,89 @@ Summarize:
 - Files merged and how conflicts were resolved
 - Any items that need the user's attention
 
+---
+
+## Mode B: Resolve Existing Conflicts
+
+When invoked without a target branch, detect and resolve conflicts from an in-progress merge, rebase, or cherry-pick.
+
+These commands are spelled without `uv run` — and must stay that way — because `uv` parses `pyproject.toml` before it runs anything, so an integration merge that conflicts the manifest takes the whole conflict toolchain down with it. `.venv/bin/lup-devtools` is the console script in this project's environment: it imports the package directly and starts whatever the manifest currently says.
+
+### 1. Assess the situation
+
+```bash
+.venv/bin/lup-devtools dev conflict status --json
+```
+
+This reports the operation type (merge/rebase/cherry-pick), conflicted files, and commits on both sides.
+
+### 2. Understand what each branch does
+
+From `ours_commits` and `theirs_commits` in the status output, derive the **branch scope** for each side — a summary of everything each branch is about.
+
+### 3. Resolve each conflicted file
+
+For each file in `conflicted_files`:
+
+1. Read the full file to see all conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
+2. Understand what each side changed by reading surrounding code
+3. Resolve using the **Resolution Decision Tree** below
+4. Validate: no remaining markers, syntactically correct, no duplicate imports
+5. Stage: `git add <file>`
+
+### 4. Deletion audit
+
+After resolving all conflicts but **before completing the merge**:
+
+```bash
+.venv/bin/lup-devtools dev conflict audit <conflicted-files> --json
+```
+
+Review the audit output. If any files have `warning: true`, check that the removals are intentional. Fix unjustified deletions before completing.
+
+### 5. Complete
+
+```bash
+.venv/bin/lup-devtools dev conflict complete
+```
+
+---
+
+## Resolution Decision Tree
+
+Used by both modes when resolving conflict hunks.
+
+### Step A: Scope classification
+
+Classify each conflict hunk against the branch scopes:
+
+- **In-scope** — The conflict is in code this branch intentionally changed. **Take ours** (HEAD).
+- **Out-of-scope** — The conflict is in code this branch didn't intentionally modify. **Take theirs**.
+- **Mixed / ambiguous** — Both sides made intentional changes. Proceed to Step B.
+
+**Direction awareness:** In initialization or sync merges, verify which side has more content — the richer side is the "authority" side.
+
+### Step B: Resolve mixed/ambiguous conflicts
+
+#### Auto-resolve (no user input needed)
+
+- **Non-overlapping additions** — Both sides add different content. **Combine both.**
+- **Clear superset** — One side is a strict superset. Take the superset.
+- **Whitespace / formatting only** — Take either side consistently.
+- **Identical intent** — Same change, trivially different wording. Take either.
+- **Refactoring vs features** — One side refactored, the other added features. **Keep both.**
+
+#### Ask the user
+
+- **Different approaches** — Both sides solve the same problem differently.
+- **Conflicting deletions vs additions** — One side removes code the other modifies.
+- **Structural reorganization** — Both sides restructured the same section differently.
+- **Ambiguous priority** — Can't tell which version is better without domain knowledge.
+
+**When asking:** Show the exact conflict as labeled code blocks before you ask. Explain what each side was trying to do. Offer "combine both" when feasible.
+
+---
+
 ## Guidelines
 
 - **Bias toward inclusion**: Never silently drop code. If both sides have value, keep both.
@@ -188,3 +268,5 @@ Summarize:
 - **Manual application is the escape hatch**: When `git merge` would produce an unreadable mess, skip it entirely and apply changes by understanding what they do.
 - **Always confirm with the user** before choosing a strategy, especially for manual application.
 - **Preserve lineage**: Even in manual merges, the commit message should reference the source branch so history is traceable.
+- **Watch for semantic conflicts**: Combined code must make sense (renamed variables, etc.)
+- **Check adjacent code**: Nearby non-conflicting code may also need updating

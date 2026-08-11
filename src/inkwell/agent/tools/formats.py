@@ -1,4 +1,3 @@
-# claude: ignore
 """Output format adapters.
 
 Transform a generic article draft into format-specific output:
@@ -10,8 +9,10 @@ draft is produced.
 import logging
 import tempfile
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 
+from markdown_it import MarkdownIt
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import stage_model
@@ -184,12 +185,69 @@ class FormatCustomOutput(BaseModel):
     word_count: int = Field(description="Word count")
 
 
-def split_sentences(text: str) -> list[str]:
-    """Split text into sentences (simple heuristic)."""
-    import re  # claude: ignore
+TWEET_CHARS = 260
+"""Characters a single tweet may carry, leaving room for the n/total marker."""
 
-    parts = re.split(r"(?<=[.!?])\s+", text)
-    return [p.strip() for p in parts if p.strip()]
+BLOG_PARAGRAPH_CHARS = 800
+"""Length past which a blog paragraph is halved, so the post stays scannable."""
+
+NEWSLETTER_PARAGRAPH_SENTENCES = 3
+"""Sentences past which a newsletter paragraph is halved, for email reading."""
+
+MARKDOWN = MarkdownIt()
+"""Reads content as the blocks its author wrote, so a heading is the parser's
+business rather than a '#' prefix these formatters strip by hand."""
+
+
+class MarkdownBlock(BaseModel):
+    """One top-level block of a markdown document, and what kind it is."""
+
+    kind: str = Field(description="Block type, as markdown-it names it")
+    text: str = Field(description="The block's text, without the markers around it")
+    source: str = Field(description="The block exactly as the author wrote it")
+
+    @property
+    def is_heading(self) -> bool:
+        """Whether this block is a heading rather than prose."""
+        return self.kind == "heading"
+
+
+def markdown_blocks(content: str) -> list[MarkdownBlock]:
+    """The top-level blocks `content` is written in, in document order.
+
+    A heading arrives as a heading rather than as prose that happens to start
+    with a '#', which is also what keeps a '#' inside a code fence from
+    reading as one.
+    """
+    lines = content.splitlines()
+
+    def blocks() -> Iterator[MarkdownBlock]:
+        kind = ""
+        for token in MARKDOWN.parse(content):
+            if token.type.endswith("_open"):
+                kind = token.type.removesuffix("_open")
+            elif token.type == "inline" and token.content.strip():
+                start, end = token.map if token.map else (0, len(lines))
+                yield MarkdownBlock(
+                    kind=kind,
+                    text=token.content.strip(),
+                    source="\n".join(lines[start:end]).strip(),
+                )
+
+    return list(blocks())
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split prose into sentences, at the punctuation that ends one.
+
+    Prose is not structured data and has no parser: where one sentence stops
+    and the next starts is a heuristic over punctuation, which is what this
+    pattern states.
+    """
+    import re  # lup: ignore[import-re] — prose has no parser, only this heuristic
+
+    parts = re.split(r"(?<=[.!?])\s+", text)  # lup: ignore[re-call, string-split]
+    return [part.strip() for part in parts if part.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -198,17 +256,10 @@ def split_sentences(text: str) -> list[str]:
 
 
 def do_format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
-    lines: list[str] = []
+    footnotes: list[str] = []  # lup: ignore[empty-collection] — the fold's other half
 
-    if params.epistemic_status:
-        lines.append(f"*Epistemic status: {params.epistemic_status}*")
-        lines.append("")
-
-    footnotes: list[str] = []
-    content = params.content
-    footnote_idx = 0
-
-    for line in content.splitlines():
+    def demote_asides(line: str) -> str:
+        """Move this line's `(aside: …)` parentheticals into `footnotes`."""
         processed = line
         while "(" in processed and "aside:" in processed.lower():
             start = processed.find("(")
@@ -216,32 +267,29 @@ def do_format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
             if end == -1:
                 break
             aside_text = processed[start + 1 : end]
-            if aside_text.lower().startswith("aside:"):
-                footnote_idx += 1
-                aside_content = aside_text[6:].strip()
-                footnotes.append(f"[^{footnote_idx}]: {aside_content}")
-                processed = (
-                    processed[:start] + f"[^{footnote_idx}]" + processed[end + 1 :]
-                )
-            else:
+            if not aside_text.lower().startswith("aside:"):
                 break
-        lines.append(processed)
+            marker = f"[^{len(footnotes) + 1}]"
+            footnotes.append(f"{marker}: {aside_text[len('aside:') :].strip()}")
+            processed = processed[:start] + marker + processed[end + 1 :]
+        return processed
 
-    if params.crossrefs:
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-        lines.append("**Related:**")
-        for ref in params.crossrefs:
-            lines.append(f"- {ref}")
+    body = [demote_asides(line) for line in params.content.splitlines()]
 
-    if footnotes:
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-        lines.extend(footnotes)
+    def rendered() -> Iterator[str]:
+        """The post: status line, body, related links, then the footnotes."""
+        if params.epistemic_status:
+            yield f"*Epistemic status: {params.epistemic_status}*"
+            yield ""
+        yield from body
+        if params.crossrefs:
+            yield from ("", "---", "", "**Related:**")
+            yield from (f"- {ref}" for ref in params.crossrefs)
+        if footnotes:
+            yield from ("", "---", "")
+            yield from footnotes
 
-    result = "\n".join(lines)
+    result = "\n".join(rendered())
 
     return FormatLesswrongOutput(
         content=result,
@@ -262,37 +310,37 @@ def split_thread(content: str, hook: str) -> list[str]:
     correct-length tweets but no editorial judgment about what makes
     each tweet stand alone.
     """
-    tweets: list[str] = []
-    first_line = content.split("\n", 1)[0].lstrip("#").strip()
-    tweets.append((hook or first_line or "Thread:").strip()[:260])
+    blocks = markdown_blocks(content)
+    opening = hook or (blocks[0].text if blocks else "") or "Thread:"
 
-    paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-
-    for para in paragraphs:
-        para = para.lstrip("#").strip()
-
-        if len(para) <= 260:
-            tweets.append(para)
-        else:
-            sentences = split_sentences(para)
-            current = ""
-            for sentence in sentences:
-                candidate = f"{current} {sentence}".strip() if current else sentence
-                if len(candidate) <= 260:
-                    current = candidate
-                else:
-                    if current:
-                        tweets.append(current)
-                    if len(sentence) <= 260:
-                        current = sentence
-                    else:
-                        for chunk in textwrap.wrap(sentence, 260):
-                            tweets.append(chunk)
-                        current = ""
+    def packed(paragraph: str) -> Iterator[str]:
+        """One paragraph as tweets, broken at sentence ends where it can be."""
+        current = ""
+        for sentence in split_sentences(paragraph):
+            candidate = f"{current} {sentence}".strip() if current else sentence
+            if len(candidate) <= TWEET_CHARS:
+                current = candidate
+                continue
             if current:
-                tweets.append(current)
+                yield current
+            if len(sentence) <= TWEET_CHARS:
+                current = sentence
+                continue
+            yield from textwrap.wrap(sentence, TWEET_CHARS)
+            current = ""
+        if current:
+            yield current
 
-    return tweets
+    def thread() -> Iterator[str]:
+        """The hook, then each block of the draft cut to tweet length."""
+        yield opening.strip()[:TWEET_CHARS]
+        for block in blocks:
+            if len(block.text) <= TWEET_CHARS:
+                yield block.text
+            else:
+                yield from packed(block.text)
+
+    return list(thread())
 
 
 THREAD_WRITER_SYSTEM = """\
@@ -311,7 +359,7 @@ Rules:
 
 async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
     """Rewrite content as a thread via LLM, with mechanical splitting as fallback."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class TwitterThread(BaseModel):
         tweets: list[str] = Field(
@@ -334,7 +382,7 @@ async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=THREAD_WRITER_SYSTEM,
     )
 
@@ -352,7 +400,7 @@ async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
 
 async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
     """Structure content as a dialog between named speakers via LLM query."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class DialogTurns(BaseModel):
         turns: list[DialogTurn] = Field(description="Dialog turns in order")
@@ -376,7 +424,7 @@ async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=(
             "You restructure articles into dialogs. Each turn should feel natural "
             "and conversational while preserving the substance of the original. "
@@ -385,16 +433,16 @@ async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
     )
     turns = result.turns if result else []
 
-    lines: list[str] = []
-    if params.preamble:
-        lines.append(f"*{params.preamble}*")
-        lines.append("")
+    def rendered() -> Iterator[str]:
+        """The dialog: its preamble, then a blank line under every turn."""
+        if params.preamble:
+            yield f"*{params.preamble}*"
+            yield ""
+        for turn in turns:
+            yield f"**{turn.speaker}:** {turn.text}"
+            yield ""
 
-    for turn in turns:
-        lines.append(f"**{turn.speaker}:** {turn.text}")
-        lines.append("")
-
-    compiled = "\n".join(lines).strip()
+    compiled = "\n".join(rendered()).strip()
 
     return FormatDialogOutput(
         preamble=params.preamble,
@@ -404,50 +452,39 @@ async def do_format_dialog(params: FormatDialogInput) -> FormatDialogOutput:
 
 
 def do_format_blog(params: FormatBlogInput) -> FormatBlogOutput:
-    lines: list[str] = []
-    lines.append(f"# {params.title}")
-    lines.append("")
+    blocks = markdown_blocks(params.content)
 
-    paragraphs = params.content.split("\n\n")
+    def scannable(paragraph: str) -> Iterator[str]:
+        """A long paragraph halved at the sentence end nearest its middle."""
+        if len(paragraph) <= BLOG_PARAGRAPH_CHARS:
+            yield paragraph
+            return
+        mid = len(paragraph) // 2
+        break_point = paragraph.rfind(". ", 0, mid)
+        if break_point == -1:
+            break_point = paragraph.find(". ", mid)
+        if break_point == -1:
+            yield paragraph
+            return
+        yield paragraph[: break_point + 1].strip()
+        yield ""
+        yield paragraph[break_point + 1 :].strip()
 
-    for para in paragraphs:
-        stripped = para.strip()
-        if not stripped:
-            continue
+    def rendered() -> Iterator[str]:
+        """The post under its title, each block followed by a blank line."""
+        yield f"# {params.title}"
+        yield ""
+        for block in blocks:
+            if block.is_heading:
+                yield block.source
+            else:
+                yield from scannable(block.text)
+            yield ""
 
-        if stripped.startswith("#"):
-            lines.append(stripped)
-            lines.append("")
-            continue
+    result = "\n".join(rendered()).strip()
 
-        if len(stripped) > 800:
-            mid = len(stripped) // 2
-            break_point = stripped.rfind(". ", 0, mid)
-            if break_point == -1:
-                break_point = stripped.find(". ", mid)
-            if break_point != -1:
-                lines.append(stripped[: break_point + 1].strip())
-                lines.append("")
-                lines.append(stripped[break_point + 1 :].strip())
-                lines.append("")
-                continue
-
-        lines.append(stripped)
-        lines.append("")
-
-    result = "\n".join(lines).strip()
-
-    first_para = ""
-    for para in paragraphs:
-        stripped = para.strip()
-        if stripped and not stripped.startswith("#"):
-            first_para = stripped
-            break
-    meta = (
-        first_para[:157].rsplit(" ", 1)[0] + "..."
-        if len(first_para) > 160
-        else first_para
-    )
+    lead = next((block.text for block in blocks if not block.is_heading), "")
+    meta = textwrap.shorten(lead, width=160, placeholder="...") if lead else ""
 
     return FormatBlogOutput(
         content=result,
@@ -459,7 +496,7 @@ def do_format_blog(params: FormatBlogInput) -> FormatBlogOutput:
 async def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
     import datetime
 
-    from lup.client import query
+    from inkwell.agent.client import query
 
     header_lines: list[str] = []
 
@@ -493,7 +530,7 @@ async def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=(
             "You restructure article-style content into memo format. "
             "Apply these rules strictly:\n\n"
@@ -534,7 +571,7 @@ async def do_format_memo(params: FormatMemoInput) -> FormatMemoOutput:
 
 async def do_format_academic(params: FormatAcademicInput) -> FormatAcademicOutput:
     """Format content as an academic paper via LLM restructuring."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class AcademicContent(BaseModel):
         abstract: str = Field(description="Paper abstract (150-300 words)")
@@ -557,7 +594,7 @@ async def do_format_academic(params: FormatAcademicInput) -> FormatAcademicOutpu
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=(
             "You restructure article-style content into academic paper format.\n\n"
             "1. ABSTRACT: Write a 150-300 word abstract if none provided.\n"
@@ -588,45 +625,40 @@ async def do_format_academic(params: FormatAcademicInput) -> FormatAcademicOutpu
 
 def do_format_newsletter(params: FormatNewsletterInput) -> FormatNewsletterOutput:
     """Format content as a newsletter / Substack-style email."""
-    lines: list[str] = []
 
-    lines.append(f"# {params.title}")
-    if params.subtitle:
-        lines.append(f"*{params.subtitle}*")
-    lines.append("")
+    def emailable(paragraph: str) -> Iterator[str]:
+        """A long paragraph halved, so no screenful of email runs unbroken."""
+        sentences = split_sentences(paragraph)
+        if len(sentences) <= NEWSLETTER_PARAGRAPH_SENTENCES:
+            yield paragraph
+            return
+        mid = len(sentences) // 2
+        yield " ".join(sentences[:mid])
+        yield ""
+        yield " ".join(sentences[mid:])
 
-    paragraphs = params.content.split("\n\n")
+    def rendered() -> Iterator[str]:
+        """The issue: masthead, each block spaced out, then the call to action."""
+        yield f"# {params.title}"
+        if params.subtitle:
+            yield f"*{params.subtitle}*"
+        yield ""
+        for block in markdown_blocks(params.content):
+            if block.is_heading:
+                yield from ("---", "", block.source)
+            else:
+                yield from emailable(block.text)
+            yield ""
+        if params.cta:
+            yield from ("---", "", f"*{params.cta}*", "")
 
-    for para in paragraphs:
-        stripped = para.strip()
-        if not stripped:
-            continue
-
-        if stripped.startswith("#"):
-            lines.extend(["---", "", stripped, ""])
-            continue
-
-        sentences = split_sentences(stripped)
-        if len(sentences) > 3:
-            mid = len(sentences) // 2
-            lines.append(" ".join(sentences[:mid]))
-            lines.append("")
-            lines.append(" ".join(sentences[mid:]))
-            lines.append("")
-        else:
-            lines.append(stripped)
-            lines.append("")
-
-    if params.cta:
-        lines.extend(["---", "", f"*{params.cta}*", ""])
-
-    result = "\n".join(lines).strip()
+    result = "\n".join(rendered()).strip()
     return FormatNewsletterOutput(content=result, word_count=len(result.split()))
 
 
 async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
     """Reformat content according to a freeform format description via LLM query."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class FormattedContent(BaseModel):
         content: str = Field(description="The reformatted content")
@@ -646,7 +678,7 @@ async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=(
             "You are a format adapter. Rewrite the content to match the requested "
             "format exactly — adopt the conventions, structure, tone, and layout "
@@ -677,13 +709,13 @@ Rules:
 
 async def do_format_linkedin(params: FormatLinkedinInput) -> FormatLinkedinOutput:
     """Rewrite content as a LinkedIn post via LLM."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     class LinkedinPost(BaseModel):
         content: str = Field(description="The LinkedIn post body in markdown")
 
     if params.hashtags:
-        tags = " ".join("#" + h.lstrip("#") for h in params.hashtags)
+        tags = " ".join("#" + h.removeprefix("#") for h in params.hashtags)
         hashtag_directive = f"End with these hashtags: {tags}"
     else:
         hashtag_directive = "End with 3-5 fitting hashtags."
@@ -700,7 +732,7 @@ async def do_format_linkedin(params: FormatLinkedinInput) -> FormatLinkedinOutpu
         model=stage_model("format"),
         tools=BUILTIN_READ_TOOLS,
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
         system_prompt=LINKEDIN_WRITER_SYSTEM,
     )
     content = result.content if result else params.content

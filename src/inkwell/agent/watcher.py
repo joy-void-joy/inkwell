@@ -10,31 +10,38 @@ When comments arrive:
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from lup.background import BackgroundAgent
-from lup.client import query
-from lup.mcp import LupMcpTool, ToolError, extract_sdk_tools, lup_tool
+from lup.runtime.background import BackgroundAgent, BackgroundConfig
+from lup.runtime.errors import TurnError
+from lup.runtime.models import TurnResult, turn_request
+from inkwell.agent.client import provider_factory, query
+from lup.mcp import LupMcpTool, ToolError, create_mcp_server, lup_tool
 
 from inkwell.agent.config import stage_model
-from inkwell.agent.models import ClassifiedComment
+from inkwell.agent.models import ClassifiedComment, CommentImpact
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.session import WritingSessionState
+from inkwell.agent.session import AuthorComment, WritingSessionState
 from inkwell.agent.stages import COMMENT_CLASSIFIER_PROMPT
 from inkwell.agent.tools.google_docs import do_reply_to_comment
 
 logger = logging.getLogger(__name__)
 
-ACKNOWLEDGE_TEMPLATES: dict[str, str] = {
+ACKNOWLEDGE_TEMPLATES: dict[CommentImpact, str | None] = {
     "plan_breaking": (
         "Understood — this changes the direction. "
         "Restarting from the planning stage to incorporate your feedback."
     ),
     "stage_local": "Noted — will apply this in the next revision.",
     "clarification": "Got it, incorporating this.",
+    "dismiss": None,
+    "revert_suggested": None,
 }
+"""The reply each classification earns. `None` where the comment is answered by
+acting on it — reverting the damage, or ignoring noise — not by posting."""
 
 WATCHER_SYSTEM_PROMPT = """\
 You are a comment watcher for a writing pipeline. Each turn you receive \
@@ -66,7 +73,7 @@ class PollOutput(BaseModel):
 
 class AckInput(BaseModel):
     comment_id: str = Field(description="Comment ID to reply to")
-    impact: str = Field(description="The classified impact level")
+    impact: CommentImpact = Field(description="The classified impact level")
 
 
 class AckOutput(BaseModel):
@@ -109,7 +116,7 @@ def create_watcher_tools(
             model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix="[classify] ",
         )
         if classified is None:
@@ -133,7 +140,7 @@ def create_watcher_tools(
         if not session_state.doc_id:
             return AckOutput(status="no_doc")
 
-        reply_text = ACKNOWLEDGE_TEMPLATES.get(inp.impact, "Noted.")
+        reply_text = ACKNOWLEDGE_TEMPLATES[inp.impact] or "Noted."
         try:
             await do_reply_to_comment(
                 session_state.doc_id,
@@ -160,18 +167,125 @@ def create_watcher_tools(
     return [poll_and_classify, acknowledge, signal_restart]
 
 
+class CommentBatch(BaseModel):
+    """One poll's worth of comments, as the turn that processes them reads it."""
+
+    prompt: str
+
+
+type CommentReader = Callable[[], list[AuthorComment]]
+"""Reads whichever document's new comments a watcher is watching."""
+
+
+def batch_prompt(heading: str, comments: list[AuthorComment]) -> str:
+    """Render one poll's comments as the turn's instruction."""
+    lines = [f"{heading} ({len(comments)}):"]
+    for comment in comments:
+        lines.append("\n---")
+        lines.append(f"Comment ID: {comment['comment_id']}")
+        lines.append(f"Content: {comment['content']}")
+        if comment["anchor_text"]:
+            lines.append(f'Anchored to: "{comment["anchor_text"]}"')
+        if comment["reply"]:
+            lines.append(f"Reply: {comment['reply']}")
+    lines.append(
+        "\nProcess each comment: classify → acknowledge → signal if plan-breaking."
+    )
+    return "\n".join(lines)
+
+
+class PollingWatcher:
+    """A background agent woken by a poll rather than by a caller.
+
+    ``BackgroundAgent`` runs one turn per wake and coalesces wakes inside its
+    debounce window, which is exactly a watcher's execution shape. What it
+    does not carry is *when* to wake, because that is the domain's question —
+    here, every so often, if the document has new comments. This owns that
+    loop, and the agent's lifetime with it, so stopping one stops both.
+    """
+
+    def __init__(
+        self,
+        agent: BackgroundAgent[CommentBatch, None],
+        read_comments: CommentReader,
+        heading: str,
+        poll_interval: float,
+    ) -> None:
+        self.agent = agent
+        self.read_comments = read_comments
+        self.heading = heading
+        self.poll_interval = poll_interval
+        self.poller: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        """Start the agent, then the loop that wakes it."""
+        await self.agent.start()
+        self.poller = asyncio.create_task(self.poll_forever())
+
+    async def poll_forever(self) -> None:
+        """Wake the agent for every poll that finds something."""
+        while True:
+            await asyncio.sleep(self.poll_interval)
+            try:
+                comments = self.read_comments()
+            except Exception:
+                # One unreachable poll is not the end of the watch: the
+                # document may be momentarily unavailable, and the next
+                # poll asks again.
+                logger.exception("Polling for comments failed")
+                continue
+            if comments:
+                self.agent.wake(
+                    CommentBatch(prompt=batch_prompt(self.heading, comments))
+                )
+
+    async def stop(self) -> None:
+        """Stop polling first, so no wake outlives the agent."""
+        if self.poller is not None:
+            self.poller.cancel()
+            self.poller = None
+        await self.agent.stop()
+
+
+def watcher_agent(
+    *, name: str, system_prompt: str, tools: list[LupMcpTool]
+) -> BackgroundAgent[CommentBatch, None]:
+    """Build the background agent behind a watcher, over one tool server."""
+    server = create_mcp_server(name, tools=tools)
+
+    async def discard(_result: TurnResult[None]) -> None:
+        """The work is the tool calls; the turn's prose is not read."""
+
+    async def report(error: TurnError) -> None:
+        logger.error("%s turn failed: %s", name, error)
+
+    return BackgroundAgent(
+        factory=provider_factory(
+            model=stage_model("classify"),
+            system_prompt=system_prompt,
+            tool_servers={name: server},
+            allowed_tools=[f"mcp__{name}__{tool.name}" for tool in tools],
+            autonomy="unattended",
+        ),
+        state_to_request=lambda batch: turn_request(batch.prompt),
+        result_handler=discard,
+        error_handler=report,
+        config=BackgroundConfig(debounce_seconds=5.0),
+    )
+
+
 def create_comment_watcher(
     *,
     session_state: WritingSessionState,
     notes: PipelineNotes,
     plan_breaking_signal: asyncio.Event,
     poll_interval: float = 30.0,
-) -> BackgroundAgent:
-    """Create a Comment Watcher BackgroundAgent.
+) -> PollingWatcher:
+    """Watch the output document for author comments.
 
-    The watcher polls for new GDoc comments, classifies them, acknowledges
-    them, and writes to PipelineNotes. Plan-breaking comments trigger a
-    signal to the pipeline state machine.
+    Polls for new GDoc comments, classifies them, acknowledges them, and
+    writes to PipelineNotes. Plan-breaking comments signal the pipeline state
+    machine.
 
     Args:
         session_state: Shared session state with doc_id and comment tracking.
@@ -179,54 +293,19 @@ def create_comment_watcher(
         plan_breaking_signal: asyncio.Event set when plan-breaking feedback arrives.
         poll_interval: Seconds between polls (default 30).
     """
-    last_poll = [0.0]
-
-    def build_message() -> str | None:
-        import time
-
-        now = time.time()
-        if now - last_poll[0] < poll_interval:
-            return None
-        last_poll[0] = now
-
-        new_comments = session_state.get_new_author_comments_sync()
-        if not new_comments:
-            return None
-
-        lines = [f"New comments ({len(new_comments)}):"]
-        for c in new_comments:
-            lines.append("\n---")
-            lines.append(f"Comment ID: {c['comment_id']}")
-            lines.append(f"Content: {c['content']}")
-            if c["anchor_text"]:
-                lines.append(f'Anchored to: "{c["anchor_text"]}"')
-            if c["reply"]:
-                lines.append(f"Reply: {c['reply']}")
-
-        lines.append(
-            "\nProcess each comment: classify → acknowledge → signal if plan-breaking."
-        )
-        return "\n".join(lines)
-
-    tools = create_watcher_tools(
-        session_state=session_state,
-        notes=notes,
-        plan_breaking_signal=plan_breaking_signal,
-    )
-
-    return BackgroundAgent(
-        name="watcher",
-        system_prompt=WATCHER_SYSTEM_PROMPT,
-        tools=extract_sdk_tools(tools),
-        build_message=build_message,
-        start_message="[Comment watcher started — monitoring Google Doc for author feedback]",
-        model=stage_model("classify"),
-        debounce_seconds=5.0,
-        allowed_tools=[
-            "mcp__watcher__poll_and_classify",
-            "mcp__watcher__acknowledge",
-            "mcp__watcher__signal_restart",
-        ],
+    return PollingWatcher(
+        agent=watcher_agent(
+            name="watcher",
+            system_prompt=WATCHER_SYSTEM_PROMPT,
+            tools=create_watcher_tools(
+                session_state=session_state,
+                notes=notes,
+                plan_breaking_signal=plan_breaking_signal,
+            ),
+        ),
+        read_comments=session_state.get_new_author_comments_sync,
+        heading="New comments",
+        poll_interval=poll_interval,
     )
 
 
@@ -278,7 +357,7 @@ def create_source_watcher_tools(
             model=stage_model("classify"),
             system_prompt=COMMENT_CLASSIFIER_PROMPT,
             max_thinking_tokens=128_000 - 1,
-            permission_mode="bypassPermissions",
+            autonomy="unattended",
             prefix="[source-classify] ",
         )
         if classified is None:
@@ -320,59 +399,24 @@ def create_source_watcher(
     notes: PipelineNotes,
     plan_breaking_signal: asyncio.Event,
     poll_interval: float = 30.0,
-) -> BackgroundAgent:
-    """Create a Source Document Watcher BackgroundAgent.
+) -> PollingWatcher:
+    """Watch the original source document for author comments.
 
-    Polls for new comments on the original source Google Doc, classifies
-    them, acknowledges them, and writes to PipelineNotes. Same feedback
-    loop as the output doc watcher but for the source material.
+    Polls for new comments on the source Google Doc, classifies them,
+    acknowledges them, and writes to PipelineNotes. The same feedback loop as
+    the output-document watcher, on the source material instead.
     """
-    last_poll = [0.0]
-
-    def build_message() -> str | None:
-        import time
-
-        now = time.time()
-        if now - last_poll[0] < poll_interval:
-            return None
-        last_poll[0] = now
-
-        new_comments = session_state.get_new_source_comments_sync()
-        if not new_comments:
-            return None
-
-        lines = [f"New source document comments ({len(new_comments)}):"]
-        for c in new_comments:
-            lines.append("\n---")
-            lines.append(f"Comment ID: {c['comment_id']}")
-            lines.append(f"Content: {c['content']}")
-            if c["anchor_text"]:
-                lines.append(f'Anchored to: "{c["anchor_text"]}"')
-            if c["reply"]:
-                lines.append(f"Reply: {c['reply']}")
-
-        lines.append(
-            "\nProcess each comment: classify → acknowledge → signal if plan-breaking."
-        )
-        return "\n".join(lines)
-
-    tools = create_source_watcher_tools(
-        session_state=session_state,
-        notes=notes,
-        plan_breaking_signal=plan_breaking_signal,
-    )
-
-    return BackgroundAgent(
-        name="source-watcher",
-        system_prompt=SOURCE_WATCHER_SYSTEM_PROMPT,
-        tools=extract_sdk_tools(tools),
-        build_message=build_message,
-        start_message="[Source watcher started — monitoring source Google Doc for author comments]",
-        model=stage_model("classify"),
-        debounce_seconds=5.0,
-        allowed_tools=[
-            "mcp__source-watcher__poll_and_classify",
-            "mcp__source-watcher__acknowledge",
-            "mcp__source-watcher__signal_restart",
-        ],
+    return PollingWatcher(
+        agent=watcher_agent(
+            name="source-watcher",
+            system_prompt=SOURCE_WATCHER_SYSTEM_PROMPT,
+            tools=create_source_watcher_tools(
+                session_state=session_state,
+                notes=notes,
+                plan_breaking_signal=plan_breaking_signal,
+            ),
+        ),
+        read_comments=session_state.get_new_source_comments_sync,
+        heading="New source document comments",
+        poll_interval=poll_interval,
     )

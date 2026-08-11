@@ -5,17 +5,77 @@ background context, definitions, and historical information.
 """
 
 import logging
+from collections.abc import Iterator
+from html.parser import HTMLParser
+from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, Field
+from httpx import QueryParams
+from pydantic import BaseModel, ConfigDict, Field
 
-from lup.content_safety import SavedContent, save_content
+from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
 
 WIKI_API = "https://en.wikipedia.org/api/rest_v1"
 WIKI_ACTION_API = "https://en.wikipedia.org/w/api.php"
+
+
+def article_url(title: str) -> str:
+    """Where an article by that title is read."""
+    return f"https://en.wikipedia.org/wiki/{quote(title.strip(), safe='')}"
+
+
+class WireSearchItem(BaseModel):
+    """One search hit, by the names the action API sends."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    title: str = ""
+    snippet: str = ""
+
+
+class WireSearchQuery(BaseModel):
+    """The search half of an action-API response."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    search: list[WireSearchItem] = Field(default_factory=list)
+
+
+class WireSearchResponse(BaseModel):
+    """What a search request answers with."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    query: WireSearchQuery = WireSearchQuery()
+
+
+class WirePage(BaseModel):
+    """One article page, which the API reports as missing by including a key."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    title: str = ""
+    extract: str = ""
+    missing: str | None = None
+
+
+class WirePageQuery(BaseModel):
+    """The pages half of an action-API response, keyed by page id."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    pages: dict[str, WirePage] = Field(default_factory=dict)
+
+
+class WirePageResponse(BaseModel):
+    """What an extract request answers with."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    query: WirePageQuery = WirePageQuery()
 
 
 class WikiSearchResult(BaseModel):
@@ -78,19 +138,16 @@ async def wiki_search(params: WikiSearchInput) -> WikiSearchOutput:
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise ToolError(f"Wikipedia API error: {e}") from e
-        data = resp.json()
+        found = WireSearchResponse.model_validate(resp.json())
 
-    results: list[WikiSearchResult] = []
-    for item in data.get("query", {}).get("search", []):
-        title = item.get("title", "")
-        safe_title = title.replace(" ", "_")
-        results.append(
-            WikiSearchResult(
-                title=title,
-                description=strip_html(item.get("snippet", "")),
-                url=f"https://en.wikipedia.org/wiki/{safe_title}",
-            )
+    results = [
+        WikiSearchResult(
+            title=item.title,
+            description=strip_html(item.snippet),
+            url=article_url(item.title),
         )
+        for item in found.query.search
+    ]
 
     return WikiSearchOutput(
         query=params.query,
@@ -108,17 +165,16 @@ async def wiki_search(params: WikiSearchInput) -> WikiSearchOutput:
     "timelines, and verifying basic facts."
 )
 async def fetch_wikipedia(params: FetchWikipediaInput) -> FetchWikipediaOutput:
-    safe_title = params.title.replace(" ", "_")
-
-    query_params: dict[str, str | int] = {
-        "action": "query",
-        "titles": params.title,
-        "prop": "extracts",
-        "explaintext": "1",
-        "format": "json",
-    }
-    if params.section is None:
-        query_params["exlimit"] = 1
+    query_params = QueryParams(
+        {
+            "action": "query",
+            "titles": params.title,
+            "prop": "extracts",
+            "explaintext": "1",
+            "format": "json",
+            **({"exlimit": 1} if params.section is None else {}),
+        }
+    )
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
@@ -126,70 +182,97 @@ async def fetch_wikipedia(params: FetchWikipediaInput) -> FetchWikipediaOutput:
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise ToolError(f"Wikipedia API error: {e}") from e
-        data = resp.json()
+        fetched = WirePageResponse.model_validate(resp.json())
 
-    pages = data.get("query", {}).get("pages", {})
-    if not pages:
+    if not fetched.query.pages:
         raise ToolError(f"No Wikipedia article found for '{params.title}'.")
 
-    page = next(iter(pages.values()))
-    if page.get("missing") is not None:
+    page = next(iter(fetched.query.pages.values()))
+    if page.missing is not None:
         raise ToolError(
             f"Wikipedia article '{params.title}' not found. "
             "Use wiki_search to find the correct title."
         )
 
-    content = page.get("extract", "")
-    if not content:
+    if not page.extract:
         raise ToolError(f"No text content in Wikipedia article '{params.title}'.")
 
-    section_extracted = False
-    if params.section:
-        section_content = extract_section(content, params.section)
-        if section_content:
-            content = section_content
-            section_extracted = True
+    section = extract_section(page.extract, params.section) if params.section else None
+    content = section if section else page.extract
 
-    title = page.get("title", params.title)
+    title = page.title or params.title
     saved = save_content("wikipedia", title, content)
 
     return FetchWikipediaOutput(
         title=title,
-        url=f"https://en.wikipedia.org/wiki/{safe_title}",
+        url=article_url(params.title),
         content=saved,
-        section_extracted=section_extracted,
+        section_extracted=section is not None,
     )
+
+
+HEADING_MARK = "=="
+
+
+def heading_title(line: str) -> str | None:
+    """The title a plaintext heading line names, or nothing if it is prose.
+
+    Wikipedia's plaintext extract marks a heading by wrapping it in equals
+    signs, so the mark is what identifies one — reading the title out from
+    between the marks, rather than stripping characters that could as easily
+    have been part of it.
+    """
+    stripped = line.strip()
+    if not (stripped.startswith(HEADING_MARK) and stripped.endswith(HEADING_MARK)):
+        return None
+    inner = stripped[len(HEADING_MARK) : -len(HEADING_MARK)]
+    return inner.strip().lower()
 
 
 def extract_section(text: str, section_title: str) -> str | None:
     """Extract a specific section from Wikipedia plaintext."""
-    lines = text.split("\n")
     target = section_title.lower().strip()
-    capturing = False
-    captured: list[str] = []
 
-    for line in lines:
-        stripped = line.strip()
-        heading = stripped.lstrip("=").rstrip("=").strip().lower()
+    def under_heading() -> Iterator[str]:
+        """The matching heading, then every line up to the next heading."""
+        capturing = False
+        for line in text.splitlines():
+            heading = heading_title(line)
+            if heading == target:
+                capturing = True
+                yield line
+                continue
+            if not capturing:
+                continue
+            if heading is not None:
+                return
+            yield line
 
-        if heading == target:
-            capturing = True
-            captured.append(line)
-            continue
-
-        if capturing:
-            if stripped.startswith("==") and heading != target:
-                break
-            captured.append(line)
-
+    captured = list(under_heading())
     return "\n".join(captured) if captured else None
 
 
-def strip_html(text: str) -> str:
-    """Remove HTML tags from a snippet."""
-    import re
+class TextOnly(HTMLParser):
+    """Collect the text a fragment of markup renders, dropping its tags."""
 
-    return re.sub(r"<[^>]+>", "", text)
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def strip_html(text: str) -> str:
+    """Remove HTML tags from a snippet.
+
+    Parsed rather than pattern-matched: a search snippet is markup, and the
+    ``<`` in a title the API quoted is not the start of a tag.
+    """
+    parser = TextOnly()
+    parser.feed(text)
+    parser.close()
+    return "".join(parser.parts)
 
 
 WIKIPEDIA_TOOLS = [wiki_search, fetch_wikipedia]

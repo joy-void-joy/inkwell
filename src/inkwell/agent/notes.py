@@ -19,14 +19,22 @@ can read without shared memory coordination.
 import asyncio
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from inkwell.agent.content import ContentEnvelope, build_envelope
 from inkwell.agent.models import ClassifiedComment
 
 logger = logging.getLogger(__name__)
+
+
+class ResearchNote(BaseModel):
+    """One research note on disk, and the file name it is filed under."""
+
+    key: str = Field(description="The note's file stem, which names its subject")
+    content: str = Field(description="The note's markdown body")
 
 
 def max_file_index(directory: Path) -> int:
@@ -151,12 +159,12 @@ class PipelineNotes:
     async def list_comments(self, impact: str | None = None) -> list[ClassifiedComment]:
         """Read all comments, optionally filtered by impact level."""
         async with self.lock:
-            return self._read_comments(self.comments_dir, impact)
+            return self.read_comments(self.comments_dir, impact)
 
     async def list_terminal_inputs(self) -> list[ClassifiedComment]:
         """Read all terminal inputs."""
         async with self.lock:
-            return self._read_comments(self.terminal_dir, None)
+            return self.read_comments(self.terminal_dir, None)
 
     async def has_plan_breaking(self) -> bool:
         """Check if any plan-breaking comments exist."""
@@ -199,56 +207,50 @@ class PipelineNotes:
         """Render all accumulated feedback as markdown for prompt injection."""
         comments = await self.list_comments()
         terminal = await self.list_terminal_inputs()
-        research_notes = await self._read_research_notes()
+        research_notes = await self.read_research_notes()
 
         if not comments and not terminal and not research_notes:
             return ""
 
-        parts: list[str] = []
+        def anchored(comment: ClassifiedComment) -> str:
+            """One comment as a bullet, with what it hangs off and any reply."""
+            line = f"- {comment.content}"
+            if comment.anchor_text:
+                line += f' (on: "{comment.anchor_text}")'
+            if comment.reply:
+                line += f" — Author reply: {comment.reply}"
+            return line
 
-        plan_breaking = [c for c in comments if c.impact == "plan_breaking"]
-        stage_local = [c for c in comments if c.impact == "stage_local"]
-        clarifications = [c for c in comments if c.impact == "clarification"]
+        def rendered() -> Iterator[str]:
+            """Each kind of feedback under its own heading, in reading order."""
+            for heading, impact in (
+                ("### Critical Author Feedback", "plan_breaking"),
+                ("\n### Author Direction", "stage_local"),
+            ):
+                of_impact = [c for c in comments if c.impact == impact]
+                if of_impact:
+                    yield heading
+                    yield from (anchored(comment) for comment in of_impact)
 
-        if plan_breaking:
-            parts.append("### Critical Author Feedback")
-            for c in plan_breaking:
-                line = f"- {c.content}"
-                if c.anchor_text:
-                    line += f' (on: "{c.anchor_text}")'
-                if c.reply:
-                    line += f" — Author reply: {c.reply}"
-                parts.append(line)
+            clarifications = [c for c in comments if c.impact == "clarification"]
+            if clarifications:
+                yield "\n### Clarifications"
+                yield from (
+                    f"- {c.content} — {c.reply}" if c.reply else f"- {c.content}"
+                    for c in clarifications
+                )
 
-        if stage_local:
-            parts.append("\n### Author Direction")
-            for c in stage_local:
-                line = f"- {c.content}"
-                if c.anchor_text:
-                    line += f' (on: "{c.anchor_text}")'
-                if c.reply:
-                    line += f" — Author reply: {c.reply}"
-                parts.append(line)
+            if terminal:
+                yield "\n### Terminal Input"
+                yield from (f"- {entry.content}" for entry in terminal)
 
-        if clarifications:
-            parts.append("\n### Clarifications")
-            for c in clarifications:
-                line = f"- {c.content}"
-                if c.reply:
-                    line += f" — {c.reply}"
-                parts.append(line)
+            if research_notes:
+                yield "\n### Research Notes (from feedback)"
+                yield from (
+                    f"#### {note.key}\n{note.content}" for note in research_notes
+                )
 
-        if terminal:
-            parts.append("\n### Terminal Input")
-            for t in terminal:
-                parts.append(f"- {t.content}")
-
-        if research_notes:
-            parts.append("\n### Research Notes (from feedback)")
-            for key, content in research_notes:
-                parts.append(f"#### {key}\n{content}")
-
-        return "\n\n## Author Feedback\n\n" + "\n".join(parts) + "\n"
+        return "\n\n## Author Feedback\n\n" + "\n".join(rendered()) + "\n"
 
     async def get_section_feedback(self, section: str) -> str:
         """Render feedback relevant to a specific section."""
@@ -288,33 +290,37 @@ class PipelineNotes:
         """
         logger.info("Notes: clear_downstream from '%s' (currently a no-op)", from_stage)
 
-    def _read_comments(
+    def read_comments(
         self, directory: Path, impact: str | None
     ) -> list[ClassifiedComment]:
         """Read ClassifiedComment JSON files from a directory."""
-        results: list[ClassifiedComment] = []
         if not directory.exists():
-            return results
-        for path in sorted(directory.glob("*.json")):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                comment = ClassifiedComment.model_validate(data)
-                if impact is None or comment.impact == impact:
-                    results.append(comment)
-            except (json.JSONDecodeError, ValueError):
-                logger.warning("Failed to read note: %s", path)
-        return results
+            return []
 
-    async def _read_research_notes(self) -> list[tuple[str, str]]:
-        """Read all research notes as (key, content) pairs."""
+        def readable() -> Iterator[ClassifiedComment]:
+            """Each note in the directory that still parses as one."""
+            for path in sorted(directory.glob("*.json")):
+                try:
+                    comment = ClassifiedComment.model_validate_json(
+                        path.read_text(encoding="utf-8")
+                    )
+                except ValidationError:
+                    logger.warning("Failed to read note: %s", path)
+                    continue
+                if impact is None or comment.impact == impact:
+                    yield comment
+
+        return list(readable())
+
+    async def read_research_notes(self) -> list[ResearchNote]:
+        """Every research note on disk, filed under the name of its file."""
         async with self.lock:
-            results: list[tuple[str, str]] = []
             if not self.research_dir.exists():
-                return results
-            for path in sorted(self.research_dir.glob("*.md")):
-                content = path.read_text(encoding="utf-8")
-                results.append((path.stem, content))
-            return results
+                return []
+            return [
+                ResearchNote(key=path.stem, content=path.read_text(encoding="utf-8"))
+                for path in sorted(self.research_dir.glob("*.md"))
+            ]
 
     # -- Typed artifact I/O -----------------------------------------------
 
@@ -322,8 +328,17 @@ class PipelineNotes:
         """Return the path for a named artifact (e.g. 'plan' -> artifacts/plan.json)."""
         return self.artifacts_dir / f"{name}.json"
 
-    def save_artifact(self, name: str, model: BaseModel) -> Path:
-        """Serialize a Pydantic model to artifacts/{name}.json. Returns the path."""
+    def save_artifact(
+        self,
+        name: str,
+        model: BaseModel,  # lup: ignore[bare-basemodel] — any artifact serializes
+    ) -> Path:
+        """Serialize a Pydantic model to artifacts/{name}.json. Returns the path.
+
+        Which artifact a stage saves is the stage's business — a plan, a
+        research set, an extraction manifest — and all this does is write one
+        out, so it takes the base every artifact is one of.
+        """
         path = self.artifact_path(name)
         path.write_text(model.model_dump_json(indent=2), encoding="utf-8")
         return path

@@ -5,17 +5,20 @@ Search for academic papers and fetch full text (HTML preferred, PDF fallback).
 
 import hashlib
 import logging
-import re
-from pathlib import Path
+from itertools import islice
+from pathlib import Path, PurePosixPath
 from typing import TypedDict
+from urllib.parse import urlparse
 
 import arxiv
 import httpx
 import trafilatura
 from pydantic import BaseModel, Field
 
-from lup.content_safety import SavedContent, save_content
+from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
+
+from inkwell.agent.tools.research.fetch import content_type
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +75,44 @@ class FetchArxivOutput(BaseModel):
     )
 
 
-ARXIV_ID_PATTERN = re.compile(
-    r"(?:https?://arxiv\.org/(?:abs|html|pdf)/)?(\d{4}\.\d{4,5}(?:v\d+)?)"
-)
+ARXIV_HOST = "arxiv.org"
+ARXIV_VIEWS = ("abs", "html", "pdf")
+"""The path segments arXiv serves one paper under, whichever is linked."""
+
+ID_SEPARATOR = 4
+"""Where the dot sits in ``YYMM.NNNNN`` — the format is fixed-width."""
+
+VERSION_MARK = "v"
+
+
+def looks_like_arxiv_id(candidate: str) -> bool:
+    """Whether this is arXiv's ``YYMM.NNNNN`` identifier, optionally versioned.
+
+    Read by position because the format is fixed-width: four digits of year
+    and month, a dot, four or five of sequence, and an optional version. A
+    pattern over the whole string would also accept one embedded in prose.
+    """
+    marked = candidate.find(VERSION_MARK, ID_SEPARATOR)
+    body = candidate if marked == -1 else candidate[:marked]
+    if marked != -1 and not candidate[marked + 1 :].isdigit():
+        return False
+    if len(body) < ID_SEPARATOR + 5 or body[ID_SEPARATOR] != ".":
+        return False
+    return body[:ID_SEPARATOR].isdigit() and body[ID_SEPARATOR + 1 :].isdigit()
 
 
 def parse_arxiv_id(raw: str) -> str | None:
-    m = ARXIV_ID_PATTERN.search(raw)
-    return m.group(1) if m else None
+    """The paper id in a bare identifier or any arXiv URL naming one."""
+    candidate = raw.strip()
+    parsed = urlparse(candidate)
+    if parsed.hostname is not None:
+        if parsed.hostname.removeprefix("www.") != ARXIV_HOST:
+            return None
+        segments = PurePosixPath(parsed.path).parts
+        if len(segments) < 3 or segments[1] not in ARXIV_VIEWS:
+            return None
+        candidate = PurePosixPath(segments[2]).stem
+    return candidate if looks_like_arxiv_id(candidate) else None
 
 
 def result_to_paper(result: arxiv.Result) -> ArxivPaper:
@@ -112,11 +145,10 @@ async def search_arxiv(params: SearchArxivInput) -> SearchArxivOutput:
     )
 
     client = arxiv.Client()
-    results: list[ArxivPaper] = []
-    for result in client.results(search):
-        results.append(result_to_paper(result))
-        if len(results) >= params.max_results:
-            break
+    results = [
+        result_to_paper(result)
+        for result in islice(client.results(search), params.max_results)
+    ]
 
     return SearchArxivOutput(
         query=params.query,
@@ -143,9 +175,7 @@ async def fetch_arxiv(params: FetchArxivInput) -> FetchArxivOutput:
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         try:
             resp = await client.get(html_url)
-            if resp.status_code == 200 and "text/html" in resp.headers.get(
-                "content-type", ""
-            ):
+            if resp.status_code == 200 and "text/html" in content_type(resp):
                 text = trafilatura.extract(resp.text) or ""
                 if len(text) > 500:
                     saved = save_content("arxiv", paper_id, text)

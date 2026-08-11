@@ -1,7 +1,6 @@
 """FastAPI application factory for the Inkwell web environment."""
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from inkwell.agent.config import current_settings
 from inkwell.agent.sandbox_image import ensure_sandbox_image
 from inkwell.environment.web.routes import profiles as profiles_route
 from inkwell.environment.web.routes import sessions as sessions_route
@@ -109,9 +109,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    base = os.environ.get("INKWELL_BASE_PATH", "/")
+    base = current_settings().base_path
     if base != "/":
-        app.add_middleware(StripBasePrefix, prefix=base.rstrip("/"))
+        app.add_middleware(StripBasePrefix, prefix=base.removesuffix("/"))
 
     app.include_router(sessions_route.formats_router)
     app.include_router(sessions_route.router)

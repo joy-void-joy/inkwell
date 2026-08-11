@@ -5,20 +5,38 @@ Handles HTML, PDF, plain text, and JSON responses.
 """
 
 import hashlib
-import json
 import logging
-import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 import httpx
 import trafilatura
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from inkwell.agent.config import stage_model
-from lup.content_safety import SavedContent, save_content
+from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
+
+
+def content_type(response: httpx.Response) -> str:
+    """The content type a response declares, empty when it declares none.
+
+    A server sends whatever headers it likes, so a missing one is ordinary
+    and every caller here treats absent and blank the same way.
+    """
+    headers = response.headers
+    return headers["content-type"] if "content-type" in headers else ""
+
+
+class ExtractedMetadata(BaseModel):
+    """The one field this project reads out of trafilatura's JSON output."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    title: str = ""
+
 
 DOWNLOADS_DIR = Path("tmp/downloads")
 MAX_PDF_BYTES = 100 * 1024 * 1024
@@ -29,12 +47,27 @@ USER_AGENT = (
 )
 
 
+GITHUB_HOST = "github.com"
+RAW_GITHUB = "https://raw.githubusercontent.com"
+BLOB_SEGMENT = 3
+"""Where ``blob`` sits in ``/owner/repo/blob/ref/path`` once the path is split."""
+
+
 def github_blob_to_raw(url: str) -> str | None:
-    """Rewrite a GitHub blob URL to raw.githubusercontent.com."""
-    m = re.match(r"https?://github\.com/([^/]+/[^/]+)/blob/(.+)", url)
-    if m:
-        return f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}"
-    return None
+    """Rewrite a GitHub blob URL to raw.githubusercontent.com.
+
+    Read as a path rather than matched as a string: the raw host serves the
+    same segments with ``blob`` dropped, so removing that one segment is the
+    whole rewrite and a query or fragment on the original cannot leak into it.
+    """
+    parsed = urlparse(url)
+    if parsed.hostname != GITHUB_HOST:
+        return None
+    segments = PurePosixPath(parsed.path).parts
+    if len(segments) <= BLOB_SEGMENT + 1 or segments[BLOB_SEGMENT] != "blob":
+        return None
+    kept = [*segments[1:BLOB_SEGMENT], *segments[BLOB_SEGMENT + 1 :]]
+    return f"{RAW_GITHUB}/{'/'.join(kept)}"
 
 
 CHALLENGE_MARKERS = (
@@ -102,7 +135,7 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
     if resp.status_code >= 500:
         raise ToolError(f"Server error {resp.status_code} for {url}. Try again later.")
 
-    ct = resp.headers.get("content-type", "")
+    ct = content_type(resp)
 
     if "html" in ct:
         marker = challenge_page_marker(resp.text)
@@ -143,7 +176,7 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
 
     if resolved_url != url:
         text = resp.text
-        title = resolved_url.rsplit("/", 1)[-1]
+        title = PurePosixPath(urlparse(resolved_url).path).name
         saved = save_content("fetch", url, text)
         return FetchSourceOutput(
             url=url,
@@ -166,9 +199,9 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
         title_str = ""
         if title_json:
             try:
-                title_str = json.loads(title_json).get("title", "")
-            except (json.JSONDecodeError, AttributeError):
-                pass
+                title_str = ExtractedMetadata.model_validate_json(title_json).title
+            except ValidationError:
+                logger.debug("Extraction metadata for %s was not readable", url)
         saved = save_content("fetch", url, extracted)
         return FetchSourceOutput(
             url=url,
@@ -241,7 +274,7 @@ class FetchAndExtractOutput(BaseModel):
 
 async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:
     """Fetch a URL and extract only the parts relevant to focus."""
-    from lup.client import query
+    from inkwell.agent.client import query
 
     source = await do_fetch_source(url)
     content_path = source.content.path
@@ -271,7 +304,7 @@ async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:
         output_type=FocusedExtract,
         tools=["Read"],
         max_thinking_tokens=128_000 - 1,
-        permission_mode="bypassPermissions",
+        autonomy="unattended",
     )
 
     if result is None:

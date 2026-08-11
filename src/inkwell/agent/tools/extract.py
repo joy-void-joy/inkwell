@@ -4,24 +4,44 @@ Extracts source material from Claude conversations, URLs, and local files
 into structured text for the writing pipeline.
 """
 
-# claude: ignore
-# pyright: reportAttributeAccessIssue=false
-
 import logging
-import re
 import shutil
-from pathlib import Path
+from collections.abc import Iterator
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, Field
+from linkify_it import LinkifyIt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from inkwell.agent.config import active_profile, settings
-from lup.content_safety import SavedContent, save_content
+from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
+from lup.types import EnvVars, JsonValue, StringMap
 
 CHUNK_CHARS = 100_000
+PARAGRAPH_SEPARATOR = "\n\n"
+
+LINKIFY = LinkifyIt()
+"""Where a link starts and stops in prose, per markdown-it's own linkifier."""
 
 logger = logging.getLogger(__name__)
+
+
+class ExtractedMetadata(BaseModel):
+    """The one field this project reads out of trafilatura's JSON output."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    title: str = ""
+
 
 CLAUDE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0",
@@ -55,94 +75,168 @@ class ExtractConversationOutput(BaseModel):
 
 
 def extract_share_id(url: str) -> str:
-    return url.rstrip("/").split("/")[-1]
+    """The conversation id a claude.ai share URL names."""
+    share_id = claude_share_id(url)
+    if share_id is None:
+        raise ToolError(
+            f"Not a Claude share URL: {url}. Expected: https://claude.ai/share/<id>"
+        )
+    return share_id
 
 
-def extract_block_text(block: dict[str, object]) -> str | None:
-    """Extract text from a single content block, handling nested structures."""
-    block_type = block.get("type", "")
-    match block_type:
-        case "text":
-            text = block.get("text", "")
-            return str(text) if text else None
-        case "document" | "content":
-            for field in ("text", "source", "content"):
-                val = block.get(field, "")
-                if isinstance(val, str) and val:
-                    return val
+class ContentBlock(BaseModel):
+    """One block of a message, in the shapes a shared conversation holds.
+
+    Every text-bearing field is declared even though a given block type uses
+    only one of them: which field carries the prose is what the type decides,
+    and an unfamiliar type is read by trying them in turn rather than dropped.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    type: str = ""
+    text: str = ""
+    source: str = ""
+    content: "str | list[ContentBlock]" = ""
+
+    def nested(self) -> list["ContentBlock"]:
+        """The blocks inside this one, if it holds blocks rather than text."""
+        return self.content if isinstance(self.content, list) else []
+
+    def inline(self) -> str:
+        """The text this block holds directly, if it holds text."""
+        return self.content if isinstance(self.content, str) else ""
+
+    def first_text(self) -> str | None:
+        """The first text-bearing field this block actually filled."""
+        for value in (self.text, self.source, self.inline()):
+            if value:
+                return value
+        return None
+
+    def prose(self) -> str | None:
+        """The text this block contributes to the conversation transcript."""
+        match self.type:
+            case "text":
+                return self.text or None
+            case "document" | "content":
+                return self.first_text()
+            case "tool_result":
+                inner = [
+                    text
+                    for block in self.nested()
+                    if (text := block.prose()) is not None
+                ]
+                return "\n\n".join(inner) if inner else self.inline() or None
+            case "image":
+                return None
+            case _:
+                recovered = self.first_text()
+                logger.debug(
+                    "Unhandled content block type=%s recovered=%s",
+                    self.type,
+                    recovered is not None,
+                )
+                return recovered
+
+
+class Attachment(BaseModel):
+    """One file uploaded or pasted into a message."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    file_name: str = ""
+    extracted_content: str = ""
+
+    def prose(self) -> str | None:
+        """This attachment's text, labelled with its name when it has one."""
+        if not self.extracted_content.strip():
             return None
-        case "tool_result":
-            nested = block.get("content", [])
-            if isinstance(nested, list):
-                inner = []
-                for sub in nested:
-                    if isinstance(sub, dict):
-                        text = extract_block_text(sub)
-                        if text:
-                            inner.append(text)
-                return "\n\n".join(inner) if inner else None
-            if isinstance(nested, str) and nested:
-                return nested
-            return None
-        case "image":
-            return None
-        case _:
-            logger.debug(
-                "Unhandled content block type=%s keys=%s",
-                block_type,
-                list(block.keys()),
-            )
-            for field in ("text", "content", "source"):
-                val = block.get(field, "")
-                if isinstance(val, str) and val:
-                    logger.debug(
-                        "Recovered text from unknown block type=%s via field=%s",
-                        block_type,
-                        field,
-                    )
-                    return val
-            return None
+        if not self.file_name:
+            return self.extracted_content
+        return f"[Attachment: {self.file_name}]\n{self.extracted_content}"
 
 
-def extract_attachments(msg: dict[str, object]) -> list[str]:
-    """Extract text from message attachments (uploaded files, pasted content)."""
-    attachments = msg.get("attachments", [])
-    if not isinstance(attachments, list):
-        return []
-    parts: list[str] = []
-    for att in attachments:
-        if not isinstance(att, dict):
-            continue
-        text = att.get("extracted_content")
-        if isinstance(text, str) and text.strip():
-            name = att.get("file_name", "")
-            if isinstance(name, str) and name:
-                parts.append(f"[Attachment: {name}]\n{text}")
-            else:
-                parts.append(text)
-    return parts
+class ShareMessage(BaseModel):
+    """One message of a shared conversation.
+
+    ``content`` is a list of blocks in every message the API has been seen to
+    send, and a bare string in the older shape it still accepts; entries that
+    are neither are dropped rather than failing the whole conversation, since
+    one unreadable block should not cost the author the rest of the thread.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    sender: str = ""
+    content: str | list[ContentBlock] = ""
+    attachments: list[Attachment] = Field(default_factory=list)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def drop_unreadable_blocks(cls, value: JsonValue) -> JsonValue:
+        """Keep the blocks that are objects, and any bare string as it is."""
+        if isinstance(value, list):
+            return [block for block in value if isinstance(block, dict)]
+        return value
+
+    def blocks(self) -> list[ContentBlock]:
+        """This message's blocks, or none when its content is a bare string."""
+        return self.content if isinstance(self.content, list) else []
+
+    def text(self) -> str:
+        """Everything this message contributes, blocks then attachments."""
+        if isinstance(self.content, str) and not self.attachments:
+            return self.content
+        return "\n\n".join(
+            [
+                *(
+                    text
+                    for block in self.blocks()
+                    if (text := block.prose()) is not None
+                ),
+                *(
+                    text
+                    for attachment in self.attachments
+                    if (text := attachment.prose()) is not None
+                ),
+            ]
+        )
 
 
-def message_text(msg: dict[str, object]) -> str:
-    content = msg.get("content", [])
-    if not isinstance(content, list):
-        return str(content)
-    parts: list[str] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        text = extract_block_text(block)
-        if text:
-            parts.append(text)
-    parts.extend(extract_attachments(msg))
-    return "\n\n".join(parts)
+class ShareSnapshot(BaseModel):
+    """A shared conversation, as far as extraction reads it."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    name: str = ""
+    chat_messages: list[ShareMessage] = Field(default_factory=list)
+
+
+class FetchedSnapshot(BaseModel):
+    """A snapshot, and which organization it turned out to live in."""
+
+    snapshot: ShareSnapshot
+    org_uuid: str
+
+
+class Organization(BaseModel):
+    """One account organization, of which only its id is read."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    uuid: str = ""
+
+
+ORGANIZATIONS = TypeAdapter(list[Organization])
+"""The organizations endpoint answers with a bare array."""
 
 
 class CookieExpiredError(Exception):
     """Raised when the Claude session cookie is expired or invalid."""
 
 
-def load_cookies_from_browser() -> dict[str, str]:
+def load_cookies_from_browser() -> StringMap:
     """Read all claude.ai cookies from the persistent browser context."""
     import asyncio
 
@@ -170,13 +264,14 @@ def load_cookies_from_browser() -> dict[str, str]:
     return cookies
 
 
-def format_cookie_header(cookies: dict[str, str]) -> str:
+def format_cookie_header(cookies: StringMap) -> str:
     return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
 
-def load_org_uuid_from_cookies(cookies: dict[str, str]) -> str | None:
-    org_uuid = cookies.get("lastActiveOrg", "")
-    return org_uuid or None
+def load_org_uuid_from_cookies(cookies: StringMap) -> str | None:
+    from inkwell.agent.browser_auth import cookie_value
+
+    return cookie_value(cookies, "lastActiveOrg") or None
 
 
 def load_cookie_from_browser() -> str | None:
@@ -193,7 +288,7 @@ async def fetch_snapshot_for_org(
     client: httpx.AsyncClient,
     share_id: str,
     org_uuid: str,
-    auth_headers: dict[str, str],
+    auth_headers: StringMap,
 ) -> httpx.Response:
     """Try fetching a snapshot from a specific org. Returns the response."""
     org_url = (
@@ -206,7 +301,7 @@ async def fetch_snapshot_for_org(
 
 async def fetch_all_orgs(
     client: httpx.AsyncClient,
-    auth_headers: dict[str, str],
+    auth_headers: StringMap,
 ) -> list[str]:
     """Fetch all org UUIDs for the authenticated account."""
     org_resp = await client.get(
@@ -220,10 +315,10 @@ async def fetch_all_orgs(
         raise ToolError(
             f"Failed to fetch organizations (status {org_resp.status_code})"
         )
-    orgs: list[dict[str, str]] = org_resp.json()
+    orgs = ORGANIZATIONS.validate_python(org_resp.json())
     if not orgs:
         raise ToolError("No organizations found for this account")
-    return [o["uuid"] for o in orgs if "uuid" in o]
+    return [org.uuid for org in orgs if org.uuid]
 
 
 async def fetch_with_cookie(
@@ -231,7 +326,7 @@ async def fetch_with_cookie(
     share_id: str,
     cookie: str,
     org_uuid: str | None,
-) -> tuple[dict[str, object], str]:
+) -> FetchedSnapshot:
     """Fetch snapshot using authenticated cookie. Returns (data, org_uuid).
 
     Tries the provided/cached org first; on 404, iterates all orgs.
@@ -258,8 +353,8 @@ async def fetch_with_cookie(
                 f"Claude session expired (status {resp.status_code})"
             )
         if resp.status_code == 200:
-            result: dict[str, object] = resp.json()
-            return result, uuid
+            result = ShareSnapshot.model_validate(resp.json())
+            return FetchedSnapshot(snapshot=result, org_uuid=uuid)
         if resp.status_code == 404 and len(candidates) == 1 and org_uuid:
             logger.info("Snapshot not found in org %s, trying all orgs", uuid[:8])
             all_orgs = await fetch_all_orgs(client, auth_headers)
@@ -274,7 +369,7 @@ async def fetch_with_cookie(
                     )
                 if resp.status_code == 200:
                     result = resp.json()
-                    return result, fallback_uuid
+                    return FetchedSnapshot(snapshot=result, org_uuid=fallback_uuid)
 
     raise ToolError(f"Conversation not found in any of {len(candidates)} org(s)")
 
@@ -342,7 +437,7 @@ def persist_credentials(cookie: str, org_uuid: str | None) -> None:
     """Save cookie and org UUID to .env.local and update live settings."""
     from inkwell.devtools.setup import write_env_local
 
-    env_updates: dict[str, str] = {"CLAUDE_COOKIE": cookie}
+    env_updates: EnvVars = {"CLAUDE_COOKIE": cookie}
     if org_uuid:
         env_updates["CLAUDE_ORG_UUID"] = org_uuid
         settings.claude_org_uuid = org_uuid
@@ -351,7 +446,7 @@ def persist_credentials(cookie: str, org_uuid: str | None) -> None:
     logger.info("Saved credentials to .env.local")
 
 
-async def fetch_snapshot(share_id: str) -> dict[str, object]:
+async def fetch_snapshot(share_id: str) -> ShareSnapshot:
     """Fetch conversation snapshot, trying public API first then org API.
 
     On auth failure, prompts the user for a fresh cookie, retries, and
@@ -365,7 +460,7 @@ async def fetch_snapshot(share_id: str) -> dict[str, object]:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(public_url, headers=CLAUDE_HEADERS)
         if resp.status_code == 200:
-            result: dict[str, object] = resp.json()
+            result = ShareSnapshot.model_validate(resp.json())
             return result
 
         cookie = settings.claude_cookie
@@ -377,25 +472,25 @@ async def fetch_snapshot(share_id: str) -> dict[str, object]:
             )
 
         try:
-            data, org_uuid = await fetch_with_cookie(
+            fetched = await fetch_with_cookie(
                 client, share_id, cookie, settings.claude_org_uuid
             )
         except CookieExpiredError:
             browser_cookie = await extract_cookie_header_async(active_profile())
             if browser_cookie and browser_cookie != cookie:
                 try:
-                    data, org_uuid = await fetch_with_cookie(
+                    retried = await fetch_with_cookie(
                         client, share_id, browser_cookie, None
                     )
-                    persist_credentials(browser_cookie, org_uuid)
-                    return data
+                    persist_credentials(browser_cookie, retried.org_uuid)
+                    return retried.snapshot
                 except CookieExpiredError:
-                    pass
+                    logger.info("Browser cookie was expired too; prompting")
             cookie = await prompt_for_cookie("Claude session cookie expired.")
-            data, org_uuid = await fetch_with_cookie(client, share_id, cookie, None)
+            fetched = await fetch_with_cookie(client, share_id, cookie, None)
 
-        persist_credentials(cookie, org_uuid)
-        return data
+        persist_credentials(cookie, fetched.org_uuid)
+        return fetched.snapshot
 
 
 async def do_extract_conversation(url: str) -> ExtractConversationOutput:
@@ -403,31 +498,19 @@ async def do_extract_conversation(url: str) -> ExtractConversationOutput:
     share_id = extract_share_id(url)
     data = await fetch_snapshot(share_id)
 
-    chat_messages = data.get("chat_messages", [])
-    if not isinstance(chat_messages, list):
-        raise ToolError("Unexpected response format: no chat_messages array")
+    spoken = [
+        ConversationMessage(
+            speaker="user" if msg.sender == "human" else "claude", text=text
+        )
+        for msg in data.chat_messages
+        if (text := msg.text()).strip()
+    ]
 
-    messages: list[ConversationMessage] = []
-    md_parts: list[str] = []
-
-    for msg in chat_messages:
-        if not isinstance(msg, dict):
-            continue
-        sender = msg.get("sender", "")
-        if not isinstance(sender, str):
-            continue
-        text = message_text(msg)
-        if not text.strip():
-            continue
-
-        speaker = "user" if sender == "human" else "claude"
-        messages.append(ConversationMessage(speaker=speaker, text=text))
-        md_parts.append(f"<{speaker}>\n{text}\n</{speaker}>")
-
-    if not messages:
+    if not spoken:
         raise ToolError("No messages found in conversation")
 
-    markdown = "\n\n".join(md_parts)
+    messages = spoken
+    markdown = "\n\n".join(f"<{m.speaker}>\n{m.text}\n</{m.speaker}>" for m in spoken)
     saved = save_content("conversation", share_id, markdown)
 
     return ExtractConversationOutput(
@@ -529,30 +612,28 @@ def write_source_chunks(
         path.write_text(text, encoding="utf-8")
         return [path]
 
-    chunks: list[str] = []
-    paragraphs = text.split("\n\n")
-    current: list[str] = []
-    current_len = 0
+    paragraphs = text.split(PARAGRAPH_SEPARATOR)  # lup: ignore[string-split] — prose
 
-    for para in paragraphs:
-        para_len = len(para) + 2
-        if current_len + para_len > CHUNK_CHARS and current:
-            chunks.append("\n\n".join(current))
-            current = []
-            current_len = 0
-        current.append(para)
-        current_len += para_len
+    def chunked() -> Iterator[str]:
+        """Successive runs of whole paragraphs that fit the chunk budget."""
+        current = ""
+        for para in paragraphs:
+            addition = para if not current else f"{PARAGRAPH_SEPARATOR}{para}"
+            if current and len(current) + len(addition) > CHUNK_CHARS:
+                yield current
+                current = para
+                continue
+            current += addition
+        if current:
+            yield current
 
-    if current:
-        chunks.append("\n\n".join(current))
-
-    paths: list[Path] = []
-    for i, chunk in enumerate(chunks, 1):
-        path = output_dir / f"{prefix}_part{i}.md"
+    def written(index: int, chunk: str) -> Path:
+        """One chunk on disk, numbered from one the way a reader counts."""
+        path = output_dir / f"{prefix}_part{index}.md"
         path.write_text(chunk, encoding="utf-8")
-        paths.append(path)
+        return path
 
-    return paths
+    return [written(i, chunk) for i, chunk in enumerate(chunked(), 1)]
 
 
 def save_source_to_files(
@@ -595,11 +676,11 @@ async def extract_source_tab_only(url: str) -> str:
     if source_tabs:
         content = Path(source_tabs[0].content.path).read_text(encoding="utf-8")
     else:
-        parts = []
-        for t in result.tabs:
-            if t.title not in PIPELINE_TAB_NAMES:
-                parts.append(Path(t.content.path).read_text(encoding="utf-8"))
-        content = "\n\n".join(parts)
+        content = "\n\n".join(
+            Path(tab.content.path).read_text(encoding="utf-8")
+            for tab in result.tabs
+            if tab.title not in PIPELINE_TAB_NAMES
+        )
 
     comments_md = format_comments_as_markdown(result.comments)
     if comments_md:
@@ -641,15 +722,65 @@ class ExtractLessWrongOutput(BaseModel):
     content: SavedContent = Field(description="Post body saved to disk as markdown")
 
 
+class LessWrongUser(BaseModel):
+    """The post's author, as the GraphQL API names them."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    display_name: str = Field(default="Unknown", alias="displayName")
+
+
+class LessWrongPost(BaseModel):
+    """One post, by the names the GraphQL API sends."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
+
+    title: str = ""
+    html_body: str = Field(default="", alias="htmlBody")
+    base_score: int = Field(default=0, alias="baseScore")
+    comment_count: int = Field(default=0, alias="commentCount")
+    posted_at: str = Field(default="", alias="postedAt")
+    user: LessWrongUser = LessWrongUser()
+
+
+class LessWrongResult(BaseModel):
+    """The single-post wrapper the query's result carries."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    result: LessWrongPost | None = None
+
+
+class LessWrongData(BaseModel):
+    """The data half of a GraphQL response."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    post: LessWrongResult = LessWrongResult()
+
+
+class LessWrongResponse(BaseModel):
+    """What the LessWrong GraphQL endpoint answers with."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    data: LessWrongData = LessWrongData()
+
+
+POSTS_SEGMENT = "posts"
+SLUG_OFFSET = 2
+"""Where the slug sits after ``posts`` in ``/posts/<id>/<slug>``."""
+
+
 def parse_lesswrong_slug(url: str) -> str:
-    parts = url.rstrip("/").split("/")
-    try:
-        posts_idx = parts.index("posts")
-    except ValueError:
+    """The slug in a LessWrong post URL, read as a path."""
+    segments = PurePosixPath(urlparse(url).path).parts
+    if POSTS_SEGMENT not in segments:
         raise ToolError(f"Not a valid LessWrong URL (no /posts/ segment): {url}")
-    if posts_idx + 2 >= len(parts):
+    slug_at = segments.index(POSTS_SEGMENT) + SLUG_OFFSET
+    if slug_at >= len(segments):
         raise ToolError(f"Not a valid LessWrong URL (missing slug): {url}")
-    return parts[posts_idx + 2]
+    return segments[slug_at]
 
 
 async def do_extract_lesswrong(url: str) -> ExtractLessWrongOutput:
@@ -671,24 +802,22 @@ async def do_extract_lesswrong(url: str) -> ExtractLessWrongOutput:
     if resp.status_code != 200:
         raise ToolError(f"LessWrong API returned HTTP {resp.status_code}")
 
-    data = resp.json()
-    post = data.get("data", {}).get("post", {}).get("result")
-    if not post:
-        raise ToolError(f"Post not found for slug '{parse_lesswrong_slug(url)}'")
+    post = LessWrongResponse.model_validate(resp.json()).data.post.result
+    if post is None:
+        raise ToolError(f"Post not found for slug '{slug}'")
 
-    html_body: str = post.get("htmlBody", "")
-    content = markdownify.markdownify(html_body, strip=["img"]) if html_body else ""
+    content = (
+        markdownify.markdownify(post.html_body, strip=["img"]) if post.html_body else ""
+    )
 
-    user = post.get("user") or {}
-    title = post.get("title", "")
-    saved = save_content("lesswrong", title or url, content)
+    saved = save_content("lesswrong", post.title or url, content)
     return ExtractLessWrongOutput(
         url=url,
-        title=title,
-        author=user.get("displayName", "Unknown"),
-        score=post.get("baseScore", 0),
-        comment_count=post.get("commentCount", 0),
-        posted_date=post.get("postedAt", ""),
+        title=post.title,
+        author=post.user.display_name,
+        score=post.base_score,
+        comment_count=post.comment_count,
+        posted_date=post.posted_at,
         content=saved,
     )
 
@@ -733,7 +862,6 @@ async def extract_webpage_batch(
     params: ExtractBatchInput,
 ) -> ExtractBatchOutput:
     import asyncio
-    import json as json_mod
 
     import trafilatura
 
@@ -764,9 +892,9 @@ async def extract_webpage_batch(
         )
         if title_json:
             try:
-                title = json_mod.loads(title_json).get("title", "")
-            except (json_mod.JSONDecodeError, AttributeError):
-                pass
+                title = ExtractedMetadata.model_validate_json(title_json).title
+            except ValidationError:
+                logger.debug("Extraction metadata for %s was not readable", url)
 
         saved = save_content("batch", url, text)
         return BatchResult(url=url, title=title, content=saved)
@@ -779,56 +907,96 @@ async def extract_webpage_batch(
         tasks = [fetch_one(client, url) for url in params.urls]
         outcomes = await asyncio.gather(*tasks)
 
-    results: list[BatchResult] = []
-    failed: list[str] = []
-    for url, outcome in zip(params.urls, outcomes):
-        if outcome is None:
-            failed.append(url)
-        else:
-            results.append(outcome)
-
-    return ExtractBatchOutput(results=results, failed=failed)
+    return ExtractBatchOutput(
+        results=[outcome for outcome in outcomes if outcome is not None],
+        failed=[url for url, outcome in zip(params.urls, outcomes) if outcome is None],
+    )
 
 
-GDOC_URL_PATTERN = re.compile(r"https://docs\.google\.com/document/d/([a-zA-Z0-9_-]+)")
+CLAUDE_HOST = "claude.ai"
+SHARE_SEGMENT = "share"
 
-LINK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("claude_share", re.compile(r"https://claude\.ai/share/[a-zA-Z0-9_-]+")),
-    ("url", re.compile(r"https?://[^\s<>\")\]]+(?<![.,;:!?\"'])")),
-]
+
+def claude_share_id(url: str) -> str | None:
+    """The conversation id a claude.ai share URL names, if it names one."""
+    parsed = urlparse(url)
+    if parsed.hostname != CLAUDE_HOST:
+        return None
+    segments = PurePosixPath(parsed.path).parts
+    if len(segments) < 3 or segments[1] != SHARE_SEGMENT:
+        return None
+    return segments[2]
+
+
+def is_gdoc_url(url: str) -> bool:
+    """Whether this URL names a Google Doc."""
+    from inkwell.agent.tools.google_docs import doc_id_from_url
+
+    return doc_id_from_url(url) is not None
 
 
 def parse_gdoc_id(url: str) -> str:
-    match = GDOC_URL_PATTERN.search(url)
-    if not match:
+    """The document id a Google Docs URL names, or an error saying it names none."""
+    from inkwell.agent.tools.google_docs import doc_id_from_url
+
+    doc_id = doc_id_from_url(url)
+    if doc_id is None:
         raise ToolError(
             f"Not a Google Doc URL: {url}. "
             "Expected: https://docs.google.com/document/d/<doc_id>/..."
         )
-    return match.group(1)
+    return doc_id
 
 
 class DiscoveredLink(BaseModel):
+    """One link found in an author's prose, and how it was written there.
+
+    Where a link first appears and how often it is repeated are what separate
+    a load-bearing source from one mentioned in passing, so a repeat is
+    counted rather than discarded as a duplicate.
+    """
+
     url: str = Field(description="Discovered URL")
     link_type: str = Field(
         description="Type: 'claude_share' for Claude conversations, 'url' for other links"
     )
+    first_offset: int = Field(
+        default=0, description="Character offset where the link first appears"
+    )
+    mentions: int = Field(default=1, description="How many times the link is written")
+
+    def again(self) -> "DiscoveredLink":
+        """The same link, having now been seen once more."""
+        return self.model_copy(update={"mentions": self.mentions + 1})
 
 
 def discover_links(text: str) -> list[DiscoveredLink]:
-    """Scan text for embedded links (Claude shares, article URLs)."""
-    seen: set[str] = set()
-    links: list[DiscoveredLink] = []
-    for link_type, pattern in LINK_PATTERNS:
-        for match in pattern.finditer(text):
-            url = match.group(0)
-            if url in seen:
-                continue
-            if GDOC_URL_PATTERN.match(url):
-                continue
-            seen.add(url)
-            links.append(DiscoveredLink(url=url, link_type=link_type))
-    return links
+    """Scan text for embedded links (Claude shares, article URLs).
+
+    Finding where a link starts and stops inside prose is markdown-it's
+    linkifier's job — the same one that turns bare URLs into links when this
+    project renders markdown, so a paste and its rendering agree about what
+    was a link. Each one found is then read with urllib to say what it is.
+    """
+    from inkwell.agent.tools.google_docs import doc_id_from_url
+
+    found: dict[str, DiscoveredLink] = {}  # lup: ignore[empty-collection] — a fold
+    for match in LINKIFY.match(text) or []:
+        if doc_id_from_url(match.url) is not None:
+            continue
+        seen = found[match.url] if match.url in found else None
+        found[match.url] = (
+            seen.again()
+            if seen is not None
+            else DiscoveredLink(
+                url=match.url,
+                link_type=(
+                    "claude_share" if claude_share_id(match.url) is not None else "url"
+                ),
+                first_offset=match.index,
+            )
+        )
+    return list(found.values())
 
 
 class ExtractGdocInput(BaseModel):
@@ -868,91 +1036,43 @@ class ExtractGdocOutput(BaseModel):
 
 async def fetch_gdoc_comments(doc_id: str) -> list[GdocComment]:
     """Read unresolved comments from a Google Doc via the Drive API."""
-    from inkwell.agent.tools.google_docs import execute_with_retry, services
+    from inkwell.agent.tools.google_docs import do_fetch_comments
 
-    svc = services()
-    drive = svc.drive_service()
-
-    comments: list[GdocComment] = []
-    page_token: str | None = None
-
-    while True:
-        kwargs: dict[str, object] = {
-            "fileId": doc_id,
-            "fields": "comments(id,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
-            "pageSize": 100,
-        }
-        if page_token:
-            kwargs["pageToken"] = page_token
-
-        result = await execute_with_retry(drive.comments().list(**kwargs))
-        items = result.get("comments", [])
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            if bool(item.get("resolved", False)):
-                continue
-
-            author_dict = item.get("author", {})
-            author_name = ""
-            if isinstance(author_dict, dict):
-                author_name = str(author_dict.get("displayName", ""))
-
-            anchor = ""
-            quoted = item.get("quotedFileContent")
-            if isinstance(quoted, dict):
-                anchor = str(quoted.get("value", ""))
-
-            replies_raw = item.get("replies", [])
-            replies: list[str] = []
-            if isinstance(replies_raw, list):
-                for reply in replies_raw:
-                    if isinstance(reply, dict):
-                        rc = reply.get("content", "")
-                        if isinstance(rc, str) and rc:
-                            replies.append(rc)
-
-            comments.append(
-                GdocComment(
-                    comment_id=str(item.get("id", "")),
-                    author=author_name,
-                    content=str(item.get("content", "")),
-                    anchor_text=anchor,
-                    replies=replies,
-                    resolved=False,
-                )
-            )
-
-        page_token_raw = result.get("nextPageToken")
-        if isinstance(page_token_raw, str) and page_token_raw:
-            page_token = page_token_raw
-        else:
-            break
-
-    return comments
+    return [
+        GdocComment(
+            comment_id=entry.comment_id,
+            author=entry.author,
+            content=entry.content,
+            anchor_text=entry.anchor_text,
+            replies=entry.replies,
+            resolved=False,
+        )
+        for entry in await do_fetch_comments(doc_id)
+    ]
 
 
 def format_comments_as_markdown(comments: list[GdocComment]) -> str:
     """Format extracted comments into markdown for inclusion in source text."""
     if not comments:
         return ""
-    parts: list[str] = []
-    for c in comments:
-        header = f"**{c.author}**" if c.author else "Comment"
-        if c.anchor_text:
-            header += f' (on "{c.anchor_text}")'
-        parts.append(f"- {header}: {c.content}")
-        for reply in c.replies:
-            parts.append(f"  - Reply: {reply}")
-    return "## Comments\n\n" + "\n".join(parts)
+
+    def lines() -> Iterator[str]:
+        """Each comment as a bullet, with its replies nested beneath it."""
+        for comment in comments:
+            header = f"**{comment.author}**" if comment.author else "Comment"
+            if comment.anchor_text:
+                header += f' (on "{comment.anchor_text}")'
+            yield f"- {header}: {comment.content}"
+            yield from (f"  - Reply: {reply}" for reply in comment.replies)
+
+    return "## Comments\n\n" + "\n".join(lines())
 
 
 async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
     """Extract content, comments, and links from a Google Doc."""
     from inkwell.agent.tools.google_docs import (
-        execute_with_retry,
         extract_tab_markdown,
+        fetch_document,
         services,
     )
 
@@ -960,42 +1080,23 @@ async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
     svc = services()
     docs = svc.docs_service()
 
-    doc = await execute_with_retry(
+    doc = await fetch_document(
         docs.documents().get(documentId=doc_id, includeTabsContent=True)
     )
 
-    doc_title = str(doc.get("title", "Untitled"))
-    tabs_raw = doc.get("tabs", [])
-    if not isinstance(tabs_raw, list):
-        raise ToolError("Could not read document tabs")
-
-    tabs: list[GdocTab] = []
-    all_text_parts: list[str] = []
-    total_words = 0
-
-    for tab in tabs_raw:
-        if not isinstance(tab, dict):
-            continue
-        props = tab.get("tabProperties", {})
-        if not isinstance(props, dict):
-            continue
-
-        tab_id = str(props.get("tabId", ""))
-        tab_title = str(props.get("title", ""))
-        text = extract_tab_markdown(tab)
-        all_text_parts.append(text)
-
-        saved = save_content("gdoc", f"{doc_title}-{tab_title}", text)
-        total_words += saved.word_count
-        tabs.append(
-            GdocTab(
-                tab_id=tab_id,
-                title=tab_title,
-                content=saved,
-            )
+    doc_title = doc.title or "Untitled"
+    rendered = [(tab.tab_properties, extract_tab_markdown(tab)) for tab in doc.walk()]
+    tabs = [
+        GdocTab(
+            tab_id=props.tab_id,
+            title=props.title,
+            content=save_content("gdoc", f"{doc_title}-{props.title}", text),
         )
+        for props, text in rendered
+    ]
+    total_words = sum(tab.content.word_count for tab in tabs)
 
-    all_text = "\n".join(all_text_parts)
+    all_text = "\n".join(text for _, text in rendered)
     discovered = discover_links(all_text)
     comments = await fetch_gdoc_comments(doc_id)
 

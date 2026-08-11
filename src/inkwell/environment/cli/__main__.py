@@ -8,14 +8,25 @@ Usage:
 
 import asyncio
 import logging
-import os
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib.parse import urlparse
 
 import typer
+from pydantic import BaseModel, Field
 
+from inkwell.agent.config import select_profile
+from inkwell.agent.models import HistorySessionData
 from inkwell.agent.stages import OUTPUT_FORMATS
+
+
+class CacheTarget(BaseModel):
+    """One cache a clear command would remove, and how it is described."""
+
+    label: str = Field(description="What the confirmation prompt calls it")
+    path: Path = Field(description="Directory the cache lives in")
+
 
 FORMAT_HELP = "Suggested format (agent may override): " + ", ".join(
     f"{f.key}:<description>" if f.accepts_description else f.key for f in OUTPUT_FORMATS
@@ -84,7 +95,7 @@ def callback(
 ) -> None:
     """AI writing agent — opens interactive chat when run with no arguments."""
     if profile:
-        os.environ["INKWELL_PROFILE"] = profile
+        select_profile(profile)
     if ctx.invoked_subcommand is None:
         from inkwell.environment.cli.chat import chat_session
 
@@ -220,42 +231,32 @@ def sessions(
     ] = 20,
 ) -> None:
     """List past writing sessions."""
-    from lup.history import get_latest_session_json, list_all_sessions
+    from lup.workspace.history import latest_session_record, list_all_session_ids
 
-    session_ids = list_all_sessions()
+    session_ids = list_all_session_ids()
     if not session_ids:
         typer.echo("No sessions found.")
         return
 
-    from lup.paths import sessions_dir
+    from lup.workspace.paths import sessions_dir
 
     for sid in session_ids[-limit:]:
-        data = get_latest_session_json(sid)
-        if data is None:
+        record = latest_session_record(sid)
+        if record is None:
             typer.echo(f"  {sid}  (no data)")
             continue
 
-        title = ""
-        doc_url = ""
-        output = data.get("output")
-        if isinstance(output, dict):
-            t = output.get("title")
-            if isinstance(t, str):
-                title = t
-            u = output.get("google_doc_url")
-            if isinstance(u, str):
-                doc_url = u
-
-        cost = data.get("cost_usd")
+        saved = HistorySessionData.model_validate(record.model_dump())
+        output = saved.output
 
         parts = [f"  {sid}"]
-        if title:
-            parts.append(f"  {title}")
-        if isinstance(cost, (int, float)):
-            parts.append(f"  ${cost:.2f}")
+        if output and output.title:
+            parts.append(f"  {output.title}")
+        if record.cost_usd is not None:
+            parts.append(f"  ${record.cost_usd:.2f}")
         typer.echo("".join(parts))
-        if doc_url:
-            typer.echo(f"    {doc_url}")
+        if output and output.google_doc_url:
+            typer.echo(f"    {output.google_doc_url}")
 
         notes_dir = sessions_dir() / sid / "pipeline_notes"
         if notes_dir.exists():
@@ -345,10 +346,10 @@ def fetch_comments(
         inkwell fetch-comments "https://docs.google.com/document/d/abc123/edit"
         inkwell fetch-comments abc123 --session 20260523_143022
     """
-    from inkwell.agent.tools.extract import GDOC_URL_PATTERN, parse_gdoc_id
+    from inkwell.agent.tools.extract import is_gdoc_url, parse_gdoc_id
     from inkwell.agent.tools.google_docs import do_fetch_comments
 
-    if GDOC_URL_PATTERN.search(doc):
+    if is_gdoc_url(doc):
         doc_id = parse_gdoc_id(doc)
     else:
         doc_id = doc
@@ -368,7 +369,7 @@ def fetch_comments(
         typer.echo()
 
     if session_id:
-        from lup.paths import sessions_dir
+        from lup.workspace.paths import sessions_dir
 
         notes_dir = sessions_dir() / session_id / "pipeline_notes"
         if not notes_dir.exists():
@@ -414,10 +415,10 @@ def extract(
     from pathlib import Path as P
 
     from inkwell.agent.tools.research.fetch import do_fetch_source
-    from lup.content_safety import configure_content_safety
+    from lup.workspace.content_safety import configure
     from lup.mcp import ToolError
 
-    configure_content_safety(P(tempfile.mkdtemp(prefix="inkwell-extract-")))
+    configure(directory=P(tempfile.mkdtemp(prefix="inkwell-extract-")))
 
     try:
         result = asyncio.run(do_fetch_source(source))
@@ -496,7 +497,9 @@ def style_list() -> None:
     """List the current style corpus and format-specific examples."""
     from inkwell.agent.tools.voice import list_format_examples, list_style_references
 
-    voice_entries, prescriptive_entries = list_style_references()
+    listing = list_style_references()
+    voice_entries = listing.voice
+    prescriptive_entries = listing.prescriptive
     format_entries = list_format_examples()
 
     if not voice_entries and not prescriptive_entries and not format_entries:
@@ -574,34 +577,38 @@ def cache_clear(
         return
 
     clear_all = not voice and not urls
-    targets: list[tuple[str, Path]] = []
 
     voice_dir = cache_root / "voice"
     url_cache_files = list(cache_root.glob("*.txt"))
 
-    if (clear_all or voice) and voice_dir.exists():
-        count = sum(1 for _ in voice_dir.rglob("*") if _.is_file())
-        targets.append((f"voice analyses ({count} files)", voice_dir))
+    def chosen() -> Iterator[CacheTarget]:
+        """Each cache the flags asked for, where there is one to clear."""
+        if (clear_all or voice) and voice_dir.exists():
+            count = sum(1 for entry in voice_dir.rglob("*") if entry.is_file())
+            yield CacheTarget(label=f"voice analyses ({count} files)", path=voice_dir)
+        if (clear_all or urls) and url_cache_files:
+            yield CacheTarget(
+                label=f"URL fetch cache ({len(url_cache_files)} files)",
+                path=cache_root,
+            )
 
-    if (clear_all or urls) and url_cache_files:
-        targets.append((f"URL fetch cache ({len(url_cache_files)} files)", cache_root))
-
+    targets = list(chosen())
     if not targets:
         typer.echo("Nothing to clear.")
         return
 
-    for label, _ in targets:
-        typer.echo(f"  {label}")
+    for target in targets:
+        typer.echo(f"  {target.label}")
 
     if not yes:
         typer.confirm("Delete these caches?", abort=True)
 
-    for label, path in targets:
-        if path == cache_root:
-            for f in url_cache_files:
-                f.unlink()
+    for target in targets:
+        if target.path == cache_root:
+            for cached in url_cache_files:
+                cached.unlink()
         else:
-            shutil.rmtree(path, ignore_errors=True)
+            shutil.rmtree(target.path, ignore_errors=True)
 
     typer.echo("Cleared.")
 

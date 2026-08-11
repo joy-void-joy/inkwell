@@ -13,9 +13,9 @@ class TestGlossary:
     def test_seed_records_conventions(self, tmp_path: Path) -> None:
         path = tmp_path / "glossary.json"
         seed_glossary(path, ["call the protocol 'the handshake'"])
-        conventions, terms = load_glossary(path)
-        assert conventions == ["call the protocol 'the handshake'"]
-        assert terms == []
+        glossary = load_glossary(path)
+        assert glossary.conventions == ["call the protocol 'the handshake'"]
+        assert glossary.terms == []
 
     def test_first_definition_wins(self, tmp_path: Path) -> None:
         path = tmp_path / "glossary.json"
@@ -33,11 +33,11 @@ class TestGlossary:
         define_term_in_glossary(path, "widget", "a gadget")
         # Re-seeding (e.g. on restart) refreshes conventions, keeps terms.
         seed_glossary(path, ["conv a", "conv b"])
-        conventions, terms = load_glossary(path)
-        assert conventions == ["conv a", "conv b"]
-        assert [t.term for t in terms] == ["widget"]
+        glossary = load_glossary(path)
+        assert glossary.conventions == ["conv a", "conv b"]
+        assert [t.term for t in glossary.terms] == ["widget"]
 
     def test_load_missing_file_is_empty(self, tmp_path: Path) -> None:
-        conventions, terms = load_glossary(tmp_path / "absent.json")
-        assert conventions == []
-        assert terms == []
+        glossary = load_glossary(tmp_path / "absent.json")
+        assert glossary.conventions == []
+        assert glossary.terms == []

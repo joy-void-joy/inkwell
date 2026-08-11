@@ -1,89 +1,57 @@
 ---
-allowed-tools: Read, Edit, Grep, Glob, AskUserQuestion
-description: View and modify permission hook patterns (bash, fetch, edits)
+description: "Inspect and modify the canonical semantic permission policy"
+allowed-tools: Read, Edit, AskUserQuestion, Bash
+arguments:
+  - name: arguments
+    description: "Optional arguments supplied with the skill invocation"
+    required: false
 ---
 
-# Hooks: Permission Hook Management
+# Hooks: Semantic Permission Policy
 
-Modify the PreToolUse permission hooks that control auto-allow, auto-deny, and ask behavior.
+Update the canonical policy and regenerate its hermetic native dispatchers.
 
 ## User's Request
 
 $ARGUMENTS
 
-## Hook Files
+## Sources of truth
 
-The configurable hooks live in `.claude/plugins/lup/hooks/scripts/`:
+- `packages/lup/src/lup/policy/` owns semantic fetch, shell, edit, aggregation,
+  and native-boundary contracts; `policy/shell_rules.py` owns the shape a shell
+  vocabulary takes and its erasure to kernel rows, like the fetch scopes and
+  anti-pattern set.
+- `packages/lup/src/lup/codescan/` owns the rule families — anti-patterns
+  (`antipatterns.py`), boundary/spelling seams (`boundaries.py`), capability
+  architecture (`capabilities.py`) — indexed by `registry.py` and rendered
+  into `docs/rules.md` by `uv run lup-devtools dev rules`.
+- `src/lup_template/devtools/harness/catalog.py` owns application URL scopes,
+  protected roots, policy IDs, and other composition inputs; the readable
+  shell table it declares is `content/shell_vocabulary.py`.
+- `tests/unit/test_semantic_policy.py` is the shared canonical/bundled fixture
+  suite.
 
-| File                  | Controls        | Configurable Parts                                                                 |
-| --------------------- | --------------- | ---------------------------------------------------------------------------------- |
-| `auto_allow_bash.py`  | Bash commands   | `RULES` list of `Allow`/`Deny` (last-match-wins)                                   |
-| `auto_allow_fetch.py` | WebFetch URLs   | `ALLOW_PATTERNS` (list of regex), `DENY_PATTERNS` (list of (regex, reason) tuples) |
-| `auto_allow_edits.py` | Edit operations | `PROTECTED_PATTERNS` (list of regex), `MAX_REAL_CHANGES` (int)                     |
+Files beneath .claude/plugins/lup/hooks/ under Claude Code, .codex/plugins/lup/hooks/ under Codex are
+generated artifacts. Never edit them as the source of a policy change.
 
-## How It Works
+## Workflow
 
-- **ALLOW_PATTERNS / Allow rules**: Commands/URLs matching these are auto-approved (no user prompt)
-- **DENY_PATTERNS / Deny rules**: Commands/URLs matching these are blocked with a reason message
-- **Neither**: Falls through to ask the user interactively
-- **PROTECTED_PATTERNS** (edits only): Files matching these always defer to user
-- **MAX_REAL_CHANGES** (edits only): Edits with more nontrivial lines than this defer to user
+1. Classify the request as a semantic rule, an application policy input, or a
+   native decoding/rendering capability.
+2. Read the relevant canonical source and its cross-native fixtures.
+3. Show the current behavior and propose the smallest semantic change. When
+   the request did not already settle the decision, Request explicit user approval before changing policy behavior. Reason: a policy change alters what every later session may do.
+4. Edit the canonical source and add fixtures for safe, denied, approval, and
+   malformed variants as applicable.
+5. Run `uv run pytest -q tests/unit/test_semantic_policy.py`.
+6. Run `uv run lup-devtools harness generate all` and
+   `uv run lup-devtools harness check all`.
 
-## Your Task
+Denial must win over approval across batches and shell segments. Unsupported
+native approval effects fail closed. Resolve-editor autonomy may relax only the
+declared protected/large edit cases; temporary paths, marker changes, and
+anti-pattern violations keep their guardrails.
 
-1. **Read all 3 hook scripts** to see current patterns
-2. **Parse the user's request** to determine:
-   - Which hook file to modify
-   - Which list to modify (allow, deny, protected)
-   - What pattern to add or remove
-3. **Show the user** the current relevant patterns and propose the specific edit
-4. **Use AskUserQuestion** to confirm before making the change
-5. **Make the edit** using the Edit tool
-
-## Guidelines
-
-- Patterns are Python regex strings (raw strings with `r"..."` prefix)
-- For DENY_PATTERNS, always include a helpful reason message
-- When adding allow patterns, prefer precise patterns over broad ones (e.g., `r"^npm run build$"` not `r"^npm"`)
-- When the user's request is ambiguous about which hook, ask
-- Show the exact pattern you'll add so the user can verify the regex
-
-## Examples
-
-User says: "allow fetching from pypi.org"
--> Add `r"https?://pypi\.org/"` to `auto_allow_fetch.py` ALLOW_PATTERNS
-
-User says: "auto-approve docker compose commands"
--> Add `Allow(r"^docker compose\b")` to `auto_allow_bash.py` RULES
-
-User says: "block rm -rf commands"
--> Add `Deny(r"^rm -rf\b", "Denied: rm -rf is blocked for safety.")` to `auto_allow_bash.py` RULES
-
-User says: "protect the settings/ directory from edits"
--> Add `r"(^|/)settings/"` to `auto_allow_edits.py` PROTECTED_PATTERNS
-
-User says: "increase the edit threshold to 5 lines"
--> Change `MAX_REAL_CHANGES = 3` to `MAX_REAL_CHANGES = 5` in `auto_allow_edits.py`
-
-User says: "remove the pypi allow pattern"
--> Remove the matching pattern from the relevant list
-
-## If no arguments provided
-
-If `$ARGUMENTS` is empty, read all 3 hook files and present a summary of current configuration using this format:
-
-### Bash (auto_allow_bash.py)
-
-**Rules:** (list Allow/Deny rules in order)
-
-### Fetch (auto_allow_fetch.py)
-
-**Auto-allow:** (list patterns)
-**Deny:** (list patterns with reasons)
-
-### Edits (auto_allow_edits.py)
-
-**Protected files:** (list patterns)
-**Max real changes:** N
-
-Then ask what the user wants to change.
+With no arguments, summarize the canonical URL scopes, shell classifications,
+protected edit rules, threshold, resolver-editor exceptions, and each native
+boundary's approval behavior, then ask what should change.

@@ -18,8 +18,6 @@ export function useSessionWebSocket(
   const prevSessionRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    console.log("[ws] effect fired, sessionId=", sessionId, "stopRef=", stopRef.current);
-    console.trace("[ws] effect caller");
     mountedRef.current = true;
     if (prevSessionRef.current !== sessionId) {
       stopRef.current = false;

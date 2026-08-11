@@ -39,7 +39,15 @@ def test_light_run_trims_to_the_light_backbone(tmp_path: Path) -> None:
 
 def test_light_skips_the_heavy_stages_but_keeps_the_spine(tmp_path: Path) -> None:
     stages = make_runner(tmp_path, light=True).stages_for_run()
-    heavy = {"voice", "research", "assumptions", "refine", "merge", "resolve", "rewrite"}
+    heavy = {
+        "voice",
+        "research",
+        "assumptions",
+        "refine",
+        "merge",
+        "resolve",
+        "rewrite",
+    }
     assert heavy.isdisjoint(stages)
     for stage in ("extract", "plan", "write", "review", "format"):
         assert stage in stages

@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(uv run lup-devtools:*), Read, Grep, Glob, Agent, AskUserQuestion
-description: Aggregate tool health, capability gaps, and reasoning patterns across sessions
+description: "Aggregate tool health, capability gaps, and reasoning patterns across sessions"
+allowed-tools: Bash(uv run lup-devtools:*), Read, Task, AskUserQuestion
 ---
 
 # Analyze: Tool Health & Capability Gaps
@@ -33,11 +33,7 @@ From investigation findings:
 
 ### 3. Version comparison (if relevant)
 
-If comparing across versions, launch the version-explorer subagent for code-level diffs:
-
-```
-Agent(subagent_type="lup:version-explorer", prompt="Compare vX.Y.Z and vA.B.C")
-```
+If comparing across versions, get code-level diffs: Delegate with Agent(subagent_type="lup:version-explorer", prompt="Compare vX.Y.Z and vA.B.C")
 
 ### 4. Summarize
 

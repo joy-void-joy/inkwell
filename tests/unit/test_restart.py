@@ -6,7 +6,7 @@ checkpointed. That choice is what makes a restart regenerate from clean
 upstream state with fresh agents, so it is exercised against on-disk files.
 """
 
-import lup.paths as paths
+import lup.workspace.paths as paths
 import pytest
 
 from inkwell.agent.core import checkpoint_before
@@ -19,7 +19,8 @@ def make_checkpoints(base, stages):
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths, "NOTES_DIR", tmp_path)
+    monkeypatch.setattr(paths, "state", paths.PathState())
+    paths.configure(notes_dir=tmp_path)
     session_id = "session-under-test"
     base = paths.sessions_dir() / session_id / "pipeline_notes"
     base.mkdir(parents=True)

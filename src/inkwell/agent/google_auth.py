@@ -1,25 +1,162 @@
-"""Google OAuth and API service creation for Inkwell."""
+"""Google OAuth and API service creation for Inkwell.
 
-# claude: ignore
-# googleapiclient.discovery.Resource is untyped — opaque handles throughout.
+The client builds its resources dynamically and ships no types, so the slice
+of the Docs and Drive APIs this project calls is declared here as protocols:
+that is what lets a checker resolve `documents().get` as a resource verb
+rather than leave every call site reading into an opaque handle.
+"""
 
-import json
 import logging
 from pathlib import Path
+from typing import Literal, NotRequired, Protocol, TypedDict, Unpack, overload
 
 import httplib2
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+from googleapiclient.discovery import build as discovery_build
 from googleapiclient.errors import HttpError
-from lup import google_oauth
+from googleapiclient.http import MediaFileUpload
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from lup.types import JsonObject, JsonValue
+from lup.web import google_oauth
+
+from inkwell.agent.markdown_to_docs import BatchUpdateBody, NewDocumentBody
 
 logger = logging.getLogger(__name__)
 
-type DocsService = object
-type DriveService = object
+
+class GoogleRequest(Protocol):
+    """The one thing this project does with a googleapiclient request.
+
+    The client builds its resources dynamically and ships no types, so the
+    shape it hands back is named here rather than inferred: every caller
+    only ever executes it and reads JSON out.
+    """
+
+    def execute(self) -> JsonValue: ...
+
+
+class DocumentQuery(TypedDict):
+    """The parameters a ``documents().get`` call takes."""
+
+    documentId: str
+    includeTabsContent: NotRequired[bool]
+    suggestionsViewMode: NotRequired[str]
+
+
+class DocumentsResource(Protocol):
+    """The Docs API's ``documents()`` resource, as this project calls it.
+
+    Naming the three verbs used keeps ``get`` legible as this resource's own
+    method: a checker resolves it here rather than mistaking it for a lookup
+    into a mapping, which is all an untyped handle leaves it looking like.
+    """
+
+    def get(self, **query: Unpack[DocumentQuery]) -> GoogleRequest: ...
+
+    def batchUpdate(
+        self, *, documentId: str, body: BatchUpdateBody
+    ) -> GoogleRequest: ...
+
+    def create(self, *, body: NewDocumentBody) -> GoogleRequest: ...
+
+
+class DocsService(Protocol):
+    """Google Docs API v1, as this project calls it."""
+
+    def documents(self) -> DocumentsResource: ...
+
+
+class CommentQuery(TypedDict):
+    """The parameters a ``comments().list`` call takes."""
+
+    fileId: str
+    fields: str
+    pageSize: NotRequired[int]
+    pageToken: NotRequired[str]
+
+
+class CommentsResource(Protocol):
+    """The Drive ``comments()`` resource, as this project calls it."""
+
+    def list(self, **query: Unpack[CommentQuery]) -> GoogleRequest: ...
+
+    def create(
+        self, *, fileId: str, body: JsonObject, fields: str
+    ) -> GoogleRequest: ...
+
+
+class RepliesResource(Protocol):
+    """The Drive ``replies()`` resource, as this project calls it."""
+
+    def create(
+        self, *, fileId: str, commentId: str, body: JsonObject, fields: str
+    ) -> GoogleRequest: ...
+
+
+class PermissionsResource(Protocol):
+    """The Drive ``permissions()`` resource, as this project calls it."""
+
+    def create(
+        self, *, fileId: str, body: JsonObject, sendNotificationEmail: bool = True
+    ) -> GoogleRequest: ...
+
+
+class FilesResource(Protocol):
+    """The Drive ``files()`` resource, as this project calls it."""
+
+    def create(
+        self, *, body: JsonObject, media_body: MediaFileUpload, fields: str
+    ) -> GoogleRequest: ...
+
+    def update(self, *, fileId: str, body: JsonObject) -> GoogleRequest: ...
+
+    def list(self, *, pageSize: int) -> GoogleRequest: ...
+
+
+class DriveService(Protocol):
+    """Google Drive API v3, as this project calls it."""
+
+    def comments(self) -> CommentsResource: ...
+
+    def replies(self) -> RepliesResource: ...
+
+    def permissions(self) -> PermissionsResource: ...
+
+    def files(self) -> FilesResource: ...
+
+
+@overload
+def build(
+    serviceName: Literal["docs"], version: Literal["v1"], *, credentials: Credentials
+) -> DocsService: ...
+
+
+@overload
+def build(
+    serviceName: Literal["drive"], version: Literal["v3"], *, credentials: Credentials
+) -> DriveService: ...
+
+
+def build(
+    serviceName: str, version: str, *, credentials: Credentials
+) -> DocsService | DriveService:
+    """The discovery client, resolved to whichever surface was asked for.
+
+    The client builds its resources at runtime and ships no types, so every call
+    site would otherwise read into an opaque handle — and a verb like
+    ``documents().get`` would look like a mapping lookup rather than the resource
+    method it is. Binding the service name to its protocol here settles that once,
+    for every caller, instead of at each one.
+    """
+    service: DocsService | DriveService = discovery_build(
+        serviceName, version, credentials=credentials
+    )
+    return service
+
 
 SCOPES = [
     "https://www.googleapis.com/auth/documents",
@@ -78,6 +215,30 @@ def load_credentials(token_path: str) -> Credentials:
     return creds
 
 
+class GoogleErrorDetail(BaseModel):
+    """One entry in a Google error's ``details`` list."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    reason: str = ""
+
+
+class GoogleError(BaseModel):
+    """The ``error`` object a Google API returns beside a 4xx status."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    details: list[GoogleErrorDetail] = Field(default_factory=list)
+
+
+class GoogleErrorEnvelope(BaseModel):
+    """A Google API error body, which wraps everything under one ``error`` key."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    error: GoogleError = Field(default_factory=GoogleError)
+
+
 def is_service_disabled_body(content: bytes | str) -> bool:
     """Whether a Google API 403 body reports SERVICE_DISABLED (API not enabled).
 
@@ -89,18 +250,10 @@ def is_service_disabled_body(content: bytes | str) -> bool:
     """
     try:
         body = content.decode() if isinstance(content, bytes) else content
-        data = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        envelope = GoogleErrorEnvelope.model_validate_json(body)
+    except (UnicodeDecodeError, ValidationError):
         return False
-    if not isinstance(data, dict):
-        return False
-    error = data.get("error")
-    details = error.get("details") if isinstance(error, dict) else None
-    if not isinstance(details, list):
-        return False
-    return any(
-        isinstance(d, dict) and d.get("reason") == "SERVICE_DISABLED" for d in details
-    )
+    return any(d.reason == "SERVICE_DISABLED" for d in envelope.error.details)
 
 
 def probe_disabled_apis(token_path: str) -> list[str] | None:
@@ -168,10 +321,10 @@ def build_consent_url(
     *,
     state: str | None = None,
     use_pkce: bool = True,
-) -> tuple[str, str, str]:
+) -> google_oauth.Consent:
     """Build inkwell's Docs/Drive consent URL for ``redirect_uri``.
 
-    Binds :data:`SCOPES` onto :func:`lup.google_oauth.build_consent_url`, which
+    Binds :data:`SCOPES` onto :func:`lup.web.google_oauth.build_consent_url`, which
     carries the PKCE ``code_verifier`` back for :func:`exchange_code` to present.
     """
     return google_oauth.build_consent_url(
@@ -189,7 +342,7 @@ def exchange_code(
 ) -> Credentials:
     """Exchange an authorization code for a saved token, for ``redirect_uri``.
 
-    Binds :data:`SCOPES` onto :func:`lup.google_oauth.exchange_code` and persists
+    Binds :data:`SCOPES` onto :func:`lup.web.google_oauth.exchange_code` and persists
     the returned credentials to ``token_path``. ``code_verifier`` must be the one
     :func:`build_consent_url` returned whenever the consent URL carried a PKCE
     challenge.
@@ -218,17 +371,21 @@ class ServiceFactory:
 
     def docs_service(self) -> DocsService:
         """Google Docs API v1 service (lazy, cached)."""
-        if self.cached_docs is None:
-            creds = self.credentials()
-            self.cached_docs = build("docs", "v1", credentials=creds)
-        return self.cached_docs
+        cached = self.cached_docs
+        if cached is not None:
+            return cached
+        service: DocsService = build("docs", "v1", credentials=self.credentials())
+        self.cached_docs = service
+        return service
 
     def drive_service(self) -> DriveService:
         """Google Drive API v3 service (lazy, cached)."""
-        if self.cached_drive is None:
-            creds = self.credentials()
-            self.cached_drive = build("drive", "v3", credentials=creds)
-        return self.cached_drive
+        cached = self.cached_drive
+        if cached is not None:
+            return cached
+        service: DriveService = build("drive", "v3", credentials=self.credentials())
+        self.cached_drive = service
+        return service
 
     def invalidate(self) -> None:
         """Clear cached services, forcing re-creation on next access."""

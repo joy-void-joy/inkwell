@@ -1,7 +1,7 @@
 ---
-allowed-tools: Read, Grep, Glob, Bash(ls:*, wc:*, sort:*, tail:*, stat:*, uv run lup-devtools:*), Agent
-description: Review a session trace for workflow quality, tool usage, and improvement opportunities
-argument-hint: [session ID, file path, or pasted trace]
+description: "Review a session trace for workflow quality, tool usage, and improvement opportunities"
+allowed-tools: Read, Bash(ls:*, wc:*, sort:*, tail:*, stat:*, uv run lup-devtools:*), Task
+argument-hint: "[session ID, file path, or pasted trace]"
 ---
 
 # Review: Trace Workflow Analysis

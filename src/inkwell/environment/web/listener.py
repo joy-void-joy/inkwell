@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from inkwell.agent.models import WritingOutput
@@ -12,10 +11,20 @@ from inkwell.agent.pipeline import PipelineListener
 from inkwell.agent.session import WritingSessionState
 from inkwell.agent.tools.google_docs import do_insert_comment
 from inkwell.environment.web.models import (
+    BlockEvent,
+    CollectRevisionEvent,
+    CompleteEvent,
+    CompletionOutput,
     CostSnapshot,
+    CostUpdateEvent,
+    MessageEvent,
+    ProgressEvent,
     SectionInfo,
+    SessionEvent,
     SessionStateSnapshot,
     StageCostSummary,
+    StageEvent,
+    StateUpdateEvent,
 )
 
 if TYPE_CHECKING:
@@ -35,42 +44,39 @@ class WebListener(PipelineListener):
         self.revision_queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.awaiting_revision = False
 
-    async def broadcast(self, message: dict[str, object]) -> None:
-        message.setdefault("timestamp", datetime.now().isoformat())
-        await self.manager.broadcast(self.session_id, message)
+    async def broadcast(self, event: SessionEvent) -> None:
+        await self.manager.broadcast(self.session_id, event)
 
     async def broadcast_state(self) -> None:
-        handle = self.manager.sessions.get(self.session_id)
+        handle = self.manager.handle_for(self.session_id)
         if not handle:
             return
-        await self.broadcast(
-            {"type": "state_update", "state": self.serialize_state(handle.state)}
-        )
+        await self.broadcast(StateUpdateEvent(state=self.serialize_state(handle.state)))
 
     async def broadcast_cost(self) -> None:
-        handle = self.manager.sessions.get(self.session_id)
+        handle = self.manager.handle_for(self.session_id)
         if not handle:
             return
         acc = handle.cost
         snapshot = CostSnapshot(
-            total_cost_usd=acc.total_cost_usd,
-            total_input_tokens=acc.total_input_tokens,
-            total_output_tokens=acc.total_output_tokens,
-            duration_s=acc.duration_seconds,
+            total_cost_usd=acc.total.cost_usd,
+            total_input_tokens=acc.total.input_tokens,
+            total_output_tokens=acc.total.output_tokens,
+            duration_s=acc.total.duration.total_seconds(),
             stages={
                 name: StageCostSummary(
                     cost_usd=sc.cost_usd,
-                    duration_s=sc.duration_seconds,
+                    duration_s=sc.duration.total_seconds(),
                     input_tokens=sc.input_tokens,
                     output_tokens=sc.output_tokens,
-                    calls=sc.call_count,
+                    calls=sc.turn_count,
                 )
                 for name, sc in acc.stages.items()
             },
         )
-        await self.broadcast({"type": "cost_update", "cost": snapshot.model_dump()})
+        await self.broadcast(CostUpdateEvent(cost=snapshot))
 
-    def serialize_state(self, state: WritingSessionState) -> dict[str, object]:
+    def serialize_state(self, state: WritingSessionState) -> SessionStateSnapshot:
         return SessionStateSnapshot(
             doc_id=state.doc_id,
             doc_url=state.doc_url,
@@ -81,64 +87,57 @@ class WebListener(PipelineListener):
                 for s in state.sections
             ],
             pending_questions=list(state.pending_questions),
-        ).model_dump()
+        )
 
     async def on_block(self, block_type: str, content: str, prefix: str) -> None:
         await self.broadcast(
-            {
-                "type": "block",
-                "block_type": block_type,
-                "content": content[:2000],
-                "prefix": prefix,
-            }
+            BlockEvent(
+                block_type=block_type,
+                content=content[:2000],
+                prefix=prefix,
+            )
         )
 
     async def on_stage(self, stage: str, description: str) -> None:
-        await self.broadcast(
-            {"type": "stage", "stage": stage, "description": description}
-        )
+        await self.broadcast(StageEvent(stage=stage, description=description))
         await self.broadcast_state()
         await self.broadcast_cost()
 
     async def on_progress(self, message: str) -> None:
-        await self.broadcast({"type": "progress", "message": message})
+        await self.broadcast(ProgressEvent(message=message))
 
     async def on_state_change(self) -> None:
         await self.broadcast_state()
 
     async def on_complete(self, output: WritingOutput) -> None:
         await self.broadcast(
-            {
-                "type": "complete",
-                "output": {
-                    "title": output.title,
-                    "word_count": output.word_count,
-                    "summary": output.summary,
-                    "google_doc_url": output.google_doc_url,
-                    "review_findings_count": len(output.review_findings),
-                },
-            }
+            CompleteEvent(
+                output=CompletionOutput(
+                    title=output.title,
+                    word_count=output.word_count,
+                    summary=output.summary,
+                    google_doc_url=output.google_doc_url,
+                    review_findings_count=len(output.review_findings),
+                )
+            )
         )
         await self.broadcast_cost()
 
     async def on_pause(self, stage: str, doc_url: str) -> None:
         await self.broadcast(
-            {
-                "type": "progress",
-                "message": (
+            ProgressEvent(
+                message=(
                     f"⏸ Paused after {stage} — review and comment in the Doc, "
                     "then resume to continue."
-                ),
-            }
+                )
+            )
         )
 
     async def on_message(self, source: str, message: str) -> None:
-        await self.broadcast({"type": "message", "source": source, "message": message})
+        await self.broadcast(MessageEvent(source=source, message=message))
 
     async def collect_author_input(self, state: WritingSessionState) -> list[str]:
-        await self.broadcast(
-            {"type": "state_update", "state": self.serialize_state(state)}
-        )
+        await self.broadcast(StateUpdateEvent(state=self.serialize_state(state)))
 
         items: list[str] = []
         while not self.feedback_queue.empty():
@@ -160,10 +159,7 @@ class WebListener(PipelineListener):
 
         if items:
             await self.broadcast(
-                {
-                    "type": "progress",
-                    "message": f"Incorporating {len(items)} feedback item(s)",
-                }
+                ProgressEvent(message=f"Incorporating {len(items)} feedback item(s)")
             )
 
         return items
@@ -184,10 +180,7 @@ class WebListener(PipelineListener):
         self.awaiting_revision = True
         try:
             await self.broadcast(
-                {
-                    "type": "collect_revision",
-                    "state": self.serialize_state(state),
-                }
+                CollectRevisionEvent(state=self.serialize_state(state))
             )
             return await asyncio.wait_for(self.revision_queue.get(), timeout=300)
         except asyncio.TimeoutError:

@@ -1,6 +1,6 @@
 """Tests for extract_json_object — the text fallback for structured output."""
 
-from lup.client import extract_json_object
+from inkwell.agent.client import extract_json_object
 
 
 class TestExtractJsonObject:

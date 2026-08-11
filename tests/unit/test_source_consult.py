@@ -5,6 +5,8 @@ from pathlib import Path
 import pymupdf
 import pytest
 
+from lup.mcp import response_text
+
 from inkwell.agent.tools.source_consult import (
     FindInSourceInput,
     build_source_registry,
@@ -91,14 +93,14 @@ class TestFindInSource:
         )
         build_source_registry([str(pdf)], artifacts_dir)
         tools = make_source_consult_tools(lambda: registry_path_for(artifacts_dir))
-        find = next(t for t in tools if t.sdk_tool.name == "find_in_source")
+        find = next(t for t in tools if t.name == "find_in_source")
 
-        result = await find.sdk_tool.handler(
+        result = await find.handler(
             FindInSourceInput(pattern="least significant").model_dump()
         )
 
         assert result.get("is_error") is not True
-        text = str(result["content"][0]["text"])
+        text = response_text(result)
         assert '"page": 2' in text.replace("page=", '"page": ') or '"page":2' in (
             text.replace(" ", "")
         )
@@ -107,11 +109,9 @@ class TestFindInSource:
         self, artifacts_dir: Path
     ) -> None:
         tools = make_source_consult_tools(lambda: registry_path_for(artifacts_dir))
-        find = next(t for t in tools if t.sdk_tool.name == "find_in_source")
+        find = next(t for t in tools if t.name == "find_in_source")
 
-        result = await find.sdk_tool.handler(
-            FindInSourceInput(pattern="x").model_dump()
-        )
+        result = await find.handler(FindInSourceInput(pattern="x").model_dump())
 
         assert result.get("is_error") is True
 
@@ -122,10 +122,8 @@ class TestFindInSource:
         make_pdf(pdf, ["content"])
         build_source_registry([str(pdf)], artifacts_dir)
         tools = make_source_consult_tools(lambda: registry_path_for(artifacts_dir))
-        find = next(t for t in tools if t.sdk_tool.name == "find_in_source")
+        find = next(t for t in tools if t.name == "find_in_source")
 
-        result = await find.sdk_tool.handler(
-            FindInSourceInput(pattern="[bad").model_dump()
-        )
+        result = await find.handler(FindInSourceInput(pattern="[bad").model_dump())
 
         assert result.get("is_error") is True

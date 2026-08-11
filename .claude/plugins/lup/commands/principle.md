@@ -1,7 +1,7 @@
 ---
-allowed-tools: Bash(uv run lup-devtools:*), Read, Write, Edit, Glob, Grep, AskUserQuestion, Task
-description: Propagate a general principle across the entire repo
-argument-hint: <principle description>
+description: "Propagate a general principle across the entire repo"
+allowed-tools: Bash(uv run lup-devtools:*), Read, Write, Edit, AskUserQuestion, Agent
+argument-hint: "<principle description>"
 ---
 
 # Propagate Principle
@@ -26,11 +26,8 @@ Before auditing files, articulate the principle precisely:
 2. **Identify the "do this / not this" pair** — what does the principle look like when followed vs violated?
 3. **Check generality** — would this principle still apply if the domain changed completely? If not, it may be too specific.
 
-Use AskUserQuestion to confirm the formulation with the user before proceeding. Show:
-
-- The principle statement
-- A "Do This / Not This" table (like the Bitter Lesson table in CLAUDE.md)
-- 2-3 concrete examples of the principle in action
+Show the principle statement, a "Do This / Not This" table (like the Bitter
+Lesson table in the guidance), and 2-3 concrete examples of it in action. Then Ask the user with the AskUserQuestion tool, offering concrete options plus a free-text choice: whether that formulation is the right one
 
 ## Phase 2: Audit All Layers
 
@@ -42,24 +39,34 @@ Read every relevant file and categorize findings into three buckets:
 
 ### Layer A: Documentation & Meta
 
-1. **CLAUDE.md** (`.claude/CLAUDE.md`)
+1. **Guidance** (`src/lup_template/devtools/harness/content/guidance.py`, plus
+   the portable blocks it composes from
+   `packages/lup/src/lup/devtools/harness/content/conventions.py`)
    - Check every section: does it align with or contradict the principle?
+   - A convention every reader needs identically belongs in the shared
+     blocks, so fixing one there fixes the guidance, the downstream template,
+     and the reference page at once
    - Look for existing principles that overlap or conflict
+   - .claude/CLAUDE.md under Claude Code, AGENTS.md under Codex are generated from this module — read them for the rendered result, never edit them
 
-2. **TEMPLATE_CLAUDE.md** (`.claude/plugins/lup/TEMPLATE_CLAUDE.md`)
-   - Same checks — this is what new projects inherit
+2. **Template guidance** (`src/lup_template/devtools/harness/content/template_sections.py`)
+   - Same checks — this is what new projects inherit; the portable sections render into every flavor of .claude/plugins/lup/TEMPLATE_CLAUDE.md under Claude Code, .codex/plugins/lup/TEMPLATE_AGENTS.md under Codex from this one source
 
 ### Layer B: Commands & Workflows
 
-3. **All command files** (`.claude/plugins/lup/commands/*.md`)
-   - Read each command's instructions, guidelines, and anti-patterns
-   - Check if commands encode workflows that violate the principle
+3. **All skill modules** (`packages/lup/src/lup/devtools/harness/content/skills/*.py`
+   and `src/lup_template/devtools/harness/content/skills/*.py` — both halves,
+   or the sweep misses the twenty-five the library holds)
+   - Read each skill's instructions, guidelines, and anti-patterns
+   - Check if a skill encodes a workflow that violates the principle
+   - .claude/plugins/lup/commands/*.md under Claude Code, .codex/plugins/lup/skills/*/SKILL.md under Codex are generated from these — never edit them
 
-### Layer C: Hook Scripts & Enforcement
+### Layer C: Semantic Policy & Enforcement
 
-4. **Hook scripts** (`.claude/plugins/lup/hooks/scripts/*.py`)
-   - Check if any hook logic contradicts the principle
-   - Consider if a new hook could enforce the principle mechanically
+4. **Canonical policy** (`packages/lup/src/lup/policy/` plus the `HookSet` in
+   `src/lup_template/devtools/harness/catalog.py`; everything under .claude/plugins/lup/hooks/ under Claude Code, .codex/plugins/lup/hooks/ under Codex is generated from these — never edit it directly)
+   - Check if any policy rule contradicts the principle
+   - Consider if a new policy rule could enforce the principle mechanically
 
 ### Layer D: Code Template
 
@@ -81,8 +88,9 @@ The `src/` directory IS the template — when someone forks this repo, this code
    - CLI structure, how the agent is invoked
    - Any scaffolding patterns
 
-8. **Devtools** (`src/lup_template/devtools/`)
-   - CLI commands for development and analysis
+8. **Devtools** (`packages/lup/src/lup/devtools/` and
+   `src/lup_template/devtools/`)
+   - CLI commands for development and analysis, most of them the library's
    - Patterns encoded in automation
 
 ## Phase 3: Propose Changes (Grouped by Layer)
@@ -91,20 +99,21 @@ Present findings and proposed changes one layer at a time. For each layer:
 
 1. **Show current state** — quote the relevant sections that need changes
 2. **Propose specific edits** — show what would change and why
-3. **Use AskUserQuestion** to get approval before proceeding
+3. Request explicit user approval before applying that layer's edits. Reason: a principle sweep touches every layer and is hard to unpick once several have landed.
 
 ### Layer order:
 
-**Group 1: CLAUDE.md + TEMPLATE_CLAUDE.md**
+**Group 1: Guidance + template sections**
 
-- CLAUDE.md is the source of truth. Changes here set the direction for everything else.
+- `guidance.py` is the source of truth. Changes here set the direction for everything else.
 - Consider: new section, additions to existing sections, anti-pattern entries, removal of contradictions.
-- Mirror relevant changes into TEMPLATE_CLAUDE.md so new projects inherit the principle.
-- Keep template sections general — domain-specific details belong in CLAUDE.md only.
+- Convention text both readers need identically lives once, in `conventions.py`, and is spliced into `guidance.py` and `template_sections.py` alike — so editing it there lands in both without anyone remembering to copy it. Never restate a shared convention in either consumer; that is what drifted before, down to em dashes in one copy and double hyphens in the other.
+- Repo-specific material is an **addition** after the shared part, never a rewrite of it. An addition cannot drift from what it adds to.
+- Keep template sections general — domain-specific details belong in `guidance.py` only.
 
-**Group 2: Command files**
+**Group 2: Skill modules**
 
-- Update commands whose workflows should reflect the principle.
+- Update the skill modules whose workflows should reflect the principle.
 - Add the principle to relevant "Guidelines" or "Anti-Patterns" sections.
 - Don't add the principle to every command — only where it's relevant to that command's workflow.
 
@@ -123,14 +132,21 @@ Present findings and proposed changes one layer at a time. For each layer:
 - If an existing hook contradicts the principle, propose modifications.
 - Not every principle needs a hook — only propose one if mechanical enforcement makes sense.
 
-**Group 5: Devtools & automation** (`src/lup_template/devtools/`)
+**Group 5: Devtools & automation** (`packages/lup/src/lup/devtools/` and `src/lup_template/devtools/`)
 
-- Do the devtools commands (agent, session, git, sync, usage) reflect the principle?
+- Do the devtools commands (agent, py, dev, feedback, setup, sync, trace, usage, version) reflect the principle?
 - Are there devtools commands that should exist to support the principle but don't?
 
 ## Phase 4: Execute Approved Changes
 
-For each approved group, make the edits. After all changes:
+For each approved group, make the edits. Every layer above is Python source, so regenerate both native plugins afterwards to bring the artifacts back in step:
+
+```bash
+uv run lup-devtools harness claude
+uv run lup-devtools harness codex
+```
+
+After all changes:
 
 1. Summarize what was changed across all layers
 2. Note any layers where no changes were needed (and why)
@@ -140,6 +156,6 @@ For each approved group, make the edits. After all changes:
 
 - **Consistency over completeness** — better to have 5 files consistently reflecting the principle than 10 files with half-baked mentions
 - **Don't dilute existing content** — integrate naturally into existing sections rather than bolting on disconnected paragraphs
-- **Respect the structure** — each file type has conventions. CLAUDE.md uses tables and sections, commands use phases, hooks use pattern lists
+- **Respect the structure** — each source has conventions. Guidance uses tables and sections, skills use phases, policy rules use pattern lists
 - **Less is more** — a principle mentioned in 3 right places is better than mentioned in 15 places where it becomes noise
 - **Enforcement > documentation** — a hook that prevents violations is worth more than a paragraph that describes the principle

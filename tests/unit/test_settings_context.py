@@ -2,6 +2,10 @@
 
 import asyncio
 
+from lup.adapters.claude.config import ClaudeCompatibilityTransform
+from lup.adapters.claude.selection import claude_config
+from lup.runtime.selection import SessionRequest
+
 import inkwell.agent.config as config_mod
 from inkwell.agent.config import (
     Settings,
@@ -11,7 +15,7 @@ from inkwell.agent.config import (
     subprocess_auth_env,
     use_settings,
 )
-from lup.client import client_env
+from inkwell.agent.client import client_env, compatible_endpoint
 
 
 def make_settings(**overrides: str) -> Settings:
@@ -80,19 +84,50 @@ class TestSubprocessAuthEnv:
         s.openrouter_api_key = None
         assert subprocess_auth_env(s) == {"CLAUDE_CONFIG_DIR": "/tmp/cesia"}
 
-    def test_openrouter_is_routed(self) -> None:
-        s = make_settings(openrouter_api_key="sk-or-xyz")
-        s.claude_config_dir = None
-        env = subprocess_auth_env(s)
-        assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-xyz"
-        assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
-        assert env["ANTHROPIC_API_KEY"] == ""
-
     def test_empty_without_credentials(self) -> None:
         s = make_settings()
         s.claude_config_dir = None
         s.openrouter_api_key = None
         assert subprocess_auth_env(s) == {}
+
+    def test_openrouter_is_not_routed_through_the_environment(self) -> None:
+        """Routing is a transform over the session config, not an env var."""
+        s = make_settings(openrouter_api_key="sk-or-xyz")
+        s.claude_config_dir = None
+        assert subprocess_auth_env(s) == {}
+
+
+class TestCompatibleEndpoint:
+    def test_openrouter_key_routes_the_session(self) -> None:
+        s = make_settings(openrouter_api_key="sk-or-xyz")
+        s.claude_config_dir = None
+        with use_settings(s):
+            endpoint = compatible_endpoint()
+            assert endpoint is not None
+            routed = ClaudeCompatibilityTransform(endpoint).apply(
+                claude_config(SessionRequest())
+            )
+        assert routed.environment["ANTHROPIC_AUTH_TOKEN"] == "sk-or-xyz"
+        assert routed.environment["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+        assert routed.environment["ANTHROPIC_API_KEY"] == ""
+
+    def test_no_key_leaves_the_vendor_endpoint(self) -> None:
+        s = make_settings()
+        s.openrouter_api_key = None
+        with use_settings(s):
+            assert compatible_endpoint() is None
+
+    def test_routing_keeps_the_profile_login(self) -> None:
+        """The endpoint transform adds to the session env, it does not replace it."""
+        s = make_settings(claude_config_dir="/tmp/cesia", openrouter_api_key="sk-or")
+        with use_settings(s):
+            endpoint = compatible_endpoint()
+            assert endpoint is not None
+            routed = ClaudeCompatibilityTransform(endpoint).apply(
+                claude_config(SessionRequest(environment=client_env.get() or {}))
+            )
+        assert routed.environment["CLAUDE_CONFIG_DIR"] == "/tmp/cesia"
+        assert routed.environment["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
 
 
 class TestUseSettings:

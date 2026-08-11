@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import inkwell.agent.google_auth as google_auth
+from inkwell.devtools.setup import GooglePaths
 from inkwell.environment.web.routes import profiles as profiles_route
 
 
@@ -52,7 +53,9 @@ def test_status_reports_disabled_apis(
     token = tmp_path / "token.json"
     token.write_text("{}")
     monkeypatch.setattr(
-        profiles_route, "google_paths_for_profile", lambda _n: (creds, token)
+        profiles_route,
+        "google_paths_for_profile",
+        lambda _n: GooglePaths(credentials=creds, token=token),
     )
     monkeypatch.setattr(
         profiles_route, "probe_disabled_apis", lambda _t: ["docs.googleapis.com"]
@@ -69,7 +72,9 @@ def test_status_skips_probe_without_token(
     creds.write_text("{}")
     token = tmp_path / "token.json"
     monkeypatch.setattr(
-        profiles_route, "google_paths_for_profile", lambda _n: (creds, token)
+        profiles_route,
+        "google_paths_for_profile",
+        lambda _n: GooglePaths(credentials=creds, token=token),
     )
     called: list[str] = []
     monkeypatch.setattr(

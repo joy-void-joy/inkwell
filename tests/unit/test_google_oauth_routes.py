@@ -15,7 +15,10 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from lup.web.google_oauth import Consent
+
 import inkwell.agent.google_auth as google_auth
+from inkwell.devtools.setup import GooglePaths
 from inkwell.environment.web.routes import profiles as profiles_route
 
 
@@ -59,15 +62,17 @@ def test_callback_round_trip_threads_pkce_verifier(
     creds = write_client(tmp_path / "c.json", "web")
     token = tmp_path / "token.json"
     monkeypatch.setattr(
-        profiles_route, "google_paths_for_profile", lambda _name: (creds, token)
+        profiles_route,
+        "google_paths_for_profile",
+        lambda _name: GooglePaths(credentials=creds, token=token),
     )
     monkeypatch.setattr(
         google_auth,
         "build_consent_url",
-        lambda _c, _r, *, state=None, use_pkce=True: (
-            "https://accounts.google.com/o/oauth2/auth",
-            "S1",
-            "VERIFIER" if use_pkce else "",
+        lambda _c, _r, *, state=None, use_pkce=True: Consent(
+            url="https://accounts.google.com/o/oauth2/auth",
+            state="S1",
+            code_verifier="VERIFIER" if use_pkce else "",
         ),
     )
     exchanged: dict[str, str] = {}
@@ -108,5 +113,5 @@ def test_callback_unknown_state_writes_nothing(
     )
     page = asyncio.run(profiles_route.google_callback(state="ghost", code="x"))
     assert page.status_code == 200
-    assert "expired" in page.body.decode().lower()
+    assert "expired" in bytes(page.body).decode().lower()
     assert calls == []

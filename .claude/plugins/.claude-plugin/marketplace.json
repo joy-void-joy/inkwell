@@ -1,12 +1,12 @@
 {
-  "name": "lup",
+  "name": "inkwell",
   "owner": {
     "name": "Lup"
   },
   "plugins": [
     {
+      "description": "Writing harness with feedback, review, and safe resolution flows",
       "name": "lup",
-      "description": "Self-improving agent scaffold with feedback loop, trace analysis, and meta-level reflection",
       "source": "./lup"
     }
   ]

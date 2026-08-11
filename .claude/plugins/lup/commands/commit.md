@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(git:*), Read, Glob, Grep
-description: Review all diffs and create atomic commits
+description: "Review all diffs and create atomic commits"
+allowed-tools: Bash(git:*), Read
 ---
 
 # Create Commits
@@ -40,8 +40,6 @@ git commit -m "$(cat <<'EOF'
 type(scope): description
 
 Optional body with more details.
-
-Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -54,7 +52,7 @@ EOF
 - `docs` — Documentation only
 - `test` — Adding or updating tests
 - `chore` — Maintenance (deps, config)
-- `meta` — Changes to `.claude/` files
+- `meta` — Changes to harness content and the native trees it generates
 - `data` — Generated outputs
 
 ### Examples

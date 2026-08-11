@@ -612,6 +612,7 @@ textarea { resize: none; }
 }
 .text-composer-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .text-composer-actions button { width: auto; }
+.text-composer-error { margin: 0; }
 
 /* --- Settings / Profiles --- */
 

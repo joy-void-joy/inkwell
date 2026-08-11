@@ -4,21 +4,26 @@ Exports:
 - setup_session() — create notes, trace, and session state for a run
 - run_session() — unified entry point (fresh run or snapshot resume)
 - load_snapshot() — load saved pipeline state for resumption
-- SessionTrace — trace handle so callers can save on interrupt
+- SessionTrace — a run's trace, so callers can save it on interrupt
 """
 
 import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
+from pydantic import BaseModel, ConfigDict
 
-from lup.client import CostAccumulator, TokenUsage
-from lup.history import save_session
-from lup.metrics import get_metrics_summary, log_metrics_summary, reset_metrics
-from lup.notes import NotesConfig, setup_notes
-from lup.paths import agent_version
-from lup.trace import TraceLogger
+from lup.runtime.usage import CostAccumulator
+from lup.types import Usage
+from lup.workspace.history import save_session
+from lup.telemetry.metrics import (
+    get_metrics_summary,
+    log_metrics_summary,
+    reset_metrics,
+)
+from lup.workspace.notes import NotesConfig, setup_notes
+from lup.workspace.paths import agent_version
+from lup.telemetry.trace import TraceLogger
 
 import inkwell.agent.config as config_mod
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot
@@ -43,7 +48,11 @@ def traces_path() -> Path:
     return notes_path() / "traces"
 
 
-class SessionSetup(NamedTuple):
+class SessionSetup(BaseModel):
+    """What setting a session up produced: its notes, its trace, its state."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     notes: NotesConfig
     trace_logger: TraceLogger
     session_state: WritingSessionState
@@ -78,7 +87,7 @@ def load_snapshot(
     (snapshot_{stage}.json) if it exists, otherwise loads the latest
     snapshot and rewinds its stage field.
     """
-    from lup.paths import sessions_dir
+    from lup.workspace.paths import sessions_dir
 
     base = sessions_dir() / session_id / "pipeline_notes"
 
@@ -115,7 +124,7 @@ def checkpoint_before(session_id: str, redo_stage: str) -> str | None:
     Walks back past stages that never checkpointed (``resolve``, or a stage the
     run never reached). Returns None when nothing earlier was checkpointed.
     """
-    from lup.paths import sessions_dir
+    from lup.workspace.paths import sessions_dir
 
     backbone = ["preprocess", *DISPLAY_STAGES]
     if redo_stage not in backbone:
@@ -127,14 +136,20 @@ def checkpoint_before(session_id: str, redo_stage: str) -> str | None:
     return None
 
 
-class SessionTrace:
-    """Holds trace state so callers can save on interrupt."""
+class SessionTrace(BaseModel):
+    """A session's trace, handed to :func:`run_session` for it to fill in.
 
-    def __init__(self, trace_logger: TraceLogger) -> None:
-        self.trace_logger = trace_logger
+    A caller constructs one before the run and keeps it, so an interrupted
+    run still leaves it holding whatever was logged up to the interrupt. It
+    is empty until the session opens its log, and saving an empty one writes
+    nothing.
+    """
 
-    def save(self) -> Path:
-        return self.trace_logger.save()
+    trace_logger: TraceLogger | None = None
+
+    def save(self) -> Path | None:
+        """Write the trace out, or nothing when no log was ever opened."""
+        return self.trace_logger.save() if self.trace_logger else None
 
 
 async def run_session(
@@ -149,7 +164,7 @@ async def run_session(
     session_id: str | None = None,
     task_id: str | None = None,
     listener: PipelineListener | None = None,
-    trace_holder: list[SessionTrace] | None = None,
+    trace: SessionTrace | None = None,
     session_state: WritingSessionState | None = None,
     cost_accumulator: CostAccumulator | None = None,
     stop_after: str | None = None,
@@ -180,8 +195,8 @@ async def run_session(
 
     setup = setup_session(session_id, session_state=session_state)
 
-    if trace_holder is not None:
-        trace_holder.append(SessionTrace(setup.trace_logger))
+    if trace is not None:
+        trace.trace_logger = setup.trace_logger
 
     cost_acc = cost_accumulator or CostAccumulator()
     pipeline_notes = PipelineNotes(setup.notes.session / "pipeline_notes")
@@ -245,10 +260,10 @@ async def run_session(
         output.stage_costs = {
             name: {
                 "cost_usd": sc.cost_usd,
-                "duration_s": sc.duration_seconds,
+                "duration_s": sc.duration.total_seconds(),
                 "input_tokens": sc.input_tokens,
                 "output_tokens": sc.output_tokens,
-                "calls": sc.call_count,
+                "calls": sc.turn_count,
             }
             for name, sc in cost_acc.stages.items()
         }
@@ -263,13 +278,17 @@ async def run_session(
         output=output,
         reasoning="",
         sources_consulted=[],
-        duration_seconds=cost_acc.duration_seconds if cost_acc.call_count else None,
-        cost_usd=cost_acc.total_cost_usd if cost_acc.call_count else None,
-        token_usage=TokenUsage(
-            input_tokens=cost_acc.total_input_tokens,
-            output_tokens=cost_acc.total_output_tokens,
+        duration_seconds=(
+            cost_acc.total.duration.total_seconds()
+            if cost_acc.total.turn_count
+            else None
+        ),
+        cost_usd=cost_acc.total.cost_usd if cost_acc.total.turn_count else None,
+        token_usage=Usage(
+            input_tokens=cost_acc.total.input_tokens,
+            output_tokens=cost_acc.total.output_tokens,
         )
-        if cost_acc.call_count
+        if cost_acc.total.turn_count
         else None,
         tool_metrics=get_metrics_summary(),
         profile=config_mod.current_settings().profile,

@@ -51,6 +51,8 @@ So a concern discovered mid-run is never dropped and never a reason to restart. 
 
 A run exercises the resolver harder than anything else does, so it is where the harness's own defects surface. **File each one as an issue against this repository at the moment you meet it**, with the exact command, the exact error, the state it left behind, and what the recovery cost — observation rather than conclusion.
 
+Use `uv run lup-devtools dev report-friction`; the command requires that evidence and explicitly targets the repository named by this checkout.
+
 File it *and then* decide whether to admit it. The two do different work: an admission dies with the run, while an issue survives it and is picked up by the next intake, which is what closes the loop — friction becomes an issue, an issue becomes evidence, evidence becomes a concern, and the concern becomes the fix. Friction only admitted is friction that has to be rediscovered.
 
 Intake takes every open issue except those labelled `resolver-skip`, so a filed issue needs no further wiring to reach the next run. `uv run lup-devtools dev issues` prints exactly what a run would take, without starting one. When a concern derived from an issue lands, the run comments on the issue naming the review branch — and never closes it, because a reviewer passing is not a human having read the code.

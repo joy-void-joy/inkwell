@@ -74,12 +74,30 @@ PDF_BYTES_SAMPLE = b"%PDF-1.4\ntrailer<</Root 1 0 R>>\n"
 
 
 def one_page_pdf() -> bytes:
-    """A real one-page PDF, so reading its page count exercises the real path."""
-    import pymupdf
+    """A real one-page PDF, so reading its page count exercises the real path.
 
-    with pymupdf.open() as document:
-        document.new_page()
-        return bytes(document.tobytes())
+    Hand-built rather than produced by a library: nothing in this project
+    writes PDFs, so a fixture that needed one would be a dependency carried
+    for a test alone.
+    """
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>",
+    ]
+    body = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for number, payload in enumerate(objects, start=1):
+        offsets.append(len(body))
+        body += f"{number} 0 obj".encode() + payload + b"endobj\n"
+    xref_at = len(body)
+    body += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for offset in offsets:
+        body += f"{offset:010d} 00000 n \n".encode()
+    body += (
+        f"trailer<</Size {len(objects) + 1}/Root 1 0 R>>\nstartxref\n{xref_at}\n%%EOF\n"
+    ).encode()
+    return bytes(body)
 
 
 class FixturePage(BaseModel):
@@ -1262,7 +1280,7 @@ def tagged_document(slug: str, tags: DocumentTags) -> StoredDocument:
 
 def test_a_browse_narrows_on_a_tag_and_still_sees_the_gap() -> None:
     """Titles alone do not narrow; a tag is what turns a scan into a filter."""
-    from inkwell.agent.tools.research.corpus import document_entries
+    from inkwell.corpus.retrieval import CorpusFilter, shard_entries
 
     shard = SourceShard(
         source="fixture",
@@ -1281,10 +1299,14 @@ def test_a_browse_narrows_on_a_tag_and_still_sees_the_gap() -> None:
         ],
     )
 
-    narrowed = document_entries(shard, "/corpus/fixture", tag=EVALUATIONS.tag)
-    assert [entry.slug for entry in narrowed] == ["one"]
-    assert narrowed[0].tags == ("organization:fixture", EVALUATIONS.tag)
+    everything = shard_entries(shard, Path("/corpus/fixture"))
+    narrowed = CorpusFilter(tags=(EVALUATIONS.tag,)).apply(everything)
+    assert [entry.document.slug for entry in narrowed] == ["one"]
+    assert narrowed[0].document.tags.applied() == (
+        "organization:fixture",
+        EVALUATIONS.tag,
+    )
 
-    everything = document_entries(shard, "/corpus/fixture")
-    assert [entry.untagged for entry in everything] == [False, True]
+    blind_spot = CorpusFilter(untagged_only=True).apply(everything)
+    assert [entry.document.slug for entry in blind_spot] == ["two"]
     assert shard.tags() == ("organization:fixture", EVALUATIONS.tag)

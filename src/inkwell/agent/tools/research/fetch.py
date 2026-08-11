@@ -32,11 +32,12 @@ def content_type(response: httpx.Response) -> str:
 
 
 class ExtractedMetadata(BaseModel):
-    """The one field this project reads out of trafilatura's JSON output."""
+    """The fields this project reads out of trafilatura's JSON output."""
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     title: str = ""
+    date: str = ""
 
 
 class ExtractedPage(BaseModel):
@@ -51,6 +52,9 @@ class ExtractedPage(BaseModel):
 
     text: str
     title: str = ""
+    published: str = ""
+    """The date the page states it was published, ISO-8601, empty where it
+    states none — which is ordinary, and never guessed at from anything else."""
 
 
 def extract_page(
@@ -76,13 +80,13 @@ def extract_page(
     if not text:
         return None
     metadata = trafilatura.extract(html, output_format="json", include_links=False)
-    title = ""
+    described = ExtractedMetadata()
     if metadata:
         try:
-            title = ExtractedMetadata.model_validate_json(metadata).title
+            described = ExtractedMetadata.model_validate_json(metadata)
         except ValidationError:
             logger.debug("Extraction metadata for %s was not readable", url or "page")
-    return ExtractedPage(text=text, title=title)
+    return ExtractedPage(text=text, title=described.title, published=described.date)
 
 
 DOWNLOADS_DIR = Path("tmp/downloads")

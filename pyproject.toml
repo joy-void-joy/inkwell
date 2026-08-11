@@ -56,6 +56,11 @@ dependencies = [
 # parse instead of a declared list — for once a wheel exists.
 pos = ["spacy>=3.8", "en-core-web-sm"]
 
+# The local implementation behind the CorpusEmbedder seam. Optional by design:
+# titles-plus-tags browsing is the primary retrieval mode, and the semantic
+# layer reports itself absent rather than failing when it is not installed.
+embeddings = ["model2vec>=0.6.0"]
+
 [project.scripts]
 inkwell = "inkwell.environment.cli.__main__:app"
 inkwell-web = "inkwell.environment.web.__main__:app"

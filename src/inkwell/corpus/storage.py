@@ -8,9 +8,12 @@ one JSON index beside them.
     <root>/<source>/<slug>.md       a document extracted to Markdown
     <root>/<source>/<slug>.pdf      a document that was a PDF, still a PDF
 
-That is enough for a writer with Grep and Read: Grep over ``*.md`` finds the
-wording, the index answers what a document is and how much to trust it, and
-Read opens a PDF at the pages the index points to.
+That is enough to navigate without a service. ``retrieval`` reads these indexes
+and answers what a document is, what it is about, and how much to trust it, and
+Read opens a PDF at the pages the index points to. Hunting a particular wording
+through the stored Markdown sits beside that as the fallback, not as the way in:
+the index declares the fields, so a question about one is answered from the
+index rather than from the prose.
 
 **A PDF is never text-extracted for storage.** Extraction garbles notation and
 layout, and a garbled copy is worse than no copy because it reads as authority.
@@ -104,12 +107,29 @@ class StoredDocument(BaseModel):
     summary: str = ""
     page_count: int = 0
     words: int = 0
+    published: str = ""
     fetched_at: str = ""
     quality: QualityReport = QualityReport()
     tags: DocumentTags = DocumentTags()
 
     def is_pdf(self) -> bool:
         return self.kind == "pdf"
+
+    def dated(self) -> bool:
+        """Whether the document itself says when it was published."""
+        return bool(self.published)
+
+    def recency(self) -> str:
+        """The date this document sorts and filters by, most recent last.
+
+        Its own publication date where the source stated one, and when it was
+        fetched where none was: an undated document is still somewhere in time,
+        and dropping it out of every date-ordered browse would hide it far more
+        thoroughly than placing it approximately does. Which of the two this is
+        travels with the document, so a reader is never told a fetch date is a
+        publication date.
+        """
+        return self.published or self.fetched_at
 
 
 class DiscoveredEntry(BaseModel):

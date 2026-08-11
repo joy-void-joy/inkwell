@@ -3,27 +3,28 @@
 Every other research tool here is a search box: a query goes out, and whatever
 it happened to name comes back. These are the other kind. The corpus already
 holds what its sources published, so the questions worth asking of it are
-*what is in here* and *is that enough* — and the answer to the second one is
-sometimes "fetch more of this source before continuing".
+*what is in here*, *what does it say*, and *is that enough* — and the answer to
+the last one is sometimes "fetch more of this source before continuing".
 
-The corpus is files, so the reading half is deliberately thin: these tools give
-the paths, the per-source counts, and the tagged title listing an agent judges
-coverage from, and then Grep and Read do the actual work. Adding a query layer
-here would put a worse search engine in front of tools that already do it
-better.
+Three tools, and the split between them is by what is being asked rather than
+by how it is answered. ``corpus_overview`` says what sources exist and what
+vocabulary a browse narrows on. ``corpus_search`` is the whole of retrieval:
+one tool with the modes named in its description, so an agent picks by what it
+is asking rather than by guessing among near-identical tools. ``top_up_corpus``
+is the only one that writes.
 
-Tags are what make that listing a filter rather than a scan. Every document
-carries them, the vocabulary they are drawn from ships with the overview, and
-``corpus_titles`` narrows on one — so an agent asks "what is here about
-evaluations" by naming a declared tag instead of guessing at wording.
+Retrieval itself lives in ``corpus.retrieval``, which navigates the typed index
+structurally — the fields the shard declares, read through the models that
+declare them. These tools are the surface: they take a question, hand it to
+that engine, and return what it found.
 """
 
 import logging
 
 from pydantic import BaseModel, Field
 
-from inkwell.agent.config import corpus_root
-from inkwell.agent.provenance import Acquisition
+from inkwell.agent.config import corpus_root, corpus_semantics
+from inkwell.agent.provenance import Venue
 from inkwell.corpus.fetch import DocumentFetcher, corpus_client
 from inkwell.corpus.ingest import SourceReport, ingest_source
 from inkwell.corpus.registry import (
@@ -32,21 +33,33 @@ from inkwell.corpus.registry import (
     corpus_vocabulary,
     declaration_for,
 )
-from inkwell.corpus.storage import CorpusStore, SourceShard
+from inkwell.corpus.retrieval import (
+    ORDER_KEYS,
+    TIERS,
+    CorpusAnswer,
+    CorpusFilter,
+    CorpusHit,
+    CorpusQuery,
+    OrderName,
+    Ordering,
+    TierName,
+    hit_for,
+    read_index,
+    retrieval_tier,
+    search_corpus,
+)
+from inkwell.corpus.storage import CorpusStore, DocumentKind, SourceShard
 from inkwell.corpus.tags import TagTerm
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
 
-MAX_TITLES = 200
-"""How many titles one listing returns. A source holding more than this is one
-an agent should Grep rather than read a catalogue of."""
-
 CORPUS_LAYOUT = (
     "<root>/<source>/index.json holds the typed index; <root>/<source>/<slug>.md "
     "holds a document extracted to Markdown; <root>/<source>/<slug>.pdf holds one "
-    "that is a PDF. PDFs are never text-extracted — Read them directly with a "
-    "pages='N-M' range, using the index's page_count to choose it."
+    "that is a PDF. corpus_search navigates that index for you — reach for it "
+    "before reading the files yourself. PDFs are never text-extracted: Read them "
+    "directly with the pages range corpus_search hands back."
 )
 
 
@@ -101,7 +114,7 @@ class CorpusSourceSummary(BaseModel):
         default=0, description="Documents that failed to fetch and will be retried"
     )
     updated_at: str = Field(default="", description="When ingestion last ran for it")
-    directory: str = Field(default="", description="Where its files are, for Grep/Read")
+    directory: str = Field(default="", description="Where its files are")
     note: str = Field(
         default="",
         description="What to know before trusting the above — why a source is inactive",
@@ -136,89 +149,50 @@ def summarize(
     )
 
 
-class CorpusDocumentEntry(BaseModel):
-    """One stored document, as a coverage judgement needs to see it."""
+class RetrievalMode(BaseModel):
+    """One way of asking the corpus a question, and which question it answers.
 
-    slug: str = Field(description="Identifier within the source")
-    title: str = Field(description="Document title")
-    category: str = Field(description="Which section of the source it came from")
-    kind: str = Field(description="'markdown' or 'pdf'")
-    path: str = Field(description="File to Read")
-    url: str = Field(description="Where it was published")
-    words: int = Field(default=0, description="Word count (0 for a PDF)")
-    page_count: int = Field(default=0, description="Pages, for a PDF")
-    quality_score: float = Field(default=1.0, description="Heuristic score, 0-1")
-    quality_flags: tuple[str, ...] = Field(
-        default=(), description="Rule ids that fired, which the score derives from"
-    )
-    quality_assessed: bool = Field(
-        default=True,
-        description="False for a PDF, whose text is never extracted to be judged",
-    )
-    abstract: str = Field(default="", description="Opening prose, for relevance")
-    summary: str = Field(
-        default="",
-        description=(
-            "What the document says, judged when it was tagged — this is what a "
-            "PDF has instead of an abstract, since its text is never extracted"
+    Declared rather than described in prose so that the tool's own output can
+    list the modes back: an agent that reached for the wrong one reads what the
+    others are in the same result, instead of having to remember a description
+    it saw once.
+    """
+
+    name: str = Field(description="How this mode is asked for")
+    answers: str = Field(description="The kind of question it is the answer to")
+
+
+RETRIEVAL_MODES: tuple[RetrievalMode, ...] = (
+    RetrievalMode(
+        name="filter",
+        answers=(
+            "what the corpus holds on a subject, from a publisher, in a period "
+            "— pass tags, sources, organizations, venues, authorities, "
+            "categories, since/until, kinds, or title_contains. This is the "
+            "primary mode: the index declares these fields and answers them "
+            "without opening a single document"
         ),
-    )
-    tags: tuple[str, ...] = Field(
-        default=(), description="Every tag this document carries, for narrowing"
-    )
-    untagged: bool = Field(
-        default=False,
-        description=(
-            "True when a tagging pass read this document and nothing applied — "
-            "it is reachable by its source and by nothing else"
+    ),
+    RetrievalMode(
+        name="phrase",
+        answers=(
+            "where a particular wording appears — the full-text fallback, for a "
+            "turn of phrase, a figure, or a name no tag covers. Reads the stored "
+            "Markdown bodies, so it is slower and blind to PDFs, and it is never "
+            "the way to answer a question about a tag, a date, or a venue"
         ),
-    )
-
-    def acquisition(self) -> Acquisition:
-        """How this document reached the run, for a citation to derive venue from.
-
-        The corpus is a research path like any other, so a document taken from
-        it carries the same acquisition record a fetched one does and its
-        venue is read off that record rather than asserted by whoever cites
-        it. The published URL is what the derivation reads, which is why it is
-        carried through ingestion rather than discarded once the file is
-        stored.
-        """
-        return Acquisition(path="corpus", url=self.url)
-
-
-def document_entries(
-    shard: SourceShard,
-    directory: str,
-    *,
-    category: str = "",
-    tag: str = "",
-    since: tuple[str, ...] = (),
-) -> list[CorpusDocumentEntry]:
-    """The shard's stored documents, narrowed by category, tag, or added set."""
-    return [
-        CorpusDocumentEntry(
-            slug=document.slug,
-            title=document.title,
-            category=document.category,
-            kind=document.kind,
-            path=f"{directory}/{document.filename}",
-            url=document.url,
-            words=document.words,
-            page_count=document.page_count,
-            quality_score=document.quality.score,
-            quality_flags=document.quality.fired,
-            quality_assessed=document.quality.assessed,
-            abstract=document.abstract,
-            summary=document.summary,
-            tags=document.tags.applied(),
-            untagged=document.tags.untagged(),
-        )
-        for document in shard.documents
-        if not category or document.category == category
-        if not tag or document.tags.carries(tag)
-        if not since or document.slug in since
-    ]
+    ),
+    RetrievalMode(
+        name="like",
+        answers=(
+            "what is near a question that shares no vocabulary with the corpus "
+            "— the optional semantic layer. It reports itself absent when it is "
+            "switched off or nothing is embedded, and the structural result "
+            "comes back regardless"
+        ),
+    ),
+)
+"""The three ways of asking, each named by the question it answers."""
 
 
 class CorpusOverviewInput(BaseModel):
@@ -226,7 +200,7 @@ class CorpusOverviewInput(BaseModel):
 
 
 class CorpusOverviewOutput(BaseModel):
-    root: str = Field(description="Corpus root — Grep and Read work under this path")
+    root: str = Field(description="Corpus root — where the sharded indexes live")
     sources: list[CorpusSourceSummary] = Field(
         description="Every declared source and what the corpus holds for it"
     )
@@ -234,39 +208,115 @@ class CorpusOverviewOutput(BaseModel):
         default_factory=list,
         description=(
             "Every tag a browse can filter on, and what each covers. This is "
-            "the declared set — pass one to corpus_titles to narrow by it"
+            "the declared set — pass one to corpus_search's tags to narrow by it"
+        ),
+    )
+    modes: list[RetrievalMode] = Field(
+        default_factory=list,
+        description="How corpus_search can be asked, and what each mode answers",
+    )
+    tiers: list[str] = Field(
+        default_factory=list,
+        description="The depths corpus_search answers at, and what each shows",
+    )
+    orderings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The axes corpus_search's order_by accepts. It defaults to recency "
+            "then quality — most recent first, better capture breaking a tie"
         ),
     )
     layout: str = Field(description="How the files under the root are arranged")
 
 
-class CorpusTitlesInput(BaseModel):
-    source: str = Field(description="Which source's documents to list")
-    category: str = Field(
-        default="", description="Restrict to one category (default: all)"
+class CorpusSearchInput(BaseModel):
+    """One question put to the corpus. Every field is optional; none narrows by
+    default, so an empty call is a browse of everything held."""
+
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Source keys from corpus_overview (default: every source held)",
     )
-    tag: str = Field(
+    tags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tags a document must carry, all of them, spelled as "
+            "corpus_overview's vocabulary spells them"
+        ),
+    )
+    organizations: list[str] = Field(
+        default_factory=list,
+        description="Publishing organizations, as the registry names them",
+    )
+    venues: list[str] = Field(
+        default_factory=list, description="Publication venues a citation would name"
+    )
+    authorities: list[Venue] = Field(
+        default_factory=list,
+        description=(
+            "Standing, in the venue vocabulary — lab_publication, "
+            "official_report, peer_reviewed, and the rest"
+        ),
+    )
+    categories: list[str] = Field(
+        default_factory=list, description="Sections of a source, from corpus_overview"
+    )
+    title_contains: list[str] = Field(
+        default_factory=list, description="Words a title must contain, all of them"
+    )
+    since: str = Field(default="", description="On or after this date, YYYY-MM-DD")
+    until: str = Field(default="", description="On or before this date, YYYY-MM-DD")
+    kinds: list[DocumentKind] = Field(
+        default_factory=list, description="'markdown' or 'pdf' (default: both)"
+    )
+    min_quality: float = Field(
+        default=0.0, description="Lowest recorded quality score to keep, 0-1"
+    )
+    untagged_only: bool = Field(
+        default=False,
+        description=(
+            "Only documents a tagging pass read and found nothing to say about "
+            "— the corpus's blind spot, worth looking at when a browse comes up "
+            "empty on a subject you expected"
+        ),
+    )
+    phrase: str = Field(
         default="",
         description=(
-            "Restrict to documents carrying this tag, spelled as the overview's "
-            "vocabulary spells it (default: all)"
+            "Full-text fallback: hunt this literal phrase through the stored "
+            "Markdown bodies. Use it for a wording no field answers, never for "
+            "a tag, a date, a venue, or a source"
         ),
     )
-
-
-class CorpusTitlesOutput(BaseModel):
-    source: str = Field(description="Source listed")
-    directory: str = Field(description="Where these files are")
-    documents: list[CorpusDocumentEntry] = Field(description="Stored documents")
-    truncated: bool = Field(
-        default=False, description="True when more documents were held than returned"
-    )
-    listed_but_absent: int = Field(
-        default=0,
+    like: str = Field(
+        default="",
         description=(
-            "Documents the source publishes that are not stored yet — top up if "
-            "this matters for the question at hand"
+            "Semantic mode: order results by nearness to this question. The "
+            "layer is optional — when it is off or nothing is embedded, the "
+            "result says so and comes back ordered structurally instead"
         ),
+    )
+    tier: TierName = Field(
+        default="browse",
+        description=(
+            "How much of each document to show. 'browse' is titles, tags, and "
+            "locators only, and is cheap; 'narrow' adds each abstract or "
+            "summary; 'read' hands over the path and the PDF page ranges"
+        ),
+    )
+    order_by: list[OrderName] = Field(
+        default_factory=list,
+        description=(
+            "Override the ordering. Default is recency then quality — most "
+            "recent first, better capture breaking a tie"
+        ),
+    )
+    oldest_first: bool = Field(
+        default=False,
+        description="Turn the ordering around, so the first result is the last one",
+    )
+    limit: int = Field(
+        default=0, description="How many documents to return (default: the tier's own)"
     )
 
 
@@ -290,7 +340,7 @@ class TopUpCorpusOutput(BaseModel):
     unchanged: int = Field(description="Documents refetched and found identical")
     skipped: int = Field(description="Documents left for a later run by the limit")
     failed: int = Field(description="Documents that could not be fetched")
-    added: list[CorpusDocumentEntry] = Field(
+    added: list[CorpusHit] = Field(
         default_factory=list, description="What this call actually added"
     )
     report: str = Field(description="One-line summary of the run")
@@ -298,14 +348,14 @@ class TopUpCorpusOutput(BaseModel):
 
 @lup_tool(
     "List the research corpus: every tracked source, how many documents are "
-    "held for it, which categories and tags they fall under, and where its "
-    "files live. Use this FIRST when a question is about AI labs, safety "
-    "institutes, or AI policy — the corpus already holds what these sources "
-    "published, so reading it beats searching for it. It also returns the tag "
-    "vocabulary, which is what a browse narrows on, and names each source's "
-    "venue and authority so a citation can state standing without asserting "
-    "it. Then call corpus_titles with a tag to narrow, Grep the directory for "
-    "wording, and Read the files.",
+    "held for it, which categories and tags they fall under, the tag "
+    "vocabulary a browse narrows on, and the modes corpus_search answers in. "
+    "Use this FIRST when a question is about AI labs, safety institutes, or AI "
+    "policy — the corpus already holds what these sources published, so "
+    "reading it beats searching the web for it, and this call is what tells "
+    "you whether it does. It also names each source's venue and authority, so "
+    "a citation can state standing without asserting it. Then call "
+    "corpus_search with a tag, a date range, or a source to narrow.",
     name="corpus_overview",
 )
 async def corpus_overview(_inp: CorpusOverviewInput) -> CorpusOverviewOutput:
@@ -321,44 +371,74 @@ async def corpus_overview(_inp: CorpusOverviewInput) -> CorpusOverviewOutput:
             for declaration in DECLARED_SOURCES
         ],
         vocabulary=list(corpus_vocabulary().terms()),
+        modes=list(RETRIEVAL_MODES),
+        tiers=[f"{tier.name}: {tier.answers}" for tier in TIERS],
+        orderings=[f"{key.name}: {key.description}" for key in ORDER_KEYS],
         layout=CORPUS_LAYOUT,
     )
 
 
 @lup_tool(
-    "List one corpus source's stored documents — title, tags, category, path, "
-    "abstract or summary, and quality — plus how many documents the source "
-    "publishes that are NOT stored yet. This is the primary way to retrieve "
-    "from the corpus: pass a tag from corpus_overview's vocabulary to narrow "
-    "hundreds of documents to the ones on your subject, then read those. "
-    "Titles and tags are what tell you a source has the material, and "
-    "listed_but_absent is what tells you it is thin. Read the paths directly; "
-    "for a PDF, Read with pages='N-M' using page_count.",
-    name="corpus_titles",
+    "Search the research corpus by navigating its index. Reach for this "
+    "BEFORE the external search boxes whenever a question is about what the "
+    "tracked sources published — AI labs, safety institutes, AI policy: the "
+    "material is already gathered, so this reads it rather than searching for "
+    "it again, and it comes back with the venue and standing a citation needs. "
+    "It answers four kinds of question, so pick by what you are asking:\n"
+    "  • BROWSE BY TAG — pass tags from corpus_overview's vocabulary to narrow "
+    "hundreds of documents to the ones on your subject.\n"
+    "  • FILTER BY FIELD — sources, organizations, venues, authorities, "
+    "categories, since/until dates, kinds, title_contains. These are declared "
+    "index fields, answered without opening any document.\n"
+    "  • HUNT A PHRASE — 'phrase' is the full-text fallback over the stored "
+    "Markdown bodies, for a wording no field covers. Slower, blind to PDFs, "
+    "and never the way to answer a tag, date, venue, or source question.\n"
+    "  • FIND A SEMANTIC NEIGHBOUR — 'like' orders by nearness to a question "
+    "that shares no vocabulary with the corpus. Optional: it says so when it "
+    "is off, and the structural result comes back either way.\n"
+    "Three depths, independently callable: tier='browse' is titles, tags, and "
+    "locators (cheap, start here), 'narrow' adds each abstract or judged "
+    "summary, 'read' hands over the path and PDF page ranges for Read. Results "
+    "come back most recent first with quality breaking ties, which order_by "
+    "and oldest_first override. Every result carries its locator, so you can "
+    "Read straight from a browse.",
+    name="corpus_search",
 )
-async def corpus_titles(inp: CorpusTitlesInput) -> CorpusTitlesOutput:
-    corpus = store()
-    declaration = declared(inp.source)
-    shard = corpus.load_by_name(inp.source)
-    if shard is None:
+async def corpus_search(inp: CorpusSearchInput) -> CorpusAnswer:
+    if inp.phrase and inp.like:
         raise ToolError(
-            f"Nothing ingested for {inp.source!r} yet. Use top_up_corpus to gather "
-            f"some, or corpus_overview to see which sources are held."
+            "Pass either 'phrase' (hunt this exact wording in the bodies) or "
+            "'like' (order by nearness to this question), not both — they "
+            "answer different questions, and running them together would "
+            "leave you unable to tell which one put a document in the result."
         )
-    directory = str(corpus.source_dir(declaration.key))
-    held = document_entries(shard, directory, category=inp.category, tag=inp.tag)
-    stored_slugs = {document.slug for document in shard.documents}
-    return CorpusTitlesOutput(
-        source=inp.source,
-        directory=directory,
-        documents=held[:MAX_TITLES],
-        truncated=len(held) > MAX_TITLES,
-        listed_but_absent=sum(
-            1
-            for entry in shard.discovered
-            if entry.present and entry.slug not in stored_slugs
+
+    corpus = store()
+    query = CorpusQuery(
+        where=CorpusFilter(
+            sources=tuple(inp.sources),
+            organizations=tuple(inp.organizations),
+            venues=tuple(inp.venues),
+            authorities=tuple(inp.authorities),
+            categories=tuple(inp.categories),
+            tags=tuple(inp.tags),
+            title_contains=tuple(inp.title_contains),
+            since=inp.since,
+            until=inp.until,
+            kinds=tuple(inp.kinds),
+            min_quality=inp.min_quality,
+            untagged_only=inp.untagged_only,
         ),
+        tier=inp.tier,
+        ordering=Ordering(
+            keys=tuple(inp.order_by) or Ordering().keys,
+            descending=not inp.oldest_first,
+        ),
+        phrase=inp.phrase,
+        like=inp.like,
+        limit=inp.limit,
     )
+    return await search_corpus(query, corpus, semantics=corpus_semantics(corpus))
 
 
 @lup_tool(
@@ -366,7 +446,7 @@ async def corpus_titles(inp: CorpusTitlesInput) -> CorpusTitlesOutput:
     "question. Enumerates what the source publishes and stores what is missing, "
     "up to a limit, then reports exactly what it added — so the research notes "
     "can say how the corpus changed. Documents already held are not refetched. "
-    "Use this after corpus_titles shows listed_but_absent is high and the "
+    "Use this after corpus_search shows listed_but_absent is high and the "
     "missing material matters; it makes live requests, so prefer a small limit.",
     name="top_up_corpus",
 )
@@ -389,13 +469,7 @@ async def top_up_corpus(inp: TopUpCorpusInput) -> TopUpCorpusOutput:
     if report.aborted:
         raise ToolError(f"Topping up {inp.source} failed: {report.aborted}")
 
-    after = corpus.load(declaration)
-    directory = str(corpus.source_dir(declaration.key))
-    fresh = tuple(
-        document.slug
-        for document in after.documents
-        if document.slug not in held_before
-    )
+    tier = retrieval_tier("narrow")
     return TopUpCorpusOutput(
         source=inp.source,
         discovered=report.discovered,
@@ -403,9 +477,13 @@ async def top_up_corpus(inp: TopUpCorpusInput) -> TopUpCorpusOutput:
         unchanged=report.unchanged,
         skipped=report.skipped,
         failed=report.failed,
-        added=document_entries(after, directory, since=fresh),
+        added=[
+            hit_for(entry, tier)
+            for entry in read_index(corpus, (declaration.key,)).entries
+            if entry.document.slug not in held_before
+        ],
         report=report.summary(),
     )
 
 
-CORPUS_TOOLS = [corpus_overview, corpus_titles, top_up_corpus]
+CORPUS_TOOLS = [corpus_overview, corpus_search, top_up_corpus]

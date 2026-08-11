@@ -54,6 +54,8 @@ src/inkwell/
 │   ├── tags.py             # The declared tag vocabulary a browse filters on
 │   ├── tagging.py          # Derive a source's tags, judge a document's, re-tag on edit
 │   ├── storage.py          # Documents as files beside one typed JSON index per source
+│   ├── retrieval.py        # Browse, narrow, read — field navigation over the index
+│   ├── semantics.py        # The optional vector layer, and the seam that computes it
 │   ├── fetch.py            # Reaching a document, escalating to a browser where declared
 │   └── ingest.py           # A run: enumerate, fetch what is new, tag, store, report
 ├── devtools/               # Development CLI, exposed as `lup-devtools`

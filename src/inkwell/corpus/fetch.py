@@ -62,6 +62,7 @@ class FetchedDocument(BaseModel):
     url: str
     kind: FetchedKind
     title: str = ""
+    published: str = ""
     text: str = ""
     data: bytes = b""
     rendered: bool = False
@@ -154,7 +155,11 @@ class DocumentFetcher(BaseModel):
         if extracted is None:
             raise FetchRefused(f"No article text could be extracted from {url}")
         return FetchedDocument(
-            url=url, kind="markdown", title=extracted.title, text=extracted.text
+            url=url,
+            kind="markdown",
+            title=extracted.title,
+            published=extracted.published,
+            text=extracted.text,
         )
 
     async def fetch_rendered(self, url: str) -> FetchedDocument:
@@ -168,6 +173,7 @@ class DocumentFetcher(BaseModel):
             url=url,
             kind="markdown",
             title=extracted.title,
+            published=extracted.published,
             text=extracted.text,
             rendered=True,
         )

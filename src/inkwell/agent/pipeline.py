@@ -21,6 +21,7 @@ from collections.abc import (
     Iterator,
 )
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 
@@ -76,7 +77,7 @@ from inkwell.agent.watcher import (
     create_comment_watcher,
     create_source_watcher,
 )
-from inkwell.agent.session import AuthorComment, CommentLedger, WritingSessionState
+from inkwell.agent.session import AuthorComment, WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
     COMMENT_CLASSIFIER_PROMPT,
@@ -135,6 +136,7 @@ from inkwell.agent.tools.formats import (
     do_format_twitter,
 )
 from inkwell.agent.tools.google_docs import (
+    COMMENT_READ_FAILURES,
     CommentSpec,
     configure_session_state,
     do_create_doc,
@@ -2761,8 +2763,8 @@ class PipelineRunner:
         from lup.workspace.content_safety import configure
 
         configure(directory=self.notes.base_dir / "content")
-        if self.state.agent_ids_path is None:
-            self.state.attach_agent_ids_registry(self.notes.base_dir / "agent_ids.txt")
+        if self.state.records is None:
+            self.state.attach_records(self.notes.base_dir)
         return self.notes
 
     def source_mounts(self) -> dict[Path, str]:
@@ -3183,14 +3185,12 @@ class PipelineRunner:
         elif snapshot.output and snapshot.output.google_doc_id:
             self.existing_doc_id = snapshot.output.google_doc_id
 
-        self.state.seen_comments = CommentLedger(handled=snapshot.seen_comment_ids)
+        self.state.seen_comments.mark_all(snapshot.seen_comment_ids)
         self.state.agent_comments.mark_all(snapshot.agent_comment_ids)
+        self.state.seen_source_comments.mark_all(snapshot.seen_source_comment_ids)
         self.ensure_notes()
         await self.ingest_reader_channel()
         self.rehydrate_draft_files()
-        self.state.seen_source_comments = CommentLedger(
-            handled=snapshot.seen_source_comment_ids
-        )
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
@@ -3259,6 +3259,7 @@ class PipelineRunner:
             session_state=self.state,
             notes=self.notes,
             plan_breaking_signal=self.plan_breaking,
+            report_unreachable=partial(self.report_unreachable, "your Google Doc"),
         )
         await self.watcher.start()
         logger.info("Comment watcher started")
@@ -3268,6 +3269,9 @@ class PipelineRunner:
                 session_state=self.state,
                 notes=self.notes,
                 plan_breaking_signal=self.plan_breaking,
+                report_unreachable=partial(
+                    self.report_unreachable, "your source document"
+                ),
             )
             await self.source_watcher.start()
             logger.info("Source document watcher started")
@@ -3332,11 +3336,19 @@ class PipelineRunner:
         the same classify-and-record path, so impact classification (and
         plan-breaking detection) does not depend on which poller sees an
         item first. Returns the number of new items ingested.
+
+        A comment is accounted for only once its note is on disk, so an
+        interruption anywhere between the poll and the record leaves it for
+        the next poll instead of dropping it.
         """
         count = 0
 
-        for comment in await self.state.get_new_author_comments():
-            await self.classify_and_record_comment(comment)
+        intake = await self.state.poll_author_comments()
+        if not intake.reached:
+            await self.report_unreachable("your Google Doc", intake.unreachable)
+        for comment in intake.comments:
+            with self.state.seen_comments.recording(comment["comment_id"]):
+                await self.classify_and_record_comment(comment)
             count += 1
 
         for text in await self.hooks.collect_author_input(self.state):
@@ -3349,6 +3361,21 @@ class PipelineRunner:
                 count += 1
 
         return count
+
+    async def report_unreachable(self, where: str, failure: str) -> None:
+        """Tell the author a document's comments could not be read, and why.
+
+        The retries are already spent by the time this runs, so the run
+        carries on rather than halting — but it says so on the surface the
+        author is watching, because an empty poll and an unreadable one are
+        the same silence to them. Every later checkpoint polls again and
+        repeats the warning until one succeeds.
+        """
+        await self.hooks.on_progress(
+            f"⚠ Could not read comments on {where} ({failure}). Anything you "
+            "left there is still unread — continuing, and trying again at the "
+            "next checkpoint."
+        )
 
     async def classify_and_record_comment(self, comment: AuthorComment) -> None:
         """Classify a GDoc comment, record it, acknowledge it on the doc."""
@@ -3388,10 +3415,11 @@ class PipelineRunner:
         classified.anchor_text = comment["anchor_text"]
         classified.reply = comment["reply"]
 
+        notes = self.ensure_notes()
         if classified.impact == "dismiss":
+            await notes.add_dismissed(classified)
             return
 
-        notes = self.ensure_notes()
         await notes.add_comment(classified)
 
         reply_text = ACKNOWLEDGE_TEMPLATES[classified.impact]
@@ -3565,8 +3593,13 @@ class PipelineRunner:
         """
         try:
             comments = await fetch_gdoc_comments(doc_id)
-        except (RuntimeError, OSError) as exc:
-            logger.warning("Could not fetch source doc comments: %s", exc)
+        except COMMENT_READ_FAILURES as exc:
+            logger.exception("Could not read source doc comments on %s", doc_id)
+            await self.hooks.on_progress(
+                "⚠ Could not read the comments already on your source document "
+                f"({type(exc).__name__}: {exc}). Planning from the document "
+                "alone — the notes on it did not reach this run."
+            )
             return 0
 
         if not comments:

@@ -135,6 +135,17 @@ class PipelineNotes:
             path = self.comments_dir / f"{self.comment_counter:04d}.json"
             path.write_text(classified.model_dump_json(indent=2), encoding="utf-8")
 
+    async def add_dismissed(self, classified: ClassifiedComment) -> None:
+        """File a dismissed comment under processed/, outside the feedback set.
+
+        Noise is not feedback, but the finding that it was noise has to be
+        durable all the same: with nothing on disk the comment stays
+        unaccounted for, and every later poll pays to classify it again.
+        """
+        async with self.lock:
+            path = self.processed_dir / f"dismissed-{classified.comment_id}.json"
+            path.write_text(classified.model_dump_json(indent=2), encoding="utf-8")
+
     async def add_terminal_input(self, text: str, *, tag: str = "terminal") -> None:
         """Write author input as a clarification-level note.
 

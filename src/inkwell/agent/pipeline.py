@@ -152,6 +152,7 @@ from inkwell.agent.tools.google_docs import (
     truncate_tab_title,
 )
 from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
+from inkwell.agent.tools.research.corpus import CORPUS_TOOLS
 from inkwell.agent.tools.research.exa import EXA_TOOLS
 from inkwell.agent.tools.research.fetch import FETCH_TOOLS
 from inkwell.agent.tools.research.fred import FRED_TOOLS
@@ -971,6 +972,7 @@ class DraftSyncer:
 def build_research_tools() -> list[LupMcpTool]:
     """Flat list of all research MCP tools (excludes fetch — now in source server)."""
     return [
+        *CORPUS_TOOLS,
         *EXA_TOOLS,
         *ARXIV_TOOLS,
         *FRED_TOOLS,

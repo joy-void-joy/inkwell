@@ -139,6 +139,10 @@ celerybeat.pid
 # .env is committed as template, .env.local contains secrets
 .env.local
 profiles/
+# The research corpus: scraped documents and their per-source index, shared
+# across sessions and worktrees. Rebuilt by `lup-devtools corpus sync`. Rooted,
+# so it never swallows the `src/inkwell/corpus/` package that builds it.
+/corpus/
 credentials/
 .envrc
 .venv

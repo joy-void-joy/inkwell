@@ -71,6 +71,16 @@ def profile_store_root() -> Path:
 PROFILES_DIR = profile_store_root() / "profiles"
 """Where every profile directory lives, for whichever checkout is running."""
 
+CORPUS_DIR = profile_store_root() / "corpus"
+"""Where the research corpus lives unless configured otherwise.
+
+Beside ``profiles/`` rather than inside a session, because the corpus is the one
+artifact here that is expensive to build and worth nothing if it is rebuilt per
+run: a session reads what earlier runs already enumerated. Resolving it against
+the shared checkout also means every worktree reads one corpus instead of each
+re-scraping the same sources.
+"""
+
 ACTIVE_PROFILE_FILE = PROFILES_DIR / ".active"
 """Where selecting a profile records it, for the runs that name none.
 
@@ -334,6 +344,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    corpus_path: str = Field(
+        default=str(CORPUS_DIR),
+        validation_alias="INKWELL_CORPUS_PATH",
+        description=(
+            "Where the research corpus is stored — enumerated documents and "
+            "one index per source. Shared across sessions and worktrees, so a "
+            "run reads what earlier ingestion already gathered."
+        ),
+    )
+
     # ==========================================================================
     # LIMITS
     # ==========================================================================
@@ -429,6 +449,11 @@ def current_settings() -> Settings:
 def stage_model(stage: PipelineStage) -> str:
     """Model for a pipeline stage from the active settings."""
     return current_settings().model_for(stage)
+
+
+def corpus_root() -> Path:
+    """Where the research corpus lives for the current execution context."""
+    return Path(current_settings().corpus_path).expanduser()
 
 
 def subprocess_auth_env(session_settings: Settings) -> EnvVars:

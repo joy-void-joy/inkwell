@@ -149,7 +149,16 @@ def save_images(images: list[ClipboardImage], images_dir: Path) -> list[Path]:
 
 app = typer.Typer(no_args_is_help=True)
 
-xclip = sh.Command("xclip")
+
+def xclip() -> sh.Command:
+    """The xclip binary, looked up on use rather than at import.
+
+    Both readers below already treat its absence as "no clipboard", but a
+    module-level lookup raises before either can: importing anything from this
+    module failed outright on a machine without xclip, which took the whole
+    CLI — and CI — down with it.
+    """
+    return sh.Command("xclip")
 
 
 def read_clipboard_image() -> ClipboardImage | None:
@@ -159,7 +168,7 @@ def read_clipboard_image() -> ClipboardImage | None:
     clipboard holds no image it can read.
     """
     try:
-        targets = str(xclip("-selection", "clipboard", "-o", "-t", "TARGETS"))
+        targets = str(xclip()("-selection", "clipboard", "-o", "-t", "TARGETS"))
     except (sh.ErrorReturnCode, sh.CommandNotFound):
         return None
 
@@ -168,7 +177,7 @@ def read_clipboard_image() -> ClipboardImage | None:
             continue
         try:
             buf = io.BytesIO()
-            xclip("-selection", "clipboard", "-o", "-t", kind.media_type, _out=buf)
+            xclip()("-selection", "clipboard", "-o", "-t", kind.media_type, _out=buf)
             data = buf.getvalue()
             if data:
                 return ClipboardImage(media_type=kind.media_type, data=data)
@@ -180,7 +189,7 @@ def read_clipboard_image() -> ClipboardImage | None:
 def read_clipboard_text() -> str | None:
     """Read text from the system clipboard via xclip."""
     try:
-        text = str(xclip("-selection", "clipboard", "-o"))
+        text = str(xclip()("-selection", "clipboard", "-o"))
         return text if text else None
     except (sh.ErrorReturnCode, sh.CommandNotFound):
         return None

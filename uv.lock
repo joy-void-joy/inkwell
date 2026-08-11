@@ -642,7 +642,6 @@ dependencies = [
     { name = "matplotlib" },
     { name = "pillow" },
     { name = "playwright" },
-    { name = "plotext" },
     { name = "prompt-toolkit" },
     { name = "pydantic-settings" },
     { name = "pymupdf" },
@@ -676,7 +675,6 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.11.1" },
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "playwright", specifier = ">=1.60.0" },
-    { name = "plotext", specifier = ">=5.3.2" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
     { name = "pymupdf", specifier = ">=1.27.2.3" },
@@ -1097,15 +1095,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/bb/4e/b008b6440a7a1624378041da94829956d4b8f7ab9ef5aad22d0dc3f2e26d/playwright-1.60.0-py3-none-win32.whl", hash = "sha256:ec94e416ea320711e0ad4bf185dcbf41833672961e90773e1885255d7db7b7e7", size = 37902157, upload-time = "2026-05-18T12:00:50.374Z" },
     { url = "https://files.pythonhosted.org/packages/55/f0/0541524133104f9cc20bf900870ff4a736b76a23483f3a55295ddfa58409/playwright-1.60.0-py3-none-win_amd64.whl", hash = "sha256:9566821ce6030a1f9e7146a24e19355ab0d98805fd0f9be50bb3d8fef1750c02", size = 37902159, upload-time = "2026-05-18T12:00:53.728Z" },
     { url = "https://files.pythonhosted.org/packages/80/c8/210f282d278e4709cdd71b12a31af45a30a22ab3207b387e29b37e478713/playwright-1.60.0-py3-none-win_arm64.whl", hash = "sha256:6e4f6700a4c2250efff8e690a81d66e3855754fb587b6b87cf5c784014f91537", size = 34037981, upload-time = "2026-05-18T12:00:57.584Z" },
-]
-
-[[package]]
-name = "plotext"
-version = "5.3.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c9/d7/f75f397af966fe252d0d34ffd3cae765317fce2134f925f95e7d6725d1ce/plotext-5.3.2.tar.gz", hash = "sha256:52d1e932e67c177bf357a3f0fe6ce14d1a96f7f7d5679d7b455b929df517068e", size = 61967, upload-time = "2024-09-24T15:13:37.728Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f6/1e/12fe7c40cd2099a1f454518754ed229b01beaf3bbb343127f0cc13ce6c22/plotext-5.3.2-py3-none-any.whl", hash = "sha256:394362349c1ddbf319548cfac17ca65e6d5dfc03200c40dfdc0503b3e95a2283", size = 64047, upload-time = "2024-09-24T15:13:36.296Z" },
 ]
 
 [[package]]

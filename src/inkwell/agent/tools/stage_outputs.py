@@ -282,22 +282,6 @@ def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
 # ---------------------------------------------------------------------------
 
 
-# lup: What the researcher records about a source carries no venue and no date,
-# so nothing downstream can tell a peer-reviewed paper from a preprint from a
-# forum post. citations.py declares a SourceType, but it sits on the
-# bibliography model the rewriter builds, which is too late — the researcher
-# never sets it. Two axes need separating rather than collapsing into one score:
-# venue authority (peer-reviewed, preprint, official report, lab publication,
-# dataset, book, forum post, blog, news, market) and evidential role (primary
-# source for this claim versus commentary on it). Reader feedback shows both
-# failing independently — Yudkowsky cited for I.J. Good's thesis is a
-# primary-source failure, not an authority one — and asks for the date outright.
-# Derive venue from where the document was acquired rather than asking the agent
-# to assert it, so a forum post cannot be labelled peer-reviewed; the agent
-# overrides only with a stated reason. Diversity checks then fall out: the
-# distribution over domain, organization, author, venue, and date, per section
-# and per book. The strongest request is diversity of position, not domain — for
-# a contested claim, is every cited source on one side?
 class ResearchSourceInput(BaseModel):
     title: str = Field(description="Source title")
     url: str = Field(description="Source URL, or file path for source documents")

@@ -65,6 +65,11 @@ from inkwell.agent.models import (
 )
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.notes import PipelineNotes
+from inkwell.agent.reader_feedback import (
+    ReaderFeedback,
+    ReaderFeedbackTree,
+    ingest_reader_feedback,
+)
 from inkwell.agent.watcher import (
     ACKNOWLEDGE_TEMPLATES,
     PollingWatcher,
@@ -81,6 +86,7 @@ from inkwell.agent.stages import (
     ORCHESTRATOR_PROMPT,
     PLANNER_SYSTEM,
     MERGE_PROMPT,
+    READER_FEEDBACK_NOTE,
     REFINER_SYSTEM,
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
@@ -537,6 +543,78 @@ def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> No
             manifest.add(p, "voice_analysis", name, instruction="match this voice")
         else:
             manifest.add(p, "voice_analysis", name)
+
+
+READER_SECTION_INSTRUCTION = (
+    "readers of the published text on this section — their own words, not a "
+    "summary; weigh them as evidence alongside the reviewers"
+)
+
+READER_INDEX_INSTRUCTION = (
+    "reader feedback filed one file per section, by ordinal path — open the "
+    "sections this piece covers"
+)
+
+READER_UNROUTED_INSTRUCTION = (
+    "reader feedback that named no section — read as feedback on the work at large"
+)
+
+
+def add_reader_unrouted_ref(manifest: ContentManifest, reader: ReaderFeedback) -> None:
+    """List the unrouted reader feedback, where any submission landed there."""
+    if (unrouted := reader.unrouted()) is not None:
+        manifest.add(
+            unrouted,
+            "reader_feedback",
+            "Reader feedback (no section)",
+            instruction=READER_UNROUTED_INSTRUCTION,
+        )
+
+
+def add_reader_index_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
+    """List the whole ingested set, for a stage that has no plan to address yet."""
+    reader = ReaderFeedback.for_plan(notes.reader_dir, None)
+    if (index := reader.index()) is not None:
+        manifest.add(
+            index,
+            "reader_feedback",
+            "Reader feedback index",
+            instruction=READER_INDEX_INSTRUCTION,
+        )
+    add_reader_unrouted_ref(manifest, reader)
+
+
+def add_reader_section_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
+    """List a ref per plan section readers wrote about, for a whole-draft pass.
+
+    The plan comes off the notes tree rather than the caller, so every stage
+    revising the whole piece addresses sections through one derivation. A
+    section nobody wrote about contributes no line, so the manifest carries
+    the sections that have evidence rather than a row of empty promises.
+    """
+    reader = ReaderFeedback.for_plan(
+        notes.reader_dir, notes.load_artifact("plan", ArticlePlan)
+    )
+    for entry in reader.sections():
+        manifest.add(
+            entry.path,
+            "reader_feedback",
+            f"Reader feedback — {entry.title}",
+            instruction=READER_SECTION_INSTRUCTION,
+        )
+    add_reader_unrouted_ref(manifest, reader)
+
+
+def reader_feedback_block(manifest: ContentManifest) -> str:
+    """How to weigh the reader-feedback files, where the manifest lists any.
+
+    Read off the manifest rather than tracked separately, so the guidance
+    reaches exactly the stages whose inputs it is about and cannot promise a
+    file that was never listed.
+    """
+    if not any(ref.role == "reader_feedback" for ref in manifest.refs):
+        return ""
+    return f"{READER_FEEDBACK_NOTE}\n\n"
 
 
 def directions_block(notes: PipelineNotes) -> str:
@@ -1146,6 +1224,7 @@ async def plan_article(
             )
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
+    add_reader_index_refs(manifest, notes)
 
     task = (
         f"Extract a structured article plan from the source material.\n"
@@ -1160,6 +1239,7 @@ async def plan_article(
         )
     if format_guidance:
         task += f"{format_guidance}\n\n"
+    task += reader_feedback_block(manifest)
     task += (
         "Read the file, then build the plan using set_plan_header, "
         "add_section, add_research_question, and add_source_quote."
@@ -1221,6 +1301,7 @@ async def refine_plan(
     manifest = ContentManifest()
     manifest.add(plan_path, "plan", "Current plan")
     add_voice_refs(manifest, voice_file_paths or [])
+    add_reader_section_refs(manifest, notes)
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
@@ -1228,6 +1309,7 @@ async def refine_plan(
         f"Refine the article plan using the research findings.\n\n"
         f"{manifest.render()}\n"
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
+        f"{reader_feedback_block(manifest)}"
         f"Read the plan, then build the refined plan using "
         f"set_plan_header, add_section, add_research_question, and add_source_quote."
     )
@@ -1416,6 +1498,7 @@ async def write_section(
     draft_path: Path,
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
+    reader_feedback_path: Path | None = None,
     section_context: str = "",
     target_format: str = "auto",
     servers: dict[str, McpServerEntry] | None = None,
@@ -1459,6 +1542,13 @@ async def write_section(
     add_voice_refs(manifest, voice_file_paths or [])
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
+    if reader_feedback_path:
+        manifest.add(
+            reader_feedback_path,
+            "reader_feedback",
+            f"Reader feedback — {section_title}",
+            instruction=READER_SECTION_INSTRUCTION,
+        )
 
     format_guidance = get_format_guidance(target_format)
     task = (
@@ -1467,6 +1557,7 @@ async def write_section(
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
     )
     task += author_context_block(notes)
+    task += reader_feedback_block(manifest)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     if section_context:
@@ -1570,6 +1661,7 @@ async def write_full_draft(
     manifest.add(notes.artifact_path("plan"), "plan", "Article plan")
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
+    add_reader_section_refs(manifest, notes)
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
@@ -1582,6 +1674,7 @@ async def write_full_draft(
         f"read_finding for details.\n\n"
     )
     task += author_context_block(notes)
+    task += reader_feedback_block(manifest)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
@@ -2293,6 +2386,7 @@ async def rewrite_final(
         )
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
+    add_reader_section_refs(manifest, notes)
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
@@ -2304,6 +2398,7 @@ async def rewrite_final(
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += author_context_block(notes)
+    task += reader_feedback_block(manifest)
     task += (
         f"{manifest.render()}\n\n"
         f"Read the annotated draft — review findings are marked inline. "
@@ -3035,6 +3130,7 @@ class PipelineRunner:
         self.install_block_callback()
         self.snapshot.profile = current_settings().profile
         configure_session_state(self.state)
+        await self.ingest_reader_channel()
         await self.setup_doc()
         policy_token = session_policy.set(self.session_policy_for_run())
 
@@ -3090,6 +3186,7 @@ class PipelineRunner:
         self.state.seen_comments = CommentLedger(handled=snapshot.seen_comment_ids)
         self.state.agent_comments.mark_all(snapshot.agent_comment_ids)
         self.ensure_notes()
+        await self.ingest_reader_channel()
         self.rehydrate_draft_files()
         self.state.seen_source_comments = CommentLedger(
             handled=snapshot.seen_source_comment_ids
@@ -3419,16 +3516,35 @@ class PipelineRunner:
             logger.info("Plan-breaking terminal input")
             self.plan_breaking.set()
 
-    # lup: Feedback reaches a stage only from the live channels — doc comments,
-    # terminal input, tab edits — so the readers who already read the published
-    # text are unheard. The author holds a Formspree export of 574 reader
-    # submissions keyed by chapter and section, 95 of them substantive, at
-    # tmp/formspree_mdkzezkv_2026-08-05T13_56_02_export.json. Ingest it into
-    # per-section files the plan and rewrite stages read, so revising section 1.3
-    # sees the comments about 1.3 rather than a general instruction to write
-    # well. This is the evidence in front of the stage that acts on it, instead
-    # of today's themes hardened into prompt lines that go stale, and it gives
-    # every future feedback round somewhere to land.
+    async def ingest_reader_channel(self) -> None:
+        """File the configured reader-feedback export, once, at session start.
+
+        Readers of the already-published text arrive as an export rather than
+        through the live channels, so this runs before the first stage — and
+        again at the head of a resume, since a run that resumes into rewrite
+        never passes through the stages that would otherwise have read it.
+        """
+        configured = current_settings().reader_feedback_path
+        if not configured:
+            return
+        source = Path(configured).expanduser()
+        if not source.exists():
+            logger.warning("Reader feedback path does not exist: %s", source)
+            return
+
+        notes = self.ensure_notes()
+        report = ingest_reader_feedback(
+            ReaderFeedbackTree(root=notes.reader_dir), source
+        )
+        logger.info("Reader feedback: %s", report.summary())
+        await self.hooks.on_progress(f"Reader feedback: {report.summary()}")
+
+    def reader_feedback(self) -> ReaderFeedback:
+        """This run's ingested reader feedback, addressed against its plan."""
+        return ReaderFeedback.for_plan(
+            self.ensure_notes().reader_dir, self.snapshot.plan
+        )
+
     async def prepare_feedback(self, stage: str) -> Path | None:
         """Ingest new feedback and render the accumulated set to a file."""
         await self.gather_feedback()
@@ -4075,6 +4191,7 @@ class PipelineRunner:
 
         feedback_path = await self.prepare_feedback("write")
         notes = self.ensure_notes()
+        reader = self.reader_feedback()
         glossary_path = notes.artifacts_dir / "glossary.json"
         seed_glossary(glossary_path, plan.conventions)
         glossary = build_glossary_server(glossary_path)
@@ -4103,6 +4220,7 @@ class PipelineRunner:
                         draft_path=sc.output_path,
                         voice_file_paths=self.snapshot.voice_file_paths,
                         feedback_path=feedback_path,
+                        reader_feedback_path=reader.for_section(section.title),
                         section_context=self.build_neighbor_context(
                             plan, section.title
                         ),
@@ -4747,6 +4865,7 @@ class PipelineRunner:
                 )
 
         feedback_path = await self.prepare_feedback("restart")
+        reader = self.reader_feedback()
         glossary = build_glossary_server(notes.artifacts_dir / "glossary.json")
         glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
@@ -4759,6 +4878,7 @@ class PipelineRunner:
                     draft_path=sc.output_path,
                     voice_file_paths=self.snapshot.voice_file_paths,
                     feedback_path=feedback_path,
+                    reader_feedback_path=reader.for_section(section_plan.title),
                     section_context=self.build_neighbor_context(
                         plan, section_plan.title
                     ),

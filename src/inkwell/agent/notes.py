@@ -9,6 +9,7 @@ read and write through PipelineNotes. Organized by category:
   ├── directions/     # Pre-existing GDoc comments treated as input context
   ├── drafts/         # Section drafts, merged article, final output
   ├── feedback/       # Rendered feedback files for stage consumption
+  ├── reader/         # Reader feedback on published text, filed per section
   ├── research/       # Research notes triggered by comments
   └── terminal/       # Terminal input from the author
 
@@ -64,6 +65,7 @@ class PipelineNotes:
         self.terminal_dir = base_dir / "terminal"
         self.drafts_dir = base_dir / "drafts"
         self.feedback_dir = base_dir / "feedback"
+        self.reader_dir = base_dir / "reader"
         self.directions_dir = base_dir / "directions"
         self.processed_dir = base_dir / "processed"
         self.work_dir = base_dir / "work"
@@ -75,6 +77,7 @@ class PipelineNotes:
             self.directions_dir,
             self.drafts_dir,
             self.feedback_dir,
+            self.reader_dir,
             self.research_dir,
             self.terminal_dir,
             self.processed_dir,
@@ -251,34 +254,6 @@ class PipelineNotes:
                 )
 
         return "\n\n## Author Feedback\n\n" + "\n".join(rendered()) + "\n"
-
-    async def get_section_feedback(self, section: str) -> str:
-        """Render feedback relevant to a specific section."""
-        comments = await self.list_comments()
-        terminal = await self.list_terminal_inputs()
-
-        relevant = [
-            c
-            for c in comments
-            if section.lower() in c.anchor_text.lower()
-            or section.lower() in c.content.lower()
-            or any(section.lower() in tag.lower() for tag in c.tags)
-        ]
-        relevant.extend(terminal)
-
-        if not relevant:
-            return ""
-
-        lines = [f"## Feedback for '{section}'", ""]
-        for c in relevant:
-            line = f"- [{c.impact}] {c.content}"
-            if c.anchor_text:
-                line += f' (on: "{c.anchor_text}")'
-            if c.reply:
-                line += f" — Author: {c.reply}"
-            lines.append(line)
-
-        return "\n".join(lines) + "\n"
 
     async def clear_downstream(self, from_stage: str) -> None:
         """Clear notes invalidated by a restart.

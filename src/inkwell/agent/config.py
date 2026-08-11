@@ -324,6 +324,16 @@ class Settings(BaseSettings):
         description="Path to style reference corpus",
     )
 
+    reader_feedback_path: str | None = Field(
+        default=None,
+        validation_alias="INKWELL_READER_FEEDBACK_PATH",
+        description=(
+            "Reader-feedback export to ingest at session start — one JSON file, "
+            "or a directory of them. Feedback from readers of already-published "
+            "text, filed per section for the stages that revise it."
+        ),
+    )
+
     # ==========================================================================
     # LIMITS
     # ==========================================================================

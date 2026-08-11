@@ -5,6 +5,7 @@ Commands:
 - serve-tools: Start SDK tools as an MCP stdio server (used by ``chat``)
 - chat: Launch an interactive ``claude`` session with the agent's tools and prompt
 - repl: Interactive REPL with the agent via the SDK (continuous session)
+- reader-feedback: Ingest a reader-feedback export and report what it routed
 
 Examples::
 
@@ -16,6 +17,7 @@ Examples::
     $ uv run lup-devtools agent repl
     $ uv run lup-devtools agent repl --model sonnet --no-prompt
     $ uv run lup-devtools agent serve-tools
+    $ uv run lup-devtools agent reader-feedback export.json --out notes/reader
 """
 
 import asyncio
@@ -60,6 +62,11 @@ from inkwell.agent.stages import (
     STYLE_REVIEWER_PROMPT,
 )
 from inkwell.agent.pipeline import build_research_tools
+from inkwell.agent.reader_feedback import (
+    ReaderFeedbackTree,
+    SubstantiveRule,
+    ingest_reader_feedback,
+)
 from inkwell.agent.tools.extract import EXTRACT_TOOLS
 from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS
 from inkwell.agent.tools.research.fetch import FETCH_TOOLS
@@ -789,6 +796,43 @@ async def repl(
         # Additional Ctrl+C during cleanup — containers will be cleaned
         # on next start via stale container removal
         pass
+
+
+@app.command("reader-feedback")
+def reader_feedback_cmd(
+    source: Annotated[
+        Path,
+        typer.Argument(help="Reader-feedback export file, or a directory of them"),
+    ],
+    out: Annotated[
+        Path,
+        typer.Option("--out", "-o", help="Where to file the per-section notes"),
+    ] = Path("notes/reader"),
+    min_length: Annotated[
+        int,
+        typer.Option("--min-length", help="Shortest prose that counts as substantive"),
+    ] = SubstantiveRule().min_length,
+    prose_field: Annotated[
+        list[str] | None,
+        typer.Option("--prose-field", help="Field whose prose counts (repeatable)"),
+    ] = None,
+) -> None:
+    """Ingest a reader-feedback export into per-section notes and report the split.
+
+    The same ingestion a run performs at session start, so an author can see
+    what an export would route — and where — before spending a pipeline on it.
+    """
+    rule = SubstantiveRule(
+        prose_fields=prose_field or SubstantiveRule().prose_fields,
+        min_length=min_length,
+    )
+    report = ingest_reader_feedback(
+        ReaderFeedbackTree(root=out.expanduser()), source.expanduser(), rule=rule
+    )
+    typer.echo(report.summary())
+    for row in report.malformed:
+        typer.echo(f"  row {row.position}: {row.error}")
+    typer.echo(f"Filed under {out}")
 
 
 @app.command("repl")

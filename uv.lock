@@ -786,7 +786,7 @@ wheels = [
 [[package]]
 name = "lup"
 version = "0.2.0"
-source = { git = "https://github.com/joy-void-joy/lup?subdirectory=packages%2Flup&branch=dev#29f842f17c2b36d85921e96185efb2cc01c828ef" }
+source = { git = "https://github.com/joy-void-joy/lup?subdirectory=packages%2Flup&branch=dev#74a3ff781048b6a8c81874ea24ea0b25e10f4fbb" }
 dependencies = [
     { name = "httpx" },
     { name = "markdown-it-py" },
@@ -811,6 +811,7 @@ docker = [
 ]
 web = [
     { name = "fastapi" },
+    { name = "google-auth-oauthlib" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 

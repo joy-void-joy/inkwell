@@ -28,6 +28,7 @@ from lup.devtools.feedback.models import AgentPrompt
 from lup.devtools.harness.profile_app import create_profile_app
 from lup.devtools.subapps import SubApp, compose
 from inkwell.devtools.agent import app as agent_app
+from inkwell.devtools.corpus import app as corpus_app
 from inkwell.devtools.dev.app import app as dev_app
 from inkwell.devtools.harness.app import app as harness_app
 from inkwell.devtools.profiles import inkwell_profile_directory
@@ -63,6 +64,7 @@ def assembled_prompt() -> AgentPrompt:
 
 APPLICATION_APPS = {
     "agent": agent_app,
+    "corpus": corpus_app,
     "dev": dev_app,
     "feedback": create_feedback_app(assembled_prompt),
     "harness": harness_app,

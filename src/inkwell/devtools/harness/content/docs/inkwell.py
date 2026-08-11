@@ -41,7 +41,14 @@ src/inkwell/
 │       ├── extract.py      # Source extraction — conversations, URLs, files
 │       ├── formats.py      # Output adapters — LessWrong, Twitter, blog
 │       ├── latex.py        # Sandboxed LaTeX rendering
-│       └── research/       # exa, arxiv, fred, markets, wikipedia, fetch
+│       └── research/       # exa, arxiv, fred, markets, wikipedia, fetch, corpus
+├── corpus/                 # The research corpus — material gathered before the question
+│   ├── registry.py         # Every tracked source declared once: hosts, avenues, authority
+│   ├── discovery.py        # Sitemap, listing, table, and sweep enumeration
+│   ├── quality.py          # Declared quality rules with overridable thresholds
+│   ├── storage.py          # Documents as files beside one typed JSON index per source
+│   ├── fetch.py            # Reaching a document, escalating to a browser where declared
+│   └── ingest.py           # A run: enumerate, fetch what is new, store, report
 ├── devtools/               # Development CLI, exposed as `lup-devtools`
 │   ├── main.py             # Root Typer app composing the sub-apps
 │   ├── harness/            # Typed harness declarations — this tree's source

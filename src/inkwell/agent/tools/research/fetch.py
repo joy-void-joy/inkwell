@@ -38,6 +38,52 @@ class ExtractedMetadata(BaseModel):
     title: str = ""
 
 
+class ExtractedPage(BaseModel):
+    """An HTML page reduced to its article text and title.
+
+    The one shape every caller of the extraction path below receives, so that
+    reading a page means the same thing whether a tool call asked for it or the
+    corpus did.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    title: str = ""
+
+
+def extract_page(
+    html: str, *, url: str = "", output_format: str = "txt"
+) -> ExtractedPage | None:
+    """Extract one HTML page's article text and title, or None if there is none.
+
+    The single trafilatura path in this project: navigation, ads, and comments
+    go, links and tables stay. ``output_format`` is the one thing callers differ
+    on — a tool call wants plain text to hand a reader, the corpus wants
+    Markdown to keep on disk — so it is a parameter rather than a second copy
+    of the call.
+    """
+    text = trafilatura.extract(
+        html,
+        url=url or None,
+        output_format=output_format,
+        include_comments=False,
+        include_tables=True,
+        no_fallback=False,
+        include_links=True,
+    )
+    if not text:
+        return None
+    metadata = trafilatura.extract(html, output_format="json", include_links=False)
+    title = ""
+    if metadata:
+        try:
+            title = ExtractedMetadata.model_validate_json(metadata).title
+        except ValidationError:
+            logger.debug("Extraction metadata for %s was not readable", url or "page")
+    return ExtractedPage(text=text, title=title)
+
+
 DOWNLOADS_DIR = Path("tmp/downloads")
 MAX_PDF_BYTES = 100 * 1024 * 1024
 
@@ -185,28 +231,13 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
             content=saved,
         )
 
-    extracted = trafilatura.extract(
-        resp.text,
-        include_comments=False,
-        include_tables=True,
-        no_fallback=False,
-        include_links=True,
-    )
-    if extracted:
-        title_json = trafilatura.extract(
-            resp.text, output_format="json", include_links=False
-        )
-        title_str = ""
-        if title_json:
-            try:
-                title_str = ExtractedMetadata.model_validate_json(title_json).title
-            except ValidationError:
-                logger.debug("Extraction metadata for %s was not readable", url)
-        saved = save_content("fetch", url, extracted)
+    extracted = extract_page(resp.text, url=url)
+    if extracted is not None:
+        saved = save_content("fetch", url, extracted.text)
         return FetchSourceOutput(
             url=url,
             format="text",
-            title=title_str,
+            title=extracted.title,
             content=saved,
         )
 

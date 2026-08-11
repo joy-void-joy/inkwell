@@ -110,9 +110,9 @@ PIPELINE_STAGES: tuple[PipelineStage, ...] = get_args(PipelineStage.__value__)
 """Stage names accepted by per-stage model overrides, in pipeline order."""
 
 SUGGESTED_MODELS: tuple[str, ...] = (
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
 )
 """Model ids offered in pickers; any model id string is accepted."""
 
@@ -241,7 +241,7 @@ class Settings(BaseSettings):
     # ==========================================================================
 
     model: str = Field(
-        default="claude-opus-4-6",
+        default="claude-opus-5",
         validation_alias="AGENT_MODEL",
         description="Default Claude model for all pipeline stages",
     )

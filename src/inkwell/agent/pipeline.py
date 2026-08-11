@@ -89,8 +89,18 @@ from inkwell.agent.stages import (
     SINGLE_WRITER_PROMPT,
     SOURCE_FIDELITY_REVIEWER_PROMPT,
     STYLE_REVIEWER_PROMPT,
+    declares_own_checks,
+    format_checks_for,
+    format_key,
     get_format_guidance,
 )
+from inkwell.agent.format_checks import (
+    DeclaredCheck,
+    Judge,
+    QueryJudge,
+    run_format_checks,
+)
+from inkwell.agent.segmenter import reader
 from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import (
@@ -151,11 +161,14 @@ from inkwell.agent.tools.research.markets import MARKET_TOOLS
 from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 from inkwell.agent.tools.stage_outputs import (
     AssumptionsCollector,
+    FormatCheckCollector,
     PlanCollector,
     PlanFile,
     ResearchCollector,
     ReviewCollector,
+    load_declared_checks,
     make_assumptions_tools,
+    make_format_check_tools,
     make_glossary_tools,
     make_note_tool,
     make_plan_tools,
@@ -1015,6 +1028,73 @@ def build_glossary_server(glossary_path: Path) -> ToolServers:
     return build_output_server("glossary", make_glossary_tools(glossary_path))
 
 
+def format_checks_path(notes: PipelineNotes) -> Path:
+    """Where the rows a run declared for its own format live."""
+    return notes.artifacts_dir / "format_checks.json"
+
+
+def build_format_check_server(notes: PipelineNotes) -> ToolServers:
+    """MCP server with the tool a custom format declares its rows through."""
+    return build_output_server(
+        "formatchecks",
+        make_format_check_tools(FormatCheckCollector(format_checks_path(notes))),
+    )
+
+
+def declared_format_checks(notes: PipelineNotes) -> list[DeclaredCheck]:
+    """The rows this run declared for its format, none if it declared none.
+
+    Read from the artifact rather than passed down the stage chain, so a row
+    the planner declared reaches the writer and the rewriter alike — including
+    across a resume, where the earlier stage is not in this process.
+    """
+    return load_declared_checks(format_checks_path(notes))
+
+
+async def add_format_check_report(
+    manifest: ContentManifest,
+    notes: PipelineNotes,
+    draft: str,
+    draft_path: Path,
+    *,
+    target_format: str,
+    judge: Judge | None = None,
+) -> None:
+    """Measure the format's declared rows off a draft and list the report.
+
+    Advisory at every step. A fired row becomes a line the rewriter reads, and
+    a failure to measure at all is logged and dropped rather than raised, so
+    neither a row nor a breakage in reading one can refuse a draft or stop the
+    stage that was about to revise it.
+    """
+    checks = format_checks_for(target_format, declared_format_checks(notes))
+    if not checks:
+        return
+    try:
+        report = await run_format_checks(
+            draft,
+            checks,
+            format_key=format_key(target_format),
+            draft_path=draft_path,
+            judge=judge or QueryJudge(),
+            reader=reader(),
+        )
+    except Exception:
+        logger.exception("Format checks could not be measured — continuing without")
+        return
+    manifest.add(
+        notes.save_text_artifact("format_checks", report.render()),
+        "review",
+        "Format checks",
+        instruction=(
+            f"{len(report.fired)} of {len(report.rows)} declared rows fired — "
+            "advisory, never blocking. The author's voice outranks every row: "
+            "where one fires against how the author actually writes, keep the "
+            "author and leave the row unactioned"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline stages — each reads from files, outputs via tools or Write
 # ---------------------------------------------------------------------------
@@ -1116,6 +1196,8 @@ async def plan_article(
     stage_tools = build_output_server("output", make_plan_tools(collector)).merged(
         build_note_server("plan", note_collector)
     )
+    if declares_own_checks(target_format):
+        stage_tools = stage_tools.merged(build_format_check_server(notes))
     output_servers = stage_tools.servers
     output_tool_names = stage_tools.tool_names
 
@@ -1128,8 +1210,17 @@ async def plan_article(
         else f"Suggested format: {target_format} (override if content is better "
         f"suited to another format: {format_list})"
     )
+    if declares_own_checks(target_format):
+        format_hint += (
+            "\nA format you describe yourself carries no rules this codebase "
+            "knows. Where your description states something a machine could "
+            "check off a finished draft — a banned phrase, a length, a bolding "
+            "convention, a rhythm — declare it as a row, and declare a judged "
+            "row for a rule only a reader could settle. The rewrite stage "
+            "reads what they measure."
+        )
 
-    format_guidance = get_format_guidance(target_format)
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     conversation_path = notes.text_artifact_path("conversation")
 
     manifest = ContentManifest()
@@ -1460,7 +1551,7 @@ async def write_section(
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
-    format_guidance = get_format_guidance(target_format)
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f'Write the section "{section_title}" for the article.\n\n'
         f"{manifest.render()}\n"
@@ -1573,7 +1664,7 @@ async def write_full_draft(
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
-    format_guidance = get_format_guidance(target_format)
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f"Write the complete piece — every section of the plan, in order, "
         f"as one coherent document.\n\n"
@@ -1669,7 +1760,7 @@ async def merge_sections(
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
-    format_guidance = get_format_guidance(target_format)
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f"Assemble these independently-written sections into one continuous "
         f"piece, in this order:\n{drafts_list}\n\n"
@@ -2296,7 +2387,11 @@ async def rewrite_final(
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
-    format_guidance = get_format_guidance(target_format)
+    await add_format_check_report(
+        manifest, notes, draft_content, draft_path, target_format=target_format
+    )
+
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f"Produce the final version of this piece.\n\n"
         f"Target format: {target_format}\n\n"

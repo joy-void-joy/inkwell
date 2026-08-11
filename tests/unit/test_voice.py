@@ -527,3 +527,81 @@ class TestInvalidateMergedCache:
 
     def test_noop_when_no_cache(self, style_dir: Path) -> None:
         invalidate_merged_cache()
+
+
+SIGNATURE_PROSE = (
+    "Moreover, the model — trained on nearly everything — is expensive.\n\n"
+    "Moreover, the cache — rebuilt every night — is already stale.\n\n"
+    "Moreover, the budget — approved last quarter — is gone."
+)
+"""Prose in an author's own signature: em-dash-heavy, copular, and opening
+every paragraph the same way. The textbook rows fire on all three."""
+
+
+class TestVoiceOutranksFormatChecks:
+    """A row firing against the author's own habits does not license a rewrite."""
+
+    async def test_rows_fire_on_a_passage_the_voice_profile_sanctions(self) -> None:
+        from inkwell.agent.format_checks import run_format_checks
+        from inkwell.agent.segmenter import reader
+        from inkwell.agent.stages import format_checks_for
+        from tests.unit.test_format_checks import HELD, StubJudge
+
+        profile = VoiceAnalysis(
+            label="author",
+            analysis=(
+                "The author writes long em-dash-heavy sentences and opens "
+                "paragraph after paragraph with 'Moreover'. This is a "
+                "signature, not a slip — keep it."
+            ),
+        )
+        mechanical = [c for c in format_checks_for("textbook") if c.kind != "judged"]
+        report = await run_format_checks(
+            SIGNATURE_PROSE,
+            mechanical,
+            format_key="textbook",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+        )
+
+        fired = {row.name for row in report.fired}
+        assert {"em-dash density", "paragraph openings"} <= fired
+        assert "signature" in profile.analysis
+
+        rendered = report.render()
+        assert "advisory" in rendered
+        assert "outrank" in rendered
+        assert "the author wins" in rendered
+
+    async def test_the_report_defers_to_the_voice_where_it_is_read(
+        self, tmp_path: Path
+    ) -> None:
+        """The rewrite stage gets the voice profile and the rows side by side."""
+        from inkwell.agent.content import ContentManifest
+        from inkwell.agent.notes import PipelineNotes
+        from inkwell.agent.pipeline import add_format_check_report, add_voice_refs
+        from tests.unit.test_format_checks import HELD, StubJudge
+
+        voice_file = tmp_path / "voice_profile.md"
+        voice_file.write_text("The author's em dashes are the point.", encoding="utf-8")
+        draft_path = tmp_path / "draft.md"
+        draft_path.write_text(SIGNATURE_PROSE, encoding="utf-8")
+
+        manifest = ContentManifest()
+        add_voice_refs(manifest, [str(voice_file)])
+        await add_format_check_report(
+            manifest,
+            PipelineNotes(tmp_path),
+            SIGNATURE_PROSE,
+            draft_path,
+            target_format="twitter",
+            judge=StubJudge(HELD),
+        )
+
+        labels = [ref.label for ref in manifest.refs]
+        assert "Format checks" in labels
+        assert len(labels) > 1, "the voice profile is listed beside the rows"
+        rows = next(ref for ref in manifest.refs if ref.label == "Format checks")
+        assert "voice outranks every row" in rows.instruction
+        assert "keep the" in rows.instruction

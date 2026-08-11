@@ -8,7 +8,29 @@ output via incremental MCP tools (plan, research, review) or built-in
 Write/Edit (prose stages).
 """
 
+from collections.abc import Sequence
+
 from pydantic import BaseModel, Field
+
+from inkwell.agent.format_checks import (
+    BannedVocabulary,
+    BlockLength,
+    BoldedSummaries,
+    BoldEmphasis,
+    DeclaredCheck,
+    DraftWords,
+    FormulaicOpenings,
+    JudgedRow,
+    LinkingPredicates,
+    MarkdownArtifacts,
+    ParagraphLengthVariance,
+    ParagraphSentences,
+    ParticipialTails,
+    PunctuationDensity,
+    SectionLength,
+    SentenceLengthVariance,
+    render_declared_rules,
+)
 
 EXTRACTOR_PROMPT = """\
 You are the extraction stage of a writing pipeline. You receive the author's \
@@ -1008,6 +1030,109 @@ Structure as a conversation between 2-3 speakers with distinct \
 perspectives. Each speaker should have a recognizable voice. \
 Distribute arguments naturally across speakers. Vary turn length."""
 
+TEXTBOOK_GUIDANCE = """\
+## Format: Textbook
+
+This piece teaches. The reader is capable but does not yet know the \
+material, and they are reading to be able to *do* something afterwards. \
+Every structural choice serves a reader who has to be able to follow the \
+argument, check it, and use it.
+
+### The bolded-summary paragraph
+
+**Every paragraph opens with a bolded sentence that summarizes the \
+paragraph's claim.** The rest of the paragraph supports, qualifies, or \
+demonstrates that claim, and nothing else. A reader who reads only the \
+bolded sentences must get the whole argument in order, with no gaps and no \
+non-sequiturs — that is the test, and it is worth re-reading the bold alone \
+to check it.
+
+The bolded sentence is a claim, not a label. "**Attention is expensive.**" \
+is a claim; "**Cost.**" is a heading pretending to be one, and \
+"**Let us now consider cost.**" announces a topic without asserting \
+anything. Bold the whole sentence, never a fragment of one — a paragraph \
+opening "**Three** reasons follow" has bolded a word, not a summary.
+
+### Teach from the concrete
+
+- **A claim arrives with the thing it is about.** A worked example, a \
+number, a case, a piece of code — something the reader can check the claim \
+against. An abstraction with no instance under it is not yet teaching.
+- **Define before deploying.** Every term, symbol, and abbreviation is \
+defined at its first use, in one or two sentences, before anything is built \
+on it. A reader must never have to read forward to understand a sentence.
+- **Build in dependency order.** A section may rely only on what earlier \
+sections established. Where the order has to break, say so explicitly and \
+say where the missing piece arrives.
+
+### Vocabulary to avoid
+
+The register is plain and specific. The following are the tells of prose \
+that is filling space rather than teaching, and they are banned outright: \
+"it's worth noting", "it is important to note", "in many ways", "this is \
+crucial", "delve into", "dive deep", "unpack", "shed light on", "navigate \
+the complexities", "tapestry", "realm", "landscape" as a metaphor, \
+"testament to", "beacon of", "multifaceted", "myriad", "plethora", \
+"paradigm", "holistic", "seamless", "cutting-edge", "ever-evolving", \
+"in today's world", "at the end of the day", "that being said", "in \
+conclusion", "plays a vital role", "serves as a", "stands as a".
+
+Prefer the specific word to the impressive one. "Robust" almost always \
+means something more precise — say that instead.
+
+### Structural tells
+
+- **No formulaic openings.** Do not open a run of paragraphs the same way. \
+"Moreover", "Furthermore", "Additionally" as paragraph openers, and the \
+"Not only X, but Y" and "It's not just X — it's Y" frames, all read as \
+template rather than thought.
+- **Vary sentence and paragraph length.** Prose where every sentence runs \
+the same length has no rhythm and is exhausting to read, however correct \
+each sentence is. Some sentences are four words.
+- **No summary paragraph that only repeats.** A closing paragraph earns its \
+place by saying what follows from the argument, not by listing it again.
+
+### Tone
+
+- **Assert, then support.** Say the thing, then give the reason. Do not \
+build to the claim, and do not hedge a claim you are about to support.
+- **Write what things do, not what they are.** Prefer a verb that acts to a \
+linking verb that describes: "attention costs O(n²)" over "attention is \
+expensive in its scaling", and never the inflated forms of the same move — \
+"serves as", "stands as", "holds the distinction of being", "constitutes".
+- **No performed enthusiasm.** "Fascinatingly", "remarkably", "it is \
+striking that" tell the reader how to feel instead of giving them the \
+reason to feel it.
+
+### Punctuation
+
+- **Em dashes are rationed.** One or two in a section, for a genuine break \
+in thought. A draft that reaches for them every few sentences is using them \
+as a substitute for deciding how two clauses relate.
+- **No participial tails.** Do not end a sentence with a comma and a \
+gerund — "…, underscoring the point", "…, highlighting the tension", "…, \
+making it clear that". The construction adds a clause that asserts nothing \
+and appears in machine prose far more than in anybody's writing.
+- **Semicolons are rationed too.** A semicolon nearly always marks two \
+sentences that were afraid to separate. Write the two sentences.
+- **Parentheses are rationed.** A parenthetical is a decision deferred: \
+either the aside matters, in which case it earns a sentence, or it does not, \
+in which case cut it. Reserve them for a genuine citation or unit.
+- **No markdown left showing.** Bold, headings, links, and code spans either \
+render or they are noise the reader has to parse. A stray `**`, a heading \
+whose hashes have no space after them, a half-written link — none of these \
+reach a finished draft.
+
+### Bold, in this format only
+
+Boldface is otherwise a tell: prose that bolds phrases for emphasis is \
+shouting rather than arguing, and a reader learns to skip it. This format is \
+the exception, and only for the one job named above — the sentence that opens \
+each paragraph and summarizes its claim, which is what makes the bold a \
+navigational spine a reader can follow alone. That exemption does not extend \
+past it: **do not bold anything inside the body of a paragraph.** Emphasis \
+mid-paragraph is the overuse the exemption was never meant to cover."""
+
 
 class OutputFormatSpec(BaseModel):
     """A selectable output format for the pipeline."""
@@ -1023,21 +1148,294 @@ class OutputFormatSpec(BaseModel):
         description="Structural guidance the writing stages read, if this "
         "format has any of its own",
     )
+    checks: list[DeclaredCheck] = Field(
+        default_factory=list,
+        description="The rows this format's guidance is re-read against — "
+        "mechanical ones measuring a threshold, judged ones spending a "
+        "reviewer. Rendered into what the writer reads and re-run on every "
+        "draft. A format with nothing measurable declares none",
+    )
 
+
+LLM_VOCABULARY = [
+    "it's worth noting",
+    "it is worth noting",
+    "it is important to note",
+    "in many ways",
+    "this is crucial",
+    "delve into",
+    "dive deep",
+    "unpack",
+    "shed light on",
+    "navigate the complexities",
+    "tapestry",
+    "realm",
+    "testament to",
+    "beacon of",
+    "multifaceted",
+    "myriad",
+    "plethora",
+    "paradigm",
+    "holistic",
+    "seamless",
+    "cutting-edge",
+    "ever-evolving",
+    "in today's world",
+    "at the end of the day",
+    "that being said",
+    "in conclusion",
+    "plays a vital role",
+    "serves as a",
+    "stands as a",
+    "not only",
+    "moreover",
+    "furthermore",
+]
+"""The vocabulary the textbook guidance bans outright. The default for that
+format's row, which takes an override: which phrases read as filler is a
+judgement about register, and a house with different tells declares its own."""
+
+TEXTBOOK_CHECKS: list[DeclaredCheck] = [
+    BoldedSummaries(
+        name="bolded summaries",
+        rule="Every paragraph opens with a bolded sentence summarizing its "
+        "claim, so a reader who reads only the bold gets the whole argument.",
+        share_floor=1.0,
+    ),
+    BannedVocabulary(
+        name="llm vocabulary",
+        rule="None of the banned filler phrases appear — prefer the specific "
+        "word to the impressive one.",
+        phrases=LLM_VOCABULARY,
+    ),
+    PunctuationDensity(
+        name="em-dash density",
+        rule="Em dashes are rationed to a genuine break in thought, one or two "
+        "a section.",
+        marks=["—"],
+        per_thousand_ceiling=3.0,
+    ),
+    PunctuationDensity(
+        name="semicolon density",
+        rule="A semicolon nearly always marks two sentences afraid to "
+        "separate — write the two sentences.",
+        marks=[";"],
+        per_thousand_ceiling=1.0,
+    ),
+    PunctuationDensity(
+        name="parenthesis density",
+        rule="A parenthetical is a decision deferred: either the aside earns a "
+        "sentence or it is cut.",
+        marks=["("],
+        per_thousand_ceiling=4.0,
+    ),
+    MarkdownArtifacts(
+        name="markdown artifacts",
+        rule="No markdown left showing — every marker either renders or is cut.",
+    ),
+    BoldEmphasis(
+        name="bold emphasis",
+        rule="Bold carries the paragraph-opening summary and nothing else; no "
+        "emphasis inside the body of a paragraph.",
+        per_thousand_ceiling=0.0,
+        exempt_paragraph_summaries=True,
+    ),
+    FormulaicOpenings(
+        name="paragraph openings",
+        rule="No run of paragraphs opens the same way.",
+        repeat_ceiling=1,
+    ),
+    SentenceLengthVariance(
+        name="sentence rhythm",
+        rule="Sentence lengths vary; some sentences are four words.",
+        spread_floor=5.0,
+    ),
+    ParagraphLengthVariance(
+        name="paragraph rhythm",
+        rule="Paragraph lengths vary rather than coming out uniform.",
+        spread_floor=15.0,
+    ),
+    LinkingPredicates(
+        name="inflated copulas",
+        rule="Write what things do, not what they are, and never reach for the "
+        "inflated stand-ins for `is` — `serves as`, `stands as`, `holds the "
+        "distinction of being`.",
+        share_ceiling=0.05,
+    ),
+    ParticipialTails(
+        name="participial tails",
+        rule="No sentence ends on a comma and a gerund.",
+        share_ceiling=0.05,
+    ),
+    JudgedRow(
+        name="teachable concreteness",
+        rule="Every claim arrives with something the reader can check it "
+        "against — a worked example, a number, a case.",
+        question="Is every substantive claim in this draft concrete enough to "
+        "teach from — does it arrive with a worked example, a number, a case, "
+        "or something else a reader could check it against? Name each passage "
+        "that asserts an abstraction with no instance under it.",
+    ),
+    JudgedRow(
+        name="dependency order",
+        rule="Every term is defined before it is used, and each section relies "
+        "only on what earlier sections established.",
+        question="Does this draft build in dependency order? Name every term, "
+        "symbol, or abbreviation used before it is defined, and every passage "
+        "that relies on something the draft establishes only later.",
+    ),
+]
+
+ACADEMIC_CHECKS: list[DeclaredCheck] = [
+    JudgedRow(
+        name="definitions before use",
+        rule="Every symbol, term, and abbreviation is defined before its first "
+        "use, and one symbol carries one meaning throughout.",
+        question="Is every symbol, term, and abbreviation in this paper defined "
+        "before its first use, with one meaning throughout? Name each first use "
+        "that precedes its definition and each symbol reused for a second "
+        "meaning.",
+    ),
+    JudgedRow(
+        name="self-containment",
+        rule="Every result the paper promises to deliver is stated and proved "
+        "in the paper; a citation never stands in for a deliverable.",
+        question="Does this paper deliver what it promises? Name every result "
+        "the paper presents as its own contribution that is deferred to a "
+        "citation instead of stated and proved here.",
+    ),
+]
+
+LESSWRONG_CHECKS: list[DeclaredCheck] = [
+    ParagraphSentences(
+        name="paragraph length",
+        rule="Paragraphs run to 4 sentences at most; break longer ones.",
+        ceiling=4,
+    ),
+    BannedVocabulary(
+        name="flagged phrases",
+        rule="None of the phrases the community explicitly flags as LLM output appear.",
+        phrases=["it's worth noting", "in many ways", "this is crucial"],
+    ),
+    DraftWords(
+        name="post length",
+        rule="Well-received posts run 2,000-5,000 words; every paragraph earns "
+        "its place.",
+        floor=2000,
+        ceiling=5000,
+    ),
+]
+
+MEMO_CHECKS: list[DeclaredCheck] = [
+    BoldedSummaries(
+        name="bolding restraint",
+        rule="Bold the few load-bearing claims, not the first sentence of every "
+        "paragraph — uniform bolding reads as a template.",
+        share_ceiling=0.5,
+    ),
+    BoldEmphasis(
+        name="bold emphasis",
+        rule="Bold the few load-bearing claims a skimmer must catch, and no "
+        "more — uniform bolding buries the signal it is meant to surface.",
+        per_thousand_ceiling=20.0,
+    ),
+    SectionLength(
+        name="section length",
+        rule="A section running over 800 words is split or cut.",
+        word_ceiling=800,
+    ),
+    DraftWords(
+        name="memo length",
+        rule="Target 3,000-5,000 words, and under 3,000 where possible.",
+        ceiling=5000,
+    ),
+]
+
+BLOG_CHECKS: list[DeclaredCheck] = [
+    ParagraphSentences(
+        name="paragraph length",
+        rule="Paragraphs run 3-5 sentences.",
+        floor=3,
+        ceiling=5,
+    ),
+    SectionLength(
+        name="subheading cadence",
+        rule="A subheading every 300-400 words, for scannability.",
+        word_ceiling=400,
+    ),
+]
+
+LINKEDIN_CHECKS: list[DeclaredCheck] = [
+    ParagraphSentences(
+        name="paragraph length",
+        rule="One to three sentences per paragraph — walls of text die in the feed.",
+        ceiling=3,
+    ),
+    DraftWords(
+        name="post length",
+        rule="Target 150-400 words.",
+        floor=150,
+        ceiling=400,
+    ),
+]
+
+TWITTER_CHECKS: list[DeclaredCheck] = [
+    BlockLength(
+        name="tweet length",
+        rule="Each point is self-contained within ~260 characters.",
+        character_ceiling=260,
+    ),
+]
+
+DIALOG_CHECKS: list[DeclaredCheck] = [
+    ParagraphLengthVariance(
+        name="turn length",
+        rule="Vary turn length — some responses are a sentence, others a paragraph.",
+        spread_floor=12.0,
+    ),
+]
 
 OUTPUT_FORMATS: list[OutputFormatSpec] = [
     OutputFormatSpec(
-        key="academic", label="Academic paper", guidance=ACADEMIC_GUIDANCE
+        key="academic",
+        label="Academic paper",
+        guidance=ACADEMIC_GUIDANCE,
+        checks=ACADEMIC_CHECKS,
     ),
     OutputFormatSpec(
-        key="lesswrong", label="LessWrong post", guidance=LESSWRONG_GUIDANCE
+        key="lesswrong",
+        label="LessWrong post",
+        guidance=LESSWRONG_GUIDANCE,
+        checks=LESSWRONG_CHECKS,
     ),
-    OutputFormatSpec(key="blog", label="Blog post", guidance=BLOG_GUIDANCE),
-    OutputFormatSpec(key="twitter", label="Twitter thread", guidance=TWITTER_GUIDANCE),
-    OutputFormatSpec(key="dialog", label="Dialog", guidance=DIALOG_GUIDANCE),
-    OutputFormatSpec(key="memo", label="Policy memo", guidance=MEMO_GUIDANCE),
+    OutputFormatSpec(
+        key="textbook",
+        label="Textbook chapter",
+        guidance=TEXTBOOK_GUIDANCE,
+        checks=TEXTBOOK_CHECKS,
+    ),
+    OutputFormatSpec(
+        key="blog", label="Blog post", guidance=BLOG_GUIDANCE, checks=BLOG_CHECKS
+    ),
+    OutputFormatSpec(
+        key="twitter",
+        label="Twitter thread",
+        guidance=TWITTER_GUIDANCE,
+        checks=TWITTER_CHECKS,
+    ),
+    OutputFormatSpec(
+        key="dialog", label="Dialog", guidance=DIALOG_GUIDANCE, checks=DIALOG_CHECKS
+    ),
+    OutputFormatSpec(
+        key="memo", label="Policy memo", guidance=MEMO_GUIDANCE, checks=MEMO_CHECKS
+    ),
     OutputFormatSpec(key="newsletter", label="Newsletter"),
-    OutputFormatSpec(key="linkedin", label="LinkedIn post", guidance=LINKEDIN_GUIDANCE),
+    OutputFormatSpec(
+        key="linkedin",
+        label="LinkedIn post",
+        guidance=LINKEDIN_GUIDANCE,
+        checks=LINKEDIN_CHECKS,
+    ),
     OutputFormatSpec(key="custom", label="Custom format", accepts_description=True),
 ]
 
@@ -1062,6 +1460,40 @@ def format_key(target_format: str) -> str:
     )
 
 
+def format_spec(target_format: str) -> OutputFormatSpec | None:
+    """The declaration for a format, or None when nothing declares it.
+
+    Looked up through `format_key`, so a custom format carrying a description
+    finds its own declaration rather than falling through.
+    """
+    key = format_key(target_format)
+    return next((spec for spec in OUTPUT_FORMATS if spec.key == key), None)
+
+
+def format_checks_for(
+    target_format: str, declared: Sequence[DeclaredCheck] = ()
+) -> list[DeclaredCheck]:
+    """Every row a draft in this format is measured against.
+
+    The format's own declared rows, plus any a custom-format run declared at
+    runtime through the tool. A format that declares none returns none, which
+    is a valid format with an empty report.
+    """
+    spec = format_spec(target_format)
+    return [*(spec.checks if spec else []), *declared]
+
+
+def declares_own_checks(target_format: str) -> bool:
+    """Whether this run's format is one the agent describes for itself.
+
+    A format that takes a description is not described in Python, so its rules
+    exist only if the run declares them. `auto` counts, because the planner may
+    still choose such a format.
+    """
+    spec = format_spec(target_format)
+    return target_format == "auto" or bool(spec and spec.accepts_description)
+
+
 VOICE_PRECEDENCE_NOTE = """\
 ## The author's voice outranks this format guidance
 
@@ -1075,16 +1507,26 @@ a house style. A recommendation delivered in the author's own prose \
 always beats the same content forced into a bolded, segmented template."""
 
 
-def get_format_guidance(target_format: str) -> str:
+def get_format_guidance(
+    target_format: str, declared: Sequence[DeclaredCheck] = ()
+) -> str:
     """Return structural guidance for a target format, or empty string.
+
+    The format's declared rows are rendered in beside its prose, so the writer
+    is asked for exactly what the check will re-read the finished draft
+    against — one declaration with two readers, rather than a rule stated
+    twice and free to drift.
 
     Format guidance always defers to the author's voice — the precedence
     note travels with every non-empty block so no stage reads the structural
     rules without the reminder that the voice profile outranks them.
     """
-    guidance = next(
-        (spec.guidance for spec in OUTPUT_FORMATS if spec.key == target_format), ""
-    )
-    if not guidance:
+    spec = format_spec(target_format)
+    blocks = [
+        spec.guidance if spec else "",
+        render_declared_rules(format_checks_for(target_format, declared)),
+    ]
+    body = "\n\n".join(block for block in blocks if block)
+    if not body:
         return ""
-    return f"{guidance}\n\n{VOICE_PRECEDENCE_NOTE}"
+    return f"{body}\n\n{VOICE_PRECEDENCE_NOTE}"

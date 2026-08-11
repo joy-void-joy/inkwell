@@ -268,6 +268,7 @@ class SourceIngestor(BaseModel):
                     abstract=abstract_of(fetched),
                     page_count=written.page_count,
                     words=written.quality.metrics.words,
+                    published=fetched.published,
                     fetched_at=now_stamp(),
                     quality=written.quality,
                 )

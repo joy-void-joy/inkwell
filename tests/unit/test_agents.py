@@ -10,11 +10,14 @@ from inkwell.agent.stages import (
     SECTION_WRITER_PROMPT,
     STYLE_REVIEWER_PROMPT,
 )
+from inkwell.agent.pipeline import build_research_tools
 from inkwell.agent.tool_policy import (
     RESEARCH_TOOLS,
+    research_name,
     research_tool_names,
     review_tool_names,
 )
+from inkwell.agent.tools.research.corpus import CORPUS_TOOLS
 
 
 ALL_PROMPTS = {
@@ -59,6 +62,24 @@ class TestToolListConsistency:
                 assert tool in RESEARCH_TOOLS, (
                     f"research_tool_names() includes {tool} not in RESEARCH_TOOLS policy"
                 )
+
+    def test_every_mounted_research_tool_is_callable(self) -> None:
+        """A tool the server mounts but the allowlist omits is registered and
+        uncallable, which reads to a stage exactly like a tool that is broken."""
+        allowed = research_tool_names()
+        for tool in build_research_tools():
+            assert research_name(tool) in allowed, (
+                f"{tool.name} is mounted on the research server but not allowed"
+            )
+
+    def test_the_corpus_leads_the_research_surface(self) -> None:
+        """What is already gathered comes before what has to be fetched."""
+        mounted = [tool.name for tool in build_research_tools()]
+        assert mounted[: len(CORPUS_TOOLS)] == [tool.name for tool in CORPUS_TOOLS]
+
+    def test_corpus_retrieval_reaches_the_research_and_review_stages(self) -> None:
+        assert "mcp__research__search_corpus" in research_tool_names()
+        assert "mcp__research__search_corpus" in review_tool_names()
 
     def test_review_tools_subset_of_research(self) -> None:
         rt = set(review_tool_names())

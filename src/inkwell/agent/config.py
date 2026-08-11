@@ -18,6 +18,7 @@ from pydantic_settings import (
 from lup.types import EnvVars
 
 from inkwell.agent.client import PROVIDER_LOGIN
+from inkwell.corpus.embeddings import DEFAULT_EMBEDDING_BASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +343,33 @@ class Settings(BaseSettings):
             "one index per source. Shared across sessions and worktrees, so a "
             "run reads what earlier ingestion already gathered."
         ),
+    )
+
+    corpus_embedding_model: str = Field(
+        default="",
+        validation_alias="INKWELL_CORPUS_EMBEDDING_MODEL",
+        description=(
+            "Embedding model id for corpus retrieval's semantic half, e.g. "
+            "'text-embedding-3-small'. Empty — the default — means no "
+            "embeddings: the semantic half then ranks by the tag vocabulary and "
+            "metadata wording, which needs no key and no network. Set it, run "
+            "`lup-devtools corpus embed`, and the same half ranks by cosine."
+        ),
+    )
+
+    corpus_embedding_base_url: str = Field(
+        default=DEFAULT_EMBEDDING_BASE_URL,
+        validation_alias="INKWELL_CORPUS_EMBEDDING_BASE_URL",
+        description=(
+            "Where the embeddings endpoint lives. Any host speaking the "
+            "POST /embeddings format serves, including one on this machine"
+        ),
+    )
+
+    corpus_embedding_api_key: str | None = Field(
+        default=None,
+        validation_alias="INKWELL_CORPUS_EMBEDDING_API_KEY",
+        description="Key for the embeddings endpoint, where it wants one",
     )
 
     # ==========================================================================

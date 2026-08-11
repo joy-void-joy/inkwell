@@ -92,7 +92,11 @@ from inkwell.agent.stages import (
     get_format_guidance,
 )
 from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
-from inkwell.agent.tool_policy import research_tool_names, review_tool_names
+from inkwell.agent.tool_policy import (
+    RESEARCH_TOOLSET,
+    research_tool_names,
+    review_tool_names,
+)
 from inkwell.agent.tools.extract import (
     EXTRACT_TOOLS as EXTRACT_MCP_TOOLS,
     is_gdoc_url,
@@ -143,13 +147,7 @@ from inkwell.agent.tools.google_docs import (
     gdoc_nonfatal,
     truncate_tab_title,
 )
-from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
-from inkwell.agent.tools.research.corpus import CORPUS_TOOLS
-from inkwell.agent.tools.research.exa import EXA_TOOLS
 from inkwell.agent.tools.research.fetch import FETCH_TOOLS
-from inkwell.agent.tools.research.fred import FRED_TOOLS
-from inkwell.agent.tools.research.markets import MARKET_TOOLS
-from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 from inkwell.agent.tools.stage_outputs import (
     AssumptionsCollector,
     PlanCollector,
@@ -891,14 +889,7 @@ class DraftSyncer:
 
 def build_research_tools() -> list[LupMcpTool]:
     """Flat list of all research MCP tools (excludes fetch — now in source server)."""
-    return [
-        *CORPUS_TOOLS,
-        *EXA_TOOLS,
-        *ARXIV_TOOLS,
-        *FRED_TOOLS,
-        *MARKET_TOOLS,
-        *WIKIPEDIA_TOOLS,
-    ]
+    return list(RESEARCH_TOOLSET)
 
 
 class ToolServers(BaseModel):

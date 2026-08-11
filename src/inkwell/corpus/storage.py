@@ -5,6 +5,7 @@ process to run: one directory per source, the documents as files inside it, and
 one JSON index beside them.
 
     <root>/<source>/index.json      the typed index for this source
+    <root>/<source>/embeddings.json optional vectors over the index's metadata
     <root>/<source>/<slug>.md       a document extracted to Markdown
     <root>/<source>/<slug>.pdf      a document that was a PDF, still a PDF
 
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 INDEX_FILENAME = "index.json"
 """The one file per source that carries everything but the documents themselves."""
 
+EMBEDDINGS_FILENAME = "embeddings.json"
+"""Where a source's optional vectors live. Beside the index because they are
+derived from it: delete this file and the corpus is still whole."""
+
 PDF_MAGIC = b"%PDF-"
 """How every PDF begins. Checked before a Markdown write, so PDF bytes cannot
 reach the text path by accident."""
@@ -48,6 +53,10 @@ segment, which can outrun what a filesystem accepts; a longer one keeps a
 readable prefix and a digest of the whole, so identity survives shortening."""
 
 DIGEST_CHARS = 12
+
+DATE_CHARS = len("YYYY-MM-DD")
+"""How much of a timestamp is the date. ISO order is what makes a date range a
+string comparison rather than a parse."""
 
 
 def now_stamp() -> str:
@@ -96,11 +105,22 @@ class StoredDocument(BaseModel):
     abstract: str = ""
     page_count: int = 0
     words: int = 0
+    published: str = ""
     fetched_at: str = ""
     quality: QualityReport = QualityReport()
 
     def is_pdf(self) -> bool:
         return self.kind == "pdf"
+
+    def dated(self) -> str:
+        """The date a reader means by "when is this from", as ``YYYY-MM-DD``.
+
+        The publication date where the page stated one, and otherwise the day it
+        was fetched — which is a poor stand-in, since a corpus built in one night
+        makes every document look equally recent. The two stay separate fields,
+        so a consumer that must not confuse them reads ``published`` itself.
+        """
+        return self.published or self.fetched_at[:DATE_CHARS]
 
 
 class DiscoveredEntry(BaseModel):
@@ -208,6 +228,24 @@ class SourceShard(BaseModel):
     def clear_failure(self, slug: str) -> None:
         """Drop a recorded failure, because the document has now been stored."""
         self.failures = [entry for entry in self.failures if entry.slug != slug]
+
+
+def restated(shard: SourceShard, declaration: SourceDeclaration) -> SourceShard:
+    """Bring an index's copy of what its source *is* back in line with the
+    declaration.
+
+    Venue and authority are the fields a citation derives from, and they are
+    written into the index so a reader needs no declaration in hand. That makes
+    the index a copy, and a copy that is never refreshed is a copy that goes
+    stale: renaming a venue in the registry would otherwise reach new sources
+    only.
+    """
+    shard.display_name = declaration.display_name
+    shard.organization = declaration.organization
+    shard.venue = declaration.venue
+    shard.authority = declaration.authority
+    shard.active = declaration.active
+    return shard
 
 
 def blank_shard(declaration: SourceDeclaration) -> SourceShard:
@@ -344,6 +382,9 @@ class CorpusStore(BaseModel):
     def index_path(self, source: str) -> Path:
         return self.source_dir(source) / INDEX_FILENAME
 
+    def embeddings_path(self, source: str) -> Path:
+        return self.source_dir(source) / EMBEDDINGS_FILENAME
+
     def document_path(self, source: str, document: StoredDocument) -> Path:
         return self.source_dir(source) / document.filename
 
@@ -370,10 +411,11 @@ class CorpusStore(BaseModel):
         if not path.is_file():
             return blank_shard(declaration)
         try:
-            return SourceShard.model_validate_json(path.read_text(encoding="utf-8"))
+            loaded = SourceShard.model_validate_json(path.read_text(encoding="utf-8"))
         except (ValidationError, ValueError, OSError):
             logger.warning("Unreadable corpus index at %s", path, exc_info=True)
             return blank_shard(declaration)
+        return restated(loaded, declaration)
 
     def load_by_name(self, source: str) -> SourceShard | None:
         """The index under ``source``, for a reader with no declaration in hand."""

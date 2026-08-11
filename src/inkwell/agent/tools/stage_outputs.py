@@ -357,6 +357,25 @@ class ResearchSourceInput(BaseModel):
             "the source is the author's source document."
         ),
     )
+    organization: str = Field(
+        default="",
+        description=(
+            "Who published this — the journal, lab, agency, outlet, or site "
+            "('Nature', 'RAND', 'OpenAI', 'the Guardian'). Read it off the "
+            "document; leave it empty rather than inferring one from the URL. "
+            "This is what makes a section leaning on one lab's output visible "
+            "as such, so an empty field is recorded as unknown, not as spread."
+        ),
+    )
+    authors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Whose names are on the document, as it gives them ('Kahneman, D.'). "
+            "Empty where it carries no byline — an institutional report often "
+            "does not. Cite the same three authors through a whole section and "
+            "the distribution says so."
+        ),
+    )
     venue_override: Venue | None = Field(
         default=None,
         description=(
@@ -442,6 +461,9 @@ class ResearchSourceInput(BaseModel):
                 role=self.role,
                 published=self.acquisition.published or self.published,
                 acquired_via=self.acquisition.path,
+                domain=self.acquisition.host(),
+                organization=self.organization,
+                authors=self.authors,
                 attributed_to=self.attributed_to,
                 venue_reason=self.override_reason,
             ),

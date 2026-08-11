@@ -17,6 +17,7 @@ src/inkwell/
 │   ├── config.py           # Settings — Google OAuth, research API keys, budgets
 │   ├── models.py           # ArticlePlan, WritingOutput, ReviewFinding
 │   ├── provenance.py       # Venue, evidential role, and acquisition records
+│   ├── diversity.py        # Citation distribution and position-diversity checks
 │   ├── prompts.py          # System prompt for the writing agent
 │   ├── stages.py           # Stage prompts and tool lists, per pipeline stage
 │   ├── pipeline.py         # The unified pipeline and its listener

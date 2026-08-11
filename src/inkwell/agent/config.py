@@ -94,7 +94,6 @@ PIPELINE_STAGES: tuple[PipelineStage, ...] = get_args(PipelineStage.__value__)
 
 SUGGESTED_MODELS: tuple[str, ...] = (
     "claude-opus-4-6",
-    "claude-fable-5",
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",
 )
@@ -158,6 +157,12 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="INKWELL_AUTHOR_EMAIL",
         description="Author's email for Google Doc sharing (editor access)",
+    )
+
+    base_path: str = Field(
+        default="/",
+        validation_alias="INKWELL_BASE_PATH",
+        description="Sub-path the dashboard is served under behind a reverse proxy",
     )
 
     google_workspace_domain: str | None = Field(

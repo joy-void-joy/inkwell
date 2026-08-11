@@ -5,11 +5,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Receive, Scope, Send
 
+from inkwell.agent.config import current_settings
 from inkwell.agent.sandbox_image import ensure_sandbox_image
 from inkwell.environment.web.routes import profiles as profiles_route
 from inkwell.environment.web.routes import sessions as sessions_route
@@ -17,6 +19,29 @@ from inkwell.environment.web.routes import ws as ws_route
 from inkwell.environment.web.session_manager import SessionManager
 
 FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
+
+
+class StripBasePrefix:
+    """Strip the SPA's base prefix from a direct hit so it routes like a proxied one.
+
+    Behind rlaif the prefix is removed before the request arrives; reached
+    directly on its own port the request still carries it. Stripping it here lets
+    one build serve both ways — the frontend's ``{base}api``/``{base}ws`` calls
+    reach the unprefixed routers, leaving only the bare origin root to redirect.
+    """
+
+    def __init__(self, app: ASGIApp, prefix: str) -> None:
+        self.app = app
+        self.prefix = prefix
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            path = str(scope["path"])
+            stripped = path.removeprefix(self.prefix)
+            if stripped != path and stripped.startswith("/") and stripped != "/":
+                scope["path"] = stripped
+        await self.app(scope, receive, send)
+
 
 WS_DIAG_HTML = """\
 <!DOCTYPE html>
@@ -84,9 +109,14 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    base = current_settings().base_path
+    if base != "/":
+        app.add_middleware(StripBasePrefix, prefix=base.removesuffix("/"))
+
     app.include_router(sessions_route.formats_router)
     app.include_router(sessions_route.router)
     app.include_router(profiles_route.router)
+    app.include_router(profiles_route.callback_router)
     app.include_router(ws_route.router)
 
     @app.get("/ws-diag")
@@ -99,6 +129,18 @@ def create_app() -> FastAPI:
         app.mount(
             "/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets"
         )
+
+        if base != "/":
+
+            @app.get("/")
+            async def root(request: Request) -> Response:
+                # A direct hit lands at "/", outside the SPA's base, where its
+                # router renders nothing — bounce it into the base. A proxied hit
+                # arrives flagged by rlaif's forwarded-prefix header; serve the
+                # document in place (its URL already sits inside the base).
+                if "x-forwarded-prefix" in request.headers:
+                    return FileResponse(index_html)
+                return RedirectResponse(base)
 
         @app.get("/{path:path}")
         async def spa_fallback(path: str) -> FileResponse:

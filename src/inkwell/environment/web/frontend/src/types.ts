@@ -122,6 +122,10 @@ export interface GoogleStatus {
   has_credentials: boolean;
   has_token: boolean;
   detail: string;
+  // Docs/Drive APIs switched off on the client's Cloud project: empty when all
+  // enabled, hostnames when off, null when not probed. A token can exist while
+  // these are off — writing a Doc then 403s and re-authorizing won't fix it.
+  disabled_apis: string[] | null;
 }
 
 export interface ServerCapabilities {

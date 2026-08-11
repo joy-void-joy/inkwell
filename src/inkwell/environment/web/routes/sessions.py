@@ -136,6 +136,7 @@ async def create_session(req: CreateSessionRequest) -> SessionLaunched:
         stage_models=req.stage_models,
         writer_mode=req.writer_mode,
         stop_after=req.stop_after,
+        light=req.light,
     )
     return SessionLaunched(session_id=session_id)
 

@@ -157,6 +157,21 @@ class FormatNewsletterOutput(BaseModel):
     word_count: int = Field(description="Word count")
 
 
+class FormatLinkedinInput(BaseModel):
+    content: str = Field(description="Full article markdown content")
+    title: str = Field(description="Post topic / headline")
+    hashtags: list[str] = Field(
+        default_factory=list,
+        description="Hashtags to append (e.g. ['AI', 'Strategy']). Empty lets "
+        "the writer pick a few fitting ones.",
+    )
+
+
+class FormatLinkedinOutput(BaseModel):
+    content: str = Field(description="LinkedIn-formatted post")
+    word_count: int = Field(description="Word count")
+
+
 class FormatCustomInput(BaseModel):
     content: str = Field(description="Full article content to reformat")
     format_description: str = Field(
@@ -677,3 +692,48 @@ async def do_format_custom(params: FormatCustomInput) -> FormatCustomOutput:
         content=content,
         word_count=len(content.split()),
     )
+
+
+LINKEDIN_WRITER_SYSTEM = """\
+You rewrite articles as LinkedIn posts for a professional audience. This is a
+rewrite, not a summary: keep the author's voice, claims, and specific numbers.
+
+Rules:
+- Open with a one-line hook that earns the "see more" expand
+- Short paragraphs (1-3 sentences) with generous line breaks for skimmability
+- Land 2-4 concrete points from the article; cut prose connective tissue
+- Professional but conversational; first person is fine; emojis sparingly
+- Close with a reflection or a question that invites comments
+- Target 150-400 words; no markdown headers, no "thread 🧵" clichés"""
+
+
+async def do_format_linkedin(params: FormatLinkedinInput) -> FormatLinkedinOutput:
+    """Rewrite content as a LinkedIn post via LLM."""
+    from inkwell.agent.client import query
+
+    class LinkedinPost(BaseModel):
+        content: str = Field(description="The LinkedIn post body in markdown")
+
+    if params.hashtags:
+        tags = " ".join("#" + h.removeprefix("#") for h in params.hashtags)
+        hashtag_directive = f"End with these hashtags: {tags}"
+    else:
+        hashtag_directive = "End with 3-5 fitting hashtags."
+
+    content_path = save_content_for_query(params.content, "linkedin")
+    result = await query(
+        (
+            f"Rewrite this article as a LinkedIn post.\n"
+            f"Topic: {params.title}\n"
+            f"{hashtag_directive}\n\n"
+            f"Read the article from: {content_path}"
+        ),
+        output_type=LinkedinPost,
+        model=stage_model("format"),
+        tools=BUILTIN_READ_TOOLS,
+        max_thinking_tokens=128_000 - 1,
+        autonomy="unattended",
+        system_prompt=LINKEDIN_WRITER_SYSTEM,
+    )
+    content = result.content if result else params.content
+    return FormatLinkedinOutput(content=content, word_count=len(content.split()))

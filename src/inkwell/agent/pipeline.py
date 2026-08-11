@@ -202,6 +202,14 @@ CHECKPOINT_STAGES = [s for s in DISPLAY_STAGES if s != "resolve"]
 review and rewrite without checkpointing, so it is neither a resume boundary
 nor a place a run can be paused and continued from."""
 
+LIGHT_STAGES = ["extract", "plan", "write", "review", "format"]
+"""The light pipeline's backbone: draft fast, then fact-check. Drops voice,
+deep research, assumptions, refine, the parallel-section merge, resolve, and
+rewrite — a single writer drafts the whole piece and the fact-check reviewer
+supplies the web-grounding. The LinkedIn format runs on it, as does any run
+launched with ``light``. Every entry is also a DISPLAY_STAGES backbone stage,
+so the resume loop's stage indexing is unchanged."""
+
 
 def validate_stop_after(stage: str | None) -> str | None:
     """Normalize and validate a requested stop point, or raise ValueError.
@@ -2056,22 +2064,12 @@ async def review_all(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    light: bool = False,
 ) -> list[ReviewFinding]:
-    """Stage 5: Run the reviewers in parallel — narrative, fact-check, style,
-    and coverage (the author's dropped specifics), plus source fidelity when
+    """Stage 5: Run the reviewers in parallel. The full pass runs narrative,
+    fact-check, style, and coverage (the author's dropped specifics); a light
+    pass runs only the fact-checker. Source fidelity is added either way when
     source documents are registered."""
-    narrative_task = review_narrative(
-        notes,
-        draft_path,
-        voice_file_paths=voice_file_paths,
-        author_notes=author_notes,
-        source_servers=source_servers,
-        source_tool_names_list=source_tool_names_list,
-        compute_servers=compute_servers,
-        compute_tool_names=compute_tool_names,
-        trace_logger=trace_logger,
-        cost_accumulator=cost_accumulator,
-    )
     facts_task = review_facts(
         notes,
         draft_path,
@@ -2084,33 +2082,48 @@ async def review_all(
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
     )
-    style_task = review_style(
-        notes,
-        draft_path,
-        voice_file_paths=voice_file_paths,
-        author_notes=author_notes,
-        source_servers=source_servers,
-        source_tool_names_list=source_tool_names_list,
-        compute_servers=compute_servers,
-        compute_tool_names=compute_tool_names,
-        trace_logger=trace_logger,
-        cost_accumulator=cost_accumulator,
-    )
-
-    coverage_task = review_coverage(
-        notes,
-        draft_path,
-        voice_file_paths=voice_file_paths,
-        author_notes=author_notes,
-        source_servers=source_servers,
-        source_tool_names_list=source_tool_names_list,
-        compute_servers=compute_servers,
-        compute_tool_names=compute_tool_names,
-        trace_logger=trace_logger,
-        cost_accumulator=cost_accumulator,
-    )
-
-    review_tasks = [narrative_task, facts_task, style_task, coverage_task]
+    if light:
+        review_tasks = [facts_task]
+    else:
+        review_tasks = [
+            review_narrative(
+                notes,
+                draft_path,
+                voice_file_paths=voice_file_paths,
+                author_notes=author_notes,
+                source_servers=source_servers,
+                source_tool_names_list=source_tool_names_list,
+                compute_servers=compute_servers,
+                compute_tool_names=compute_tool_names,
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+            ),
+            facts_task,
+            review_style(
+                notes,
+                draft_path,
+                voice_file_paths=voice_file_paths,
+                author_notes=author_notes,
+                source_servers=source_servers,
+                source_tool_names_list=source_tool_names_list,
+                compute_servers=compute_servers,
+                compute_tool_names=compute_tool_names,
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+            ),
+            review_coverage(
+                notes,
+                draft_path,
+                voice_file_paths=voice_file_paths,
+                author_notes=author_notes,
+                source_servers=source_servers,
+                source_tool_names_list=source_tool_names_list,
+                compute_servers=compute_servers,
+                compute_tool_names=compute_tool_names,
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+            ),
+        ]
     if load_source_registry(registry_path_for(notes.artifacts_dir)):
         review_tasks.append(
             review_source_fidelity(
@@ -2385,6 +2398,16 @@ async def apply_format(
                 FormatNewsletterInput(content=content, title=title)
             )
             return result.content
+        case "linkedin":
+            from inkwell.agent.tools.formats import (
+                FormatLinkedinInput,
+                do_format_linkedin,
+            )
+
+            result = await do_format_linkedin(
+                FormatLinkedinInput(content=content, title=title)
+            )
+            return result.content
         case _ if target_format.startswith("custom:"):
             from inkwell.agent.tools.formats import FormatCustomInput, do_format_custom
 
@@ -2563,6 +2586,7 @@ class PipelineRunner:
         listener: PipelineListener | None = None,
         cost_accumulator: CostAccumulator | None = None,
         stop_after: str | None = None,
+        light: bool = False,
     ) -> None:
         self.sources = sources
         self.refs = refs or []
@@ -2575,6 +2599,7 @@ class PipelineRunner:
         self.trace_logger = trace_logger
         self.hooks = listener or PipelineListener()
         self.stop_after = validate_stop_after(stop_after)
+        self.explicit_light = light
 
         if cost_accumulator is None:
             cost_accumulator = CostAccumulator()
@@ -2614,6 +2639,25 @@ class PipelineRunner:
         if plan and plan.target_format and plan.target_format != "auto":
             return plan.target_format
         return self.target_format
+
+    @property
+    def light(self) -> bool:
+        """Whether this run uses the trimmed light pipeline.
+
+        Explicitly requested, or implied by the LinkedIn format. Reading the
+        format through ``effective_format`` lets a resumed run recover lightness
+        from the snapshot's plan even though resume reconstructs with ``auto``.
+        """
+        return self.explicit_light or self.effective_format == "linkedin"
+
+    def stages_for_run(self) -> list[str]:
+        """The backbone stages this run executes, with ``preprocess`` prepended.
+
+        Light runs trim the heavy stages to LIGHT_STAGES; the fresh run and the
+        resume loop both read the sequence here so they stay in lockstep.
+        """
+        backbone = LIGHT_STAGES if self.light else DISPLAY_STAGES
+        return ["preprocess", *backbone]
 
     def ensure_notes(self) -> PipelineNotes:
         """Return notes, creating a temp dir if needed."""
@@ -2982,31 +3026,26 @@ class PipelineRunner:
         )
 
     async def run(self) -> WritingOutput:
-        """Execute the full pipeline with restart and stop-point support."""
+        """Execute the pipeline with restart and stop-point support.
+
+        The stage sequence comes from ``stages_for_run`` so a light run skips the
+        heavy stages; the comment watcher starts before the write stage either
+        way.
+        """
         self.install_block_callback()
         self.snapshot.profile = current_settings().profile
         configure_session_state(self.state)
         await self.setup_doc()
         policy_token = session_policy.set(self.session_policy_for_run())
 
+        stages = self.stages_for_run()
+        watch_from = stages.index("write")
+
         try:
-            for stage_name in ("extract", "voice", "plan"):
-                await self.run_stage(stage_name)
-            await self.run_stage("research")
-            for stage_name in ("assumptions", "refine"):
-                await self.run_stage(stage_name)
-
-            await self.start_watcher()
-
             try:
-                for stage_name in (
-                    "write",
-                    "merge",
-                    "review",
-                    "resolve",
-                    "rewrite",
-                    "format",
-                ):
+                for index, stage_name in enumerate(stages):
+                    if index == watch_from:
+                        await self.start_watcher()
                     await self.run_stage(stage_name)
 
                 output = self.snapshot.output
@@ -3071,7 +3110,7 @@ class PipelineRunner:
         current_stage: str | None = None
 
         try:
-            stages = ["preprocess", *DISPLAY_STAGES]
+            stages = self.stages_for_run()
             last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
             remaining = [s for s in stages[last_idx + 1 :] if s != "preprocess"]
             if "write" not in remaining and self.write_stage_produced_nothing():
@@ -4003,10 +4042,13 @@ class PipelineRunner:
     async def stage_write(self) -> None:
         plan = self.snapshot.plan
         research = self.snapshot.research
-        if plan is None or research is None:
+        if plan is None or (research is None and not self.light):
             raise PipelineError("Cannot write without plan and research")
 
-        if resolve_writer_mode(current_settings().writer_mode) == "single":
+        if (
+            self.light
+            or resolve_writer_mode(current_settings().writer_mode) == "single"
+        ):
             await self.write_single_draft()
             return
 
@@ -4282,6 +4324,7 @@ class PipelineRunner:
                 compute_tool_names=sc.tool_names,
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
+                light=self.light,
             )
         await self.post_author_notes()
         consolidated = consolidate_findings(findings)
@@ -4409,10 +4452,18 @@ class PipelineRunner:
         await self.update_overview()
 
     async def stage_format(self) -> None:
-        output = self.snapshot.output
         plan = self.snapshot.plan
-        if output is None or plan is None:
-            raise PipelineError("Cannot format without output and plan")
+        if plan is None:
+            raise PipelineError("Cannot format without a plan")
+        output = self.snapshot.output
+        if output is None:
+            # A light run skips rewrite, so format publishes the reviewed draft
+            # directly: build the output from the merged single-writer draft.
+            merged = self.snapshot.merged
+            if merged is None:
+                raise PipelineError("Cannot format without output or a merged draft")
+            output = WritingOutput(title=plan.title, content=merged.content)
+            self.snapshot.output = output
 
         chosen_format = self.effective_format
         await self.announce_stage("format", f"Applying {chosen_format} formatting")
@@ -5179,6 +5230,7 @@ async def run_pipeline(
     listener: PipelineListener | None = None,
     cost_accumulator: CostAccumulator | None = None,
     stop_after: str | None = None,
+    light: bool = False,
 ) -> WritingOutput:
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
@@ -5192,5 +5244,6 @@ async def run_pipeline(
         listener=listener,
         cost_accumulator=cost_accumulator,
         stop_after=stop_after,
+        light=light,
     )
     return await runner.run()

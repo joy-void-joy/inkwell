@@ -737,6 +737,35 @@ still makes sense."""
 # Format-specific structural guidance
 # ---------------------------------------------------------------------------
 
+LINKEDIN_GUIDANCE = """\
+## Format: LinkedIn Post
+
+This piece is a LinkedIn post, not an article. LinkedIn rewards short, \
+skimmable posts that earn the "see more" expand and invite comments.
+
+### Structure requirements
+
+1. **Hook first.** Open with a single punchy line that creates curiosity or \
+stakes — it is the only text shown before "see more", so it must earn the \
+expand on its own.
+
+2. **Short paragraphs, generous whitespace.** One to three sentences per \
+paragraph, a blank line between them. Walls of text die in the feed.
+
+3. **Two to four concrete points.** Carry the article's strongest, most \
+specific claims and numbers. Cut the connective tissue that only works in \
+long-form prose.
+
+4. **Conversational, professional register.** First person is welcome; \
+emojis only where they genuinely help. A few fitting hashtags go at the very \
+end, never mid-post.
+
+5. **Close with an invitation.** End on a reflection or a question that gives \
+readers a reason to comment.
+
+Target 150-400 words. No markdown headers, no "a thread 🧵" clichés."""
+
+
 MEMO_GUIDANCE = """\
 ## Format: Policy Memo
 
@@ -1008,6 +1037,7 @@ OUTPUT_FORMATS: list[OutputFormatSpec] = [
     OutputFormatSpec(key="dialog", label="Dialog", guidance=DIALOG_GUIDANCE),
     OutputFormatSpec(key="memo", label="Policy memo", guidance=MEMO_GUIDANCE),
     OutputFormatSpec(key="newsletter", label="Newsletter"),
+    OutputFormatSpec(key="linkedin", label="LinkedIn post", guidance=LINKEDIN_GUIDANCE),
     OutputFormatSpec(key="custom", label="Custom format", accepts_description=True),
 ]
 

@@ -6,6 +6,7 @@ const backendWs = backend.replace(/^http/, 'ws')
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: process.env.INKWELL_BASE_PATH ?? '/',
   plugins: [react()],
   server: {
     proxy: {

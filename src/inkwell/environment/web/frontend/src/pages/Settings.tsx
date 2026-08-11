@@ -456,14 +456,40 @@ function GoogleSetup({
         </>
       )}
 
-      {google.has_token && (
-        <div className="setup-authorized">
-          <span className="setup-authorized-label">Authorized</span>
-          <button onClick={handleAuthorize} disabled={authorizing}>
-            {authorizing ? "Re-authorizing..." : "Re-authorize"}
-          </button>
-        </div>
-      )}
+      {google.has_token &&
+        google.disabled_apis &&
+        google.disabled_apis.length > 0 && (
+          <div className="setup-current-value">
+            <p className="error-message">
+              Authorized — but these APIs are switched off on the project, so writing
+              a Doc will fail. Enable them and retry; re-authorizing won't help (it's
+              a project setting, not a token one):
+            </p>
+            <ul>
+              {google.disabled_apis.map((api) => (
+                <li key={api}>
+                  <a
+                    href={`https://console.cloud.google.com/apis/library/${api}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Enable {api}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+      {google.has_token &&
+        !(google.disabled_apis && google.disabled_apis.length > 0) && (
+          <div className="setup-authorized">
+            <span className="setup-authorized-label">Authorized</span>
+            <button onClick={handleAuthorize} disabled={authorizing}>
+              {authorizing ? "Re-authorizing..." : "Re-authorize"}
+            </button>
+          </div>
+        )}
 
       {error && <p className="error-message">{error}</p>}
     </div>

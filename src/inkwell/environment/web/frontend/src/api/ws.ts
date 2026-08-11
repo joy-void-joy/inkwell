@@ -30,7 +30,7 @@ export function useSessionWebSocket(
       if (!mountedRef.current || !sessionId || stopRef.current) return;
 
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/${sessionId}`);
+      const ws = new WebSocket(`${protocol}//${window.location.host}${import.meta.env.BASE_URL}ws/${sessionId}`);
       wsRef.current = ws;
 
       ws.onopen = () => {};

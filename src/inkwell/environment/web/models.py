@@ -83,6 +83,11 @@ class CreateSessionRequest(ModelConfigOverrides):
         default=None,
         description="Pause after this stage completes; resume the session to continue",
     )
+    light: bool = Field(
+        default=False,
+        description="Run the light pipeline: single writer, fact-check-only "
+        "review, no deep research/resolve/rewrite. Implied by the LinkedIn format.",
+    )
 
 
 class ModelOptions(BaseModel):

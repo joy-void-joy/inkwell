@@ -124,6 +124,7 @@ class SessionManager:
         stage_models: dict[PipelineStage, str] | None = None,
         writer_mode: str | None = None,
         stop_after: str | None = None,
+        light: bool = False,
     ) -> str:
         session_id = uuid.uuid4().hex[:16]
         return self.launch(
@@ -137,6 +138,7 @@ class SessionManager:
             stage_models=stage_models,
             writer_mode=writer_mode,
             stop_after=stop_after,
+            light=light,
         )
 
     async def resume_session(
@@ -236,6 +238,7 @@ class SessionManager:
         stage_models: dict[PipelineStage, str] | None = None,
         writer_mode: str | None = None,
         stop_after: str | None = None,
+        light: bool = False,
     ) -> str:
         from inkwell.agent.config import load_settings, use_settings
 
@@ -275,6 +278,7 @@ class SessionManager:
                     cost_accumulator=cost,
                     trace=trace,
                     stop_after=stop_after,
+                    light=light,
                 )
 
         task = asyncio.create_task(

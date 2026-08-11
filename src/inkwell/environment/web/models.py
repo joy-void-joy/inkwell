@@ -65,16 +65,6 @@ class ModelConfigOverrides(BaseModel):
     )
 
 
-# lup: This model, the typer signature in environment/cli/__main__.py, and the
-# frontend form each declare an entry point's parameters by hand, and they have
-# already drifted: `light` reaches the web UI and is absent from the CLI
-# entirely, where chat_session() does not even accept it. Declare each entry
-# point once — the way OUTPUT_FORMATS is declared once and /api/formats renders
-# from it — and render the typer command, this model, and the frontend form from
-# that declaration, so a parameter cannot exist on one surface alone. Add a
-# `revise` entry point through the same declaration: it takes an existing
-# section as the draft, plus a standing instruction to rewrite for clarity and
-# currency, and feeds the ordinary write pipeline.
 class CreateSessionRequest(ModelConfigOverrides):
     sources: list[str] = Field(
         description="Source materials: URLs, Claude share links, file paths, or freeform text"

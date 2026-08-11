@@ -4,6 +4,7 @@ import contextvars
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Literal, Self, get_args
 
 from pydantic import BaseModel, Field, model_validator
@@ -47,9 +48,25 @@ which follow resolve against it. A holder rather than a rebound module-level
 name, so `select_profile` needs no `global`."""
 
 
+ACTIVE_PROFILE_FILE = Path("profiles/.active")
+"""Where selecting a profile records it, for the runs that name none.
+
+Consulted last, so an explicit argument and ``INKWELL_PROFILE`` both still
+win over it. It sits beside the profiles themselves rather than in an env
+file, because the selection is what decides which env files are read.
+"""
+
+
+def recorded_profile() -> str | None:
+    """The profile a previous selection recorded, where one did."""
+    if not ACTIVE_PROFILE_FILE.exists():
+        return None
+    return ACTIVE_PROFILE_FILE.read_text(encoding="utf-8").strip() or None
+
+
 def active_profile() -> str | None:
     """Return the active profile name, or None for the default config."""
-    return override.name or ProfileSelection().profile or None
+    return override.name or ProfileSelection().profile or recorded_profile()
 
 
 def select_profile(profile: str | None) -> None:

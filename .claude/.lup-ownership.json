@@ -219,7 +219,7 @@
     {
       "path": ".claude/plugins/lup/commands/resolve.md",
       "category": "generated",
-      "sha256": "9ef4d37dcc999dc9cb3dbbd79d6524e22c56c9f48280a2557182b683a402f618",
+      "sha256": "cc44e51869a21713ab3b4fd07dd6d8eb883b2b5059d1b496ec726cb953ef1613",
       "semantic_id": "skill.resolve",
       "executable": false
     },
@@ -268,7 +268,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/decision.py",
       "category": "generated",
-      "sha256": "72561aa5ecbfbc30236986b15b5cb4b8d41705c092f39652074276716fe5c037",
+      "sha256": "cbfca05d43777241f5825f81b35ba8e8e93e928a11ee13dc1fc1bff9eb5e9c42",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },

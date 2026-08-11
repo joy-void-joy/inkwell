@@ -10,11 +10,14 @@ its own questions as author feedback) is pinned alongside, because every
 document now polls through the same path.
 """
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Unpack
 
 import pytest
 
+from lup.mcp import LupMcpTool, ToolError
 from lup.types import JsonObject, JsonValue
 
 import inkwell.agent.tools.google_docs as google_docs
@@ -28,10 +31,18 @@ from inkwell.agent.google_auth import (
     ServiceFactory,
     CommentQuery,
 )
+from inkwell.agent.models import ClassifiedComment
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import PipelineListener, PipelineRunner
 from inkwell.agent.session import AuthorComment, WritingSessionState
 from inkwell.agent.tools.google_docs_schema import Comment
+import inkwell.agent.watcher as watcher_module
+from inkwell.agent.watcher import (
+    ClaimHold,
+    PollInput,
+    create_source_watcher_tools,
+    create_watcher_tools,
+)
 
 
 def page_payload(comments: list[JsonValue], next_token: str) -> JsonObject:
@@ -152,6 +163,31 @@ def watched(doc_id: str = "doc") -> WritingSessionState:
     state = WritingSessionState()
     state.set_doc(doc_id, f"https://docs.google.com/document/d/{doc_id}/edit")
     return state
+
+
+def tool_named(tools: list[LupMcpTool], name: str) -> LupMcpTool:
+    """The watcher tool answering to `name`."""
+    return next(tool for tool in tools if tool.name == name)
+
+
+def classifier(
+    verdict: ClassifiedComment | None,
+) -> Callable[..., Awaitable[ClassifiedComment | None]]:
+    """A stand-in classifier that answers with `verdict`, or fails to answer."""
+
+    async def classify(*_args: object, **_kwargs: object) -> ClassifiedComment | None:
+        return verdict
+
+    return classify
+
+
+def stage_local() -> ClassifiedComment:
+    """A classification the watcher would record."""
+    return ClassifiedComment(comment_id="", content="", impact="stage_local")
+
+
+async def quiet(_failure: str) -> None:
+    """An unreachable report nobody is listening to."""
 
 
 class TestAuthorNews:
@@ -451,6 +487,170 @@ class TestAgentIdsRegistry:
         resumed.attach_records(tmp_path)
 
         assert "c1" in resumed.seen_comments
+
+
+class TestWatcherIngest:
+    """The watcher's own tool: record first, account after, drop nothing between.
+
+    This is the every-30-seconds path, and the whole of it — classification
+    included — sits inside the claim, because a classification that fails is
+    exactly when a comment would otherwise be filtered out of every later poll
+    with nothing written down.
+    """
+
+    def watcher_tools(
+        self, state: WritingSessionState, notes: PipelineNotes
+    ) -> list[LupMcpTool]:
+        """The output-document watcher's tools, over this state and notes."""
+        return create_watcher_tools(
+            session_state=state, notes=notes, plan_breaking_signal=asyncio.Event()
+        )
+
+    async def test_a_failed_classification_re_offers_the_comment(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        serve_comments(monkeypatch, [{"id": "c1", "content": "cut section 3"}])
+        state = watched()
+        notes = PipelineNotes(tmp_path / "n")
+        classify = tool_named(self.watcher_tools(state, notes), "poll_and_classify")
+        assert ids((await state.poll_author_comments()).comments) == ["c1"]
+
+        monkeypatch.setattr(watcher_module, "query", classifier(None))
+        with pytest.raises(ToolError):
+            await classify(PollInput(comment_id="c1", content="cut section 3"))
+
+        assert state.seen_comments.handled == []
+        assert list(notes.comments_dir.glob("*.json")) == []
+        assert ids((await state.poll_author_comments()).comments) == ["c1"]
+
+    async def test_a_recorded_comment_is_accounted_for(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        serve_comments(monkeypatch, [{"id": "c1", "content": "cut section 3"}])
+        state = watched()
+        notes = PipelineNotes(tmp_path / "n")
+        classify = tool_named(self.watcher_tools(state, notes), "poll_and_classify")
+        await state.poll_author_comments()
+
+        monkeypatch.setattr(watcher_module, "query", classifier(stage_local()))
+        await classify(PollInput(comment_id="c1", content="cut section 3"))
+
+        assert state.seen_comments.handled == ["c1"]
+        assert len(list(notes.comments_dir.glob("*.json"))) == 1
+        assert (await state.poll_author_comments()).comments == []
+
+    async def test_the_note_is_written_before_the_comment_is_accounted_for(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        serve_comments(monkeypatch, [{"id": "c1", "content": "cut section 3"}])
+        state = watched()
+        notes = PipelineNotes(tmp_path / "n")
+        classify = tool_named(self.watcher_tools(state, notes), "poll_and_classify")
+        await state.poll_author_comments()
+        monkeypatch.setattr(watcher_module, "query", classifier(stage_local()))
+        unaccounted_at_write = False
+
+        async def record(_classified: ClassifiedComment) -> None:
+            """Stand in for the note write, reading the ledger as it happens."""
+            nonlocal unaccounted_at_write
+            unaccounted_at_write = "c1" not in state.seen_comments.handled
+
+        monkeypatch.setattr(notes, "add_comment", record)
+        await classify(PollInput(comment_id="c1", content="cut section 3"))
+
+        assert unaccounted_at_write
+        assert state.seen_comments.handled == ["c1"]
+
+    async def test_the_source_tool_accounts_on_its_own_ledger(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        state = WritingSessionState()
+        state.source_doc_id = "source-doc"
+        classify = tool_named(
+            create_source_watcher_tools(
+                session_state=state,
+                notes=PipelineNotes(tmp_path / "n"),
+                plan_breaking_signal=asyncio.Event(),
+            ),
+            "poll_and_classify",
+        )
+
+        monkeypatch.setattr(watcher_module, "query", classifier(stage_local()))
+        await classify(PollInput(comment_id="s1", content="this is the point"))
+
+        assert state.seen_source_comments.handled == ["s1"]
+        assert state.seen_comments.handled == []
+
+
+class TestWatcherClaims:
+    """No claim outlives the turn that was supposed to record its comment."""
+
+    async def test_a_turn_that_records_nothing_releases_the_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        serve_comments(monkeypatch, [{"id": "c1", "content": "cut section 3"}])
+        state = watched()
+        claims = ClaimHold(state.seen_comments)
+
+        claims.hold(ids((await state.poll_author_comments()).comments))
+        assert (await state.poll_author_comments()).comments == []
+
+        claims.release()
+
+        assert state.seen_comments.handled == []
+        assert ids((await state.poll_author_comments()).comments) == ["c1"]
+
+    async def test_the_release_leaves_a_recorded_comment_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        serve_comments(
+            monkeypatch,
+            [{"id": "c1", "content": "cut section 3"}, {"id": "c2", "content": "cite"}],
+        )
+        state = watched()
+        claims = ClaimHold(state.seen_comments)
+        claims.hold(ids((await state.poll_author_comments()).comments))
+
+        with state.seen_comments.recording("c1"):
+            pass
+        claims.release()
+
+        assert ids((await state.poll_author_comments()).comments) == ["c2"]
+
+    async def test_a_batch_dropped_before_its_turn_is_released_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        serve_comments(
+            monkeypatch,
+            [{"id": "c1", "content": "cut section 3"}, {"id": "c2", "content": "cite"}],
+        )
+        state = watched()
+        claims = ClaimHold(state.seen_comments)
+
+        claims.hold(["c1"])
+        state.seen_comments.claim(["c1"])
+        claims.hold(["c2"])
+        state.seen_comments.claim(["c2"])
+        claims.release()
+
+        assert ids((await state.poll_author_comments()).comments) == ["c1", "c2"]
+
+    async def test_the_watcher_holds_claims_on_the_session_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        state = watched()
+        watcher = watcher_module.create_comment_watcher(
+            session_state=state,
+            notes=PipelineNotes(tmp_path / "n"),
+            plan_breaking_signal=asyncio.Event(),
+            report_unreachable=quiet,
+        )
+
+        state.seen_comments.claim(["c1"])
+        watcher.claims.hold(["c1"])
+        watcher.claims.release()
+
+        assert "c1" not in state.seen_comments
 
 
 class RecordingListener(PipelineListener):

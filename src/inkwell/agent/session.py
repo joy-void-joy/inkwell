@@ -324,7 +324,7 @@ class WritingSessionState:
         ledger: CommentLedger,
         news: NewsFilter,
         *,
-        claim: bool = True,
+        probe: bool = False,
     ) -> CommentIntake:
         """Read every comment on one document and pick out what is new.
 
@@ -335,6 +335,10 @@ class WritingSessionState:
         Nothing is accounted for here — the caller marks a comment seen once
         its note is on disk — and the claim a poll takes out keeps a second
         poller off a comment already in flight.
+
+        A ``probe`` only looks: it claims nothing and records no outcome, so it
+        can neither take a comment out of the next real poll's way nor
+        overwrite what that poll last reported.
         """
         if not doc_id:
             return CommentIntake()
@@ -358,14 +362,14 @@ class WritingSessionState:
             fresh = [
                 author for author in feedback if author["comment_id"] not in ledger
             ]
-            if claim:
+            if not probe:
                 ledger.claim(author["comment_id"] for author in fresh)
             intake = CommentIntake(
                 comments=fresh,
                 unresolved=[author["comment_id"] for author in feedback],
             )
 
-        if self.records is not None:
+        if self.records is not None and not probe:
             self.records.save(intake.record(channel, doc_id))
         return intake
 
@@ -385,15 +389,16 @@ class WritingSessionState:
         """What an ingest would take next, claiming none of it.
 
         A probe only asks whether the author is waiting on anything, so it
-        leaves the comments in front of the poll that will record them. Its
-        answer still distinguishes a quiet document from an unreadable one: a
-        caller that reads an unreachable Drive as "nothing unread" tells the
-        author their comment was seen and ignored.
+        leaves the comments in front of the poll that will record them, and
+        leaves that poll's recorded outcome alone. Its answer still
+        distinguishes a quiet document from an unreadable one: a caller that
+        reads an unreachable Drive as "nothing unread" tells the author their
+        comment was seen and ignored.
         """
         return await self.poll_comments(
             "author",
             self.doc_id,
             self.seen_comments,
             self.author_news,
-            claim=False,
+            probe=True,
         )

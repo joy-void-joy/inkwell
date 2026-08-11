@@ -24,7 +24,12 @@ from lup.mcp import LupMcpTool, ToolError, create_mcp_server, lup_tool
 from inkwell.agent.config import stage_model
 from inkwell.agent.models import ClassifiedComment, CommentImpact
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.session import AuthorComment, CommentIntake, WritingSessionState
+from inkwell.agent.session import (
+    AuthorComment,
+    CommentIntake,
+    CommentLedger,
+    WritingSessionState,
+)
 from inkwell.agent.stages import COMMENT_CLASSIFIER_PROMPT
 from inkwell.agent.tools.google_docs import do_reply_to_comment
 
@@ -110,25 +115,25 @@ def create_watcher_tools(
         if inp.reply:
             task += f"Reply to agent question: {inp.reply}\n"
 
-        classified = await query(
-            task,
-            output_type=ClassifiedComment,
-            model=stage_model("classify"),
-            system_prompt=COMMENT_CLASSIFIER_PROMPT,
-            max_thinking_tokens=128_000 - 1,
-            autonomy="unattended",
-            prefix="[classify] ",
-        )
-        if classified is None:
-            raise ToolError("Classification failed — no output from classifier")
-
-        classified.comment_id = inp.comment_id
-        classified.content = inp.content
-        classified.anchor_text = inp.anchor_text
-        classified.reply = inp.reply
-        classified.timestamp = datetime.now().isoformat()
-
         with session_state.seen_comments.recording(inp.comment_id):
+            classified = await query(
+                task,
+                output_type=ClassifiedComment,
+                model=stage_model("classify"),
+                system_prompt=COMMENT_CLASSIFIER_PROMPT,
+                max_thinking_tokens=128_000 - 1,
+                autonomy="unattended",
+                prefix="[classify] ",
+            )
+            if classified is None:
+                raise ToolError("Classification failed — no output from classifier")
+
+            classified.comment_id = inp.comment_id
+            classified.content = inp.content
+            classified.anchor_text = inp.anchor_text
+            classified.reply = inp.reply
+            classified.timestamp = datetime.now().isoformat()
+
             await notes.add_comment(classified)
         return PollOutput(classified=classified)
 
@@ -172,6 +177,44 @@ class CommentBatch(BaseModel):
     """One poll's worth of comments, as the turn that processes them reads it."""
 
     prompt: str
+    comment_ids: list[str] = Field(
+        default_factory=list,
+        description="The comments this batch was handed, claimed until recorded",
+    )
+
+
+class ClaimHold:
+    """The comment claims the turns of one watcher are holding.
+
+    A claim exists to keep the next poll off a comment already in flight, so
+    no claim may outlive the turn that was supposed to write that comment
+    down. A turn ends three ways that record nothing — the classifier raised,
+    the turn itself failed, or the agent never reached one comment of its
+    batch — and all three end here, where releasing puts the comment back in
+    front of the next poll instead of stranding it for the life of the
+    process. An id the turn did record left the claim set when it was marked,
+    so releasing what is left over is exactly right.
+    """
+
+    def __init__(self, ledger: CommentLedger) -> None:
+        self.ledger = ledger
+        self.holding: tuple[str, ...] = ()
+
+    def hold(self, comment_ids: list[str]) -> None:
+        """Take over the claims a poll took out, alongside any still held.
+
+        A batch can be replaced before its turn runs — wakes inside the
+        debounce window coalesce — so holds accumulate rather than displace:
+        the ids of a batch that never became a turn are released by the turn
+        that ran instead of it.
+        """
+        self.holding = (*self.holding, *comment_ids)
+
+    def release(self) -> None:
+        """Drop every claim outstanding, whatever the turn did or did not do."""
+        for comment_id in self.holding:
+            self.ledger.release(comment_id)
+        self.holding = ()
 
 
 type CommentReader = Callable[[], Awaitable[CommentIntake]]
@@ -205,7 +248,9 @@ class PollingWatcher:
     debounce window, which is exactly a watcher's execution shape. What it
     does not carry is *when* to wake, because that is the domain's question —
     here, every so often, if the document has new comments. This owns that
-    loop, and the agent's lifetime with it, so stopping one stops both.
+    loop, and the agent's lifetime with it, so stopping one stops both — and
+    with it the claims each batch was handed, which a stopped watch drops
+    rather than leaving in front of a poll that will never come.
     """
 
     def __init__(
@@ -213,12 +258,14 @@ class PollingWatcher:
         agent: BackgroundAgent[CommentBatch, None],
         read_comments: CommentReader,
         report_unreachable: UnreachableReport,
+        claims: ClaimHold,
         heading: str,
         poll_interval: float,
     ) -> None:
         self.agent = agent
         self.read_comments = read_comments
         self.report_unreachable = report_unreachable
+        self.claims = claims
         self.heading = heading
         self.poll_interval = poll_interval
         self.poller: asyncio.Task[None] | None = None
@@ -249,9 +296,12 @@ class PollingWatcher:
             if not intake.reached:
                 await self.report_unreachable(intake.unreachable)
             elif intake.comments:
-                self.agent.wake(
-                    CommentBatch(prompt=batch_prompt(self.heading, intake.comments))
+                batch = CommentBatch(
+                    prompt=batch_prompt(self.heading, intake.comments),
+                    comment_ids=[comment["comment_id"] for comment in intake.comments],
                 )
+                self.claims.hold(batch.comment_ids)
+                self.agent.wake(batch)
 
     async def stop(self) -> None:
         """Stop polling first, so no wake outlives the agent."""
@@ -259,19 +309,32 @@ class PollingWatcher:
             self.poller.cancel()
             self.poller = None
         await self.agent.stop()
+        self.claims.release()
 
 
 def watcher_agent(
-    *, name: str, system_prompt: str, tools: list[LupMcpTool]
+    *,
+    name: str,
+    system_prompt: str,
+    tools: list[LupMcpTool],
+    claims: ClaimHold,
 ) -> BackgroundAgent[CommentBatch, None]:
-    """Build the background agent behind a watcher, over one tool server."""
+    """Build the background agent behind a watcher, over one tool server.
+
+    Every turn ends in one of the two handlers below, which is why the claims
+    a batch was handed are released there: whatever the turn recorded is
+    already accounted for, and whatever it did not belongs back in front of
+    the next poll.
+    """
     server = create_mcp_server(name, tools=tools)
 
-    async def discard(_result: TurnResult[None]) -> None:
+    async def done(_result: TurnResult[None]) -> None:
         """The work is the tool calls; the turn's prose is not read."""
+        claims.release()
 
     async def report(error: TurnError) -> None:
         logger.error("%s turn failed: %s", name, error)
+        claims.release()
 
     return BackgroundAgent(
         factory=provider_factory(
@@ -282,7 +345,7 @@ def watcher_agent(
             autonomy="unattended",
         ),
         state_to_request=lambda batch: turn_request(batch.prompt),
-        result_handler=discard,
+        result_handler=done,
         error_handler=report,
         config=BackgroundConfig(debounce_seconds=5.0),
     )
@@ -309,6 +372,7 @@ def create_comment_watcher(
         report_unreachable: Tells the author a poll could not read the document.
         poll_interval: Seconds between polls (default 30).
     """
+    claims = ClaimHold(session_state.seen_comments)
     return PollingWatcher(
         agent=watcher_agent(
             name="watcher",
@@ -318,9 +382,11 @@ def create_comment_watcher(
                 notes=notes,
                 plan_breaking_signal=plan_breaking_signal,
             ),
+            claims=claims,
         ),
         read_comments=session_state.poll_author_comments,
         report_unreachable=report_unreachable,
+        claims=claims,
         heading="New comments",
         poll_interval=poll_interval,
     )
@@ -368,25 +434,25 @@ def create_source_watcher_tools(
         if inp.reply:
             task += f"Reply to agent question: {inp.reply}\n"
 
-        classified = await query(
-            task,
-            output_type=ClassifiedComment,
-            model=stage_model("classify"),
-            system_prompt=COMMENT_CLASSIFIER_PROMPT,
-            max_thinking_tokens=128_000 - 1,
-            autonomy="unattended",
-            prefix="[source-classify] ",
-        )
-        if classified is None:
-            raise ToolError("Classification failed — no output from classifier")
-
-        classified.comment_id = inp.comment_id
-        classified.content = inp.content
-        classified.anchor_text = inp.anchor_text
-        classified.reply = inp.reply
-        classified.timestamp = datetime.now().isoformat()
-
         with session_state.seen_source_comments.recording(inp.comment_id):
+            classified = await query(
+                task,
+                output_type=ClassifiedComment,
+                model=stage_model("classify"),
+                system_prompt=COMMENT_CLASSIFIER_PROMPT,
+                max_thinking_tokens=128_000 - 1,
+                autonomy="unattended",
+                prefix="[source-classify] ",
+            )
+            if classified is None:
+                raise ToolError("Classification failed — no output from classifier")
+
+            classified.comment_id = inp.comment_id
+            classified.content = inp.content
+            classified.anchor_text = inp.anchor_text
+            classified.reply = inp.reply
+            classified.timestamp = datetime.now().isoformat()
+
             await notes.add_comment(classified)
         return PollOutput(classified=classified)
 
@@ -425,6 +491,7 @@ def create_source_watcher(
     acknowledges them, and writes to PipelineNotes. The same feedback loop as
     the output-document watcher, on the source material instead.
     """
+    claims = ClaimHold(session_state.seen_source_comments)
     return PollingWatcher(
         agent=watcher_agent(
             name="source-watcher",
@@ -434,9 +501,11 @@ def create_source_watcher(
                 notes=notes,
                 plan_breaking_signal=plan_breaking_signal,
             ),
+            claims=claims,
         ),
         read_comments=session_state.poll_source_comments,
         report_unreachable=report_unreachable,
+        claims=claims,
         heading="New source document comments",
         poll_interval=poll_interval,
     )

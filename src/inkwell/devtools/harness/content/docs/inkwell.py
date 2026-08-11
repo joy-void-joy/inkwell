@@ -48,7 +48,10 @@ src/inkwell/
 │   ├── quality.py          # Declared quality rules with overridable thresholds
 │   ├── storage.py          # Documents as files beside one typed JSON index per source
 │   ├── fetch.py            # Reaching a document, escalating to a browser where declared
-│   └── ingest.py           # A run: enumerate, fetch what is new, store, report
+│   ├── ingest.py           # A run: enumerate, fetch what is new, store, report
+│   ├── tags.py             # What a document is about, read off its metadata
+│   ├── embeddings.py       # Optional vectors over metadata, keyed by content identity
+│   └── search.py           # One surface: lexical over the files, semantic over metadata
 ├── devtools/               # Development CLI, exposed as `lup-devtools`
 │   ├── main.py             # Root Typer app composing the sub-apps
 │   ├── harness/            # Typed harness declarations — this tree's source

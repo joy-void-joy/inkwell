@@ -785,27 +785,6 @@ def fred_cmd(
 #   app.add_typer(setup_app, name="setup", help="Interactive setup wizard")
 
 
-@app.command("profiles")
-def profiles_cmd() -> None:
-    """List available configuration profiles."""
-    names = list_profiles()
-    active = resolve_profile()
-
-    if not names:
-        console.print("No profiles configured.")
-        console.print(
-            "\n  Create one with: [bold]inkwell setup --profile <name>[/]\n"
-            "  or: [bold]uv run lup-devtools setup --profile <name>[/]"
-        )
-        return
-
-    console.print()
-    for name in names:
-        marker = " [green](active)[/]" if name == active else ""
-        console.print(f"  {name}{marker}")
-    console.print()
-
-
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,

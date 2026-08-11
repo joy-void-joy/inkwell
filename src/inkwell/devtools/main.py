@@ -25,12 +25,19 @@ import typer
 import inkwell.agent.stages as stages
 from lup.devtools.feedback.app import create_feedback_app
 from lup.devtools.feedback.models import AgentPrompt
+from lup.devtools.harness.profile_app import create_profile_app
 from lup.devtools.subapps import SubApp, compose
 from inkwell.devtools.agent import app as agent_app
 from inkwell.devtools.dev.app import app as dev_app
 from inkwell.devtools.harness.app import app as harness_app
+from inkwell.devtools.profiles import inkwell_profile_directory
 from inkwell.devtools.setup import app as setup_app
 from inkwell.devtools.subapps import APPLICATION_SPECS, INHERITED
+
+# Mounted from the composition root because the profile origin reads the setup
+# module for where a profile directory lives, which leaves setup unable to
+# reach back for the tree that curates them.
+setup_app.add_typer(create_profile_app(inkwell_profile_directory()), name="profile")
 
 
 def assembled_prompt() -> AgentPrompt:

@@ -13,13 +13,8 @@ from pathlib import Path
 from lup.runtime.profiles import ProfileDirectory, ProfileStore
 
 import inkwell.agent.config as config
+import inkwell.devtools.setup as setup
 from inkwell.agent.client import PROVIDER_LOGIN
-from inkwell.devtools.setup import (
-    PROFILES_DIR,
-    claude_config_dir_for_profile,
-    env_file_for_profile,
-    list_profiles,
-)
 
 
 class InkwellProfileStore(ProfileStore):
@@ -27,15 +22,15 @@ class InkwellProfileStore(ProfileStore):
 
     def known(self, name: str) -> str:
         """Return name, or raise for one no profile directory answers to."""
-        if name not in list_profiles():
+        if name not in setup.list_profiles():
             raise KeyError(f"unknown inkwell profile {name!r}")
         return name
 
     def names(self) -> list[str]:
-        return list_profiles()
+        return setup.list_profiles()
 
     def config_dir_for(self, name: str) -> Path:
-        return claude_config_dir_for_profile(self.known(name))
+        return setup.claude_config_dir_for_profile(self.known(name))
 
     def active_profile(self) -> str | None:
         return config.active_profile()
@@ -47,13 +42,13 @@ class InkwellProfileStore(ProfileStore):
         caller asking for one elsewhere is asking for something an inkwell
         profile cannot be, rather than for a variation on one.
         """
-        home = claude_config_dir_for_profile(name)
+        home = setup.claude_config_dir_for_profile(name)
         if config_dir is not None and config_dir != home:
             raise ValueError(
                 f"an inkwell profile keeps its configuration home at {home}, "
                 f"which is derived from the name — {config_dir} cannot be one"
             )
-        env_file = env_file_for_profile(name)
+        env_file = setup.env_file_for_profile(name)
         env_file.parent.mkdir(parents=True, exist_ok=True)
         env_file.touch()
         home.mkdir(parents=True, exist_ok=True)
@@ -70,7 +65,8 @@ class InkwellProfileStore(ProfileStore):
         the login that profile earned.
         """
         raise ValueError(
-            f"an inkwell profile is the directory {PROFILES_DIR / self.known(name)}, "
+            "an inkwell profile is the directory "
+            f"{setup.PROFILES_DIR / self.known(name)}, "
             "which holds its credentials — remove that directory to remove it"
         )
 

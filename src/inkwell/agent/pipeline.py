@@ -3419,6 +3419,16 @@ class PipelineRunner:
             logger.info("Plan-breaking terminal input")
             self.plan_breaking.set()
 
+    # lup: Feedback reaches a stage only from the live channels — doc comments,
+    # terminal input, tab edits — so the readers who already read the published
+    # text are unheard. The author holds a Formspree export of 574 reader
+    # submissions keyed by chapter and section, 95 of them substantive, at
+    # tmp/formspree_mdkzezkv_2026-08-05T13_56_02_export.json. Ingest it into
+    # per-section files the plan and rewrite stages read, so revising section 1.3
+    # sees the comments about 1.3 rather than a general instruction to write
+    # well. This is the evidence in front of the stage that acts on it, instead
+    # of today's themes hardened into prompt lines that go stale, and it gives
+    # every future feedback round somewhere to land.
     async def prepare_feedback(self, stage: str) -> Path | None:
         """Ingest new feedback and render the accumulated set to a file."""
         await self.gather_feedback()

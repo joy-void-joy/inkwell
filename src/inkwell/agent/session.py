@@ -195,6 +195,24 @@ class WritingSessionState:
     def mark_comments_seen(self, comment_ids: list[str]) -> None:
         self.seen_comments.mark_all(comment_ids)
 
+    # lup: Author feedback from the Google Doc goes missing in four ways, each
+    # silent. This fetch and its sync twin swallow every exception into a
+    # warning and return an empty list, so an expired token, a 403, or a network
+    # blip is indistinguishable from "the author said nothing" — the run then
+    # proceeds as if no feedback existed and the author is never told their
+    # comment went unread. Both pollers pass pageSize=100 with no pagination,
+    # while do_fetch_comments in tools/google_docs.py pages properly through
+    # nextPageToken, so past a hundred comments feedback simply vanishes — a
+    # certainty on a textbook with several reviewers. parse_comments marks a
+    # comment seen as it yields it, so if classification then fails or the
+    # process dies before the snapshot, that comment is seen but never recorded
+    # and is lost for good. And the sync and async paths duplicate the same
+    # field list and filter logic, free to drift apart.
+    # Distinguish "no new comments" from "could not reach Drive" in the return
+    # type and surface the second to the author; paginate both; mark seen only
+    # after a comment is durably recorded; derive the two paths from one
+    # implementation. A `feedback status` devtools command showing what was
+    # ingested against what is pending would make the rest debuggable.
     async def get_new_author_comments(self) -> list[AuthorComment]:
         """Fetch author replies not yet seen (async with retry)."""
         if not self.doc_id:

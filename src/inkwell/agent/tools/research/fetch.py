@@ -215,6 +215,29 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
     )
 
 
+# lup: Research reaches only what the agent thought to query, because every
+# research tool here is a search box: exa, arXiv, Wikipedia, FRED, markets, and
+# this fetch. Nothing is indexed, results are one-shot, and coverage is whatever
+# a query happened to name. Build a corpus instead, so retrieval runs over
+# material that already exists before the question does. The author's
+# research-database backup under tmp/ is the port: per-source scrapers, sitemap
+# discovery that enumerates everything a source published, trafilatura and PDF
+# extraction, heuristic quality assessment, and a declarative source registry
+# spanning the labs and institutes worth tracking. Bring it in natively under
+# inkwell's conventions rather than wrapping it as a service — the registry is
+# also where a source's venue and authority are declared once, which is what
+# lets authority be derived rather than asserted per citation.
+# Store documents as markdown files with a typed JSON index sharded per source,
+# so the writer can Grep and Read the corpus with built-in tools, no query layer
+# and no daemon. Do not extract PDFs: keep the PDF and let an agent read it
+# directly with page ranges, the way source_consult already insists, and locate
+# candidates through metadata and abstract embeddings instead. Retrieval is one
+# surface merging lexical search with date, source, and venue filters against
+# semantic search over embeddings — the lexical half answers "is this claim
+# still current", where the terms are known, and the semantic half answers "who
+# argues the other side", where no vocabulary is shared. Reach JS-hard sources
+# with playwright, which is already a dependency and already runs persistent
+# per-profile browser contexts in agent/browser_auth.py.
 @lup_tool(
     "Fetch a URL and extract its text content. Saves the extracted text "
     "to disk and returns a file path, word count, and preview. Works "

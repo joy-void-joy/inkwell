@@ -3,6 +3,16 @@
 from typing import Literal
 
 
+# lup: Escaping the sandbox is a different axis from permission and wants its
+# own field beside this one, not a member inside it: these four answer *who
+# decides*, escaping answers *where it runs*, and folding them together forces
+# an ask-plus-escalate member next, then a deny-plus-escalate. Keep this closed.
+# The neutral kernel must also never learn `dangerouslyDisableSandbox`, which is
+# one runtime's spelling — Codex matches on this type and has no sandbox
+# concept. Even if the unprompted rendering proves impossible, the field still
+# earns its place: Claude renders `escalate` as an ask whose reason says to
+# re-run unsandboxed, and a runtime that cannot escalate degrades to the plain
+# effect instead of silently doing nothing.
 type DecisionEffect = Literal["allow", "ask", "deny", "defer"]
 
 

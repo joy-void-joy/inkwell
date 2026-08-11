@@ -823,6 +823,29 @@ def path_rule_matches(path: str, path_exists: bool, row: PathRuleRow) -> bool:
             raise ValueError(f"invalid path rule kind {kind!r}")
 
 
+# lup: Editing `.claude/` or `.codex/` should be auto-deny here, carrying the
+# redirecting guidance that the `.py` generating it is what to modify instead.
+# `GENERATED_PLUGIN_REFUSAL` in the kernel's words module already says exactly
+# that, but only the shell path reaches it — an Edit or Write to the same file
+# is judged by the ordinary lattice.
+#
+# lup: The edit gate should refuse a *spurious* suppression — an added
+# `ignore[rule]` on a line that does not trip that rule. It asks about every
+# added directive equally, so the cheap way past a gate is a marker that
+# suppresses nothing, and the audit only reports it later. The refiner already
+# decides exemption per line, which is the same question.
+#
+# lup: It should be possible to *relocate* a note. The gate reads any edit that
+# drops the marker line as a deletion, so moving one to the declaration it
+# actually concerns is refused with "resolving a note means replacing it with
+# solved" — which is not what a move is. This bites hardest in a merge, where
+# both sides add at one spot and a note routinely lands against the wrong
+# declaration. Recognize a marker whose text reappears elsewhere in the file.
+#
+# lup: It is also hard to tell whether a new file the agent writes carries any
+# suppression directives at all. I like reviewing the full Write, so I get the
+# gist of the folder hierarchy and so on — surface the ignores a creation
+# introduces rather than letting the full-write gate wave the file through.
 def decide_edit(
     path: str,
     before: str | None,

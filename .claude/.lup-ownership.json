@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generator_version": "0.2.0",
-  "source_digest": "b9f927747c12ceac05bfb0e65130bd1c7dbf5019aebf84f5e9788af77726f436",
+  "source_digest": "205cb8cd9dbd6ba147bfc645284d4654d99e6796048a0b60aa0bb0eeb44784c5",
   "target_requirements": [
     "claude-code"
   ],
@@ -9,7 +9,7 @@
     {
       "path": ".claude/CLAUDE.md",
       "category": "generated",
-      "sha256": "12af626aa43315b2ed1b61d1c7d105fbf99578e40ffaf2a7bcb5effbd72a8725",
+      "sha256": "9cdebe6670053d3b389ba2d20650dbd79d6ee6062e94540c073de0451ece3304",
       "semantic_id": "harness.guidance",
       "executable": false
     },
@@ -261,7 +261,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/commands.py",
       "category": "generated",
-      "sha256": "9075ab390fb4c9b582c672ede1a89ad8bbca1a2086db923b9810ed1bbf5b4df5",
+      "sha256": "7208e213a736cdca28538c0647576d3237889a9742d08960eb13abeb7df0699a",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -275,7 +275,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/edit.py",
       "category": "generated",
-      "sha256": "9444a012d1bfaa369bf6bea3aefc885de0b192044f2fed3713700f8d4c3805b1",
+      "sha256": "c2dd757eb3829800f82115c04270b018817d9362137109940cc313dcd686c7b8",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -289,7 +289,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/lex.py",
       "category": "generated",
-      "sha256": "8803a2e845a029c6c9ca2ed15f4e233ee533df4c0d7f49bc21edfb3e8a3cf50a",
+      "sha256": "9d430bd69a15879e7be17040c1a815985b820cfeb17f06c9b9a998e42c84ac67",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -310,7 +310,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/shell.py",
       "category": "generated",
-      "sha256": "0b2ed4f581549e670c440ad804a67df1ec97ab2c634622b3afd7c00896ee07a9",
+      "sha256": "9e270d6e6ee1efe21dc553a408f324f98e625ecbd1642859761f6c6b3d3eb716",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -324,7 +324,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/policy_data.py",
       "category": "generated",
-      "sha256": "d52087bc3d604f2ac247a4117766727a3498dc0f3d8ac05b89445b7416fb5554",
+      "sha256": "bc9c8d5c5b7c851d46a929e6940428e4e4260931236dc88d2d83520a72d2c9ac",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },

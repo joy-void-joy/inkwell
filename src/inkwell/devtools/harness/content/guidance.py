@@ -233,7 +233,7 @@ The codebase should read as a **monolithic source of truth** — understandable 
 
 ### Inline `# lup:` Notes
 
-A `# lup:` (or `// lup:`) comment is **actionable review feedback** left in the code for the agent to address. Four flavors, and only the removal rules differ:
+A `# lup:` (or `// lup:`) comment is **actionable review feedback** left in the code for the agent to address. A note that runs to several lines carries the marker on its **first line only**, continuing with bare `#` comments — every `# lup:` line starts a new note, so repeating the marker turns one concern into a note per line, and the resolver then plans each fragment separately. Four flavors, and only the removal rules differ:
 
 | Marker | Removing it |
 |---|---|

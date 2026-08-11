@@ -15,7 +15,7 @@ import asyncio
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.corpus.discovery import AvenueFailure, PageCache, discover_avenues
 from inkwell.corpus.failures import classify
@@ -43,6 +43,7 @@ from inkwell.corpus.storage import (
     now_stamp,
     pending_entries,
 )
+from inkwell.corpus.tagging import DocumentTagger
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ class SourceIngestor(BaseModel):
     declaration: SourceDeclaration
     store: CorpusStore
     fetcher: DocumentFetcher
+    tagger: DocumentTagger = Field(default_factory=DocumentTagger)
     concurrency: int = DEFAULT_CONCURRENCY
     limit: int = 0
     refresh: bool = False
@@ -244,6 +246,11 @@ class SourceIngestor(BaseModel):
 
         An unchanged document is recognised by its content hash rather than by
         any timestamp, so re-running over a static source rewrites nothing.
+
+        Tagging happens here, as the document enters, rather than when some
+        later run happens to want it: tags are what a browse navigates by, so a
+        corpus tagged only where someone already looked is one whose gaps are
+        exactly where nobody has looked yet.
         """
         source = self.declaration.key
         try:
@@ -256,22 +263,24 @@ class SourceIngestor(BaseModel):
                 )
             title = fetched.title or entry.title or entry.slug
             written = self.write(entry.slug, fetched, title)
-            shard.record_document(
-                StoredDocument(
-                    slug=entry.slug,
-                    url=entry.url,
-                    category=entry.category,
-                    title=title,
-                    kind=fetched.kind,
-                    filename=written.filename,
-                    content_sha256=digest,
-                    abstract=abstract_of(fetched),
-                    page_count=written.page_count,
-                    words=written.quality.metrics.words,
-                    fetched_at=now_stamp(),
-                    quality=written.quality,
-                )
+            document = StoredDocument(
+                slug=entry.slug,
+                url=entry.url,
+                category=entry.category,
+                title=title,
+                kind=fetched.kind,
+                filename=written.filename,
+                content_sha256=digest,
+                abstract=abstract_of(fetched),
+                page_count=written.page_count,
+                words=written.quality.metrics.words,
+                fetched_at=now_stamp(),
+                quality=written.quality,
             )
+            assignment = await self.tagger.assign(
+                self.declaration, document, self.store.document_path(source, document)
+            )
+            shard.record_document(assignment.applied_to(document))
             shard.clear_failure(entry.slug)
             return DocumentOutcome(
                 slug=entry.slug, url=entry.url, status=STORED, kind=fetched.kind
@@ -354,6 +363,7 @@ async def ingest_source(
     fetcher: DocumentFetcher,
     *,
     pages: PageCache | None = None,
+    tagger: DocumentTagger | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     limit: int = 0,
     refresh: bool = False,
@@ -371,6 +381,7 @@ async def ingest_source(
         declaration=declaration,
         store=store,
         fetcher=fetcher,
+        tagger=tagger if tagger is not None else DocumentTagger(),
         concurrency=concurrency,
         limit=limit,
         refresh=refresh,
@@ -392,6 +403,7 @@ async def ingest_with(
     store: CorpusStore,
     fetcher: DocumentFetcher,
     *,
+    tagger: DocumentTagger | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     limit: int = 0,
     refresh: bool = False,
@@ -407,6 +419,7 @@ async def ingest_with(
             declaration,
             store,
             fetcher,
+            tagger=tagger,
             concurrency=concurrency,
             limit=limit,
             refresh=refresh,
@@ -425,6 +438,7 @@ async def ingest_sources(
     store: CorpusStore,
     *,
     profile: str | None = None,
+    tagger: DocumentTagger | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     limit: int = 0,
     refresh: bool = False,
@@ -435,6 +449,7 @@ async def ingest_sources(
             declarations,
             store,
             DocumentFetcher(client=client, profile=profile),
+            tagger=tagger,
             concurrency=concurrency,
             limit=limit,
             refresh=refresh,
@@ -466,6 +481,7 @@ async def sync_corpus(
     *,
     keys: tuple[str, ...] = (),
     profile: str | None = None,
+    tagger: DocumentTagger | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     limit: int = 0,
     refresh: bool = False,
@@ -475,6 +491,7 @@ async def sync_corpus(
         resolve_sources(keys),
         store,
         profile=profile,
+        tagger=tagger,
         concurrency=concurrency,
         limit=limit,
         refresh=refresh,

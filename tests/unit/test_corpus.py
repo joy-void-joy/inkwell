@@ -7,6 +7,7 @@ costs only itself. The network is faked with a fixture reader and an httpx mock
 transport, so the real extraction, hashing, and merge paths all run.
 """
 
+import json
 from pathlib import Path
 
 import httpx
@@ -34,6 +35,7 @@ from inkwell.corpus.registry import (
     DROPPED_SOURCES,
     SourceDeclaration,
     active_declarations,
+    corpus_vocabulary,
     declaration_for,
 )
 from inkwell.corpus.storage import (
@@ -42,6 +44,24 @@ from inkwell.corpus.storage import (
     StoredDocument,
     merged_discovery,
     pending_entries,
+)
+from inkwell.corpus.tagging import (
+    DocumentTagger,
+    TagJudge,
+    TagJudgement,
+    TagRequest,
+    retag_source,
+)
+from inkwell.corpus.tags import (
+    DEFAULT_SUBJECTS,
+    DEFAULT_VOCABULARY,
+    EVALUATIONS,
+    GOVERNANCE,
+    SYSTEM_CARD,
+    DocumentTags,
+    TagTerm,
+    TagVocabulary,
+    folded,
 )
 
 FIXTURE_HOST = "https://fixture.test"
@@ -129,6 +149,48 @@ def fixture_declaration(
         authority="institute",
         hosts=("fixture.test",),
         avenues=avenues or (SitemapAvenue(category="research", sitemap=SITEMAP),),
+    )
+
+
+class FixtureJudge(TagJudge):
+    """A judgement that answers from a canned map and records what it was asked.
+
+    Recording the requests is what lets a test check the *shape* of the
+    question — that a judgement is never asked to settle what the registry
+    already declares, and that it is handed a body it can actually read.
+    """
+
+    def __init__(
+        self,
+        tags: dict[str, tuple[str, ...]] | None = None,
+        *,
+        default: tuple[str, ...] = (),
+        summary: str = "",
+        answers: bool = True,
+    ) -> None:
+        self.tags = tags or {}
+        self.default = default
+        self.summary = summary
+        self.answers = answers
+        self.requests = list[TagRequest]()
+
+    async def judge(self, request: TagRequest) -> TagJudgement | None:
+        self.requests.append(request)
+        if not self.answers:
+            return None
+        canned = self.tags[request.slug] if request.slug in self.tags else self.default
+        return TagJudgement(
+            tags=canned, summary=self.summary or f"What {request.slug} says."
+        )
+
+
+def fixture_tagger(
+    judge: TagJudge | None = None, vocabulary: TagVocabulary | None = None
+) -> DocumentTagger:
+    """A tagger that spends no model, for the ingestion paths under test."""
+    return DocumentTagger(
+        vocabulary=vocabulary if vocabulary is not None else corpus_vocabulary(),
+        judge=judge if judge is not None else FixtureJudge(),
     )
 
 
@@ -494,7 +556,9 @@ async def test_ingesting_a_pdf_never_extracts_its_text(tmp_path: Path) -> None:
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        report = await ingest_source(declaration, store, DocumentFetcher(client=client))
+        report = await ingest_source(
+            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
+        )
 
     assert report.stored == 1
     document = store.load(declaration).stored("paper")
@@ -561,14 +625,20 @@ async def test_a_run_reports_what_it_discovered_fetched_and_skipped(
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
         first = await ingest_source(
-            declaration, store, DocumentFetcher(client=client), limit=1
+            declaration,
+            store,
+            DocumentFetcher(client=client),
+            tagger=fixture_tagger(),
+            limit=1,
         )
         assert first.discovered == 2
         assert first.new == 2
         assert first.stored == 1
         assert first.skipped == 1
 
-        second = await ingest_source(declaration, store, DocumentFetcher(client=client))
+        second = await ingest_source(
+            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
+        )
     assert second.new == 0
     assert second.stored == 1
     assert second.skipped == 0
@@ -586,9 +656,15 @@ async def test_a_stored_document_is_not_rewritten_when_it_has_not_changed(
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        await ingest_source(declaration, store, DocumentFetcher(client=client))
+        await ingest_source(
+            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
+        )
         again = await ingest_source(
-            declaration, store, DocumentFetcher(client=client), refresh=True
+            declaration,
+            store,
+            DocumentFetcher(client=client),
+            tagger=fixture_tagger(),
+            refresh=True,
         )
     assert again.stored == 0
     assert again.unchanged == 1
@@ -604,7 +680,9 @@ async def test_a_document_failure_is_recorded_for_the_next_run(tmp_path: Path) -
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        report = await ingest_source(declaration, store, DocumentFetcher(client=client))
+        report = await ingest_source(
+            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
+        )
 
     assert report.stored == 1
     assert report.failed == 1
@@ -636,7 +714,10 @@ async def test_one_unreachable_source_does_not_take_the_run_down(
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
         report = await ingest_with(
-            (broken, healthy), store, DocumentFetcher(client=client)
+            (broken, healthy),
+            store,
+            DocumentFetcher(client=client),
+            tagger=fixture_tagger(),
         )
 
     by_source = {entry.source: entry for entry in report.sources}
@@ -656,7 +737,10 @@ async def test_a_source_whose_store_cannot_be_written_is_reported_not_raised(
     pages = (FixturePage(url=SITEMAP, body=sitemap_xml(("/research/one",))),)
     async with client_for(pages) as client:
         report = await ingest_source(
-            declaration, CorpusStore(root=blocked), DocumentFetcher(client=client)
+            declaration,
+            CorpusStore(root=blocked),
+            DocumentFetcher(client=client),
+            tagger=fixture_tagger(),
         )
     assert report.aborted
     assert "aborted" in report.summary()
@@ -775,3 +859,430 @@ async def test_a_sweep_keeps_documents_and_pdfs_but_drops_furniture() -> None:
     assert not any("tag" in slug for slug in by_slug)
     assert not any("app.js" in slug for slug in by_slug)
     assert by_slug["index-a-post"].category == "index"
+
+
+# ── Tags: a declared vocabulary, derived where the registry knows ─────────────
+
+
+def test_the_vocabulary_is_declared_data_a_browse_can_read() -> None:
+    """What a browse may filter on is a declaration, not what a run invented."""
+    vocabulary = corpus_vocabulary()
+    assert EVALUATIONS.tag == "subject:evaluations"
+    assert vocabulary.holds(EVALUATIONS.tag)
+    assert not vocabulary.holds("subject:whatever-a-run-felt-like")
+    assert all(term.description for term in vocabulary.terms())
+    assert {term.facet for term in vocabulary.terms()} == {
+        "subject",
+        "method",
+        "organization",
+    }
+
+
+def test_every_declared_source_contributes_its_organization_tag() -> None:
+    """The organization facet is derived from the registry, not restated."""
+    vocabulary = corpus_vocabulary()
+    assert {term.name for term in vocabulary.organizations} == {
+        entry.key for entry in DECLARED_SOURCES
+    }
+    assert all(term.facet == "organization" for term in vocabulary.organizations)
+    assert "organization:metr" in vocabulary.tags()
+
+
+def test_a_judgement_is_only_offered_what_it_alone_can_settle() -> None:
+    """Organizations are declared, so no judgement is spent re-deriving one."""
+    assert {term.facet for term in corpus_vocabulary().judged_terms()} == {
+        "subject",
+        "method",
+    }
+
+
+def test_adding_a_tag_is_one_line_of_declaration() -> None:
+    added = TagTerm(
+        facet="subject", name="scaling-policy", description="A lab's own scaling policy"
+    )
+    wider = TagVocabulary(subjects=(*DEFAULT_SUBJECTS, added))
+    assert wider.holds(added.tag)
+    assert not DEFAULT_VOCABULARY.holds(added.tag)
+    assert wider.signature() != DEFAULT_VOCABULARY.signature()
+
+
+def test_rewording_a_term_changes_the_vocabulary_signature() -> None:
+    """A description is what a judgement reads, so editing one is a real change."""
+    reworded = DEFAULT_VOCABULARY.model_copy(
+        update={
+            "subjects": (
+                *DEFAULT_SUBJECTS[:-1],
+                DEFAULT_SUBJECTS[-1].model_copy(
+                    update={"description": "Something else entirely"}
+                ),
+            )
+        }
+    )
+    assert reworded.tags() == DEFAULT_VOCABULARY.tags()
+    assert reworded.signature() != DEFAULT_VOCABULARY.signature()
+
+
+def test_a_declared_tag_spelled_loosely_is_still_the_declared_tag() -> None:
+    """Folding both sides keeps a free tag a real gap, not a capitalisation."""
+    vocabulary = corpus_vocabulary()
+    assert vocabulary.resolve("Subject: Evaluations") == EVALUATIONS
+    assert vocabulary.resolve("chain of thought faithfulness") is None
+    assert folded("Chain of Thought Faithfulness") == "chain-of-thought-faithfulness"
+
+
+def test_a_per_source_fact_reaches_every_document_from_the_declaration() -> None:
+    """Declared once on the source, exactly as venue and authority are."""
+    metr = declaration_for("metr")
+    govai = declaration_for("govai")
+    assert metr is not None and govai is not None
+    assert all(
+        EVALUATIONS.tag in metr.tags_for(category)
+        for category in ("blog", "notes", "evaluations")
+    )
+    assert GOVERNANCE.tag in govai.tags_for("research")
+    assert "organization:govai" in govai.tags_for("analysis")
+
+
+def test_an_avenue_declares_what_everything_it_publishes_is() -> None:
+    """A per-category fact belongs to the avenue that publishes the category."""
+    anthropic = declaration_for("anthropic")
+    assert anthropic is not None
+    assert SYSTEM_CARD.tag in anthropic.tags_for("system-cards")
+    assert SYSTEM_CARD.tag not in anthropic.tags_for("research")
+    assert anthropic.tags_for("research") == ("organization:anthropic",)
+
+
+def test_every_tag_a_source_declares_is_one_the_vocabulary_holds() -> None:
+    """Declarations name terms rather than strings, so this cannot drift."""
+    vocabulary = corpus_vocabulary()
+    declared = {
+        term.tag
+        for entry in DECLARED_SOURCES
+        for term in (*entry.tags, *(one for a in entry.avenues for one in a.tags))
+    }
+    assert declared
+    assert all(vocabulary.holds(tag) for tag in declared)
+
+
+# ── Tags are assigned as a document enters, on every entry ────────────────────
+
+
+class IngestedCorpus(BaseModel):
+    """A fixture corpus that has been through one ingestion."""
+
+    declaration: SourceDeclaration
+    store: CorpusStore
+
+    def shard(self) -> SourceShard:
+        return self.store.load(self.declaration)
+
+    def document(self, slug: str) -> StoredDocument:
+        found = self.shard().stored(slug)
+        assert found is not None
+        return found
+
+
+async def ingested_with(
+    tmp_path: Path, judge: TagJudge, *, slugs: tuple[str, ...] = ("one", "two")
+) -> IngestedCorpus:
+    """Ingest a fixture source with ``judge`` doing the judging."""
+    declaration = fixture_declaration()
+    pages = (
+        FixturePage(
+            url=SITEMAP, body=sitemap_xml(tuple(f"/research/{one}" for one in slugs))
+        ),
+        *(
+            FixturePage(url=f"{FIXTURE_HOST}/research/{one}", body=article_html(one))
+            for one in slugs
+        ),
+    )
+    store = CorpusStore(root=tmp_path)
+    async with client_for(pages) as client:
+        await ingest_source(
+            declaration,
+            store,
+            DocumentFetcher(client=client),
+            tagger=fixture_tagger(judge),
+        )
+    return IngestedCorpus(declaration=declaration, store=store)
+
+
+async def test_every_stored_document_carries_tags(tmp_path: Path) -> None:
+    """Tags are what a browse navigates by, so no document may lack them."""
+    judge = FixtureJudge({"one": (EVALUATIONS.tag,)})
+    ingested = await ingested_with(tmp_path, judge)
+
+    documents = ingested.shard().documents
+    assert len(documents) == 2
+    assert all(document.tags.judged for document in documents)
+    assert all(
+        document.tags.derived == ("organization:fixture",) for document in documents
+    )
+    assert {document.slug for document in documents} == {
+        request.slug for request in judge.requests
+    }
+
+
+async def test_a_document_nothing_applies_to_is_explicitly_untagged(
+    tmp_path: Path,
+) -> None:
+    """The gap is recorded rather than absent, so a browse can see it."""
+    ingested = await ingested_with(tmp_path, FixtureJudge(), slugs=("one",))
+
+    document = ingested.document("one")
+    assert document.tags.untagged()
+    assert document.tags.applied() == ("organization:fixture",)
+
+    written = json.loads(
+        (tmp_path / ingested.declaration.key / "index.json").read_text(encoding="utf-8")
+    )
+    recorded = written["documents"][0]["tags"]
+    assert recorded["judged"] is True
+    assert recorded["core"] == []
+    assert recorded["derived"] == ["organization:fixture"]
+
+
+def test_a_never_judged_document_is_not_mistaken_for_an_untagged_one() -> None:
+    """ "Nobody looked" and "looked and found nothing" are different gaps."""
+    fresh = StoredDocument(slug="one", url=f"{FIXTURE_HOST}/research/one")
+    assert not fresh.tags.judged
+    assert not fresh.tags.untagged()
+    assert DocumentTags(judged=True).untagged()
+
+
+async def test_a_proposed_tag_is_kept_apart_from_the_declared_ones(
+    tmp_path: Path,
+) -> None:
+    """A free tag is a review queue, not a filter the browse offers."""
+    judge = FixtureJudge(
+        {"one": ("Subject: Evaluations", "Chain of Thought Faithfulness")}
+    )
+    ingested = await ingested_with(tmp_path, judge, slugs=("one",))
+
+    document = ingested.document("one")
+    assert document.tags.core == (EVALUATIONS.tag,)
+    assert document.tags.free == ("chain-of-thought-faithfulness",)
+    assert not document.tags.untagged()
+    assert not corpus_vocabulary().holds("chain-of-thought-faithfulness")
+
+
+async def test_a_judgement_is_never_asked_what_the_registry_declares(
+    tmp_path: Path,
+) -> None:
+    """Deriving-versus-judging is settled in the code, not by the caller."""
+    judge = FixtureJudge()
+    ingested = await ingested_with(tmp_path, judge, slugs=("one",))
+
+    offered = {term.facet for request in judge.requests for term in request.choices}
+    assert offered == {"subject", "method"}
+    assert ingested.document("one").tags.derived == ("organization:fixture",)
+
+
+async def test_a_pdf_gets_a_judged_summary_where_it_can_have_no_abstract(
+    tmp_path: Path,
+) -> None:
+    """One pass tags the document and says what it is, without extracting it."""
+    declaration = fixture_declaration()
+    pages = (
+        FixturePage(url=SITEMAP, body=sitemap_xml(("/research/paper",))),
+        FixturePage(
+            url=f"{FIXTURE_HOST}/research/paper",
+            body=one_page_pdf(),
+            content_type="application/pdf",
+        ),
+    )
+    judge = FixtureJudge(summary="A one-page paper about evaluation harnesses.")
+    store = CorpusStore(root=tmp_path)
+    async with client_for(pages) as client:
+        await ingest_source(
+            declaration,
+            store,
+            DocumentFetcher(client=client),
+            tagger=fixture_tagger(judge),
+        )
+
+    document = store.load(declaration).stored("paper")
+    assert document is not None
+    assert document.abstract == ""
+    assert document.summary == "A one-page paper about evaluation harnesses."
+    assert judge.requests[0].kind == "pdf"
+    assert "pages='1-1'" in judge.requests[0].reading_hint()
+
+
+# ── A vocabulary edit re-tags what is stored, and fetches nothing ─────────────
+
+
+HARNESS_DESIGN = TagTerm(
+    facet="subject",
+    name="harness-design",
+    description="How an evaluation harness is built, and what that changes",
+)
+
+
+def wider_vocabulary(added: TagTerm) -> TagVocabulary:
+    """The corpus vocabulary with one more subject declared."""
+    return corpus_vocabulary().model_copy(
+        update={"subjects": (*DEFAULT_SUBJECTS, added)}
+    )
+
+
+async def test_a_vocabulary_change_retags_the_corpus_without_refetching(
+    tmp_path: Path,
+) -> None:
+    """The whole point of the split: re-tagging reads disk, never the network.
+
+    ``retag_source`` takes no fetcher at all, so a re-tag cannot fetch even by
+    accident — and the fixture client is closed by the time this one runs.
+    """
+    ingested = await ingested_with(tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)))
+
+    judge = FixtureJudge(default=(HARNESS_DESIGN.tag,))
+    report = await retag_source(
+        ingested.declaration,
+        ingested.store,
+        DocumentTagger(vocabulary=wider_vocabulary(HARNESS_DESIGN), judge=judge),
+    )
+
+    assert report.examined == 2
+    assert report.retagged == 2
+    assert report.changed == 2
+    assert report.untagged == 0
+    assert report.failed == 0
+    assert all(Path(request.path).is_file() for request in judge.requests)
+    assert all(
+        HARNESS_DESIGN.tag in document.tags.core
+        for document in ingested.shard().documents
+    )
+
+
+async def test_a_retag_reports_how_many_documents_became_untagged(
+    tmp_path: Path,
+) -> None:
+    """A vocabulary edit is observable: the gap it opens is counted."""
+    ingested = await ingested_with(tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)))
+
+    narrowed = corpus_vocabulary().model_copy(update={"subjects": (), "methods": ()})
+    report = await retag_source(
+        ingested.declaration,
+        ingested.store,
+        DocumentTagger(vocabulary=narrowed, judge=FixtureJudge()),
+    )
+
+    assert report.changed == 2
+    assert report.untagged == 2
+    assert len(ingested.shard().untagged()) == 2
+    assert "untagged 2" in report.summary()
+
+
+async def test_documents_already_judged_against_this_vocabulary_are_left_alone(
+    tmp_path: Path,
+) -> None:
+    """Re-running after no edit costs nothing, so re-tagging stays cheap."""
+    ingested = await ingested_with(tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)))
+
+    judge = FixtureJudge(default=(EVALUATIONS.tag,))
+    report = await retag_source(
+        ingested.declaration, ingested.store, fixture_tagger(judge)
+    )
+
+    assert report.examined == 2
+    assert report.retagged == 0
+    assert report.current == 2
+    assert judge.requests == []
+
+    forced = await retag_source(
+        ingested.declaration, ingested.store, fixture_tagger(judge), force=True
+    )
+    assert forced.retagged == 2
+    assert forced.changed == 0
+
+
+async def test_a_judgement_that_does_not_come_back_leaves_earlier_tags_standing(
+    tmp_path: Path,
+) -> None:
+    """A failure today never un-tags a document that was tagged yesterday."""
+    ingested = await ingested_with(
+        tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)), slugs=("one",)
+    )
+
+    report = await retag_source(
+        ingested.declaration,
+        ingested.store,
+        DocumentTagger(
+            vocabulary=wider_vocabulary(HARNESS_DESIGN),
+            judge=FixtureJudge(answers=False),
+        ),
+    )
+
+    assert report.failed == 1
+    assert report.changed == 0
+    document = ingested.document("one")
+    assert document.tags.core == (EVALUATIONS.tag,)
+    assert document.summary == "What one says."
+
+
+async def test_a_document_whose_body_is_gone_is_reported_not_judged(
+    tmp_path: Path,
+) -> None:
+    """Assignment reads bodies, so a missing one is a failure worth counting."""
+    ingested = await ingested_with(
+        tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)), slugs=("one",)
+    )
+    ingested.store.document_path(
+        ingested.declaration.key, ingested.document("one")
+    ).unlink()
+
+    judge = FixtureJudge(default=(HARNESS_DESIGN.tag,))
+    report = await retag_source(
+        ingested.declaration,
+        ingested.store,
+        DocumentTagger(vocabulary=wider_vocabulary(HARNESS_DESIGN), judge=judge),
+        force=True,
+    )
+
+    assert report.failed == 1
+    assert judge.requests == []
+
+
+# ── The browse surface narrows on a tag ───────────────────────────────────────
+
+
+def tagged_document(slug: str, tags: DocumentTags) -> StoredDocument:
+    return StoredDocument(
+        slug=slug,
+        url=f"{FIXTURE_HOST}/research/{slug}",
+        category="research",
+        title=slug.title(),
+        filename=f"{slug}.md",
+        tags=tags,
+    )
+
+
+def test_a_browse_narrows_on_a_tag_and_still_sees_the_gap() -> None:
+    """Titles alone do not narrow; a tag is what turns a scan into a filter."""
+    from inkwell.agent.tools.research.corpus import document_entries
+
+    shard = SourceShard(
+        source="fixture",
+        documents=[
+            tagged_document(
+                "one",
+                DocumentTags(
+                    derived=("organization:fixture",),
+                    core=(EVALUATIONS.tag,),
+                    judged=True,
+                ),
+            ),
+            tagged_document(
+                "two", DocumentTags(derived=("organization:fixture",), judged=True)
+            ),
+        ],
+    )
+
+    narrowed = document_entries(shard, "/corpus/fixture", tag=EVALUATIONS.tag)
+    assert [entry.slug for entry in narrowed] == ["one"]
+    assert narrowed[0].tags == ("organization:fixture", EVALUATIONS.tag)
+
+    everything = document_entries(shard, "/corpus/fixture")
+    assert [entry.untagged for entry in everything] == [False, True]
+    assert shard.tags() == ("organization:fixture", EVALUATIONS.tag)

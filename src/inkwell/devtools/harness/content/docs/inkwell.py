@@ -46,9 +46,11 @@ src/inkwell/
 │   ├── registry.py         # Every tracked source declared once: hosts, avenues, authority
 │   ├── discovery.py        # Sitemap, listing, table, and sweep enumeration
 │   ├── quality.py          # Declared quality rules with overridable thresholds
+│   ├── tags.py             # The declared tag vocabulary a browse filters on
+│   ├── tagging.py          # Derive a source's tags, judge a document's, re-tag on edit
 │   ├── storage.py          # Documents as files beside one typed JSON index per source
 │   ├── fetch.py            # Reaching a document, escalating to a browser where declared
-│   └── ingest.py           # A run: enumerate, fetch what is new, store, report
+│   └── ingest.py           # A run: enumerate, fetch what is new, tag, store, report
 ├── devtools/               # Development CLI, exposed as `lup-devtools`
 │   ├── main.py             # Root Typer app composing the sub-apps
 │   ├── harness/            # Typed harness declarations — this tree's source

@@ -235,9 +235,10 @@ export function NewSession() {
 
   const entryPoint =
     entryPoints.find((e) => e.name === entryPointName) ?? null;
-  // Only the entry points that start something new belong on this page;
-  // resume and restart act on a session that already exists.
-  const startable = entryPoints.filter((e) => carries(e, "target_format"));
+  // Only the entry points that start something new belong on this page; resume
+  // and restart act on a session that already exists. The declaration says
+  // which is which, so this does not turn on a parameter one happens to take.
+  const startable = entryPoints.filter((e) => e.starts_a_session);
 
   useEffect(() => {
     fetchEntryPoints().then(setEntryPoints).catch(() => {});

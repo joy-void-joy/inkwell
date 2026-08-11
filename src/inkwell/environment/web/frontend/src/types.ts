@@ -55,6 +55,10 @@ export interface EntryPointDescriptor {
   name: string;
   summary: string;
   detail: string;
+  // Whether this begins a session or continues a saved one. Which page offers
+  // an entry point follows from this rather than from which parameters it
+  // happens to take.
+  starts_a_session: boolean;
   parameters: ParameterDescriptor[];
 }
 
@@ -83,6 +87,36 @@ export function declaredDefaults(
 ): SuppliedValues {
   return Object.fromEntries(
     genericParameters(entryPoint).map((p) => [p.name, p.default]),
+  );
+}
+
+// One control per generic parameter across several entry points that share a
+// form — the resume and restart actions sit in one panel, so a parameter either
+// declares gets a control, and a parameter both declare gets one control.
+export function mergedParameters(
+  entryPoints: (EntryPointDescriptor | null)[],
+): ParameterDescriptor[] {
+  const merged = new Map<string, ParameterDescriptor>();
+  for (const entryPoint of entryPoints) {
+    for (const parameter of genericParameters(entryPoint)) {
+      if (!merged.has(parameter.name)) merged.set(parameter.name, parameter);
+    }
+  }
+  return [...merged.values()];
+}
+
+// The values one entry point declares, taken from a form that may hold values
+// for several — so an action never posts a parameter it does not declare, and
+// never omits one it does.
+export function valuesDeclaredBy(
+  entryPoint: EntryPointDescriptor | null,
+  values: SuppliedValues,
+): SuppliedValues {
+  return Object.fromEntries(
+    genericParameters(entryPoint).map((p) => [
+      p.name,
+      values[p.name] ?? p.default,
+    ]),
   );
 }
 

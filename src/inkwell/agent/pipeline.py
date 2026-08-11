@@ -246,20 +246,24 @@ launched with ``light``. Every entry is also a DISPLAY_STAGES backbone stage,
 so the resume loop's stage indexing is unchanged."""
 
 
-def validate_stop_after(stage: str | None) -> str | None:
-    """Normalize and validate a requested stop point, or raise ValueError.
+def validate_checkpoint_stage(
+    stage: str | None, *, what: str = "stop point"
+) -> str | None:
+    """Normalize and validate a stage a run pauses at or picks up from.
 
-    ``None``/empty means "run to the end" and passes through. Every other
-    value must name a checkpoint stage, so a typo fails loudly at construction
+    ``None``/empty means "no stage named" and passes through. Every other value
+    must name a checkpoint stage, so a typo fails loudly where it was supplied
     rather than silently never firing and letting the run finish unpaused.
+
+    ``what`` names the thing being validated, so one rule serves the stop point,
+    the resume point, and the restart point while each still reports itself.
     """
     if stage is None or not stage.strip():
         return None
     normalized = stage.strip().lower()
     if normalized not in CHECKPOINT_STAGES:
         raise ValueError(
-            f"Invalid stop point '{stage}'. Valid stages: "
-            f"{', '.join(CHECKPOINT_STAGES)}"
+            f"Invalid {what} '{stage}'. Valid stages: {', '.join(CHECKPOINT_STAGES)}"
         )
     return normalized
 
@@ -2908,7 +2912,7 @@ class PipelineRunner:
         self.notes = notes
         self.trace_logger = trace_logger
         self.hooks = listener or PipelineListener()
-        self.stop_after = validate_stop_after(stop_after)
+        self.stop_after = validate_checkpoint_stage(stop_after)
         self.explicit_light = light
 
         if cost_accumulator is None:

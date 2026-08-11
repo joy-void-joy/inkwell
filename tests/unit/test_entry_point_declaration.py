@@ -22,21 +22,26 @@ from typer.testing import CliRunner
 
 import inkwell.environment.cli.compile as compile_module
 from inkwell.devtools.harness.composition import write_entry_point_commands
-from inkwell.environment.cli.compile import render_entry_point_commands
+from inkwell.environment.cli.compile import command_lines, render_entry_point_commands
 from inkwell.environment.entrypoints import (
     ENTRY_POINTS,
     LIGHT,
     RESTART,
+    RESTART_FROM,
     RESUME,
     REVISE,
     RUN,
+    SOURCES,
     STAGE_MODELS,
+    VERBOSE,
     WRITE,
     EntryPoint,
     EntryPointParameter,
     EntryPointValues,
     FlagParameter,
+    SuppliedValue,
     SurfacePlan,
+    checkpoint_stage,
     entry_point_descriptors,
     entry_point_named,
     request_model,
@@ -121,6 +126,47 @@ class TestEachSurfaceRendersTheDeclaration:
         assert rendered["target_format"] is False
         assert rendered["stop_after"] is True
         assert rendered["existing_doc_id"] is True
+
+    def test_the_descriptor_says_which_page_offers_an_entry_point(self) -> None:
+        """A form picks its entry points off this, not off a parameter name."""
+        starting = {e.name: e.descriptor().starts_a_session for e in ENTRY_POINTS}
+        assert starting == {
+            "write": True,
+            "run": True,
+            "revise": True,
+            "resume": False,
+            "restart": False,
+        }
+
+    @pytest.mark.parametrize("entry_point", ENTRY_POINTS, ids=lambda e: e.name)
+    def test_the_compiled_signature_is_valid_python(
+        self, entry_point: EntryPoint
+    ) -> None:
+        """No defaulted parameter precedes an undefaulted one, whatever kind of
+        parameter each is — the rendering cannot compile to a SyntaxError."""
+        defaults = [bool(p.cli_default) for p in entry_point.command_parameters]
+        assert defaults == sorted(defaults)
+
+    def test_a_defaulted_argument_beside_a_required_option_still_compiles(
+        self,
+    ) -> None:
+        """The mix no declaration makes today, made here so the order is proven
+        rather than merely unexercised."""
+        mixed = WRITE.model_copy(
+            update={
+                "parameters": [
+                    SOURCES,
+                    RESTART_FROM,
+                    VERBOSE,
+                ]
+            }
+        )
+        assert [p.name for p in mixed.command_parameters] == [
+            "from_stage",
+            "sources",
+            "verbose",
+        ]
+        ast.parse("\n".join(command_lines(mixed)))
 
     def test_every_command_is_registered(self) -> None:
         source = render_entry_point_commands()
@@ -328,7 +374,7 @@ class TestOneCoercionServesEverySurface:
         assert EXISTING_DOC_ID.read(values) == "abc123"
 
     def test_a_stage_that_names_no_checkpoint_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="Invalid stage"):
+        with pytest.raises(ValueError, match="Invalid stop_after 'nonsense'"):
             EntryPointValues.declared(
                 "write", {"sources": ["x"], "stop_after": "nonsense"}
             )
@@ -356,13 +402,49 @@ class TestOneCoercionServesEverySurface:
                 "write", {"sources": ["x"], "stage_models": ["plan"]}
             )
 
-    def test_a_stage_nobody_declared_is_refused(self) -> None:
+    @pytest.mark.parametrize(
+        "supplied",
+        [["bogus=m"], {"bogus": "m"}],
+        ids=["from the command line", "from the api"],
+    )
+    def test_an_override_naming_no_stage_is_refused_at_the_boundary(
+        self, supplied: SuppliedValue
+    ) -> None:
+        """Where every other stage is checked: in ``coerce``, so a command can
+        report it as a usage error instead of dying once the run is under way."""
+        with pytest.raises(ValueError, match="Invalid stage_models stage 'bogus'"):
+            EntryPointValues.declared(
+                "write", {"sources": ["x"], "stage_models": supplied}
+            )
+
+    def test_a_bad_stage_model_is_a_usage_error_not_a_traceback(self) -> None:
+        from inkwell.environment.cli.__main__ import app
+
+        result = CliRunner().invoke(
+            app, ["restart", "abc", "--from", "write", "--stage-model", "bogus=m"]
+        )
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Invalid stage_models stage 'bogus'" in result.output
+
+    def test_a_stage_nobody_declared_is_refused_on_read_too(self) -> None:
         with pytest.raises(ValueError):
             STAGE_MODELS.read(
                 EntryPointValues(
                     entry_point="write", supplied={"stage_models": {"nope": "m"}}
                 )
             )
+
+    def test_the_stage_rule_is_the_pipeline_s_own(self) -> None:
+        """One rule, called rather than restated, so the two cannot come apart."""
+        from inkwell.agent.pipeline import CHECKPOINT_STAGES
+
+        for stage in CHECKPOINT_STAGES:
+            assert checkpoint_stage(stage.upper(), "stop_after") == stage
+        # `resolve` is a pipeline stage that never checkpoints, so the pipeline
+        # refuses it and every surface refuses it for the same reason.
+        with pytest.raises(ValueError, match="Invalid stop_after 'resolve'"):
+            checkpoint_stage("resolve", "stop_after")
 
 
 class RecordingManager(SessionManager):

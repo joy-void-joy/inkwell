@@ -10,7 +10,13 @@ import { DocLink } from "../components/DocEmbed";
 import { ActionBar } from "../components/ActionBar";
 import { PromptPanel } from "../components/PromptPanel";
 import { DeclaredFields } from "../components/DeclaredFields";
-import { declaredDefaults, stageLabel, stageProgressIndex } from "../types";
+import {
+  declaredDefaults,
+  mergedParameters,
+  stageLabel,
+  stageProgressIndex,
+  valuesDeclaredBy,
+} from "../types";
 import type {
   EntryPointDescriptor,
   ProfileResponse,
@@ -41,12 +47,15 @@ function ResumeControls() {
   const [entryPoints, setEntryPoints] = useState<EntryPointDescriptor[]>([]);
   const [declared, setDeclared] = useState<SuppliedValues>({});
 
-  // Resume's and restart's own declarations: the stage picker and the profile
-  // picker are bespoke here (they need this session's completed stages and the
-  // profile list), and everything else the declarations carry is rendered from
-  // the descriptor rather than hand-written beside them.
-  const resumeDeclaration =
-    entryPoints.find((e) => e.name === "resume") ?? null;
+  // Resume's and restart's own declarations. The stage picker and the profile
+  // picker are bespoke here — they need this session's completed stages and the
+  // profile list — and everything else either declaration carries is rendered
+  // from its descriptor. Both actions share one panel, so the controls are the
+  // union of what the two declare and each action posts only its own.
+  const resumeDeclaration = entryPoints.find((e) => e.name === "resume") ?? null;
+  const restartDeclaration =
+    entryPoints.find((e) => e.name === "restart") ?? null;
+  const sharedFields = mergedParameters([resumeDeclaration, restartDeclaration]);
 
   useEffect(() => {
     fetchProfiles().then(setProfiles).catch(() => {});
@@ -54,8 +63,11 @@ function ResumeControls() {
   }, []);
 
   useEffect(() => {
-    setDeclared(declaredDefaults(resumeDeclaration));
-  }, [resumeDeclaration]);
+    setDeclared({
+      ...declaredDefaults(resumeDeclaration),
+      ...declaredDefaults(restartDeclaration),
+    });
+  }, [resumeDeclaration, restartDeclaration]);
 
   const setDeclaredValue = (name: string, next: SuppliedValue) => {
     setDeclared((prev) => ({ ...prev, [name]: next }));
@@ -89,7 +101,7 @@ function ResumeControls() {
     setError(null);
     try {
       await resume({
-        ...declared,
+        ...valuesDeclaredBy(resumeDeclaration, declared),
         from_stage: resumeStage || null,
         profile: overrideProfile || null,
       });
@@ -105,6 +117,7 @@ function ResumeControls() {
     setError(null);
     try {
       await restart({
+        ...valuesDeclaredBy(restartDeclaration, declared),
         from_stage: restartStage,
         profile: overrideProfile || null,
       });
@@ -162,7 +175,7 @@ function ResumeControls() {
         )}
       </div>
       <DeclaredFields
-        parameters={resumeDeclaration?.parameters ?? []}
+        parameters={sharedFields}
         values={declared}
         onChange={setDeclaredValue}
       />

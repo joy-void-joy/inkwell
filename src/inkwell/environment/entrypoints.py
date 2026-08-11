@@ -30,6 +30,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     create_model,
     model_validator,
 )
@@ -108,20 +109,16 @@ def document_id(value: str) -> str:
     )
 
 
-def checkpoint_stage(value: str) -> str:
+def checkpoint_stage(value: str, what: str) -> str:
     """``value`` normalized to a stage a run can pause at, or a ``ValueError``.
 
-    Read off the pipeline's own ``CHECKPOINT_STAGES`` at call time, so the
-    stages a surface accepts are the stages the pipeline actually checkpoints.
+    The rule is the pipeline's own, called rather than restated, so the stages a
+    surface accepts and the stages a run can actually stop at cannot come apart.
+    ``what`` is the parameter asking, so the error names it.
     """
-    from inkwell.agent.pipeline import CHECKPOINT_STAGES
+    from inkwell.agent.pipeline import validate_checkpoint_stage
 
-    normalized = value.strip().lower()
-    if normalized and normalized not in CHECKPOINT_STAGES:
-        raise ValueError(
-            f"Invalid stage '{value}'. Valid stages: {', '.join(CHECKPOINT_STAGES)}"
-        )
-    return normalized
+    return validate_checkpoint_stage(value, what=what) or ""
 
 
 class SurfacePlan(BaseModel):
@@ -376,7 +373,7 @@ class StageParameter(OptionalTextParameter):
     def coerce(self, raw: SuppliedValue) -> SuppliedValue:
         if not isinstance(raw, str):
             raise ValueError(f"{self.name} takes a stage name")
-        return checkpoint_stage(raw)
+        return checkpoint_stage(raw, self.name)
 
 
 class FlagParameter(EntryPointParameter):
@@ -502,11 +499,32 @@ class StageModelParameter(EntryPointParameter):
 
     def coerce(self, raw: SuppliedValue) -> SuppliedValue:
         if isinstance(raw, dict):
-            return {key: str(value) for key, value in raw.items()}
+            return self.checked({key: str(value) for key, value in raw.items()})
         if not isinstance(raw, list):
             raise ValueError(f"{self.name} takes stage=model pairs")
         pairs = [StageModelPair.parsed(str(item), self.name) for item in raw]
-        return {pair.stage: pair.runs_on for pair in pairs}
+        return self.checked({pair.stage: pair.runs_on for pair in pairs})
+
+    def checked(self, overrides: StringMap) -> StringMap:
+        """``overrides`` with every stage name checked against the pipeline's.
+
+        The check belongs in ``coerce`` rather than in ``read`` because ``coerce``
+        is what every surface passes through: a stage nobody declared has to be
+        refused while a command can still report it as a usage error, rather than
+        once the run is already under way. The adapter decides; the message names
+        which stage it objected to, the way every other stage error reads.
+        """
+        try:
+            STAGE_MODELS_ADAPTER.validate_python(overrides)
+        except ValidationError as exc:
+            named = ", ".join(
+                stage for stage in overrides if stage not in PIPELINE_STAGES
+            )
+            raise ValueError(
+                f"Invalid {self.name} stage '{named}'. "
+                f"Stages: {', '.join(PIPELINE_STAGES)}"
+            ) from exc
+        return overrides
 
     def read(self, values: "EntryPointValues") -> dict[PipelineStage, str]:
         """The overrides supplied, validated against the pipeline's stage names."""
@@ -541,6 +559,11 @@ class EntryPointDescriptor(BaseModel):
     name: str = Field(description="Entry point name, as the request path spells it")
     summary: str = Field(description="One line describing what it starts")
     detail: str = Field(default="", description="The longer explanation, if any")
+    starts_a_session: bool = Field(
+        description="Whether this begins a session rather than continuing a saved "
+        "one — which page offers it follows from this, not from which parameters "
+        "it happens to take"
+    )
     parameters: list[ParameterDescriptor] = Field(
         description="Every parameter the form carries, generic ones and bespoke"
     )
@@ -568,13 +591,15 @@ class EntryPoint(BaseModel):
     def command_parameters(self) -> list[EntryPointParameter]:
         """The parameters the generated command spells, in signature order.
 
-        Positional arguments precede options and, within each, the ones the
-        command insists on precede the ones carrying a default — which is the
-        order a Python signature admits at all.
+        A Python signature admits no defaulted parameter before an undefaulted
+        one, so what a command insists on comes first whatever kind it is, and
+        positional arguments lead within each group. Sorting on the default
+        first is what makes the compiled signature valid by construction rather
+        than valid because no declaration happens to mix the two today.
         """
         return sorted(
             (p for p in self.parameters if p.surfaces.cli in ("argument", "option")),
-            key=lambda p: (p.surfaces.cli != "argument", not p.cli_required),
+            key=lambda p: (bool(p.cli_default), p.surfaces.cli != "argument"),
         )
 
     @property
@@ -587,12 +612,18 @@ class EntryPoint(BaseModel):
         """The parameters the browser carries, generically rendered or bespoke."""
         return [p for p in self.parameters if p.surfaces.form != "none"]
 
+    @property
+    def starts_a_session(self) -> bool:
+        """Whether this begins a session rather than continuing a saved one."""
+        return False
+
     def descriptor(self) -> EntryPointDescriptor:
         """This entry point as ``GET /api/entry-points`` serves it."""
         return EntryPointDescriptor(
             name=self.name,
             summary=self.summary,
             detail=self.detail,
+            starts_a_session=self.starts_a_session,
             parameters=[p.descriptor() for p in self.form_parameters],
         )
 
@@ -686,6 +717,10 @@ class FreshEntryPoint(EntryPoint):
         description="An instruction this entry point always adds beside the "
         "material, saying what the run is for",
     )
+
+    @property
+    def starts_a_session(self) -> bool:
+        return True
 
     def material(self, values: EntryPointValues) -> list[str]:
         """The material the author supplied, before the standing instruction."""

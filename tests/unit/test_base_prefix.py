@@ -16,6 +16,14 @@ from fastapi.testclient import TestClient
 import inkwell.agent.config as config
 from inkwell.environment.web.app import FRONTEND_DIST, create_app
 
+# What these routes serve is the built SPA, so there is nothing to route to
+# until it is built. dist/ is generated, not tracked, so a checkout that has
+# not run `bun run build` — CI included — has no document and no assets.
+pytestmark = pytest.mark.skipif(
+    not (FRONTEND_DIST / "assets").is_dir(),
+    reason="frontend not built — run `bun run build` in the frontend directory",
+)
+
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:

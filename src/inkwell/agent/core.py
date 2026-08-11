@@ -78,6 +78,16 @@ def setup_session(
     )
 
 
+def pipeline_notes_dir(session_dir: Path) -> Path:
+    """Where a session keeps the notes the pipeline writes.
+
+    Named once because three readers need it — the run that writes it, a
+    resume that loads its snapshot, and the intake report that inspects it —
+    and a path spelled at each of them can be spelled differently.
+    """
+    return session_dir / "pipeline_notes"
+
+
 def load_snapshot(
     session_id: str, *, from_stage: str | None = None
 ) -> PipelineSnapshot | None:
@@ -89,7 +99,7 @@ def load_snapshot(
     """
     from lup.workspace.paths import sessions_dir
 
-    base = sessions_dir() / session_id / "pipeline_notes"
+    base = pipeline_notes_dir(sessions_dir() / session_id)
 
     if from_stage:
         stage_path = base / f"snapshot_{from_stage}.json"
@@ -199,7 +209,7 @@ async def run_session(
         trace.trace_logger = setup.trace_logger
 
     cost_acc = cost_accumulator or CostAccumulator()
-    pipeline_notes = PipelineNotes(setup.notes.session / "pipeline_notes")
+    pipeline_notes = PipelineNotes(pipeline_notes_dir(setup.notes.session))
 
     try:
         if resume_session_id:

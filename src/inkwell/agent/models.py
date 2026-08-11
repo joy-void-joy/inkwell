@@ -276,6 +276,33 @@ class ClassifiedComment(BaseModel):
     timestamp: str = Field(default="", description="ISO timestamp when classified")
 
 
+class IntakeRecord(BaseModel):
+    """How one comment channel's last poll went, as the run wrote it down.
+
+    A feedback set cannot show the difference between an author who said
+    nothing and a Drive that could not be read, and only one of those means a
+    comment is sitting unread. The run records which happened beside its
+    notes, so a later reader — the author, or whoever is asked why a comment
+    went unanswered — can tell them apart without polling Drive a second time
+    and getting a different answer.
+    """
+
+    channel: str = Field(description="Which document was polled: 'author' or 'source'")
+    doc_id: str = Field(description="The document the poll read")
+    at: str = Field(description="ISO timestamp of the poll")
+    unreachable: str = Field(
+        default="", description="Why Drive could not be read, empty when it was"
+    )
+    unresolved: list[str] = Field(
+        default_factory=list,
+        description="Unresolved comment ids the poll read as author feedback",
+    )
+    offered: list[str] = Field(
+        default_factory=list,
+        description="Ids this poll handed to its caller as not yet accounted for",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Assumptions stage output
 # ---------------------------------------------------------------------------

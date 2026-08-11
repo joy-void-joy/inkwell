@@ -10,7 +10,7 @@ When comments arrive:
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -24,7 +24,7 @@ from lup.mcp import LupMcpTool, ToolError, create_mcp_server, lup_tool
 from inkwell.agent.config import stage_model
 from inkwell.agent.models import ClassifiedComment, CommentImpact
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.session import AuthorComment, WritingSessionState
+from inkwell.agent.session import AuthorComment, CommentIntake, WritingSessionState
 from inkwell.agent.stages import COMMENT_CLASSIFIER_PROMPT
 from inkwell.agent.tools.google_docs import do_reply_to_comment
 
@@ -128,7 +128,8 @@ def create_watcher_tools(
         classified.reply = inp.reply
         classified.timestamp = datetime.now().isoformat()
 
-        await notes.add_comment(classified)
+        with session_state.seen_comments.recording(inp.comment_id):
+            await notes.add_comment(classified)
         return PollOutput(classified=classified)
 
     @lup_tool(
@@ -173,8 +174,11 @@ class CommentBatch(BaseModel):
     prompt: str
 
 
-type CommentReader = Callable[[], list[AuthorComment]]
-"""Reads whichever document's new comments a watcher is watching."""
+type CommentReader = Callable[[], Awaitable[CommentIntake]]
+"""Polls whichever document's comments a watcher is watching."""
+
+type UnreachableReport = Callable[[str], Awaitable[None]]
+"""Tells the author a poll could not read the document it watches."""
 
 
 def batch_prompt(heading: str, comments: list[AuthorComment]) -> str:
@@ -208,11 +212,13 @@ class PollingWatcher:
         self,
         agent: BackgroundAgent[CommentBatch, None],
         read_comments: CommentReader,
+        report_unreachable: UnreachableReport,
         heading: str,
         poll_interval: float,
     ) -> None:
         self.agent = agent
         self.read_comments = read_comments
+        self.report_unreachable = report_unreachable
         self.heading = heading
         self.poll_interval = poll_interval
         self.poller: asyncio.Task[None] | None = None
@@ -223,20 +229,28 @@ class PollingWatcher:
         self.poller = asyncio.create_task(self.poll_forever())
 
     async def poll_forever(self) -> None:
-        """Wake the agent for every poll that finds something."""
+        """Wake the agent for every poll that finds something.
+
+        A poll that could not read the document is reported to the author
+        rather than passed over: they are the one waiting on the comment it
+        failed to read, and the next poll asks again.
+        """
         while True:
             await asyncio.sleep(self.poll_interval)
             try:
-                comments = self.read_comments()
+                intake = await self.read_comments()
             except Exception:
-                # One unreachable poll is not the end of the watch: the
-                # document may be momentarily unavailable, and the next
-                # poll asks again.
+                # A poll reports an unreadable document in its result, so
+                # anything raised here is the poller itself failing. The watch
+                # outlives it, and says so, rather than ending in a dead task.
                 logger.exception("Polling for comments failed")
+                await self.report_unreachable("the poller failed; see the run log")
                 continue
-            if comments:
+            if not intake.reached:
+                await self.report_unreachable(intake.unreachable)
+            elif intake.comments:
                 self.agent.wake(
-                    CommentBatch(prompt=batch_prompt(self.heading, comments))
+                    CommentBatch(prompt=batch_prompt(self.heading, intake.comments))
                 )
 
     async def stop(self) -> None:
@@ -279,6 +293,7 @@ def create_comment_watcher(
     session_state: WritingSessionState,
     notes: PipelineNotes,
     plan_breaking_signal: asyncio.Event,
+    report_unreachable: UnreachableReport,
     poll_interval: float = 30.0,
 ) -> PollingWatcher:
     """Watch the output document for author comments.
@@ -291,6 +306,7 @@ def create_comment_watcher(
         session_state: Shared session state with doc_id and comment tracking.
         notes: PipelineNotes instance for writing classified comments.
         plan_breaking_signal: asyncio.Event set when plan-breaking feedback arrives.
+        report_unreachable: Tells the author a poll could not read the document.
         poll_interval: Seconds between polls (default 30).
     """
     return PollingWatcher(
@@ -303,7 +319,8 @@ def create_comment_watcher(
                 plan_breaking_signal=plan_breaking_signal,
             ),
         ),
-        read_comments=session_state.get_new_author_comments_sync,
+        read_comments=session_state.poll_author_comments,
+        report_unreachable=report_unreachable,
         heading="New comments",
         poll_interval=poll_interval,
     )
@@ -369,7 +386,8 @@ def create_source_watcher_tools(
         classified.reply = inp.reply
         classified.timestamp = datetime.now().isoformat()
 
-        await notes.add_comment(classified)
+        with session_state.seen_source_comments.recording(inp.comment_id):
+            await notes.add_comment(classified)
         return PollOutput(classified=classified)
 
     @lup_tool(
@@ -398,6 +416,7 @@ def create_source_watcher(
     session_state: WritingSessionState,
     notes: PipelineNotes,
     plan_breaking_signal: asyncio.Event,
+    report_unreachable: UnreachableReport,
     poll_interval: float = 30.0,
 ) -> PollingWatcher:
     """Watch the original source document for author comments.
@@ -416,7 +435,8 @@ def create_source_watcher(
                 plan_breaking_signal=plan_breaking_signal,
             ),
         ),
-        read_comments=session_state.get_new_source_comments_sync,
+        read_comments=session_state.poll_source_comments,
+        report_unreachable=report_unreachable,
         heading="New source document comments",
         poll_interval=poll_interval,
     )

@@ -11,9 +11,10 @@ from urllib.parse import urlparse
 
 import httpx
 import trafilatura
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_field
 
 from inkwell.agent.config import stage_model
+from inkwell.agent.provenance import Acquisition
 from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
@@ -108,6 +109,19 @@ class FetchSourceOutput(BaseModel):
     pdf_path: str | None = Field(
         default=None, description="Path to downloaded PDF (PDF format only)"
     )
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How this document was acquired, for record_finding to copy verbatim.
+
+        Computed from the fetch rather than stored, so it cannot disagree with
+        what happened. A bare fetch reaches whatever the URL serves, so the venue
+        derived from it comes from the host: this path asserts nothing about the
+        document beyond where it was found. The fetch learns no publication date,
+        so record_finding asks for one.
+        """
+        return Acquisition(path="url_fetch", url=self.url)
 
 
 async def do_fetch_source(url: str) -> FetchSourceOutput:
@@ -270,6 +284,12 @@ class FetchAndExtractOutput(BaseModel):
         default=False,
         description="True if content was long enough to require extraction",
     )
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How this document was acquired — copy it into record_finding as it is."""
+        return Acquisition(path="url_fetch", url=self.url)
 
 
 async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:

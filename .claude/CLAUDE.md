@@ -212,7 +212,7 @@ A gate catches a violation once it is written. These change what gets written, s
 - **The code is the source of truth** — it should read as though it had always been written this way. Never reference what code used to do, and never write "now", "new", "updated", "fixed", or "changed" in a comment. Change history belongs in commit messages.
 - Reach for `for` and comprehensions over `while`, and for `match`/`case` over an `if`/`elif` chain dispatching on a value or a range.
 
-Some rules shape a design before any gate could catch it. Know these by name and read them in `docs/rules.md` while choosing a shape rather than after being stopped: `own-model-dispatch` (a union answers through its members, never through `isinstance` over our own types), `abc-capability` (a capability ABC is an engine, never a surface a consumer holds), `model-free-function` (a model carries its own operations), and `constant-declaration` with `library-default` (a judgement reaches its caller as an overridable default).
+Some rules shape a design before any gate could catch it. Know these by name and read them in `docs/rules.md` while choosing a shape rather than after being stopped: `own-model-dispatch` (a union answers through its members, never through `isinstance` over our own types), and `abc-capability` (a capability ABC is an engine, never a surface a consumer holds).
 
 ### Exceptions No Rule Can See
 

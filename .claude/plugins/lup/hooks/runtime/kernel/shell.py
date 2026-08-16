@@ -839,6 +839,15 @@ def sandbox_excluded(command: str, patterns: list[str]) -> bool:
     )
 
 
+def auto_escape_matches(command: str, prefixes: list[list[str]]) -> bool:
+    """Whether one simple command has a native auto-escape prefix."""
+    segments = parse_shell_words(command)
+    if not isinstance(segments, list) or len(segments) != 1:
+        return False
+    words = segments[0]
+    return any(bool(prefix) and words[: len(prefix)] == prefix for prefix in prefixes)
+
+
 def decide_shell(
     command: str,
     rows: list[ShellRuleRow],

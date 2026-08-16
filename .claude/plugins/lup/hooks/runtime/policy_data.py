@@ -552,14 +552,6 @@ ANTI_PATTERN_ROWS: dict[str, list[AntiPatternRow]] = {
             "strength": "soft",
         },
         {
-            "id": "default-factory",
-            "pattern": "\\bdefault_factory\\s*=",
-            "message": "`Field(default_factory=list)` states in a factory what the annotation already declares \u2014 write the default as a literal, `items: list[B] = []`, which pydantic copies per instance. A factory that does real work (reads another declaration, stamps a value, builds a model) is cleared by both gates on its own, and a marker there is reported spurious",
-            "context": "code",
-            "refiner": "default_factory_exempt_lines",
-            "strength": "soft",
-        },
-        {
             "id": "empty-collection",
             "pattern": "(?<![=!<>])=\\s*(?:\\{\\}|\\[\\]|set\\(\\))",
             "message": "Empty-collection literals (`= {}`, `= []`, `= set()`) usually seed an append/mutate loop \u2014 build the collection with a comprehension, or, when the loop carries control flow a comprehension cannot, `yield` the items from a nested function and let its caller collect them. Add `# lup: ignore[empty-collection]` only for a fold neither expresses",
@@ -659,14 +651,6 @@ ANTI_PATTERN_ROWS: dict[str, list[AntiPatternRow]] = {
             "id": "namedtuple",
             "pattern": "\\bNamedTuple\\b|\\bnamedtuple\\b",
             "message": "Use Pydantic BaseModel (or TypedDict) instead of NamedTuple/namedtuple",
-            "context": "code",
-            "refiner": "",
-            "strength": "soft",
-        },
-        {
-            "id": "model-config",
-            "pattern": "^\\s*model_config\\s*[:=]",
-            "message": "Declare pydantic configuration as class keywords \u2014 class A(BaseModel, frozen=True, extra='forbid') \u2014 instead of assigning model_config, so the configuration reads in the header beside the class it configures. Every key carries over under its own name; a shared ConfigDict alias inlines into each header rather than being imported",
             "context": "code",
             "refiner": "",
             "strength": "soft",
@@ -914,14 +898,6 @@ ANTI_PATTERN_ROWS: dict[str, list[AntiPatternRow]] = {
             "strength": "soft",
         },
         {
-            "id": "default-factory",
-            "pattern": "\\bdefault_factory\\s*=",
-            "message": "`Field(default_factory=list)` states in a factory what the annotation already declares \u2014 write the default as a literal, `items: list[B] = []`, which pydantic copies per instance. A factory that does real work (reads another declaration, stamps a value, builds a model) is cleared by both gates on its own, and a marker there is reported spurious",
-            "context": "code",
-            "refiner": "default_factory_exempt_lines",
-            "strength": "soft",
-        },
-        {
             "id": "empty-collection",
             "pattern": "(?<![=!<>])=\\s*(?:\\{\\}|\\[\\]|set\\(\\))",
             "message": "Empty-collection literals (`= {}`, `= []`, `= set()`) usually seed an append/mutate loop \u2014 build the collection with a comprehension, or, when the loop carries control flow a comprehension cannot, `yield` the items from a nested function and let its caller collect them. Add `# lup: ignore[empty-collection]` only for a fold neither expresses",
@@ -1021,14 +997,6 @@ ANTI_PATTERN_ROWS: dict[str, list[AntiPatternRow]] = {
             "id": "namedtuple",
             "pattern": "\\bNamedTuple\\b|\\bnamedtuple\\b",
             "message": "Use Pydantic BaseModel (or TypedDict) instead of NamedTuple/namedtuple",
-            "context": "code",
-            "refiner": "",
-            "strength": "soft",
-        },
-        {
-            "id": "model-config",
-            "pattern": "^\\s*model_config\\s*[:=]",
-            "message": "Declare pydantic configuration as class keywords \u2014 class A(BaseModel, frozen=True, extra='forbid') \u2014 instead of assigning model_config, so the configuration reads in the header beside the class it configures. Every key carries over under its own name; a shared ConfigDict alias inlines into each header rather than being imported",
             "context": "code",
             "refiner": "",
             "strength": "soft",
@@ -6955,5 +6923,7 @@ RUNNER_TARGETS: list[RunnerTargetRow] = [
 ]
 
 SANDBOX_EXCLUDED_COMMANDS: list[str] = []
+
+AUTO_ESCAPE_PREFIXES: list[list[str]] = []
 
 DIAGNOSTICS_COMMAND: list[str] = []

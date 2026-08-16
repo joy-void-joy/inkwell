@@ -9,6 +9,8 @@ Nothing beneath ``docs/`` is hand-written.
 """
 
 import lup.harness.models as models
+from lup.adapters.claude.harness import CLAUDE_DISPATCHER
+from lup.adapters.codex.harness import CODEX_DISPATCHER
 from lup.devtools.harness.content.docs.catalog import library_documents, published
 from inkwell.devtools.harness.content.catalog import AGENTS, PLUGIN_NAME, SKILLS
 from inkwell.devtools.harness.content.docs import inkwell
@@ -24,8 +26,22 @@ Lup is a git dependency rather than a checkout in this tree, so the default
 module path inside the installed package is what they can actually resolve.
 """
 
-REFERENCE = library_documents(SKILLS, AGENTS, PLUGIN_NAME, LIBRARY_DOCS_ROOT)
-"""The pages lup publishes about the machinery inkwell is built on."""
+REFERENCE = library_documents(
+    SKILLS,
+    AGENTS,
+    PLUGIN_NAME,
+    CLAUDE_DISPATCHER.routed_tools,
+    CODEX_DISPATCHER.routed_tools,
+    LIBRARY_DOCS_ROOT,
+)
+"""The pages lup publishes about the machinery inkwell is built on.
+
+The parity audit reads what each runtime decodes from the runtime itself, so
+composing them is what this root is for: the page stays portable while the
+table it publishes cannot claim a decoded set that stopped being true. Codex
+appears there as the runtime lup differentiates against, not as one inkwell
+generates a tree for — `NATIVE_RUNTIMES` is what decides that.
+"""
 
 DOCUMENTS: list[models.Document] = [
     published("inkwell", "inkwell.md", inkwell.DOCUMENT, DOCS_ROOT),

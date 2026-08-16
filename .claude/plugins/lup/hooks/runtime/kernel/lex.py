@@ -17,6 +17,7 @@ from .rows import PathRoleRow, PathRuleRow
 from .words import (
     SCRATCH_VERB_FLAGS,
     effective_command,
+    git_restore_operands,
     path_verb_operands,
     protected_write_target,
     refuses_generated_plugin_target,
@@ -619,6 +620,24 @@ def parse_shell_words(
 
     segments: list[list[str]] = []
     current: list[str] = []
+    # A substitution's own command, held until the segment being built closes.
+    # Spliced the moment it is read, it lands ahead of the words around it —
+    # between a `for` header and its `do`, where the loop reader takes it for
+    # a condition and refuses a construct that parsed fine. It cannot simply
+    # flush the partial segment either: the tokenizer leaves a sentinel in the
+    # word where the substitution stood, and cutting the segment there strands
+    # that sentinel as a command of its own.
+    pending: list[list[str]] = []
+
+    def close_segment() -> None:
+        """End the segment being built, then place what it substituted."""
+        nonlocal current
+        if current:
+            segments.append(current)
+            current = []
+        segments.extend(pending)
+        pending.clear()
+
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -654,9 +673,7 @@ def parse_shell_words(
         ):
             return unjudged("shell function definitions are not classified")
         if token.kind == "op" and token.text in SENTINEL_OPS:
-            if current:
-                segments.append(current)
-                current = []
+            close_segment()
             segments.append([token.text])
             index += 1
             continue
@@ -673,7 +690,7 @@ def parse_shell_words(
             )
             if isinstance(inner, KernelDecision):
                 return inner
-            segments.extend(inner)
+            pending.extend(inner)
             current.append("/dev/fd/63")
             index += 1
             continue
@@ -681,13 +698,11 @@ def parse_shell_words(
             spliced = substituted_segments(token.text)
             if isinstance(spliced, KernelDecision):
                 return spliced
-            segments.extend(spliced)
+            pending.extend(spliced)
             index += 1
             continue
         if is_control_operator(token.text):
-            if current:
-                segments.append(current)
-                current = []
+            close_segment()
             index += 1
             continue
         redirection = resolve_redirection(
@@ -697,8 +712,7 @@ def parse_shell_words(
         verdict = redirection["decision"]
         if verdict is not None:
             return verdict
-    if current:
-        segments.append(current)
+    close_segment()
     if not segments:
         return unjudged("shell command has no executable segment")
     return segments
@@ -706,6 +720,10 @@ def parse_shell_words(
 
 def shell_path_verb_targets(command: str) -> list[str]:
     """Name every operand a path-writing verb in this command acts on.
+
+    ``git restore`` is one of them: it rewrites the paths it names from the
+    index, so whether that costs anything is the same filesystem question the
+    delete verbs ask.
 
     A caller that can reach the filesystem resolves facts about these — which
     are directories, which Git could restore — and hands them back, so the
@@ -724,7 +742,13 @@ def shell_path_verb_targets(command: str) -> list[str]:
     targets: list[str] = []
     for segment in segments:
         words = effective_command(segment)["words"]
-        if not words or posixpath.basename(words[0]) not in SCRATCH_VERB_FLAGS:
+        if not words:
+            continue
+        restore = git_restore_operands(words)
+        if restore is not None:
+            targets.extend(restore["paths"])
+            continue
+        if posixpath.basename(words[0]) not in SCRATCH_VERB_FLAGS:
             continue
         operands = path_verb_operands(words)["operands"]
         targets.extend(operands)

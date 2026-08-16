@@ -40,8 +40,8 @@ mistyped free-text value correctable until it counts.
 
 | Door | How |
 | --- | --- |
-| the page | answer form, *Park run*, accept/reject |
-| a rerun | `--answer <question-id>=<value>`, `--accept`/`--reject` |
+| the page | answer form, *Park run* |
+| a rerun | `--answer <question-id>=<value>` |
 | another shell | `harness resolve answer --run-id <id> q=value`, `harness resolve questions`, `harness resolve park` |
 | a worker | its own `queue_questions` / `await_answers` tools |
 
@@ -49,15 +49,26 @@ Partial answers are legal. A question is answered by whoever knows that
 decision, whenever they know it, so answering one of six open questions is
 the normal case rather than a validation error.
 
-Acceptance is not special: it is the reserved `integration-acceptance`
-question with choices `accept` and `reject`, so `--accept` and the page's
-button write the same offer through the same path.
+Assembling the review branch is not special: it is the reserved
+`integration-assembly` question with choices `approve` and `defer`, so every
+door records that decision the way it records any other answer.
 
 **Park is the clean abort.** *Park run* writes `park.request`, which ends
 every open wait in that run and lands on exactly the headless park state,
 printing the same flag-carrying rerun recipe. Ctrl-C is the dirty one:
 `KeyboardInterrupt` is a `BaseException`, so the resolver's failure recording
 does not catch it.
+
+**Draining is the other verb, for a run that is working rather than waiting.**
+A worker inside a model turn waits on nothing, so park never reached one and
+killing was the only way to end a busy run — which discards the uncommitted
+edits of each interrupted round along with its reviewer feedback and round
+counter. `harness resolve drain` is observed at the top of a round, after the
+previous one is committed, and at the boundary between dependency batches.
+Nothing is failed and nothing is written off, so resuming costs only the turns
+that had not finished. A satisfied drain is cleared on resume the way a stale
+park is, or the run would stop again at the first boundary of the resume that
+answered it.
 
 ## Resuming
 

@@ -18,16 +18,22 @@ Parse the raw arguments into a list of **branch names**: split on whitespace and
 
 ## Process
 
-### 1. Commit pending changes
+### 1. Settle the working tree
 
-Invoke `/lup:commit` to commit any uncommitted work before the sweep.
+Read a dirty tree before writing it, because only one of the three cases it can be is a commit:
+
+- **On the integration branch.** Committing code here is forbidden. Survey first, then check the dirty paths against every branch that could already carry them — `git diff <branch> -- <paths>` reports nothing where one does. Work a branch already holds is a stale duplicate, to discard or stash rather than commit; work no branch holds belongs on a branch of its own.
+- **On a feature branch, where the work is that branch's own.** Invoke `/lup:commit`.
+- **Anything else.** Ask.
+
+Report which case it is and what the comparison showed, and let the user settle it. A sweep is about to act on every branch in the repository; opening it with a commit nobody asked for is the one move no later disposition can undo.
 
 ## Targeted Mode (branch names provided)
 
 1. Run `uv run lup-devtools dev survey --json`.
 2. Resolve every named branch against the survey. Report each name that matches nothing; stop only when none of them resolve.
 3. Show every resolved branch's `disposition` and `reason` in one table, then Request explicit user approval before carrying out the actions those dispositions imply. Reason: the branches may hold work the user has not looked at.
-4. Carry out each disposition's action from the table below, taking every `LAND` branch through step 5.
+4. Carry out each disposition's action from the table below, taking every `LAND` branch through step 6 and every branch an open PR is driving through step 7.
 
 ## Full Sweep Mode (no argument)
 
@@ -39,25 +45,41 @@ uv run lup-devtools dev survey --json
 
 Every branch arrives with a `disposition` and a `reason` already computed. **Do not re-derive them** — the classifier is shared with `dev status`, so a judgement made here would drift from the one made there.
 
-### 3. Present the sweep
+### 3. Reconcile against the runs holding branches
 
-One table covering every branch, ordered `LAND` first (that is the work at risk), then `DELETE`/`STALE`, then `KEEP`/`CURRENT`:
+Read `runs` before you read `branches`. Each entry is a resolver run holding branches out of the sweep, and `alive` says whether anything is still answerable for them.
 
-| Branch | Disposition | Unique | Diff | PR | Proposed action |
+A run with `alive: false` holds work that no verb here reaches: it is not landing on its own, and nothing will retire its leases. Report it before the table — the run id, how many branches, and `uv run lup-devtools harness resolve status --run-id <id>` for what it was doing when it stopped — and ask what should happen to the run before offering any per-branch action. Landing its branches by hand bypasses the join machinery the run never ran, which is the whole reason the lease holds them.
+
+Do not present a dead run's branches as a to-do list. One decision about the run is the honest question; twenty-six decisions about its branches is the same question asked in a form that hides what it is.
+
+### 4. Present the sweep
+
+One table covering every branch, ordered `LAND` first (that is the work at risk), then the `KEEP` rows an open PR is driving (work already asked for, waiting on nothing but an order to merge in), then `DELETE`/`STALE`, then the rest of `KEEP`/`CURRENT`:
+
+| Branch | Disposition | Unique | Diff | Dirt | PR | Proposed action |
+
+`Dirt` is the survey's `changes` — what that branch's worktree holds uncommitted. It never changes a disposition, only what carrying one out costs: a dirty worktree makes a delete refuse until forced, and forcing discards those files, so a dirty row is one to read before proposing anything.
+
+**Group the `LAND` rows by the run holding them**, where `runs` gives one, and label the group with the run rather than repeating it per row. Branches from one run are one situation; listed flat they read as unrelated work that happens to share a prefix.
+
+**Report each group's union, not the sum of its rows.** Branches from a run are stacked, so a branch's `unique_commits` counts commits its siblings also carry — summing them multiplies the same work by how many branches contain it. `git rev-list --count ^<integration> <branch>...` over the group is the real figure, and the two can differ by more than a factor of two.
+
+**Offer only the branches no sibling contains.** A branch listed in another's `contained_in` lands when that one does, so proposing both asks for a decision that has already been made. Name the ones riding along under the branch that carries them, so nothing looks dropped.
 
 ## Acting on Dispositions (both modes)
 
-### 4. Act on each disposition
+### 5. Act on each disposition
 
 | Disposition | Meaning | Action |
 | --- | --- | --- |
-| `LAND` | Holds commits the integration branch lacks, with no PR driving it | Land it — step 5 |
-| `DELETE` | Reached the integration branch, or its PR merged | `uv run lup-devtools dev delete <branch>` |
+| `LAND` | Holds commits the integration branch lacks, with no PR driving it | Land it — step 6 |
+| `DELETE` | Reached the integration branch, or its PR merged | `uv run lup-devtools dev delete <branch>`; where `Dirt` is set it refuses, so compare that worktree against the integration branch and report what forcing would discard before asking |
 | `STALE` | Every commit already cherry-picked into the integration branch | Confirm, then delete |
-| `KEEP` | Protected, or an open PR is already driving it | Leave alone |
+| `KEEP` | Protected, an open PR is already driving it, or a resolver run holds its lease | Read which of the three it is: protected leaves it alone; an open PR offers it — step 7; a resolver run is step 3, and one with `alive: false` holds it forever |
 | `CURRENT` | The branch checked out here | Never delete; warn if it would otherwise qualify |
 
-### 5. Landing a LAND branch
+### 6. Landing a LAND branch
 
 Land one branch at a time, oldest divergence first — rebase, merge, and push before the next branch is touched. Every branch that lands moves the integration branch, so a rebase run ahead of a sibling's merge carries a base that no longer exists.
 
@@ -69,13 +91,29 @@ Ask the user, per branch, which route to take:
 
 Never choose a route on the user's behalf: a `LAND` branch by definition carries no PR expressing intent, so the intent has to come from them.
 
-### 6. Confirm and execute
+### 7. Merging an open-PR branch
 
-Request explicit user approval before deleting a branch or pushing to a remote. Reason: a LAND branch carries no PR expressing intent, so the intent has to come from the user. Then carry out the approved actions.
+A `KEEP` branch an open PR is driving is not finished work — it is work whose intent is already on record. The question step 6 puts to the user is therefore already answered here: never *whether* to land it, only *when*, and that answer belongs to the sweep as a whole rather than to the branch alone.
 
-### 7. Report results
+**Offer these. Leaving one open is a decision the user makes, not one the sweep makes on their behalf.** Present them as their own group, each with its PR's review decision and check state — `uv run lup-devtools dev pr status --branch <branch> --json` — and ask which to merge. A draft PR, a failing check, or a review still owed are all reasons to leave one standing, and each of them is the user's to weigh.
 
-What landed, what was deleted, and what was deliberately left alone.
+**They share step 6's queue.** Every merge moves the integration branch, so open-PR branches and `LAND` branches form one ordered sequence rather than two independent passes. Take them one at a time, and re-derive the next one's base after each.
+
+**Order by what the branches touch, not by when they started.** Branches cut from the same tip have no divergence to sort by, so compare their file sets — `git diff --name-only <integration>...<branch>` for each — and read the intersection:
+
+- **Disjoint.** Any order serves. Take the smallest first, so the larger rebases onto a base that has stopped moving.
+- **Overlapping source.** Merge the one the other builds on, and expect the second to want a real rebase rather than a fast-forward.
+- **Overlapping generated tree.** A generated artifact's contents are derived, so merging two branches' versions as text yields something no generation run ever emitted — resolving cleanly while answering to nothing. Merge whichever regenerates least first, then reconcile the next where this repository's own merge drivers exist: rebase it inside its worktree, regenerate, and let the drift check report that it settled. A merge performed on the host has none of those drivers, because they are per-clone configuration no repository can ship.
+
+Report the comparison and the order it implies, then ask before the first merge. The order is the decision; the merges only carry it out.
+
+### 8. Confirm and execute
+
+Request explicit user approval before deleting a branch, merging a PR, or pushing to a remote. Reason: a LAND branch carries no PR expressing intent, and the order open PRs merge in is the user's to settle, so the intent has to come from them. Then carry out the approved actions.
+
+### 9. Report results
+
+What landed, what merged, what was deleted, and what was deliberately left alone.
 
 ## Guidelines
 

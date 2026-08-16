@@ -25,7 +25,8 @@ class VerbOperands(TypedDict):
     inert: bool
 
 
-PASS_THROUGH_WORDS = (  # lup: ignore[library-default] — real wrappers that exec the argument after them
+# lup: ignore[library-default] — real wrappers that exec the argument after them
+PASS_THROUGH_WORDS = (
     "env",
     "command",
     "exec",
@@ -34,7 +35,8 @@ PASS_THROUGH_WORDS = (  # lup: ignore[library-default] — real wrappers that ex
     "setsid",
     "stdbuf",
 )
-DANGEROUS_ENV_NAMES = (  # lup: ignore[library-default] — variables the shell and language runtimes read to redirect execution
+# lup: ignore[library-default] — variables the shell and language runtimes read to redirect execution
+DANGEROUS_ENV_NAMES = (
     "PATH",
     "IFS",
     "ENV",
@@ -53,11 +55,12 @@ DANGEROUS_ENV_NAMES = (  # lup: ignore[library-default] — variables the shell 
     "RUBYLIB",
     "RUBYOPT",
 )
-# lup: ignore[library-default] — loader and interpreter variable prefixes fixed by the OS and those runtimes
-DANGEROUS_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "GIT_", "BASH_FUNC_")
+# lup: ignore[library-default] — variable prefixes the OS, those runtimes, and these tools read to redirect execution or retarget a command
+DANGEROUS_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "GIT_", "GH_", "BASH_FUNC_")
 # lup: ignore[library-default] — the native runtimes' own plugin directory names
 GENERATED_PLUGIN_ROOTS = (".claude/plugins", ".codex/plugins")
-INTERPRETERS = (  # lup: ignore[library-default] — real interpreter executables; omitting one is a hole, not a preference
+# lup: ignore[library-default] — real interpreter executables; omitting one is a hole, not a preference
+INTERPRETERS = (
     "python",
     "python3",
     "perl",
@@ -150,7 +153,8 @@ def uv_run_words(words: list[str]) -> list[str]:
 # Every judged-ask verb that acts on paths, paired with the short flags whose
 # presence does not change what the verb does to them. A long flag or an
 # unrecognized cluster falls through to the verb's own ask.
-SCRATCH_VERB_FLAGS = {  # lup: ignore[library-default] — each verb's own POSIX flags, fixed by what the utility does rather than by who is asking
+# lup: ignore[library-default] — each verb's own POSIX flags, fixed by what the utility does rather than by who is asking
+SCRATCH_VERB_FLAGS = {
     "rm": "rfv",
     "rmdir": "pv",
     "mv": "fnv",
@@ -172,6 +176,7 @@ def is_trusted_script(word: str, roots: list[str]) -> bool:
     )
 
 
+# lup: ignore[constant-declaration] — refusal wording, declared with its verdict
 GENERATED_PLUGIN_REFUSAL = (
     "a native plugin tree is compiled from typed source, and the running"
     " runtime already loaded it — edit the policy source, run"
@@ -227,6 +232,54 @@ def path_verb_operands(words: list[str]) -> VerbOperands:
             continue
         operands.append(word)
     return VerbOperands(operands=operands, inert=inert)
+
+
+class RestoreOperands(TypedDict):
+    """A ``git restore``'s source ref, if it named one, and the paths it rewrites.
+
+    ``source`` is ``None`` for the index-sourced form, which is the one whose
+    safety depends on whether those paths carry uncommitted work.
+    """
+
+    source: str | None
+    paths: list[str]
+
+
+def git_restore_operands(words: list[str]) -> RestoreOperands | None:
+    """Split ``git restore`` into the ref it reads from and the paths it writes.
+
+    ``None`` where the line is not a restore, carries a flag beyond the source
+    and target selectors, or holds a word that expands at run time — each of
+    which leaves the restore row's ask to answer for it, because a flag this
+    does not know could move which paths are touched.
+    """
+    if len(words) < 3 or posixpath.basename(words[0]) != "git" or words[1] != "restore":
+        return None
+    source: str | None = None
+    paths: list[str] = []
+    position = 2
+    while position < len(words):
+        word = words[position]
+        if word == "--source" and position + 1 < len(words):
+            source = words[position + 1]
+            position += 2
+            continue
+        if word.startswith("--source="):
+            source = word[len("--source=") :]
+            position += 1
+            continue
+        if word in ("--staged", "--worktree", "-S", "-W", "--"):
+            position += 1
+            continue
+        if word.startswith("-"):
+            return None
+        paths.append(word)
+        position += 1
+    if not paths or (source is not None and source.startswith("-")):
+        return None
+    if opaque_argument(source or "") or any(opaque_argument(word) for word in paths):
+        return None
+    return RestoreOperands(source=source, paths=paths)
 
 
 def written_operands(executable: str, operands: list[str]) -> list[str]:
@@ -467,7 +520,7 @@ def opaque_argument(word: str) -> bool:
 HELP_UNSAFE = set("/=$*?~<>|&;`\\'\" \t\n")
 
 
-def is_help_probe(arguments: list[str]) -> bool:
+def is_help_probe(arguments: list[str], unsafe: set[str] = HELP_UNSAFE) -> bool:
     """Recognize an invocation that only prints usage.
 
     ``--help`` is inert wherever it sits among plain subcommand words, so
@@ -477,7 +530,7 @@ def is_help_probe(arguments: list[str]) -> bool:
     """
     if not arguments:
         return False
-    if any(character in HELP_UNSAFE for word in arguments for character in word):
+    if any(character in unsafe for word in arguments for character in word):
         return False
     if arguments == ["-h"]:
         return True

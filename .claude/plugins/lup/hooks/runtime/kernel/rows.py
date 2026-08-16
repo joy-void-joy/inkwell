@@ -2,7 +2,7 @@
 
 from typing import Literal, TypedDict
 
-from .decision import DecisionEffect
+from .decision import DecisionEffect, SandboxPlacement
 
 type PathRuleKind = Literal[
     "exact",
@@ -12,6 +12,14 @@ type PathRuleKind = Literal[
     "contains_part",
     "new_devtools",
 ]
+
+type RuleLevel = Literal["root", "command", "subcommand", "operation"]
+"""Which nesting level of a shell table a resolved value was declared at.
+
+A row's own level is the deepest name it carries; anything shallower means the
+value was inherited. ``root`` is the fallback beneath every table, which a
+command declaring its own effect always shadows.
+"""
 
 
 class UrlScopeRow(TypedDict):
@@ -71,12 +79,47 @@ class AntiPatternRow(TypedDict):
     pattern: str
     message: str
     context: str
+    refiner: str
+    """The exemption function this rule declares, or ``""`` where it declares none.
+
+    Named rather than carried, because a row crossing into the hermetic
+    runtime is primitive and a callable is not. The association lives at the
+    declaration and travels here, so the gate resolves a rule's refiner from
+    the row it is already matching on instead of from a second list of ids
+    that has to be kept in step with it.
+    """
     strength: str
     """"strong" when no directive may silence this rule, "soft" when one may.
 
     The audit refuses a directive on a strong rule; the hook has to refuse the
     same one, or an edit the hook admits is an edit `dev check` then rejects.
     """
+
+
+class RefusedToolRow(TypedDict):
+    """One erased refusal of a native call, and where to go instead.
+
+    ``specifier`` is ``""`` when the whole tool is refused, and otherwise the
+    subject that selects one of its uses — the ``artifact-design`` in
+    ``Skill(artifact-design)``. ``reason`` is the whole of what the agent is
+    told, so it names the surface to reach for and not only the refusal.
+    """
+
+    tool: str
+    specifier: str
+    reason: str
+
+
+class RunnerTargetRow(TypedDict):
+    """One erased ``uv run <target>`` a project blesses, and where it runs.
+
+    ``sandbox`` is the same axis :class:`ShellRuleRow` carries, on the one
+    surface a command row cannot reach: ``uv`` is parsed rather than matched,
+    so a target's placement has nowhere else to be declared.
+    """
+
+    name: str
+    sandbox: SandboxPlacement
 
 
 class ShellRuleRow(TypedDict):
@@ -97,12 +140,25 @@ class ShellRuleRow(TypedDict):
     allow when a declared verb appears among words that are all literal and
     free of guarded flags, because the verb pins the invocation to its query
     action regardless of the other words.
+
+    ``sandbox`` says where this command has to run, independently of who
+    decides it: a verb that reaches a remote is unusable confined however the
+    effect reads, and a verb whose blast radius wants the OS boundary keeps it
+    however ordinary the effect reads.
+
+    Both axes arrive already resolved down the nesting, so matching one row is
+    the whole answer. ``effect_source`` and ``sandbox_source`` say which level
+    supplied each value, which is what a reader needs at a verdict they did not
+    expect; neither is consulted in reaching one.
     """
 
     command: str
     subcommand: str
     operation: str
     effect: DecisionEffect
+    effect_source: RuleLevel
+    sandbox: SandboxPlacement
+    sandbox_source: RuleLevel
     ask_flags: list[str]
     allow_flags: list[str]
     read_verbs: list[str]

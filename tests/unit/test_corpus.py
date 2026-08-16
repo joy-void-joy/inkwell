@@ -1280,7 +1280,7 @@ def tagged_document(slug: str, tags: DocumentTags) -> StoredDocument:
 
 def test_a_browse_narrows_on_a_tag_and_still_sees_the_gap() -> None:
     """Titles alone do not narrow; a tag is what turns a scan into a filter."""
-    from inkwell.agent.tools.research.corpus import document_entries
+    from inkwell.corpus.retrieval import CorpusFilter, shard_entries
 
     shard = SourceShard(
         source="fixture",
@@ -1299,10 +1299,14 @@ def test_a_browse_narrows_on_a_tag_and_still_sees_the_gap() -> None:
         ],
     )
 
-    narrowed = document_entries(shard, "/corpus/fixture", tag=EVALUATIONS.tag)
-    assert [entry.slug for entry in narrowed] == ["one"]
-    assert narrowed[0].tags == ("organization:fixture", EVALUATIONS.tag)
+    everything = shard_entries(shard, Path("/corpus/fixture"))
+    narrowed = CorpusFilter(tags=(EVALUATIONS.tag,)).apply(everything)
+    assert [entry.document.slug for entry in narrowed] == ["one"]
+    assert narrowed[0].document.tags.applied() == (
+        "organization:fixture",
+        EVALUATIONS.tag,
+    )
 
-    everything = document_entries(shard, "/corpus/fixture")
-    assert [entry.untagged for entry in everything] == [False, True]
+    blind_spot = CorpusFilter(untagged_only=True).apply(everything)
+    assert [entry.document.slug for entry in blind_spot] == ["two"]
     assert shard.tags() == ("organization:fixture", EVALUATIONS.tag)

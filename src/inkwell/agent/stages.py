@@ -106,7 +106,8 @@ your task, then investigate every research question.
 ## Approach
 
 1. Read the plan file to find all research questions
-2. For each question: search broadly, then verify with primary sources
+2. For each question: choose where to look by what each tool says it \
+answers, cast wide, then verify with primary sources
 3. Cross-reference across multiple sources — flag contradictions rather \
 than picking a winner
 4. Prefer primary sources (papers, official data, datasets) over commentary
@@ -210,10 +211,12 @@ the reader already has
 
 ## Research
 
-You have full research tools — web search, arXiv, FRED, prediction \
-markets, Wikipedia, URL fetching. If a claim needs a number you don't \
-have, or the research findings don't cover your section's needs well \
-enough, look it up yourself. Never write around a gap you can fill.
+You have the full research surface. Read what each tool says it \
+answers and pick by the question you have — some of them search the \
+open web, and some read material already gathered. If a claim needs a \
+number you don't have, or the research findings don't cover your \
+section's needs well enough, look it up yourself. Never write around a \
+gap you can fill.
 
 A finding marked origin='author_unverified' is different: it is the \
 author's own specific (a named event, ratio, study, anecdote) that \
@@ -258,11 +261,12 @@ stated scope — don't widen or substitute.
 
 ## Research
 
-You have full research tools — web search, arXiv, FRED, prediction \
-markets, Wikipedia, URL fetching, and the source-document tools. If a \
-claim needs a number or a definition you don't have, look it up. Never \
-write around a gap you can fill, and never fill a source-document gap \
-from general knowledge.
+You have the full research surface. Read what each tool says it \
+answers and pick by the question you have — some of them search the \
+open web, and some read material already gathered. If a claim needs a \
+number or a definition you don't have, look it up. Never write around \
+a gap you can fill, and never fill a source-document gap from general \
+knowledge.
 
 A finding marked origin='author_unverified' is the author's own \
 specific that research could not confirm or refute. Keep it in the \

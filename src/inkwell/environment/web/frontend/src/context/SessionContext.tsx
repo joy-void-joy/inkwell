@@ -8,6 +8,7 @@ import type {
   CompletionOutput,
   ServerMessage,
   SessionStatus,
+  SuppliedValues,
 } from "../types";
 
 type Action =
@@ -135,14 +136,14 @@ export function SessionProvider({
     }
   }, [state.events.length]);
 
-  const resume = useCallback(async (fromStage?: string, profile?: string, stopAfter?: string) => {
-    await resumeSession(sessionId, fromStage, profile, undefined, stopAfter);
+  const resume = useCallback(async (values: SuppliedValues = {}) => {
+    await resumeSession(sessionId, values);
     dispatch({ type: "RESUMED" });
     setWsSessionId(sessionId);
   }, [sessionId]);
 
-  const restart = useCallback(async (fromStage: string, profile?: string) => {
-    await restartSession(sessionId, fromStage, profile);
+  const restart = useCallback(async (values: SuppliedValues) => {
+    await restartSession(sessionId, values);
     dispatch({ type: "RESUMED" });
     setWsSessionId(sessionId);
   }, [sessionId]);

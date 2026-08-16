@@ -1,13 +1,14 @@
 import type {
+  EntryPointDescriptor,
   FormatOption,
   GeneratingPrompt,
   GoogleStatus,
-  ModelConfig,
   ModelOptions,
   ProfileResponse,
   ServerCapabilities,
   SessionDetail,
   SessionSummary,
+  SuppliedValues,
 } from "../types";
 
 const BASE = `${import.meta.env.BASE_URL}api`;
@@ -30,33 +31,30 @@ export async function fetchPipelineStages(): Promise<string[]> {
   return res.json();
 }
 
-export async function fetchStopStages(): Promise<string[]> {
-  const res = await fetch(`${BASE}/stop-stages`);
+export async function fetchEntryPoints(): Promise<EntryPointDescriptor[]> {
+  const res = await fetch(`${BASE}/entry-points`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function createSession(
-  sources: string[],
-  targetFormat: string = "auto",
-  refs: string[] = [],
-  profile?: string,
-  modelConfig?: ModelConfig,
-  stopAfter?: string,
+// Option list for a parameter whose descriptor names an endpoint to read it
+// from — a stage picker reads the pipeline's own checkpoint stages this way.
+export async function fetchOptions(endpoint: string): Promise<string[]> {
+  const res = await fetch(`${BASE}/${endpoint}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// Start one of the fresh entry points. The body is the values keyed by their
+// declared names, so nothing here names a parameter.
+export async function startSession(
+  entryPoint: string,
+  values: SuppliedValues,
 ): Promise<{ session_id: string; status: string }> {
-  const res = await fetch(`${BASE}/sessions`, {
+  const res = await fetch(`${BASE}/sessions/${entryPoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sources,
-      target_format: targetFormat,
-      refs,
-      profile: profile || null,
-      model: modelConfig?.model || null,
-      stage_models: modelConfig?.stage_models || {},
-      writer_mode: modelConfig?.writer_mode || null,
-      stop_after: stopAfter || null,
-    }),
+    body: JSON.stringify(values),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -82,22 +80,12 @@ export async function getSessionPrompt(id: string): Promise<GeneratingPrompt> {
 
 export async function resumeSession(
   id: string,
-  fromStage?: string,
-  profile?: string,
-  modelConfig?: ModelConfig,
-  stopAfter?: string,
+  values: SuppliedValues = {},
 ): Promise<{ session_id: string; status: string }> {
   const res = await fetch(`${BASE}/sessions/${id}/resume`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from_stage: fromStage ?? null,
-      profile: profile ?? null,
-      model: modelConfig?.model || null,
-      stage_models: modelConfig?.stage_models || {},
-      writer_mode: modelConfig?.writer_mode || null,
-      stop_after: stopAfter ?? null,
-    }),
+    body: JSON.stringify(values),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -105,20 +93,12 @@ export async function resumeSession(
 
 export async function restartSession(
   id: string,
-  fromStage: string,
-  profile?: string,
-  modelConfig?: ModelConfig,
+  values: SuppliedValues,
 ): Promise<{ session_id: string; status: string }> {
   const res = await fetch(`${BASE}/sessions/${id}/restart`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from_stage: fromStage,
-      profile: profile ?? null,
-      model: modelConfig?.model || null,
-      stage_models: modelConfig?.stage_models || {},
-      writer_mode: modelConfig?.writer_mode || null,
-    }),
+    body: JSON.stringify(values),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

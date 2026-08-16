@@ -17,7 +17,7 @@ from inkwell.agent.pipeline import (
     CHECKPOINT_STAGES,
     PipelineRunner,
     PipelineStopRequested,
-    validate_stop_after,
+    validate_checkpoint_stage,
 )
 
 
@@ -26,23 +26,29 @@ def runner(tmp_path: Path) -> PipelineRunner:
     return PipelineRunner(sources=["dummy"], notes=PipelineNotes(tmp_path / "notes"))
 
 
-class TestValidateStopAfter:
+class TestValidateCheckpointStage:
     def test_none_and_blank_pass_through(self) -> None:
-        assert validate_stop_after(None) is None
-        assert validate_stop_after("   ") is None
+        assert validate_checkpoint_stage(None) is None
+        assert validate_checkpoint_stage("   ") is None
 
     def test_normalizes_case_and_whitespace(self) -> None:
-        assert validate_stop_after("  Plan ") == "plan"
+        assert validate_checkpoint_stage("  Plan ") == "plan"
 
     def test_rejects_unknown_stage(self) -> None:
         with pytest.raises(ValueError, match="Invalid stop point"):
-            validate_stop_after("bogus")
+            validate_checkpoint_stage("bogus")
 
     def test_rejects_non_checkpoint_stage(self) -> None:
         # resolve runs without checkpointing, so it is not a valid stop point.
         assert "resolve" not in CHECKPOINT_STAGES
         with pytest.raises(ValueError):
-            validate_stop_after("resolve")
+            validate_checkpoint_stage("resolve")
+
+    def test_names_what_it_was_asked_about(self) -> None:
+        """One rule serves the stop point, the resume point and the restart
+        point, so each says which it was."""
+        with pytest.raises(ValueError, match="Invalid from_stage 'bogus'"):
+            validate_checkpoint_stage("bogus", what="from_stage")
 
 
 class TestRunnerStopAfterValidation:

@@ -5,6 +5,7 @@ import type {
   CompletionOutput,
   ServerMessage,
   SessionStatus,
+  SuppliedValues,
 } from "../types";
 
 export interface SessionState {
@@ -27,8 +28,10 @@ export interface SessionContextValue {
   pipelineStages: string[];
   send: (text: string) => void;
   sendAction: (action: string) => void;
-  resume: (fromStage?: string, profile?: string, stopAfter?: string) => Promise<void>;
-  restart: (fromStage: string, profile?: string) => Promise<void>;
+  // Values keyed by the names the resume and restart declarations give them,
+  // so a parameter added to either reaches the request without a new argument.
+  resume: (values?: SuppliedValues) => Promise<void>;
+  restart: (values: SuppliedValues) => Promise<void>;
 }
 
 /**

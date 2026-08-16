@@ -13,10 +13,111 @@ export interface ModelOptions {
   default_stage_models: Record<string, string>;
 }
 
-export interface ModelConfig {
-  model?: string;
-  stage_models?: Record<string, string>;
-  writer_mode?: string;
+// --- Entry points ---
+//
+// Every way a session starts, and the parameters it takes, are fetched from
+// GET /api/entry-points, which is rendered off the one declaration the typer
+// commands and the API request models are compiled from too. Nothing below
+// names a parameter: the form builds its controls from what arrives, so a
+// parameter added to the declaration shows up here without an edit.
+
+export type ParameterWidget =
+  | "text"
+  | "textarea"
+  | "lines"
+  | "flag"
+  | "select"
+  | "map";
+
+export type SuppliedValue =
+  | string
+  | boolean
+  | string[]
+  | Record<string, string>
+  | null;
+
+export type SuppliedValues = Record<string, SuppliedValue>;
+
+export interface ParameterDescriptor {
+  name: string;
+  label: string;
+  help: string;
+  widget: ParameterWidget;
+  default: SuppliedValue;
+  required: boolean;
+  options_endpoint: string;
+  // False when the page carries bespoke UI for this parameter — a source
+  // picker, a format description, a model grid — that no descriptor describes.
+  rendered: boolean;
+}
+
+export interface EntryPointDescriptor {
+  name: string;
+  summary: string;
+  detail: string;
+  // Whether this begins a session or continues a saved one. Which page offers
+  // an entry point follows from this rather than from which parameters it
+  // happens to take.
+  starts_a_session: boolean;
+  parameters: ParameterDescriptor[];
+}
+
+export function declaredParameter(
+  entryPoint: EntryPointDescriptor | null,
+  name: string,
+): ParameterDescriptor | undefined {
+  return entryPoint?.parameters.find((p) => p.name === name);
+}
+
+export function carries(
+  entryPoint: EntryPointDescriptor | null,
+  name: string,
+): boolean {
+  return declaredParameter(entryPoint, name) !== undefined;
+}
+
+export function genericParameters(
+  entryPoint: EntryPointDescriptor | null,
+): ParameterDescriptor[] {
+  return (entryPoint?.parameters ?? []).filter((p) => p.rendered);
+}
+
+export function declaredDefaults(
+  entryPoint: EntryPointDescriptor | null,
+): SuppliedValues {
+  return Object.fromEntries(
+    genericParameters(entryPoint).map((p) => [p.name, p.default]),
+  );
+}
+
+// One control per generic parameter across several entry points that share a
+// form — the resume and restart actions sit in one panel, so a parameter either
+// declares gets a control, and a parameter both declare gets one control.
+export function mergedParameters(
+  entryPoints: (EntryPointDescriptor | null)[],
+): ParameterDescriptor[] {
+  const merged = new Map<string, ParameterDescriptor>();
+  for (const entryPoint of entryPoints) {
+    for (const parameter of genericParameters(entryPoint)) {
+      if (!merged.has(parameter.name)) merged.set(parameter.name, parameter);
+    }
+  }
+  return [...merged.values()];
+}
+
+// The values one entry point declares, taken from a form that may hold values
+// for several — so an action never posts a parameter it does not declare, and
+// never omits one it does.
+export function valuesDeclaredBy(
+  entryPoint: EntryPointDescriptor | null,
+  values: SuppliedValues,
+): SuppliedValues {
+  return Object.fromEntries(
+    genericParameters(entryPoint).map((p) => [
+      p.name,
+      values[p.name] ?? p.default,
+    ]),
+  );
 }
 
 export type SessionStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted" | "resuming" | "paused";

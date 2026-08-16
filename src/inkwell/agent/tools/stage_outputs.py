@@ -664,8 +664,8 @@ def make_research_output_tools(
             raise ToolError(
                 f"origin={inp.origin!r} says this was answered from the author's "
                 "own source material, but no source records a 'source_document' "
-                "acquisition. Read the document (consult_source, find_in_source, "
-                "Read) and record the excerpt with its page or section, or record "
+                "acquisition. Read the document (consult_source, Read) and "
+                "record the excerpt with its page or section, or record "
                 "this finding as origin='external' — an external work's wording is "
                 "not evidence of what the source document says."
             )

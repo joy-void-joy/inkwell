@@ -24,10 +24,30 @@ lattice reserves ask for judged risk; unjudged work denies, hinting the
 escalation recipe. Under a launcher-verified OS sandbox
 (`LUP_SANDBOX_ACTIVE`), unjudged work defers to that boundary, and a
 `dangerouslyDisableSandbox` escape re-enters the deny lattice; the sandbox
-block derives from the same `HookSet` declaration.
+block derives from the same `HookSet` declaration. A command the sandbox's
+`excluded_commands` takes out of isolation re-enters it too, without the
+escape: the boundary was told to leave that command alone, so there is
+nothing for unjudged work to defer to.
 
 Segments join deny > ask > defer > allow — unjudged rides into a judged
 prompt, a judged deny wins the batch. Malformed input fails conservatively.
+
+Where a command runs is a second axis beside that verdict, declared per rule
+rather than inferred: `git` states its placement once and every verb beneath
+it runs outside the sandbox, because one confined away from its transport or
+from the repository's own locks fails however freely it was allowed. An
+allow placed outside runs there unprompted; an ask placed outside says so in
+the question it asks; a deny short-circuits the axis entirely, and so does a
+defer, which hands the sandbox status over with the rest of the decision.
+Confinement wins a join, so one segment that must stay inside keeps the whole
+line inside. A runtime with no per-call sandbox renders the plain effect.
+
+Both axes cascade down a table's nesting, and absence means one thing
+everywhere: a subcommand or operation omitting `effect` or `sandbox` inherits
+the level above it, and one stating either overrides what it inherited in
+either direction. `default_effect` is the exception, being required — a
+command that never said who decides is a gap a reader sees rather than a
+silent allow, and the fallback beneath every table denies.
 
 `$(...)` classifies recursively — the inner command joins the batch and its
 opaque result rides only argument-safe commands; command position, deep
@@ -48,7 +68,10 @@ scope may opt into its subdomains, which also contributes the `*.host`
 wildcard to the OS sandbox network allowlist, so both boundaries admit the
 same set. Declare any origin an agent should be able to read as a fetch
 scope; reserve the sandbox's `extra_domains` for hosts that need egress
-without being readable sources.
+without being readable sources. Egress the proxy cannot carry at all — SSH
+under a git remote, a daemon socket — is not a scope question: the sandbox's
+only lever there is `excluded_commands`, which drops the command out of
+isolation rather than widening anything.
 
 ## Edit decisions
 
@@ -68,6 +91,17 @@ The
 resolver's worker receives only its declared autonomous edit exceptions;
 temporary paths, human-owned files like `README.md`, marker changes, and
 anti-pattern violations retain their guardrails in every mode.
+
+A few of those guardrails open only for a gate a human granted — creating a
+devtools module, adding an anti-pattern suppression. What a lease holds is
+written in one document per lease, and every judge reads it at the moment it
+judges: the canonical policy in the composing process and the deployed
+dispatcher in the session's own. The session environment names that document
+and never carries its contents, so a gate granted while the session runs
+reaches it and one taken back stops applying, with no restart either way. A
+narrowed document parks the run rather than silently reducing what a worker
+may do. Nothing else grants: a name outside the declared vocabulary is
+dropped, and an unreadable document is no grant at all.
 
 Autonomy follows the identity a launcher declares for the session it starts,
 carried in the environment and matched against the resolver's own

@@ -343,6 +343,15 @@ def build_status_table(profile: str | None = None) -> Table:
         mask(env["FRED_API_KEY"]) if fred_ok else "not configured (optional)",
     )
 
+    poppler = shutil.which("pdfinfo")
+    table.add_row(
+        "[green]OK[/]" if poppler else "[red]--[/]",
+        "poppler (pdfinfo)",
+        poppler
+        or "not installed — PDF sources register without page windows "
+        "(apt install poppler-utils / brew install poppler)",
+    )
+
     return table
 
 

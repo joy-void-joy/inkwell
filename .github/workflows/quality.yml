@@ -17,5 +17,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-extras
+      - name: Generated artifact drift
+        run: uv run lup-devtools harness check all
       - name: Quality gate
         run: uv run lup-devtools dev check

@@ -13,7 +13,11 @@ from lup.devtools.dev.workflow import write_workflow
 from lup.devtools.harness.composition import NativeTargets, claude_composition
 from lup.devtools.harness.drift import RepositoryWriter
 from lup.devtools.harness.generate import NativeHarnessComposition, ProjectContent
-from inkwell.devtools.harness.catalog import WORKFLOW, portable_harness
+from inkwell.devtools.harness.catalog import (
+    WORKFLOW,
+    declared_hook_set,
+    portable_harness,
+)
 from inkwell.devtools.harness.content.docs.catalog import DOCUMENTS
 from inkwell.devtools.harness.content.settings import project_settings
 
@@ -46,7 +50,7 @@ TARGETS = NativeTargets(builders={"claude": claude_target})
 
 
 REPOSITORY_WIDE: list[RepositoryWriter] = [
-    write_rule_reference,
+    partial(write_rule_reference, selection=declared_hook_set().rules),
     partial(write_workflow, WORKFLOW),
 ]
 """Every project-owned generated file outside a native runtime tree."""

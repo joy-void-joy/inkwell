@@ -1,10 +1,14 @@
 ---
-description: "Check every claimed-resolved note against what it actually asked"
+description: "Check every claimed-resolved note and stale open issue against what it actually asked"
 ---
 
 Every `# lup: solved:` marker in this repository is a claim that a note was addressed, made by whoever addressed it. You are the check on those claims, and you are the only thing that may retire one.
 
 Run `uv run lup-devtools dev comments` and read the "Claimed resolved" section. Each entry carries the note's original words, unchanged — that is what makes it checkable, and it is what you judge the code against.
+
+The tracker holds the same kind of claim from the other direction. An issue left open after its fix landed asserts something about the tree that is no longer true, and the next run's intake takes it as evidence and plans a concern to solve it again — one leased worktree per issue already fixed. So read `uv run lup-devtools dev issues` in the same pass and judge each one the same way: against the report's own words, not its title. Verify the mechanism in the code, not the commit subject that claims it; a commit whose message names an issue is where to start looking, not proof. Where a report lists several defects under one number, each is judged separately and the issue stays open while any of them stands.
+
+Closing an issue is a claim in public, so it carries its evidence: name the commit and the mechanism, and say what you verified. Never close one on a title match.
 
 ## What you are deciding
 
@@ -29,6 +33,8 @@ Bias toward restoring. A claim you cannot confirm from the code is not confirmed
 
 ## Reporting
 
-Give the rundown before you edit anything: one line per claim naming the file, the site, what was asked, what you found, and your verdict. Then apply every verdict in one pass so the tree matches what you reported.
+Give the rundown before you edit anything, and give it from scratch. A verdict handed over on its own cannot be judged — only accepted on trust — so for each claim explain the underlying problem as though the reader has none of your context, then what you found, then your verdict and the option you would take. Prefer slow and complete over brief: the reader is deciding, and a decision made without the reasoning is one they have to re-derive later. Then apply every verdict in one pass so the tree matches what you reported.
+
+Correct yourself out loud when the check reverses an earlier reading, including your own. A claim you first read as met and then found wanting is the most valuable thing this pass produces, and burying it in a revised summary wastes it.
 
 Say plainly how many you restored and why. A pass that retires everything it reads is not evidence the work was good; it is the first thing to be suspicious of in your own output.

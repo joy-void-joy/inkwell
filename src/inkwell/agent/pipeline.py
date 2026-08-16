@@ -488,7 +488,7 @@ def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
             doc.label,
             instruction=(
                 f"authoritative source document ({doc.kind}{pages}) — verify "
-                "claims against it via consult_source/find_in_source or Read"
+                "claims against it via consult_source or Read"
             ),
         )
     for notes_file in sorted(reading_notes_dir(notes.artifacts_dir).glob("*.md")):

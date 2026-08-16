@@ -112,13 +112,11 @@ uv run lup-devtools trace show <session_id>
 
 ## Plan at Agent Speed
 
-You are an AI agent. Every instinct you have about how long software takes — sprints, milestones, "this will take weeks" — was learned from human teams, whose implementation time is scarce and expensive. Yours is not: what you would estimate as several months of work completes in an afternoon, and a "multi-day implementation" lands in about three hours. Your duration estimates are not cautious; they are wrong by orders of magnitude, and every practice built on them inverts:
+Every instinct you have about how long software takes was learned from human teams, whose implementation time is scarce. Yours is not: what you would estimate as months completes in an afternoon. Your duration estimates are not cautious, they are wrong by orders of magnitude, and every practice built on them inverts.
 
-- **Never scope, defer, or reject work from a predicted duration.** Scope by content — what changes, what it touches, how it is verified. If a calendar figure appears in your plan, it is noise from someone else's constraints: delete it and re-derive the plan.
-- **The POC is superstition at your speed.** Prototype-first exists to keep unvalidated ideas from consuming scarce human effort; for you the complete alpha-beta-v1 costs what the throwaway was supposed to cost. Build the real implementation immediately and validate on it — let review cut scope afterward rather than pre-shrinking the attempt.
-- **Catch the reflex in the act.** "Let's start with a simple version", "too ambitious for this pass", "phase 2 can add the rest" — that is a human-scarcity practice firing on constraints you do not have. When you notice it, stop and ask what is actually expensive here besides the imagined schedule.
+**Never scope, defer, or reject work from a predicted duration.** Scope by content — what changes, what it touches, how it is verified. A calendar figure in a plan is noise from someone else's constraints: delete it and re-derive the plan. Prototype-first exists to protect scarce human effort, and for you the real implementation costs what the throwaway was supposed to cost, so build it and let review cut scope afterward rather than pre-shrinking the attempt.
 
-**README.md is human-owned.** The root `README.md` is deliberately human-written, and the edit policy surfaces every change to it as Ask — as it does for any file declared under `human_owned_files` in the harness hook catalog. Never edit a human-owned file yourself — propose the exact change as a question and let the user apply or approve it.
+Catch the reflex in the act. "Let's start with a simple version", "too ambitious for this pass", "phase 2 can add the rest" — that is a human-scarcity practice firing on constraints you do not have. When you notice it, ask what is actually expensive here besides the imagined schedule.
 
 ## Agent Vocabulary
 
@@ -128,6 +126,22 @@ Two kinds of delegated agents look alike and must not be conflated:
 - A **nested agent** (also called a *tool-subagent*) runs inside a tool call: the handler opens one independent session via `query()` and folds the result into the tool's response. The harness never sees it — to the calling agent it is just a tool.
 
 Guidance that says "subagent" unqualified means the native kind. `docs/orchestration.md` carries the full delegation catalog — subagent, nested, background, deferred tool schemas — and when to reach for each. `docs/patterns.md` carries the recurring *code* shapes: declaration-plus-renderer, closed-by-construction, the typed-matcher router, and the engine-versus-surface split.
+
+## The Gates You Will Meet
+
+You are not expected to hold this repository's conventions in memory. Gates enforce them, each names what it caught and how to answer, and their diagnostics are written to be read cold. What is worth knowing up front is that they exist, and what a refusal from each one looks like.
+
+**The rule checker.** Executable rules in anti-pattern, boundary, spelling, and architecture families run on every edit and in `dev check`. A denial cites its rule id, and `docs/rules.md` indexes every rule with the shape it matches, its diagnostic, and the module that enforces it — generated from the same registry that runs, so it cannot drift from what stopped you.
+
+Suppress one deliberate site with `# lup: ignore[rule-id]` and a reason, comma-separating ids where a line trips several. The directive sits on the line it guards, or alone directly above it when the reason will not fit inline; nowhere else reaches, and one placed in a file's opening comment block applies file-wide. A bare `# lup: ignore` still parses but is reported untyped. A stale directive blocks. A rule marked **refused** takes no directive at all — its replacement is right every time, so a directive there could only express a decision to keep the defect, and the way past is to write what the diagnostic names. `# noqa`, `# type: ignore`, and `# pyright: ignore` are forbidden shapes rather than suppressions.
+
+**The permission policy.** Every shell command, URL scope, and edit in a batch is classified. Segments join deny > ask > defer > allow, and malformed input fails conservatively. A denial names what tripped and the recovery, so you rarely need to read the lattice first. `# lup: escalate: <why>` as the leading line of a shell command promotes a classified deny or ask into an approval question carrying that reason.
+
+**The edit budget.** A change block of at most three "real" changed lines is auto-allowed, so split large changes — imports in one edit, logic in another. A file declared human-owned surfaces every change as an approval instead: propose the exact edit as a question and let the user apply it, rather than writing it yourself.
+
+**The drift check.** Generated trees are regenerated, never hand-edited and never hand-merged. Take either side of a conflict, regenerate, and let the check confirm it settled.
+
+`docs/permissions.md` carries the full lattice, what counts as a real changed line, how the escalation marker scopes, and the recovery when work is denied as unjudged; `docs/contributing.md` carries the suppression marker's scoping.
 
 ## Development Workflow
 
@@ -168,48 +182,17 @@ Use `/lup:merge` (with no argument) for guided conflict resolution. See the comm
 | `meta` | The harness declaration and what it generates |
 | `data` | Generated data and outputs |
 
-### Editing Style
-
-**Prefer small, atomic edits.** The edit hook auto-allows a change block of at most three "real" changed lines. `docs/permissions.md` carries what counts as real, and which gates stay explicit approvals in every mode.
-
-- Split large changes into multiple small edits (<=3 real lines per Edit call)
-- Separate concerns — imports in one edit, logic in another
-- Use `rename_symbol` for identifier renames instead of `Edit` with `replace_all`
-
 ---
 
 ## Code Conventions
 
-### Primary Libraries
+Build on claude-agent-sdk and pydantic, with pydantic-settings for configuration rather than dotenv; `docs/conventions.md` names each library and what it is for, and puts each typed form beside the raw dict it replaces — including tool inputs, which are BaseModel classes with `Field(description=...)` that give both the `@tool` schema and the validation.
 
-Build on claude-agent-sdk and pydantic, with pydantic-settings for configuration rather than dotenv; `docs/conventions.md` names each library and what it is for.
+Use existing Python libraries from PyPI before writing raw HTTP requests. Don't rebuild the wheel.
 
 ### Model Selection
 
 Default to the **strongest** tier for the main agent, every subagent, reviewer, and background agent. This runs on a subscription where the best model is the point: reach for a **balanced** tier only when latency or cost provably dominates and quality is non-critical, and for the **fast** tier almost never. A role that genuinely warrants a cheaper model declares that tier explicitly with a reason; otherwise it inherits the strongest default. Agent declarations state the tier, not a model id — each runtime spells the tier in its own lineup.
-
-### Type Safety
-
-- **Never silently swallow exceptions** — no `except ...: pass`, no `contextlib.suppress`; log with `logger.exception()`, handle meaningfully, or re-raise. Catch-all `except Exception` is fine at boundaries (task loops, subagent delegation) that do so; bare `except:` and `except BaseException` are never fine
-- **Every function must specify input and output types**
-- **Never use `Any`, `dict[str, Any]`, or `dict[str, object]`** — Use `TypedDict` for dict-like data, `BaseModel` for validated models, or specific types
-  - `docs/conventions.md` maps each origin of dict-shaped data to its typed stand-in, and lists the SDK types to prefer
-- **Python 3.12+ generics**: `class A[T]`, not `Generic[T]`
-- Use `TypedDict` and Pydantic models for structured data
-- Never manually parse agent output — use structured outputs via Pydantic
-- **Never use `# type: ignore`** — Ask the user how to properly fix type errors
-- **`# lup: ignore` escape hatch** — when `Any` or another anti-pattern is genuinely needed at an untyped boundary, an inline ignore requests user approval instead of silencing the check; prefer the typed `# lup: ignore[rule-id]` over the bare form (`docs/contributing.md`), and `docs/rules.md` indexes every rule id a denial can cite
-- **Use Pydantic BaseModel instead of dataclasses**
-- **Use `match`/`case` instead of `if`/`elif` chains** for dispatching on values or ranges
-- **Never dispatch on the type of our own models** — no `isinstance` over a union we declare, no `case ClassName()` arms, no `assert_never` net. The union's base declares the operation and each subtype answers or declines it, so a new variant is one class instead of an edit to every walk that would have to notice it, and a filter cannot go stale by omission. Narrowing untyped data at a boundary — a vendor payload, a `JsonValue` — is the different case where `isinstance` is right, because those alternatives are not ours to give a method to. The `own-model-dispatch` rule enforces exactly this line: it fires only on classes we define that inherit `BaseModel`
-- **Compiling is stronger than emitting** — build an artifact from a typed declaration and it cannot diverge; transport checked source and a checker can only warn once it already has. When tempted to add a check that two things still match, ask whether one can be derived from the other instead (`docs/patterns.md`)
-- **A constant should probably be an overridable default** — a canonical value (a native tool's real name, a vendor's field) is fine hardcoded; a non-canonical one (an allowlist, a ceiling, a retry count) is our judgement, so give it a default a caller can override rather than a constant they must fork to change (`docs/patterns.md`)
-- **A capability ABC is an engine, not a surface** — a consumer never holds or calls one directly; it holds a concrete plain class that composes the seam and is parametrized by which implementation fills it. `ModelRouter` over `ModelMatcher` is the shape, `SessionFactory` over a `SessionOpener` the surface. The test is behaviour: a frozen value that only carries capabilities is a transparent carrier, and a seam that is only ever injected says so in its own docstring (`docs/patterns.md`)
-- **Use `for`/comprehensions over `while`** — reach for structured iteration whenever the iteration space is expressible (a range, a sequence, an iterator, `enumerate`/`zip`); reserve `while` for genuinely unbounded, condition-driven loops
-
-### Tool Input Schemas
-
-Define tool inputs as BaseModel classes with `Field(description=...)`, and take both the `@tool` schema and the validation from that model. `docs/conventions.md` puts each form beside the raw dict it replaces.
 
 ### Error Handling
 
@@ -219,25 +202,26 @@ Define tool inputs as BaseModel classes with `Field(description=...)`, and take 
 
 **Never silently swallow errors** — handle them meaningfully or let them propagate.
 
-### Structured Data, Not Strings
+### Design Principles
 
-If you're reaching for `re`, `.replace()`, `.split()`, or string slicing to process structured data, something is wrong. `docs/conventions.md` names the parser to reach for, per format.
+A gate catches a violation once it is written. These change what gets written, so they are here rather than in the index.
 
-`import re` is a code smell — look for the structured API first.
+- **Compiling is stronger than emitting** — build an artifact from a typed declaration and it cannot diverge; transport checked source and a checker can only warn once it already has. When tempted to add a check that two things still match, ask whether one can be derived from the other instead (`docs/patterns.md`).
+- **Structured data, not strings** — reaching for `re`, `.replace()`, `.split()`, or slicing to process structured data means a parser was missed, and `docs/conventions.md` names one per format. Never hand-parse an agent's output either: take a structured output through a Pydantic model.
+- **Placement decides the package** — would another project built on this library want it? Then it belongs to the library. Only this application? Then it stays in the application. The same test applies to values, not only to code, which is why a judgement reaches a caller as an overridable default rather than as a constant they would have to fork.
+- **The code is the source of truth** — it should read as though it had always been written this way. Never reference what code used to do, and never write "now", "new", "updated", "fixed", or "changed" in a comment. Change history belongs in commit messages.
+- Reach for `for` and comprehensions over `while`, and for `match`/`case` over an `if`/`elif` chain dispatching on a value or a range.
 
-### Standard Libraries
+Some rules shape a design before any gate could catch it. Know these by name and read them in `docs/rules.md` while choosing a shape rather than after being stopped: `own-model-dispatch` (a union answers through its members, never through `isinstance` over our own types), and `abc-capability` (a capability ABC is an engine, never a surface a consumer holds).
 
-Use existing Python libraries from PyPI before writing raw HTTP requests. Don't rebuild the wheel.
+### Exceptions No Rule Can See
 
-### Code as Documentation
+A rule states the shape it refuses. These carve-outs are ours, and its diagnostic does not carry them:
 
-The codebase should read as a **monolithic source of truth** — understandable without knowledge of its history.
-
-**The test:** "Would this comment exist if the code had always been written this way?" If no — don't add it.
-
-- Never reference what code used to do or explain modifications you made
-- Never use "now", "new", "updated", "fixed", or "changed" in comments
-- Use commit messages for change history, not code comments
+- **Barrel files.** `__all__` and `__init__.py` re-exports are refused, and import goes directly to the module that defines the symbol. The exception is a standalone package's own top-level `__init__.py`, which may declare a public API that way — the package root only, never a subpackage.
+- **Private prefixes.** Nothing is private, so a `_` prefix is refused on functions, methods, classes, and constants. An unused parameter (`_context`, `_exc_type`) is exempt: that is a linting convention, not a privacy one. What to do instead depends on why you wanted the prefix:
+  - A helper that genuinely should not pollute the module namespace **nests inside its only caller**, which hides it without claiming privacy.
+  - A wrapper whose only purpose is to call one other function, with no logic of its own, is not a helper worth hiding at all — inline it and let the caller reach the target directly.
 
 ### Inline `# lup:` Notes
 
@@ -248,35 +232,13 @@ A `# lup:` (or `// lup:`) comment is **actionable review feedback** left in the 
 | `# lup: <text>` — open feedback | **denied**; resolve it into a claim instead |
 | `# lup: solved: <text>` — a claim you addressed it | **denied**; only the verify-solved review pass retires one |
 | `# lup: defer: <text>` — parked work (§ Deferred Work) | **denied** while parked |
-| `# lup: ignore[<rule>]` — an anti-pattern hatch (§ Type Safety), not feedback | fine once the violation is gone |
+| `# lup: ignore[<rule>]` — the rule-checker hatch (§ The Gates You Will Meet), not feedback | fine once the violation is gone |
 
 Resolve open feedback by fixing what it points at, or, for a question, by answering it definitively in the code, the docs, or a recorded user decision. Then rewrite the marker as **`# lup: solved: <the note's original words>`**, text unchanged, so the claim sits beside what it claims to fix and can be checked against what was asked. `docs/contributing.md` carries the full lifecycle (use /lup:resolve`).
 
 ### Deferred Work
 
 **Never create tracking files.** A `TODO.md`, backlog, or roadmap file parks a decision where no workflow will surface it again — deferral by tracking file is delegation to nobody. Deferred work lives in exactly two places: a `# lup: defer: <text>` note at the site it concerns, where `dev check` keeps it visible; or a question to the user, when whether to defer is itself the open question. Default to the bare `defer:`; a bracket states a real, externally-checkable gate, never that this code might change again. The one exception is a `tmp/` briefing, which starts a fresh session on a situation this one cannot finish, and is rewritten whole rather than appended to.
-
-### Imports: No Barrel Files
-
-**Never use `__init__.py` re-exports or `__all__` in internal packages.** Import directly from the module that defines the symbol.
-
-- `from lup.mcp import lup_tool` — not `from lup import lup_tool`
-- `__init__.py` files should contain only the module docstring (no imports, no `__all__`)
-- Barrel files drift out of sync and hide real dependencies
-
-**Exception:** Standalone library packages under `packages/` may use re-exports with `__all__` in their top-level `__init__.py` to declare a public API. Only the package root — not subpackages.
-
-### Naming: No Private Prefixes
-
-**Never use `_` prefixes** on functions, methods, classes, or constants. Nothing is private.
-
-This holds for module-level functions, class methods, constants, and classes alike; `docs/conventions.md` shows each form beside the prefixed name it replaces.
-
-**If a helper truly shouldn't pollute the module namespace**, nest it inside its only caller rather than marking it private.
-
-**Avoid useless mini-wrappers.** If a function's only purpose is to call another function with no additional logic, inline it.
-
-**Exceptions:** `_` prefix is fine for unused parameters (`_context`, `_exc_type`) — that's a linting convention, not a privacy convention.
 
 ---
 
@@ -304,14 +266,7 @@ Run `uv run lup-devtools --help` for the command tree. `lup-devtools harness gen
 
 Permissions come from the canonical semantic policies in `lup.policy` and the application-owned `HookSet` in `devtools/harness/catalog.py`. Harness generation compiles one hermetic dispatcher and runtime for the native plugin. Never edit generated dispatcher or runtime files.
 
-Every shell command, URL scope, and edit in a batch is classified. Segments join deny > ask > defer > allow, and malformed input fails conservatively. `docs/permissions.md` carries the full lattice — shell vocabulary, `$(...)` recursion, write targets, fetch scopes, and edit gates. You rarely need to read it first: a denial names what tripped and how to recover.
-
-**Two markers change a decision, so keep them in mind before you are stopped:**
-
-- `# lup: escalate: <why>` as the leading line of a shell command promotes a classified deny or ask into an approval question carrying that reason.
-- `# lup: ignore[<rule-id>]` on the offending line suppresses exactly that anti-pattern, and no other.
-
-Use /lup:hooks to change the canonical policy inputs, regenerate, and run the shared fixture suite. `settings.json` holds only native settings outside this semantic policy boundary.
+Change the policy those gates enforce with /lup:hooks, which edits the canonical policy inputs, regenerates the plugin, and runs the shared fixture suite. `settings.json` holds only native settings outside this semantic policy boundary.
 
 ### Code Intelligence
 

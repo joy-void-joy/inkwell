@@ -14,10 +14,12 @@ what that budget is for.
 
 import lup.devtools.harness.content.conventions as conventions
 import lup.harness.models as models
+from lup.codescan.common import RuleSelection
 
-DOCUMENT = models.PromptDocument(
-    source=__name__,
-    parts=[
+
+def guidance_parts(selection: RuleSelection) -> list[models.PromptPart]:
+    """Inkwell's guidance, naming only the rules it still enforces."""
+    return [
         models.TextPart(
             text=r"""# Inkwell repository guidance
 
@@ -201,7 +203,7 @@ Default to the **strongest** tier for the main agent, every subagent, reviewer, 
 
 """
         ),
-        *conventions.DESIGN_PRINCIPLES,
+        *conventions.design_principles(selection),
         *conventions.SANCTIONED_EXCEPTIONS,
         models.TextPart(
             text=r"""### Inline `# lup:` Notes
@@ -332,5 +334,16 @@ input or the workflow step where the wrong decision entered, and change that.
 A prompt rule coexists peacefully with the failure it warns about.
 """
         ),
-    ],
-)
+    ]
+
+
+def document(selection: RuleSelection | None = None) -> models.PromptDocument:
+    """The guidance as one document, built against the project's selection.
+
+    Taking the selection rather than reading one keeps the catalog free to
+    import this module: the catalog owns the declaration and hands it down,
+    so nothing here reaches back up for it.
+    """
+    return models.PromptDocument(
+        source=__name__, parts=guidance_parts(selection or RuleSelection())
+    )

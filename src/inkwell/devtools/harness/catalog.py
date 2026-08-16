@@ -14,6 +14,7 @@ from pydantic import AnyHttpUrl
 
 from lup.adapters.claude.harness import ClaudeSpellings
 from lup.codescan.boundaries import ApplicationRoots, generated_tree_paths
+from lup.codescan.common import RuleSelection
 from lup.devtools.dev.workflow import WorkflowSpec
 from lup.devtools.project import DevProject
 from lup.harness.contracts import NativeSpellings
@@ -34,7 +35,7 @@ from lup.policy.kernel.rows import PathRoleRow
 from lup.policy.vocabulary import runner_target_rules
 from lup.workspace.paths import project_root, read_project_name
 from inkwell.devtools.harness.content.catalog import AGENTS, PLUGIN_NAME, SKILLS
-from inkwell.devtools.harness.content.guidance import DOCUMENT as GUIDANCE
+from inkwell.devtools.harness.content.guidance import document as guidance_document
 from inkwell.devtools.harness.content.shell_vocabulary import SHELL_RULES
 
 HARNESS_SESSION = "harness"
@@ -97,6 +98,30 @@ WORKFLOW = WorkflowSpec(branches=["main", "dev"])
 both deserve a run of their own."""
 
 
+RETIRED_RULES = RuleSelection(
+    retired=[
+        "constant-declaration",
+        "default-factory",
+        "model-config",
+        "model-free-function",
+    ]
+)
+"""The library rules inkwell does not hold itself to, and why each.
+
+`constant-declaration` and `model-free-function` are architecture rules the
+library settled for a framework, where every value is somebody else's to
+override and every model is part of a published surface. Inkwell is the
+application at the end of that chain: a stage's model list or a writer's
+prompt budget has no caller above it to be handed to, and a free function
+over one of its models is a pipeline step rather than an operation the model
+owes anyone. `default-factory` and `model-config` are spellings — pydantic
+does the same thing either way — so enforcing them would buy consistency
+with the library at the price of churn through every model here.
+
+Retiring them is a judgement about this repository, not a claim the rules are
+wrong: they still run in lup, where the reasoning that produced them holds.
+"""
+
 NATIVE_RUNTIMES: list[NativeSpellings] = [ClaudeSpellings()]
 """Every runtime inkwell generates a tree for. Claude Code alone — inkwell
 carries no `.codex/` tree, and generating one would publish a harness for a
@@ -125,11 +150,17 @@ def application_roots() -> ApplicationRoots:
 
 
 def dev_project() -> DevProject:
-    """What inkwell tells the shared development tooling about itself."""
+    """What inkwell tells the shared development tooling about itself.
+
+    The roles and the rule selection come from the same hook set the generated
+    tree enforces, so a scan and a hook cannot disagree about what a path is
+    for, nor about which rules are live here.
+    """
     hooks = declared_hook_set()
     return DevProject(
         package=Path(__file__).resolve().parents[2].name,
         roots=application_roots(),
+        rules=hooks.rules,
         path_roles=[
             PathRoleRow(root=role.root.as_posix(), role=role.role)
             for role in hooks.path_roles
@@ -196,6 +227,7 @@ def portable_harness(version: str = "0.2.0", root: Path | None = None) -> Harnes
                 HookPathRole(root=Path("tmp"), role="scratch"),
             ],
             human_owned_files=[Path("README.md")],
+            rules=RETIRED_RULES,
             shell_rules=SHELL_RULES,
             runner_targets=runner_target_rules(
                 session_opening=("lup-devtools", "inkwell")
@@ -215,7 +247,7 @@ def portable_harness(version: str = "0.2.0", root: Path | None = None) -> Harnes
         generator_version=version,
         source_evidence={"content": "typed-python"},
         plugins=[plugin],
-        guidance=GUIDANCE,
+        guidance=guidance_document(plugin.hooks.rules if plugin.hooks else None),
         resolver=ResolveSpec(
             id="resolver.inkwell",
             worker_identity="resolver-worker",

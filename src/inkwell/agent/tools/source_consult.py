@@ -4,18 +4,25 @@ The pipeline's plan and research notes are lossy summaries of the source
 documents. These tools give every stage direct access to the originals,
 so claims get verified by reading rather than reconstructed from memory.
 
-The per-page text layer extracted for searching is NAVIGATION ONLY:
-PDF text extraction garbles mathematical notation and layout, so a
-match tells you which page to read, never what the page says.
+A document is read whole, by a reader agent holding it in context through
+the runtime's own Read. Nothing here pulls text out of a PDF: an extractor
+returns an empty string from a scanned or image-only page, and an empty
+string reads as a document that does not say the thing rather than as an
+extraction that failed. Locating and answering are therefore the same
+operation — ``consult_source`` finds the pages and quotes them — because
+the cheap locate step that used to precede it could only exist on top of
+an extracted layer that lies exactly where it is least noticed.
+
+``pdfinfo`` (poppler-utils) supplies the page count, which is metadata
+rather than content: it reports the same number for a scanned document as
+for a born-digital one, so nothing downstream reads a silence into it.
 """
 
 import asyncio
 import json
 import logging
-import re  # lup: ignore[import-re] — this tool's input is a pattern to search
 import shutil
 from collections.abc import Callable, Iterator
-from itertools import islice
 from pathlib import Path
 from typing import Literal
 
@@ -24,6 +31,7 @@ from pydantic import BaseModel, Field, computed_field
 from inkwell.agent.config import stage_model
 from inkwell.agent.client import query, result_text
 from inkwell.agent.provenance import Acquisition
+from inkwell.pdf import page_count
 from lup.runtime.usage import CostAccumulator
 from lup.mcp import LupMcpTool, ToolError, lup_tool
 from lup.telemetry.trace import TraceLogger
@@ -31,9 +39,6 @@ from lup.telemetry.trace import TraceLogger
 logger = logging.getLogger(__name__)
 
 REGISTRY_FILENAME = "sources.json"
-TEXT_LAYER_DIRNAME = "source_text"
-MAX_MATCHES = 25
-SNIPPET_CHARS = 160
 
 
 class SourceDocument(BaseModel):
@@ -43,10 +48,6 @@ class SourceDocument(BaseModel):
     path: str = Field(description="Absolute path to the original document")
     kind: Literal["pdf", "text"] = Field(description="Document type")
     page_count: int = Field(default=0, description="Number of pages (PDFs)")
-    text_dir: str = Field(
-        default="",
-        description="Directory of per-page extracted text (navigation only)",
-    )
 
     @computed_field
     @property
@@ -64,23 +65,6 @@ def registry_path_for(artifacts_dir: Path) -> Path:
     return artifacts_dir / REGISTRY_FILENAME
 
 
-def extract_pdf_text_layer(pdf_path: Path, text_dir: Path) -> int:
-    """Write one text file per PDF page for grep-style navigation.
-
-    Returns the page count. The extracted text is never treated as
-    document content — only as a way to find page numbers.
-    """
-    import pymupdf
-
-    text_dir.mkdir(parents=True, exist_ok=True)
-    with pymupdf.open(pdf_path) as doc:
-        page_count = int(doc.page_count)
-        for index in range(page_count):
-            page_text = str(doc.load_page(index).get_text())
-            (text_dir / f"{index + 1:04d}.txt").write_text(page_text, encoding="utf-8")
-        return page_count
-
-
 def build_source_registry(
     source_paths: list[str], artifacts_dir: Path
 ) -> list[SourceDocument]:
@@ -92,46 +76,25 @@ def build_source_registry(
     """
     sources_dir = artifacts_dir / "sources"
     sources_dir.mkdir(parents=True, exist_ok=True)
-    documents: list[SourceDocument] = []
-    for raw in source_paths:
-        original = Path(raw).expanduser()
-        if not original.is_file():
-            continue
-        path = sources_dir / original.name
-        if path.resolve() != original.resolve():
-            shutil.copy2(original, path)
-        label = path.stem
-        if path.suffix.lower() == ".pdf":
-            text_dir = artifacts_dir / TEXT_LAYER_DIRNAME / label
-            try:
-                page_count = extract_pdf_text_layer(path, text_dir)
-            except (ImportError, RuntimeError, OSError, ValueError):
-                logger.warning(
-                    "Text-layer extraction failed for %s; registering without "
-                    "search support",
-                    path,
-                    exc_info=True,
-                )
-                page_count = 0
-                text_dir = Path("")
-            documents.append(
-                SourceDocument(
-                    label=label,
-                    path=str(path.resolve()),
-                    kind="pdf",
-                    page_count=page_count,
-                    text_dir=str(text_dir) if str(text_dir) else "",
-                )
-            )
-        else:
-            documents.append(
-                SourceDocument(
-                    label=label,
-                    path=str(path.resolve()),
-                    kind="text",
-                )
+
+    def registered() -> Iterator[SourceDocument]:
+        """Each source path that exists, copied in beside the run and described."""
+        for raw in source_paths:
+            original = Path(raw).expanduser()
+            if not original.is_file():
+                continue
+            path = sources_dir / original.name
+            if path.resolve() != original.resolve():
+                shutil.copy2(original, path)
+            is_pdf = path.suffix.lower() == ".pdf"
+            yield SourceDocument(
+                label=path.stem,
+                path=str(path.resolve()),
+                kind="pdf" if is_pdf else "text",
+                page_count=page_count(path) if is_pdf else 0,
             )
 
+    documents = list(registered())
     registry = registry_path_for(artifacts_dir)
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(
@@ -144,7 +107,7 @@ def build_source_registry(
 async def build_source_registry_async(
     source_paths: list[str], artifacts_dir: Path
 ) -> list[SourceDocument]:
-    """Thread-offloaded ``build_source_registry`` (PDF extraction is CPU-bound)."""
+    """Thread-offloaded ``build_source_registry`` (it copies files and shells out)."""
     return await asyncio.to_thread(build_source_registry, source_paths, artifacts_dir)
 
 
@@ -175,47 +138,11 @@ Your final message IS the answer that gets returned to the caller:
 Never paraphrase where a quote will do — the caller needs the
 document's exact words, not your summary of them. If the document does
 not answer the question, say exactly that; do not fill the gap from
-general knowledge."""
+general knowledge.
 
-
-class FindInSourceInput(BaseModel):
-    pattern: str = Field(
-        description="Case-insensitive regular expression to locate in the text layer"
-    )
-    label: str = Field(
-        default="",
-        description="Restrict the search to one document label (default: all)",
-    )
-
-
-class SourcePage(BaseModel):
-    """One page of a source document, and the file holding its text."""
-
-    number: int = Field(description="1-based page number")
-    path: Path = Field(description="File holding this page's extracted text")
-
-
-def source_pages(doc: SourceDocument) -> list[SourcePage]:
-    """A document's pages: one file per page for a PDF, one for anything else."""
-    if doc.kind == "pdf" and doc.text_dir:
-        return [
-            SourcePage(number=int(path.stem), path=path)
-            for path in sorted(Path(doc.text_dir).glob("[0-9]*.txt"))
-        ]
-    return [SourcePage(number=1, path=Path(doc.path))]
-
-
-class SourceMatch(BaseModel):
-    label: str = Field(description="Document the match is in")
-    page: int = Field(description="1-based page number")
-    snippet: str = Field(description="Surrounding text (garbled-math caveat applies)")
-
-
-class FindInSourceOutput(BaseModel):
-    matches: list[SourceMatch] = Field(description="Up to 25 matches")
-    truncated: bool = Field(
-        default=False, description="True when more matches were dropped"
-    )
+Where the question is a "where" — which pages define this symbol, state
+this theorem, set this convention — the page numbers are the answer, so
+give every page you found it discussed on, not only the first."""
 
 
 class ConsultSourceInput(BaseModel):
@@ -229,8 +156,8 @@ class ConsultSourceInput(BaseModel):
     pages: str = Field(
         default="",
         description=(
-            "Page range hint like '105-124' — usually from a find_in_source "
-            "match. The reader starts there and widens if needed."
+            "Page range hint like '105-124' — usually page numbers an earlier "
+            "answer cited. The reader starts there and widens if needed."
         ),
     )
 
@@ -289,59 +216,16 @@ def make_source_consult_tools(
         raise ToolError(f"Several documents are registered ({known}); pass label.")
 
     @lup_tool(
-        "Search the source documents' extracted text layer for a regular "
-        "expression. Returns page numbers and short snippets. Use this to "
-        "LOCATE where the source defines or discusses something — a symbol, "
-        "a definition, a convention, a theorem — before reading the real "
-        "pages. The text layer is navigation only: PDF extraction garbles "
-        "mathematical notation, so always confirm a match by reading the "
-        "actual page (consult_source, or Read with pages).",
-        name="find_in_source",
-    )
-    async def find_in_source(inp: FindInSourceInput) -> FindInSourceOutput:
-        documents = load_registry()
-        if inp.label:
-            documents = [d for d in documents if d.label == inp.label]
-            if not documents:
-                raise ToolError(f"No source document labeled {inp.label!r}")
-        try:
-            pattern = re.compile(inp.pattern, re.IGNORECASE)  # lup: ignore[re-call]
-        except re.error as exc:
-            raise ToolError(f"Invalid regular expression: {exc}") from exc
-
-        def found() -> Iterator[SourceMatch]:
-            """Every match in every document, in page order."""
-            for doc in documents:
-                for page in source_pages(doc):
-                    try:
-                        text = page.path.read_text(encoding="utf-8", errors="replace")
-                    except OSError:
-                        continue
-                    for m in pattern.finditer(text):
-                        start = max(0, m.start() - SNIPPET_CHARS // 2)
-                        yield SourceMatch(
-                            label=doc.label,
-                            page=page.number,
-                            snippet=" ".join(
-                                text[start : m.end() + SNIPPET_CHARS // 2].split()
-                            ),
-                        )
-
-        # One past the cap, so the caller can be told there were more.
-        capped = list(islice(found(), MAX_MATCHES + 1))
-        return FindInSourceOutput(
-            matches=capped[:MAX_MATCHES], truncated=len(capped) > MAX_MATCHES
-        )
-
-    @lup_tool(
         "Ask a focused question of a source document. A nested reader agent "
-        "opens the actual document (not the extracted text) at the relevant "
-        "pages and answers with verbatim quotes and page citations. Use this "
-        "whenever a claim, definition, theorem statement, notation, or "
-        "convention must come from the source itself — plan key points and "
-        "research summaries are lossy, and external papers may use opposite "
-        "conventions. Pair with find_in_source: locate the pages cheaply, "
-        "then consult exactly those pages.",
+        "opens the document itself and answers with verbatim quotes and page "
+        "citations. Use this whenever a claim, definition, theorem statement, "
+        "notation, or convention must come from the source itself — plan key "
+        "points and research summaries are lossy, and external papers may use "
+        "opposite conventions. This is also how you LOCATE something: ask "
+        "where the document defines a symbol or states a theorem and the "
+        "reader navigates by the document's own structure (contents, index, "
+        "headings), returning the pages along with the answer. Pass `pages` "
+        "when you already know roughly where to look.",
         name="consult_source",
     )
     async def consult_source(inp: ConsultSourceInput) -> ConsultSourceOutput:
@@ -377,8 +261,9 @@ def make_source_consult_tools(
 
     @lup_tool(
         "List the source documents registered for this session, with labels, "
-        "kinds, and page counts. Use the labels with find_in_source and "
-        "consult_source.",
+        "kinds, and page counts. Use the labels with consult_source. A page "
+        "count of 0 on a PDF means poppler could not read one, so ask for the "
+        "document whole rather than by page range.",
         name="list_source_documents",
     )
     async def list_source_documents(
@@ -386,7 +271,7 @@ def make_source_consult_tools(
     ) -> ListSourceDocumentsOutput:
         return ListSourceDocumentsOutput(documents=load_registry())
 
-    return [find_in_source, consult_source, list_source_documents]
+    return [consult_source, list_source_documents]
 
 
 READING_NOTES_DIRNAME = "source_notes"

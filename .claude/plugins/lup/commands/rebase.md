@@ -65,8 +65,10 @@ uv run lup-devtools dev pr push --json
 **If no existing PR** (first run), draft a title and summary, then:
 
 ```bash
-uv run lup-devtools dev pr create --base "<target>" --title "<title>" --body "<body>"
+uv run lup-devtools dev pr create --base "<target>" --title "<title>" --body-file "<path>"
 ```
+
+Write the body to a file and pass `--body-file`. A body worth reading has headings, code spans and prose, and prose has apostrophes: as a `--body` argument every one of them is yours to escape, and a missed one truncates the document into a shell parse error naming an offset rather than the body. `--body` stays for a one-liner.
 
 **If PR already exists**, skip -- we'll force-push the cleaned history later.
 
@@ -98,7 +100,7 @@ uv run lup-devtools dev pr push --force --json
 Update the PR body with a commit list:
 
 ```bash
-uv run lup-devtools dev pr update <PR_NUMBER> --body "<updated body>"
+uv run lup-devtools dev pr update <PR_NUMBER> --body-file "<path>"
 ```
 
 Return the PR URL to the user.

@@ -66,6 +66,37 @@ Four tiers, and imports only ever point downward.
 the tests, the examples, or a named application composition root is a
 build failure, not a review comment.
 
+## Where a module belongs
+
+Three questions place every module, and they point in different directions.
+
+**Outward — would another project built on lup want this?** If yes it belongs
+in `packages/lup/` even when only this application uses it today, because the
+library never imports the application: a utility left in `src/lup_template/`
+is unreachable from here and has to move later. The same test applies to
+values. The library may declare one only when it could not have chosen
+otherwise — a language's file suffixes, a provider's wire spelling, a closed
+enum the library itself defines. Everything else is a judgement, and reaches
+an adopter as an overridable default they replace rather than a constant they
+fork. `library-default` in `lup.codescan.boundaries` is the mechanical half of
+that; canonicity it cannot judge, so a canonical table says so with
+`# lup: ignore[library-default]` and a reason.
+
+**Inward — is this the tooling layer, or what the tooling layer is built on?**
+`lup/devtools/` is the development CLI an adopter inherits. Provider-neutral
+code a program would want with no CLI in front of it sits above `devtools/`,
+and `devtools/` imports it; the reverse never holds. A value follows the same
+rule at module scale: a page's default port belongs to the module serving that
+page, not to a module about checkout directories that happens to be imported
+by both.
+
+**Downward — is this a subject of its own, or part of one?** A top-level
+package answers a question no sibling answers. One that exists to serve a
+single subject nests under it — and library code follows its driver only as
+far as the library edge, so a package driven from `lup/devtools/harness/`
+nests under `lup/harness/` rather than moving into `devtools/`, which would
+pull provider-neutral code into the tooling layer.
+
 ## The packages
 
 ### `runtime` — how one turn runs
@@ -158,18 +189,61 @@ is the map of every difference.
 
 ### The rest
 
+Every remaining top-level entry, and what makes it one. `types` is tier 1
+above and `__init__` is the front door; the rest each answer a question no
+sibling answers.
+
 | Package | Solves |
 | --- | --- |
 | `devtools` | The development CLI an adopter inherits rather than forks: worktrees and branches, trace and Python introspection, the resolver supervisor, the sync registry, version bookkeeping. Ships no roster — each sub-app declares itself beside its Typer app and an application composes the ones it wants. Requires the `web` extra for the supervisor. |
-| `web` | What a page served on this machine does to stay local-only: the loopback bind refusal and the `Host` check that DNS rebinding would otherwise walk past. |
+| `channels` | File-backed channels — a value that settles, an ordered log, and the atomic publish under both. The widest dependency here: `harness`, `resolver`, `runtime`, `realtime`, `telemetry`, and `adapters` all write through it, which is what makes it a package rather than a helper inside any one of them. |
+| `codeintel` | An LSP client and the tools built on it, so a name is resolved rather than grepped. Serves an agent's toolset and the pyright oracle behind `dev check` — two consumers on opposite sides of the library, neither of which owns it. |
+| `gitlocks` | Why git cannot take the lock its config writes need. A confinement owning the path and a lock some git left behind when it died both surface as `File exists`, and the remedies are opposite, so telling them apart reads the mount state and the lock's age rather than the message. The same two-consumers shape as `codeintel`: the resolver's orchestrator and `devtools/utils` both diagnose it, and neither owns it. |
+| `subagents` | Spec-driven delegation for engines with no native subagents, dispatching the same `SubagentSpec` roster the native path uses. |
+| `tool_policy` | Tool-availability filtering: the mechanism, not the policy. A project subclasses `BaseToolPolicy` and maps its own settings onto it, which is the placement rule in miniature — the machinery is the library's, every exclusion is the adopter's. |
+| `markdown` | Rendering Markdown that is generated rather than authored, escaping at the leaf where data enters the document. Only `devtools` renders such tables today, but nothing in it is about development tooling. |
+| `web` | What a page served on this machine does to stay local-only: the loopback bind refusal, the `Host` check that DNS rebinding would otherwise walk past, and the browser round-trip an installed OAuth client needs. One subject — a local HTTP surface a browser reaches — and the OAuth half is reached by a downstream project rather than by anything here, which is the outward test answering in the affirmative. The two user-facing pages, `devtools/dashboard` and `devtools/supervisor`, sit *on* this; it does not belong beside them. |
 | `workspace` | Where a run's data lives: version-aware paths, the `SessionContext` that crosses a process boundary, session history, and the note directories a session may touch. |
 | `realtime` | The wake/act/sleep lifecycle for persistent agents. `scheduler.py` stands alone; `relay.py` layers a subprocess mailbox transport on top and is never imported by it. |
 | `telemetry` | What a run records about itself: markdown trace plus machine-readable sidecar, console rendering, per-tool metrics with a file-backed flush for subprocess tools. |
+| `usage` | One account's metered usage, whichever runtime billed it: the windows a plan meters and when each clears, where the tokens went day by day, and the display that draws both. Ships no roster — each adapter declares the entry that reads its own runtime into this shape, so a runtime joins the display by being read rather than by growing a command beside it. |
 | `sandbox` | A Docker-isolated Python REPL — mount topology, container lifecycle, and the exec-multiplexed socket protocol. Requires the `docker` extra. |
 | `resilience` | `throttle` bounds concurrency and minimum call interval; `retry` re-runs a coroutine with exponential backoff. |
 | `hooks` | SDK-agnostic hook models and factories: permission hooks, tool allowlists, gates, nudges, capture. |
 | `mcp` | The `lup_tool` decorator and `create_mcp_server`, with typed input models and error propagation that actually reaches the caller. |
 | `reflect` | Reflect-before-output gates: a flag-based `ReflectionGate` and a verdict-aware `ReviewGate`. |
+
+### The target layout
+
+The roster above is where the tree stands and, with one exception, where the
+three questions put it. The exception is `resolver`, whose home is
+`lup/harness/resolver/`: its only driver is `lup.devtools.harness.resolve`,
+so it is part of the harness subject rather than a sibling of it, and the
+downward question stops it at the library edge — following the driver into
+`devtools/` would move provider-neutral code into the tooling layer.
+
+`usage/` and the `usage/` beside each adapter are worth naming next to it as
+the placement rule worked all the way through. What an account publishes is
+the only thing that differs between runtimes — which windows it meters,
+whether it splits a day's tokens by model — so that is what stays at the
+vendor edge, and the report shape, the pacing bars and the rendering are
+decided once above it. Neither reader carries a command of its own: each
+declares an entry, and an application composes the ones it wants, so no Typer
+app sits under `adapters/` and nothing above `devtools/` imports one.
+
+The outward question also runs the other way, and `dev check` asks it on every
+run: the `application placement` row names each module under the application's
+`devtools/` that imports nothing from the application. It reports rather than
+fails, because the template is copied and frozen the moment an adopter takes
+it while `packages/lup` reaches them through an ordinary dependency bump — so
+the row is a debt that shrinks, and this is where its verdicts are settled
+rather than a list kept somewhere else. Two modules answer it today.
+`devtools/setup.py` is where it belongs: this project's own integrations
+written as data, which is exactly what importing nothing looks like when a
+module is this project's judgement. `devtools/dev/library.py` is not — how a
+project obtains lup, across the published, git, local, and linked modes, is a
+question every adopter has and none of it is about this application, so its
+home is `lup/devtools/dev/`.
 
 ## Building on it
 

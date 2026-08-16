@@ -10,10 +10,18 @@ from .decision import (
     ESCALATE_HINT,
     KernelDecision,
     RESHAPE_HINT,
+    SANDBOX_TRAPPED_REASON,
     SUBSTITUTION_SENTINEL,
+    SandboxPlacement,
     unjudged,
 )
-from .rows import PathRoleRow, PathRuleRow, ShellRuleRow, UrlScopeRow
+from .rows import (
+    PathRoleRow,
+    PathRuleRow,
+    RunnerTargetRow,
+    ShellRuleRow,
+    UrlScopeRow,
+)
 from .words import (
     INTERPRETERS,
     asks_before_removing_a_directory,
@@ -37,6 +45,8 @@ from .commands import (
     decide_uv,
     git_checkout_pathspec,
     git_restore_source,
+    git_restore_unchanged,
+    git_symbolic_ref_read,
 )
 
 ESCALATE_RE = re.compile(
@@ -64,7 +74,7 @@ class ShellContext(TypedDict):
     recoverable_targets: list[str]
     directory_targets: list[str]
     recoverable_target_limit: int
-    runner_targets: list[str]
+    runner_targets: list[RunnerTargetRow]
 
 
 def shell_context(
@@ -78,7 +88,7 @@ def shell_context(
     recoverable_targets: list[str] | None = None,
     directory_targets: list[str] | None = None,
     recoverable_target_limit: int = 5,
-    runner_targets: list[str] | None = None,
+    runner_targets: list[RunnerTargetRow] | None = None,
 ) -> ShellContext:
     """Bundle one classification's declarations, normalizing absent lists.
 
@@ -143,14 +153,6 @@ def decide_find_words(words: list[str], context: ShellContext) -> KernelDecision
     return decide_command_rows(remaining, context["rows"])
 
 
-# lup: The shell auto-allow asks for permission far too often, and in general it
-# feels very incomplete. Take example from Codex' own allowlist —
-# https://github.com/openai/codex. Measured with `lup-devtools hooks classify`
-# after landing review-fixes, these still stop and should not: `git restore
-# <path>` asks, `rm tracked.py` asks, and `git merge-tree --write-tree` denies
-# as unclassified though it writes no ref, index, or working tree. Also
-# EnterWorktree and ExitWorktree. Already fixed there, for the record:
-# `rm -rf build/` and `make --dry-run` both allow now.
 def decide_shell_segment(segment: list[str], context: ShellContext) -> KernelDecision:
     """Classify one parsed shell segment against the vocabulary and handlers."""
     while segment and segment[0] == "!":
@@ -193,11 +195,16 @@ def decide_shell_segment(segment: list[str], context: ShellContext) -> KernelDec
             "ask", "the git ext transport can execute commands — requires approval"
         )
     if executable == "git":
-        pathspec = git_checkout_pathspec(words)
-        if pathspec is None:
-            pathspec = git_restore_source(words)
-        if pathspec is not None:
-            return pathspec
+        recognized = (
+            git_checkout_pathspec(words)
+            or git_restore_source(words)
+            or git_restore_unchanged(
+                words, context["recoverable_targets"], context["path_rules"]
+            )
+            or git_symbolic_ref_read(words)
+        )
+        if recognized is not None:
+            return recognized
     refused = refuses_generated_plugin_write(words)
     if refused is not None:
         return refused
@@ -308,7 +315,9 @@ def literal_loop_word(word: str) -> bool:
     )
 
 
-def uv_post_target_words_safe(words: list[str], runner_targets: list[str]) -> bool:
+def uv_post_target_words_safe(
+    words: list[str], runner_targets: list[RunnerTargetRow]
+) -> bool:
     """True when every unknown word sits strictly after a blessed uv run target.
 
     uv stops parsing its own options at the first positional word, so a word
@@ -324,7 +333,7 @@ def uv_post_target_words_safe(words: list[str], runner_targets: list[str]) -> bo
             return False
         if word.startswith("-"):
             continue
-        return "/" not in word and word in runner_targets
+        return "/" not in word and any(row["name"] == word for row in runner_targets)
     return False
 
 
@@ -513,13 +522,13 @@ def decide_loop(
         return unjudged("loops nest too deeply")
     end = find_loop_end(segments, start)
     if end is None:
-        return unjudged("loop construct does not parse")
+        return unjudged("loop construct is never closed by `done`")
     interior = segments[start + 1 : end]
     do_index = next(
         (position for position, seg in enumerate(interior) if seg[0] == "do"), None
     )
     if do_index is None:
-        return unjudged("loop construct does not parse")
+        return unjudged("loop construct has no `do` introducing its body")
     body = [seg for seg in [interior[do_index][1:], *interior[do_index + 1 :]] if seg]
     if not body:
         return unjudged("loop body is empty")
@@ -527,7 +536,7 @@ def decide_loop(
     match segments[start]:
         case ["for", name, "in", *loop_words] if name.isidentifier():
             if condition:
-                return unjudged("loop construct does not parse")
+                return unjudged("a `for` loop cannot carry a condition")
             return Group(
                 decisions=decide_for_body(
                     name, loop_words, body, context, depth, bindings
@@ -732,6 +741,23 @@ def decide_segment_list(
     return decisions
 
 
+def joined_placement(decisions: list[KernelDecision]) -> SandboxPlacement:
+    """Where a whole command runs, given what each of its segments needs.
+
+    One command line is one process, so its segments cannot be placed
+    apart. Confinement outranks escape: a segment that has to stay inside
+    keeps the whole line inside, and only a line where something needs the
+    outside and nothing needs the inside leaves.
+    """
+    if any(item.sandbox == "inside" for item in decisions):
+        return "inside"
+    if any(item.sandbox == "outside" for item in decisions):
+        return "outside"
+    if any(item.sandbox == "escalable" for item in decisions):
+        return "escalable"
+    return "ambient"
+
+
 def classify_shell(
     command: str,
     rows: list[ShellRuleRow],
@@ -744,7 +770,7 @@ def classify_shell(
     recoverable_targets: list[str] | None = None,
     directory_targets: list[str] | None = None,
     recoverable_target_limit: int = 5,
-    runner_targets: list[str] | None = None,
+    runner_targets: list[RunnerTargetRow] | None = None,
 ) -> KernelDecision:
     """Conservatively classify every segment in one shell command."""
     segments = parse_shell_words(
@@ -766,16 +792,60 @@ def classify_shell(
         runner_targets,
     )
     decisions = decide_segment_list(segments, context)
+    placement = joined_placement(decisions)
     denied = next((item for item in decisions if item.effect == "deny"), None)
     if denied is not None:
         return denied
     asked = next((item for item in decisions if item.effect == "ask"), None)
     if asked is not None:
-        return asked
+        return KernelDecision("ask", asked.reason, placement)
     deferred = next((item for item in decisions if item.effect == "defer"), None)
     if deferred is not None:
         return deferred
-    return KernelDecision("allow", "every shell segment is declared safe")
+    return KernelDecision("allow", "every shell segment is declared safe", placement)
+
+
+def excluded_prefix(pattern: str) -> list[str]:
+    """The literal words a sandbox-exclusion pattern matches a segment by.
+
+    Reading a pattern down to its literal head is the conservative half of
+    its meaning: whatever a wildcard goes on to match, the boundary drops at
+    least everything the head covers, so taking the head for the whole rule
+    can only classify more commands as unconfined, never fewer.
+    """
+    words = pattern.split()
+    wildcards = [index for index, word in enumerate(words) if "*" in word]
+    return words[: wildcards[0]] if wildcards else words
+
+
+def sandbox_excluded(command: str, patterns: list[str]) -> bool:
+    """Whether the boundary was told to leave this command out of isolation.
+
+    Exclusion is the sandbox's only per-command lever, and it removes the
+    command entirely rather than lifting one rule — so a command that
+    matches runs with nothing beneath it, and work the policy would have
+    handed to the boundary has to be judged here instead. Every segment is
+    tested, because a compound command carries an exclusion as a whole, and
+    one the lexer cannot read falls back to a single segment, which is what
+    the boundary does with it too.
+    """
+    prefixes = [excluded_prefix(pattern) for pattern in patterns]
+    segments = parse_shell_words(command)
+    lexed = segments if isinstance(segments, list) else [command.split()]
+    return any(
+        bool(prefix) and segment[: len(prefix)] == prefix
+        for segment in lexed
+        for prefix in prefixes
+    )
+
+
+def auto_escape_matches(command: str, prefixes: list[list[str]]) -> bool:
+    """Whether one simple command has a native auto-escape prefix."""
+    segments = parse_shell_words(command)
+    if not isinstance(segments, list) or len(segments) != 1:
+        return False
+    words = segments[0]
+    return any(bool(prefix) and words[: len(prefix)] == prefix for prefix in prefixes)
 
 
 def decide_shell(
@@ -784,6 +854,7 @@ def decide_shell(
     allowed_scopes: list[UrlScopeRow] | None = None,
     denied_scopes: list[UrlScopeRow] | None = None,
     sandboxed: bool = False,
+    excluded_commands: list[str] | None = None,
     trusted_script_roots: list[str] | None = None,
     path_roles: list[PathRoleRow] | None = None,
     path_rules: list[PathRuleRow] | None = None,
@@ -792,7 +863,8 @@ def decide_shell(
     recoverable_targets: list[str] | None = None,
     directory_targets: list[str] | None = None,
     recoverable_target_limit: int = 5,
-    runner_targets: list[str] | None = None,
+    runner_targets: list[RunnerTargetRow] | None = None,
+    escapable: bool = False,
 ) -> KernelDecision:
     """Classify one command, honoring an escalation marker and hinting denies.
 
@@ -803,23 +875,36 @@ def decide_shell(
     reshapes it into the allowed vocabulary or deliberately promotes it.
     When the execution is sandboxed, unjudged work defers instead: the OS
     boundary confines it, and only an unsandboxed escape returns to the
-    deny lattice.
+    deny lattice. A command the declaration excludes from the sandbox is
+    such an escape without saying so — the boundary was told to leave it
+    alone — so it is judged as though no sandbox were running at all.
 
     A non-interactive host has no approval channel, so a question it cannot
     put to a human is not a question — sandboxed, it rides the same OS
     boundary as unjudged work; unsandboxed, it fails closed. Such a host is
     never told to escalate, because that flow cannot complete there. A judged
     deny is never rescued by the sandbox in either mode.
+
+    ``escapable`` is the third fact of that family: whether this host can put
+    one call outside its own sandbox. A command declared ``outside`` is not
+    advice — confined, it fails on whatever it writes first — so a host that
+    cannot place it stops it here with that reason rather than letting it reach
+    the shell. The pair is what makes the declaration safe to give a toolchain:
+    where the escape is carried out it is unprompted, and where nothing can
+    carry it out the refusal names the sandbox instead of a bare write error.
     """
     hint = ESCALATE_HINT if interactive else RESHAPE_HINT
+    confined = sandboxed and not sandbox_excluded(command, excluded_commands or [])
 
     def resolve(decision: KernelDecision) -> KernelDecision:
+        if sandboxed and not escapable and decision.sandbox == "outside":
+            return KernelDecision("deny", SANDBOX_TRAPPED_REASON)
         match decision.effect:
             case "allow":
                 return decision
             case "ask" if interactive:
                 return decision
-            case "defer" | "ask" if sandboxed:
+            case "defer" | "ask" if confined:
                 return KernelDecision("defer", decision.reason)
             case _:
                 return KernelDecision("deny", decision.reason + hint)
@@ -845,7 +930,9 @@ def decide_shell(
         )
         if inner.effect == "allow":
             return inner
-        return resolve(KernelDecision("ask", f"escalated ({why}): {inner.reason}"))
+        return resolve(
+            KernelDecision("ask", f"escalated ({why}): {inner.reason}", inner.sandbox)
+        )
     return resolve(
         classify_shell(
             command,

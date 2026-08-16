@@ -69,10 +69,17 @@ Never create a tracking file. A `TODO.md`, backlog, or roadmap parks a
 decision where no workflow surfaces it again. Deferred work lives as a
 `# lup: defer: <text>` note at the site it concerns — where `dev comments`
 lists it in its own parked section and `dev check` keeps it visible until
-somebody wakes it — or as a question to the user. That bare spelling is the
+somebody wakes it. That bare spelling is the
 default: nothing evaluates a wake condition mechanically, so a bracketed
 `defer[<gate>]: <text>` is for a real, externally-checkable gate ("until the
 v2 API ships"), never for restating that this code might change again.
+
+A note is right when the subject is the code: a bug worth remarking on, an
+idea for a feature, anything the site it concerns can hold. Work whose
+subject is the tooling misbehaving — friction, a command that half-completes,
+a classifier reporting a failed probe as fact — has no site to sit at, and
+becomes a GitHub issue instead. When whether to defer at all is the open
+question, it becomes a question to the user rather than any note.
 
 ## Git workflow
 
@@ -137,11 +144,11 @@ uv run lup-devtools dev rules --check      # the generated rule reference
 ```
 
 [quality-pipeline.md](quality-pipeline.md) explains which of the three
-automated layers catches what, and why commit-time regeneration is
-path-scoped. The short version: the per-push CI workflow is the gate that
-binds, the pre-commit hook only stops harness-relevant commits from landing
-without their regenerated output, and the nightly lane owns everything that
-needs a real native CLI.
+automated layers catches what. The short version: `dev commit-guard install`
+refuses a commit whose generated artifacts are behind their source, the
+per-push CI workflow runs that same check plus the full bar and binds whether
+or not anyone armed the hook, and the nightly lane owns everything that needs
+a real native CLI.
 
 Two conventions catch most first-time review comments:
 
@@ -166,11 +173,23 @@ the check on its own authority.
 Prefer the typed, pyright-style `# lup: ignore[rule-id]`, comma-separating a
 list (`# lup: ignore[dict-get, tuple-shape]`), so a site silences exactly the
 rule it needs and still trips the others. The bare `# lup: ignore` stays
-valid, but the auditor flags it as untyped to nudge migration. The marker must
-sit on the line that trips the rule: one line above is reported as spurious
-while the violation stays uncovered.
+valid, but the auditor flags it as untyped to nudge migration. The marker sits
+on the line that trips the rule, or stands alone directly above it — one
+policy for every rule alike, and nowhere else reaches. Inline is the canonical
+placement; the line above is where a reason too long for the column budget
+goes, since a comment is the one thing the formatter cannot wrap.
 
-In a file's first 10 lines the marker goes file-wide — a standalone
+A directive naming a rule that nothing it guards trips is refused rather than
+approved — it silences nothing, so the approval would buy an exemption the
+auditor already calls spurious. The refusal names the rule that does not fire,
+and what the line trips instead where it trips something. Rules another
+scanner owns are not judged this way: the edit gate carries the anti-pattern
+table alone, and a verdict it cannot reach is not one it refuses over. Nor is
+the bare form, which names no rule and so silences every rule there is — the
+auditor still reports one that guards nothing, so a bare marker the gate
+admits can still be a marker `dev check` refuses.
+
+In a file's opening comment block the marker goes file-wide — a standalone
 `# lup: ignore` disables anti-pattern checks for the whole file, and
 `# lup: ignore[rule-id]` disables only that rule, the way `# pyright: ignore`
 works for files.

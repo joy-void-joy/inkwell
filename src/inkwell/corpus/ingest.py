@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.corpus.discovery import AvenueFailure, PageCache, discover_avenues
+from inkwell.pdf import page_count
 from inkwell.corpus.failures import classify
 from inkwell.corpus.fetch import (
     DocumentFetcher,
@@ -174,26 +175,6 @@ class IngestReport(BaseModel):
         return "\n".join([*(report.summary() for report in self.sources), total])
 
 
-def pdf_page_count(data: bytes) -> int:
-    """How many pages a PDF has, so a page range is a meaningful request.
-
-    Reads the document's structure, never its text: a page count is what lets a
-    reader ask for pages 40-60, and asking for the text here would be exactly
-    the extraction this corpus refuses.
-    """
-    try:
-        import pymupdf
-    except ImportError:
-        logger.debug("pymupdf unavailable, storing the PDF without a page count")
-        return 0
-    try:
-        with pymupdf.open(stream=data, filetype="pdf") as opened:
-            return int(opened.page_count)
-    except (RuntimeError, ValueError, OSError):
-        logger.warning("Could not read a PDF's page count", exc_info=True)
-        return 0
-
-
 class StoredPayload(BaseModel):
     """A document written to disk, and what the index should say about it."""
 
@@ -227,9 +208,10 @@ class SourceIngestor(BaseModel):
         """
         source = self.declaration.key
         if document.kind == "pdf":
+            filename = self.store.store_pdf(source, slug, document.data)
             return StoredPayload(
-                filename=self.store.store_pdf(source, slug, document.data),
-                page_count=pdf_page_count(document.data),
+                filename=filename,
+                page_count=page_count(self.store.source_dir(source) / filename),
                 quality=QualityReport(assessed=False),
             )
         return StoredPayload(

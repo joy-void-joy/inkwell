@@ -116,7 +116,7 @@ than picking a winner
 ## Source documents vs external works
 
 Questions about the author's own source material are answered by READING \
-the source document (consult_source, find_in_source, Read), never by \
+the source document (consult_source, Read), never by \
 inference from external works. Different papers in the same field \
 routinely use opposite conventions, so an external work's definition \
 tells you nothing about the source's. Record source-document findings \
@@ -199,7 +199,7 @@ the others inherit it.
 3. Write in the author's voice — match their tone, rhythm, and formality
 4. Ground every claim in the research findings and, when a source \
 document is listed in your inputs, in the source itself \
-(consult_source, find_in_source, Read) — for definitions, exact \
+(consult_source, Read) — for definitions, exact \
 statements, and conventions the source is the authority, and research \
 summaries are lossy
 5. Weave in source quotes naturally (not as block quotes unless that fits)
@@ -246,7 +246,7 @@ in order, as one coherent document.
 2. Read the voice files; match the author's tone, rhythm, and formality
 3. Ground claims in the research findings and, when a source document \
 is listed in your inputs, in the source itself (consult_source, \
-find_in_source, Read). Plan key points are summaries; for definitions, \
+Read). Plan key points are summaries; for definitions, \
 theorem statements, notation, and conventions, the source document is \
 the authority.
 4. Introduce every term, symbol, and abbreviation before first use, \
@@ -368,7 +368,7 @@ Read the draft and the research findings from the file paths in your task.
 - Source fidelity — when the piece is built on a source document, do \
 the draft's definitions, conventions, and technical statements match \
 what the document actually says? Verify against the document itself \
-(consult_source, find_in_source, Read), not against research summaries \
+(consult_source, Read), not against research summaries \
 or other papers; internal consistency of the draft is not evidence.
 
 ## Approach
@@ -397,7 +397,7 @@ what the summaries garbled.
 
 Read the draft from the path in your task, then check every \
 source-derived element against the document itself using \
-consult_source, find_in_source, and Read. Reading notes (when listed) \
+consult_source and Read. Reading notes (when listed) \
 give you page references; the document is the authority.
 
 ## What to Check
@@ -421,8 +421,8 @@ the wrong place.
 
 ## Approach
 
-For each suspect passage: locate the corresponding source text \
-(find_in_source), read the actual page (consult_source or Read), and \
+For each suspect passage: ask consult_source where the document treats \
+it, then read those pages yourself (consult_source or Read) and \
 compare. Verify the draft against the DOCUMENT — never against the \
 research notes or the draft's own internal consistency.
 
@@ -455,8 +455,8 @@ For each question in your task:
 
 1. Does the brief or a constraint settle it? Resolve from the brief, \
 quoting the instruction it rests on.
-2. Else, can the source answer it? Find the answer (find_in_source, \
-consult_source, Read) and resolve with verbatim quotes and page numbers.
+2. Else, can the source answer it? Find the answer (consult_source, \
+Read) and resolve with verbatim quotes and page numbers.
 3. Else it is a genuine judgment call. Mark it for the author — and \
 still give a conservative interim default that honors the brief, so the \
 rewrite never falls back to the draft's status quo while waiting.
@@ -670,8 +670,8 @@ the author can widen scope, you cannot.
 
 A finding's origin field says what it is evidence of. Treat \
 'source_document' findings without verbatim quotes and locators as \
-unverified: verify them yourself (consult_source, find_in_source, \
-Read) or leave them out of key points.
+unverified: verify them yourself (consult_source, Read) or leave them \
+out of key points.
 
 A finding marked origin='author_unverified' is the author's own \
 specific that research could neither confirm nor refute. It is not an \

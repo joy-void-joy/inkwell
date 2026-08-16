@@ -523,7 +523,7 @@ def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
             doc.label,
             instruction=(
                 f"authoritative source document ({doc.kind}{pages}) — verify "
-                "claims against it via consult_source/find_in_source or Read"
+                "claims against it via consult_source or Read"
             ),
         )
     for notes_file in sorted(reading_notes_dir(notes.artifacts_dir).glob("*.md")):
@@ -545,7 +545,7 @@ def render_source_lines(notes: PipelineNotes) -> str:
         return ""
     lines = [
         "Authoritative source documents (verify claims against these via "
-        "consult_source/find_in_source or Read):"
+        "consult_source or Read):"
     ]
     for doc in docs:
         pages = f" ({doc.page_count} pages)" if doc.page_count else ""
@@ -1039,7 +1039,7 @@ def build_source_server(
     """MCP server for source fetching/extraction — available to ALL pipeline stages.
 
     With ``registry_provider``, also exposes the source-document tools
-    (find_in_source, consult_source, list_source_documents) bound to the
+    (consult_source, list_source_documents) bound to the
     session's source registry.
     """
     tools = [*FETCH_TOOLS, *EXTRACT_MCP_TOOLS]

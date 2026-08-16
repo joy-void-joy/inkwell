@@ -13,11 +13,12 @@ from urllib.parse import urlparse
 import arxiv
 import httpx
 import trafilatura
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
+from inkwell.agent.provenance import Acquisition
 from inkwell.agent.tools.research.fetch import content_type
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,9 @@ class ArxivPaper(TypedDict):
     categories: list[str]
     primary_category: str
     pdf_url: str | None
+    acquisition: Acquisition
+    """How this paper was acquired, carrying arXiv's own publication date —
+    record_finding takes it as it stands and derives the venue from it."""
 
 
 class SearchArxivInput(BaseModel):
@@ -73,6 +77,17 @@ class FetchArxivOutput(BaseModel):
     pdf_path: str | None = Field(
         default=None, description="Path to downloaded PDF (PDF format only)"
     )
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How this paper was acquired — copy it into record_finding as it stands.
+
+        arXiv serves preprints, so the venue follows from the path alone. Fetching
+        full text reads no metadata, so the publication date is empty here and
+        record_finding asks for it; search_arxiv reports it with each hit.
+        """
+        return Acquisition(path="arxiv", url=self.url)
 
 
 ARXIV_HOST = "arxiv.org"
@@ -116,12 +131,14 @@ def parse_arxiv_id(raw: str) -> str | None:
 
 
 def result_to_paper(result: arxiv.Result) -> ArxivPaper:
+    published = result.published.strftime("%Y-%m-%d")
     return ArxivPaper(
+        acquisition=Acquisition(path="arxiv", url=result.entry_id, published=published),
         paper_id=result.entry_id,
         title=result.title,
         summary=result.summary if result.summary else None,
         authors=[str(a) for a in result.authors],
-        published=result.published.strftime("%Y-%m-%d"),
+        published=published,
         updated=result.updated.strftime("%Y-%m-%d") if result.updated else None,
         categories=result.categories,
         primary_category=result.primary_category,

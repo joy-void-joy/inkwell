@@ -34,6 +34,8 @@ uv run lup-devtools dev pr sync-base --json
 
 A `guessed` base exits non-zero having merged nothing -- settle the base as above and rerun with `--base <branch>`. If conflicts are reported, resolve with `/lup:merge` (no argument) first.
 
+Merging the base commonly leaves a generated tree behind its source -- most often the ownership manifest, which the next `dev check` reports as `harness drift: FAIL` with a stale proof. That is the merge working, not a conflict: run `lup-devtools harness generate all` until it reports `ownership=present`, and commit what it writes.
+
 ### 3. Fold local grants into the canonical policy
 
 Check whether `.claude/settings.local.json` exists. Its permission entries are ad-hoc grants one person accepted; leaving them there means the next person re-approves the same prompts.
@@ -52,11 +54,13 @@ Classify each entry:
 uv run lup-devtools dev check
 ```
 
-Fix any failures before proceeding.
+Fix any failure this branch introduced. A failure the base already carries is not this branch's to fix: confirm it by running the same check on `<base>`, name it and its origin when reporting, and continue. Fixing it here buries an unrelated change in this PR; staying silent about it lets the next run inherit it as though it were yours.
 
 ## Process
 
 ### 5. Push and open PR
+
+Open the PR **now, before the history is rebuilt** -- never after. The force-push in step 8 lands in the PR timeline as a force-push event, so the PR carries both the history as it was actually worked and the cleaned sequence that replaced it. Creating it after the rebuild saves one body update and throws that whole trace away.
 
 ```bash
 uv run lup-devtools dev pr push --json

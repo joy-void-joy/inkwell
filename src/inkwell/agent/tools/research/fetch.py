@@ -11,9 +11,10 @@ from urllib.parse import urlparse
 
 import httpx
 import trafilatura
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_field
 
 from inkwell.agent.config import stage_model
+from inkwell.agent.provenance import Acquisition
 from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 
@@ -36,6 +37,52 @@ class ExtractedMetadata(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     title: str = ""
+
+
+class ExtractedPage(BaseModel):
+    """An HTML page reduced to its article text and title.
+
+    The one shape every caller of the extraction path below receives, so that
+    reading a page means the same thing whether a tool call asked for it or the
+    corpus did.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    title: str = ""
+
+
+def extract_page(
+    html: str, *, url: str = "", output_format: str = "txt"
+) -> ExtractedPage | None:
+    """Extract one HTML page's article text and title, or None if there is none.
+
+    The single trafilatura path in this project: navigation, ads, and comments
+    go, links and tables stay. ``output_format`` is the one thing callers differ
+    on — a tool call wants plain text to hand a reader, the corpus wants
+    Markdown to keep on disk — so it is a parameter rather than a second copy
+    of the call.
+    """
+    text = trafilatura.extract(
+        html,
+        url=url or None,
+        output_format=output_format,
+        include_comments=False,
+        include_tables=True,
+        no_fallback=False,
+        include_links=True,
+    )
+    if not text:
+        return None
+    metadata = trafilatura.extract(html, output_format="json", include_links=False)
+    title = ""
+    if metadata:
+        try:
+            title = ExtractedMetadata.model_validate_json(metadata).title
+        except ValidationError:
+            logger.debug("Extraction metadata for %s was not readable", url or "page")
+    return ExtractedPage(text=text, title=title)
 
 
 DOWNLOADS_DIR = Path("tmp/downloads")
@@ -108,6 +155,19 @@ class FetchSourceOutput(BaseModel):
     pdf_path: str | None = Field(
         default=None, description="Path to downloaded PDF (PDF format only)"
     )
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How this document was acquired, for record_finding to copy verbatim.
+
+        Computed from the fetch rather than stored, so it cannot disagree with
+        what happened. A bare fetch reaches whatever the URL serves, so the venue
+        derived from it comes from the host: this path asserts nothing about the
+        document beyond where it was found. The fetch learns no publication date,
+        so record_finding asks for one.
+        """
+        return Acquisition(path="url_fetch", url=self.url)
 
 
 async def do_fetch_source(url: str) -> FetchSourceOutput:
@@ -185,28 +245,13 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
             content=saved,
         )
 
-    extracted = trafilatura.extract(
-        resp.text,
-        include_comments=False,
-        include_tables=True,
-        no_fallback=False,
-        include_links=True,
-    )
-    if extracted:
-        title_json = trafilatura.extract(
-            resp.text, output_format="json", include_links=False
-        )
-        title_str = ""
-        if title_json:
-            try:
-                title_str = ExtractedMetadata.model_validate_json(title_json).title
-            except ValidationError:
-                logger.debug("Extraction metadata for %s was not readable", url)
-        saved = save_content("fetch", url, extracted)
+    extracted = extract_page(resp.text, url=url)
+    if extracted is not None:
+        saved = save_content("fetch", url, extracted.text)
         return FetchSourceOutput(
             url=url,
             format="text",
-            title=title_str,
+            title=extracted.title,
             content=saved,
         )
 
@@ -215,29 +260,6 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
     )
 
 
-# lup: Research reaches only what the agent thought to query, because every
-# research tool here is a search box: exa, arXiv, Wikipedia, FRED, markets, and
-# this fetch. Nothing is indexed, results are one-shot, and coverage is whatever
-# a query happened to name. Build a corpus instead, so retrieval runs over
-# material that already exists before the question does. The author's
-# research-database backup under tmp/ is the port: per-source scrapers, sitemap
-# discovery that enumerates everything a source published, trafilatura and PDF
-# extraction, heuristic quality assessment, and a declarative source registry
-# spanning the labs and institutes worth tracking. Bring it in natively under
-# inkwell's conventions rather than wrapping it as a service — the registry is
-# also where a source's venue and authority are declared once, which is what
-# lets authority be derived rather than asserted per citation.
-# Store documents as markdown files with a typed JSON index sharded per source,
-# so the writer can Grep and Read the corpus with built-in tools, no query layer
-# and no daemon. Do not extract PDFs: keep the PDF and let an agent read it
-# directly with page ranges, the way source_consult already insists, and locate
-# candidates through metadata and abstract embeddings instead. Retrieval is one
-# surface merging lexical search with date, source, and venue filters against
-# semantic search over embeddings — the lexical half answers "is this claim
-# still current", where the terms are known, and the semantic half answers "who
-# argues the other side", where no vocabulary is shared. Reach JS-hard sources
-# with playwright, which is already a dependency and already runs persistent
-# per-profile browser contexts in agent/browser_auth.py.
 @lup_tool(
     "Fetch a URL and extract its text content. Saves the extracted text "
     "to disk and returns a file path, word count, and preview. Works "
@@ -293,6 +315,12 @@ class FetchAndExtractOutput(BaseModel):
         default=False,
         description="True if content was long enough to require extraction",
     )
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How this document was acquired — copy it into record_finding as it is."""
+        return Acquisition(path="url_fetch", url=self.url)
 
 
 async def do_fetch_and_extract(url: str, focus: str) -> FetchAndExtractOutput:

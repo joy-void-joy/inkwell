@@ -78,11 +78,11 @@ otherwise learns nothing it can act on.
 # with, naming the bare filesystem error it would otherwise die on; the whole
 # value of the words is that they are the same ones every time
 SANDBOX_TRAPPED_REASON = (
-    "this has to run outside the sandbox, and this runtime puts no single call"
-    " outside its own — run from inside one it would reach the shell and die on"
-    " a bare read-only-filesystem error, which reads like a broken repository"
-    " rather than like a boundary; re-run it from a session that is not"
-    " sandboxed"
+    "this has to run outside the sandbox, but this call has no active per-call"
+    " escape — resubmit through the runtime's native sandbox escalation when"
+    " available; only a runtime without that channel needs a session that is"
+    " not sandboxed. Running this call confined would fail with a bare"
+    " read-only-filesystem error and misreport the boundary as repository failure"
 )
 """Why a call that has to escape is refused where nothing can carry it out.
 

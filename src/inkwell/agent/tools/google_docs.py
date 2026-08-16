@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from googleapiclient.errors import HttpError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from inkwell.agent.google_auth import (
     CommentQuery,
@@ -31,6 +31,7 @@ from inkwell.agent.google_auth import (
 )
 from inkwell.agent.tools.google_docs_schema import (
     BatchUpdateResponse,
+    Comment,
     CommentPage,
     CreatedComment,
     Document,
@@ -125,6 +126,23 @@ async def fetch_document(request: GoogleRequest) -> Document:
     return Document.model_validate(await execute_with_retry(request))
 
 
+DRIVE_FAILURES = (HttpError, OSError, TimeoutError, ToolError, GoogleAuthError)
+"""What a Google call raises when the service cannot answer it.
+
+Named once because two boundaries catch the same set for different reasons — a
+write degrades the live Doc to stale, a comment read reports itself unreachable
+— and a set spelled at each of them drifts apart.
+"""
+
+COMMENT_READ_FAILURES = (*DRIVE_FAILURES, ValidationError)
+"""What a comment read raises when it cannot hand back the comments.
+
+A payload that does not validate belongs here: to a caller waiting on the
+author's feedback an unreadable answer is the same event as no answer, and
+reading it as an empty page would report the author as silent.
+"""
+
+
 @asynccontextmanager
 async def gdoc_nonfatal(operation: str) -> AsyncGenerator[None]:
     """Wrap GDoc calls so failures log a warning instead of crashing the pipeline.
@@ -137,7 +155,7 @@ async def gdoc_nonfatal(operation: str) -> AsyncGenerator[None]:
     """
     try:
         yield
-    except (HttpError, OSError, TimeoutError, ToolError, GoogleAuthError) as exc:
+    except DRIVE_FAILURES as exc:
         logger.warning("GDoc %s failed (non-fatal): %s", operation, exc)
 
 
@@ -732,6 +750,63 @@ async def do_insert_comments_batch(
     return list(collected())
 
 
+COMMENT_PAGE_SIZE = 100
+"""How many comments to ask Drive for at once, which is its own maximum."""
+
+COMMENT_FIELDS = (
+    "comments(id,content,author/displayName,quotedFileContent/value,"
+    "replies(id,content),resolved),nextPageToken"
+)
+"""Every comment field this project reads, and the token that pages through them.
+
+One list rather than one per caller: a poller that omits a field its own
+filter needs — a reply's id, the resolved flag — reads a document that looks
+empty of exactly the comments it was watching for.
+"""
+
+
+async def fetch_all_comments(
+    doc_id: str,
+    *,
+    fields: str = COMMENT_FIELDS,
+    page_size: int = COMMENT_PAGE_SIZE,
+) -> list[Comment]:
+    """Every comment on a document, page by page through to the last one.
+
+    Drive answers a page at a time and says there is more with
+    ``nextPageToken``. A read of the first page alone loses everything past
+    it without saying so, which on a document several reviewers have been
+    through is most of the feedback — so this is the only place a comment
+    read is issued, and it follows the token to the end.
+    """
+    svc = services()
+    drive = svc.drive_service()
+
+    async def paged() -> AsyncIterator[Comment]:
+        """Each page's comments, following the token Drive hands back."""
+        page_token = ""
+        while True:
+            query: CommentQuery = {
+                "fileId": doc_id,
+                "fields": fields,
+                "pageSize": page_size,
+            }
+            if page_token:
+                query["pageToken"] = page_token
+
+            page = CommentPage.model_validate(
+                await execute_with_retry(drive.comments().list(**query))
+            )
+            for comment in page.comments:
+                yield comment
+
+            if not page.next_page_token:
+                return
+            page_token = page.next_page_token
+
+    return [comment async for comment in paged()]
+
+
 async def do_fetch_comments(
     doc_id: str,
     *,
@@ -739,45 +814,18 @@ async def do_fetch_comments(
     include_resolved: bool = False,
 ) -> list[CommentEntry]:
     """Fetch comments from any Google Doc by ID."""
-    svc = services()
-    drive = svc.drive_service()
-
-    async def wanted() -> AsyncIterator[CommentEntry]:
-        """Every comment the caller asked for, page by page through the API."""
-        page_token = ""
-        while True:
-            kwargs: CommentQuery = {
-                "fileId": doc_id,
-                "fields": "comments(id,content,author/displayName,quotedFileContent/value,replies/content,resolved),nextPageToken",
-                "pageSize": 100,
-            }
-            if page_token:
-                kwargs["pageToken"] = page_token
-
-            page = CommentPage.model_validate(
-                await execute_with_retry(drive.comments().list(**kwargs))
-            )
-            for comment in page.comments:
-                if comment.resolved and not include_resolved:
-                    continue
-                if comment.id in exclude_ids:
-                    continue
-                yield CommentEntry(
-                    comment_id=comment.id,
-                    author=comment.author.display_name,
-                    content=comment.content,
-                    anchor_text=comment.anchor_text(),
-                    replies=[
-                        reply.content for reply in comment.replies if reply.content
-                    ],
-                    resolved=comment.resolved,
-                )
-
-            if not page.next_page_token:
-                return
-            page_token = page.next_page_token
-
-    return [entry async for entry in wanted()]
+    return [
+        CommentEntry(
+            comment_id=comment.id,
+            author=comment.author.display_name,
+            content=comment.content,
+            anchor_text=comment.anchor_text(),
+            replies=[reply.content for reply in comment.replies if reply.content],
+            resolved=comment.resolved,
+        )
+        for comment in await fetch_all_comments(doc_id)
+        if (include_resolved or not comment.resolved) and comment.id not in exclude_ids
+    ]
 
 
 async def do_reply_to_comment(

@@ -8,9 +8,9 @@ import pytest
 from inkwell.agent.tools.source_consult import (
     build_source_registry,
     load_source_registry,
-    pdf_page_count,
     registry_path_for,
 )
+from inkwell.pdf import page_count
 
 needs_poppler = pytest.mark.skipif(
     shutil.which("pdfinfo") is None,
@@ -60,7 +60,7 @@ class TestPageCount:
         pdf = tmp_path / "thesis.pdf"
         make_pdf(pdf, 3)
 
-        assert pdf_page_count(pdf) == 3
+        assert page_count(pdf) == 3
 
     @needs_poppler
     def test_registration_records_the_count(

@@ -73,9 +73,11 @@ class TestWritingSessionState:
         state.mark_comments_seen(["c1", "c1"])
         assert state.seen_comments.handled == ["c1"]
 
-    async def test_check_unread_no_doc(self) -> None:
+    async def test_probe_with_no_doc_reaches_and_finds_nothing(self) -> None:
         state = WritingSessionState()
-        assert await state.check_unread_comments() == 0
+        probed = await state.probe_author_comments()
+        assert probed.reached
+        assert probed.comments == []
 
     def test_set_stage(self) -> None:
         state = WritingSessionState()

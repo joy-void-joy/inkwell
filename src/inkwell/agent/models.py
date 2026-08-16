@@ -9,6 +9,7 @@ restart strategies, assumptions, and pipeline snapshot state.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Annotated, Literal, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -16,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from lup.runtime.usage import CostAccumulator
 from lup.types import JsonObject, JsonValue, StringMap
 from lup.workspace.history import SessionResult
+
+from inkwell.agent.provenance import SourceProvenance, Venue
 
 
 class AuthorNote(BaseModel):
@@ -127,6 +130,23 @@ class ResearchSource(BaseModel):
             "('p. 142'), chapter/section, or URL fragment"
         ),
     )
+    provenance: SourceProvenance | None = Field(
+        default=None,
+        description=(
+            "Venue authority, evidential role, and publication date, derived "
+            "from how the document was acquired when the source was recorded. "
+            "Absent on an artifact written before provenance was recorded, "
+            "which means unrecorded — not undated"
+        ),
+    )
+
+    def venue(self) -> Venue:
+        """The venue research derived, unknown where none was recorded."""
+        return self.provenance.venue if self.provenance is not None else "unknown"
+
+    def published(self) -> str:
+        """The publication date research recorded, empty where none was."""
+        return self.provenance.published if self.provenance is not None else ""
 
 
 class ResearchFinding(BaseModel):
@@ -161,6 +181,53 @@ class ResearchFinding(BaseModel):
         default_factory=list,
         description="Specific numbers, dates, or facts found",
     )
+
+    def recorded_provenance(self) -> list[SourceProvenance]:
+        """The provenance of every source that carries it."""
+        return [s.provenance for s in self.sources if s.provenance is not None]
+
+    def cites_source_document(self) -> bool:
+        """Whether any source came from the author's own source material."""
+        return any(
+            p.acquired_via == "source_document" for p in self.recorded_provenance()
+        )
+
+    def provenance_gaps(self) -> list[str]:
+        """What the recorded provenance shows this finding is missing.
+
+        Read off the record rather than judged, so a claim reached only through
+        someone else's commentary is visible where it was recorded instead of
+        waiting for a reviewer to notice. Empty for a finding written before
+        provenance was recorded, where there is nothing to read.
+        """
+        recorded = self.recorded_provenance()
+        if not recorded:
+            return []
+
+        def gaps() -> Iterator[str]:
+            """Every gap the record shows, in terms the researcher can act on."""
+            relayed = sorted(
+                {
+                    p.attributed_to
+                    for p in recorded
+                    if p.role == "commentary" and p.attributed_to
+                }
+            )
+            if relayed and not any(p.role == "primary" for p in recorded):
+                for name in relayed:
+                    yield (
+                        f"{name}'s claim is recorded only through commentary on "
+                        f"it. Read what {name} wrote and record that as the "
+                        f"primary source, or say in the answer that this is the "
+                        f"commentator's reading of {name}."
+                    )
+            if all(p.role == "background" for p in recorded):
+                yield (
+                    "Every source is background — nothing recorded is evidence "
+                    "for the answer itself."
+                )
+
+        return list(gaps())
 
 
 class ResearchCompilation(BaseModel):
@@ -274,6 +341,33 @@ class ClassifiedComment(BaseModel):
         description="Semantic tags: 'tone', 'structure', 'fact', 'scope', etc.",
     )
     timestamp: str = Field(default="", description="ISO timestamp when classified")
+
+
+class IntakeRecord(BaseModel):
+    """How one comment channel's last poll went, as the run wrote it down.
+
+    A feedback set cannot show the difference between an author who said
+    nothing and a Drive that could not be read, and only one of those means a
+    comment is sitting unread. The run records which happened beside its
+    notes, so a later reader — the author, or whoever is asked why a comment
+    went unanswered — can tell them apart without polling Drive a second time
+    and getting a different answer.
+    """
+
+    channel: str = Field(description="Which document was polled: 'author' or 'source'")
+    doc_id: str = Field(description="The document the poll read")
+    at: str = Field(description="ISO timestamp of the poll")
+    unreachable: str = Field(
+        default="", description="Why Drive could not be read, empty when it was"
+    )
+    unresolved: list[str] = Field(
+        default_factory=list,
+        description="Unresolved comment ids the poll read as author feedback",
+    )
+    offered: list[str] = Field(
+        default_factory=list,
+        description="Ids this poll handed to its caller as not yet accounted for",
+    )
 
 
 # ---------------------------------------------------------------------------

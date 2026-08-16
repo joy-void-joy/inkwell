@@ -14,24 +14,50 @@ from pydantic import BaseModel, Field
 from lup.mcp import lup_tool
 from lup.types import StringMap
 
+from inkwell.agent.provenance import UNDATED, Venue, publication_year, venue_note
+
 logger = logging.getLogger(__name__)
 
 
-SourceType = Literal["web", "paper", "dataset", "book", "report"]
 CitationStyle = Literal["footnote", "numbered", "author-date", "url-only"]
 
 
 class BibliographyEntry(BaseModel):
+    """One source as a reference list carries it.
+
+    What kind of source this is comes from :data:`inkwell.agent.provenance.Venue`
+    — the same vocabulary the researcher recorded — so the bibliography reads the
+    venue off the research artifact instead of re-deciding it at citation time,
+    where the acquisition is no longer in view.
+    """
+
     title: str = Field(description="Source title")
     url: str = Field(description="Source URL")
     authors: list[str] = Field(
         default_factory=list, description="Author names (empty if unknown)"
     )
-    year: str = Field(default="", description="Publication year (empty if unknown)")
-    source_type: SourceType = Field(default="web", description="Type of source")
+    venue: Venue = Field(
+        default="unknown",
+        description=(
+            "Venue authority as research recorded it — list_sources fills this "
+            "from the research artifact, where it was derived from how the "
+            "document was acquired. Don't re-decide it here"
+        ),
+    )
+    published: str = Field(
+        default="",
+        description=(
+            f"Publication date as recorded (ISO 8601), or {UNDATED!r}; the year "
+            "an author-date citation shows is read from this"
+        ),
+    )
     key_excerpt: str = Field(
         default="", description="Most relevant excerpt from this source"
     )
+
+    def year(self) -> str:
+        """The publication year a citation shows, empty when there is no date."""
+        return publication_year(self.published)
 
 
 class FormatBibliographyInput(BaseModel):
@@ -56,12 +82,20 @@ def format_entry_label(entry: BibliographyEntry) -> str:
     """Build a human-readable label from entry metadata."""
 
     def parts() -> Iterator[str]:
-        """Authors, then year, then the title — whichever the entry carries."""
+        """Authors, year, title, and what kind of venue it was — as carried.
+
+        The venue tag is what lets a reader weigh the reference without opening
+        it: a preprint, a forum post, and a journal paper look identical in a
+        reference list otherwise.
+        """
         if entry.authors:
             yield ", ".join(entry.authors)
-        if entry.year:
-            yield f"({entry.year})"
+        if entry.year():
+            yield f"({entry.year()})"
         yield f'"{entry.title}"'
+        note = venue_note(entry.venue)
+        if note:
+            yield f"[{note}]"
 
     return " ".join(parts())
 
@@ -71,7 +105,8 @@ def author_date_citation(entry: BibliographyEntry) -> str:
     if not entry.authors:
         return f'("{entry.title}")'
     last_name = entry.authors[0].split()[-1]
-    return f"({last_name}, {entry.year})" if entry.year else f"({last_name})"
+    year = entry.year()
+    return f"({last_name}, {year})" if year else f"({last_name})"
 
 
 def do_format_bibliography(
@@ -107,7 +142,7 @@ def do_format_bibliography(
         case "author-date":
             sorted_entries = sorted(
                 entries,
-                key=lambda e: (e.authors[0] if e.authors else e.title, e.year),
+                key=lambda e: (e.authors[0] if e.authors else e.title, e.year()),
             )
             bibliography = "\n".join(
                 [
@@ -139,7 +174,10 @@ def do_format_bibliography(
     "Format research sources into a bibliography and in-text citation mappings. "
     "Use after list_sources to get all sources accumulated during research. "
     "Returns the bibliography as markdown and a URL-to-citation map the rewriter "
-    "uses for in-text references. Match the citation style to the output format: "
+    "uses for in-text references. Pass each entry's venue and published date "
+    "through from list_sources unchanged — they were derived from how the "
+    "document was acquired during research, and re-guessing them here is how a "
+    "forum post ends up cited as a paper. Match the citation style to the output format: "
     "footnotes for LessWrong/blog, numbered for academic, author-date for papers, "
     "url-only for memos and Twitter."
 )

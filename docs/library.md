@@ -182,7 +182,9 @@ the rule families; `registry.py` indexes them all into
 into policy events, render decisions back). `adapters/harness.py` composes the
 renderers into whole-tree compilers.
 
-Each also carries what only it needs: Claude a personal profile store, Codex a
+Each also carries what only it needs: Claude a personal account registry that
+`runtime/profile_tree.py` answers with the directories a project keeps instead,
+Codex a
 typed JSON-RPC transport to `codex app-server`. Neither is mirrored for
 symmetry's sake. [platform-differentiation.md](platform-differentiation.md)
 is the map of every difference.

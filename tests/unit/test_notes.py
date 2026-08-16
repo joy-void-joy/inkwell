@@ -148,38 +148,16 @@ class TestGetAllFeedback:
         assert "add charts" in result
 
 
-class TestGetSectionFeedback:
-    """Section-specific feedback filtering."""
+class TestReaderDirectory:
+    """Where reader feedback on published text is filed.
 
-    @pytest.mark.anyio
-    async def test_matches_by_content(self, notes: PipelineNotes) -> None:
-        await notes.add_comment(
-            ClassifiedComment(
-                comment_id="c1",
-                content="The intro needs work",
-                impact="stage_local",
-            )
-        )
-        await notes.add_comment(
-            ClassifiedComment(
-                comment_id="c2",
-                content="Conclusion is fine",
-                impact="clarification",
-            )
-        )
-        result = await notes.get_section_feedback("intro")
-        assert "intro needs work" in result.lower()
-        assert "conclusion" not in result.lower()
+    Section-scoped feedback is addressed by ordinal path rather than matched
+    against comment text; ``tests/unit/test_reader_feedback.py`` covers the
+    route end to end.
+    """
 
-    @pytest.mark.anyio
-    async def test_no_matches_returns_empty(self, notes: PipelineNotes) -> None:
-        await notes.add_comment(
-            ClassifiedComment(
-                comment_id="c1", content="unrelated", impact="stage_local"
-            )
-        )
-        result = await notes.get_section_feedback("nonexistent")
-        assert result == ""
+    def test_the_reader_directory_is_created(self, notes: PipelineNotes) -> None:
+        assert notes.reader_dir.is_dir()
 
 
 class TestPipelineNotesBrief:

@@ -12,10 +12,11 @@ import textwrap
 from collections.abc import Iterator
 from pathlib import Path
 
-from markdown_it import MarkdownIt
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import stage_model
+from inkwell.agent.prose import markdown_blocks
+from inkwell.agent.segmenter import reader
 
 logger = logging.getLogger(__name__)
 
@@ -194,60 +195,37 @@ BLOG_PARAGRAPH_CHARS = 800
 NEWSLETTER_PARAGRAPH_SENTENCES = 3
 """Sentences past which a newsletter paragraph is halved, for email reading."""
 
-MARKDOWN = MarkdownIt()
-"""Reads content as the blocks its author wrote, so a heading is the parser's
-business rather than a '#' prefix these formatters strip by hand."""
-
-
-class MarkdownBlock(BaseModel):
-    """One top-level block of a markdown document, and what kind it is."""
-
-    kind: str = Field(description="Block type, as markdown-it names it")
-    text: str = Field(description="The block's text, without the markers around it")
-    source: str = Field(description="The block exactly as the author wrote it")
-
-    @property
-    def is_heading(self) -> bool:
-        """Whether this block is a heading rather than prose."""
-        return self.kind == "heading"
-
-
-def markdown_blocks(content: str) -> list[MarkdownBlock]:
-    """The top-level blocks `content` is written in, in document order.
-
-    A heading arrives as a heading rather than as prose that happens to start
-    with a '#', which is also what keeps a '#' inside a code fence from
-    reading as one.
-    """
-    lines = content.splitlines()
-
-    def blocks() -> Iterator[MarkdownBlock]:
-        kind = ""
-        for token in MARKDOWN.parse(content):
-            if token.type.endswith("_open"):
-                kind = token.type.removesuffix("_open")
-            elif token.type == "inline" and token.content.strip():
-                start, end = token.map if token.map else (0, len(lines))
-                yield MarkdownBlock(
-                    kind=kind,
-                    text=token.content.strip(),
-                    source="\n".join(lines[start:end]).strip(),
-                )
-
-    return list(blocks())
-
 
 def split_sentences(text: str) -> list[str]:
-    """Split prose into sentences, at the punctuation that ends one.
+    """`text` as the sentences it is written in.
 
-    Prose is not structured data and has no parser: where one sentence stops
-    and the next starts is a heuristic over punctuation, which is what this
-    pattern states.
+    Segmented rather than pattern-matched, so an abbreviation or a decimal
+    does not end a sentence, and the pieces come back carrying whatever
+    markdown they arrived with — which is what lets a formatter re-emit them.
     """
-    import re  # lup: ignore[import-re] — prose has no parser, only this heuristic
+    return [sentence.text for sentence in reader().sentences(text)]
 
-    parts = re.split(r"(?<=[.!?])\s+", text)  # lup: ignore[re-call, string-split]
-    return [part.strip() for part in parts if part.strip()]
+
+def halved_at_sentence(text: str) -> Iterator[str]:
+    """`text` as two halves, cut at the sentence boundary nearest its middle.
+
+    Yields the text unchanged when it runs to a single sentence and there is
+    no boundary to cut on.
+    """
+    sentences = split_sentences(text)
+    if len(sentences) < 2:
+        yield text
+        return
+
+    def prefix(count: int) -> str:
+        """The first `count` sentences, rejoined."""
+        return " ".join(sentences[:count])
+
+    middle = len(text) // 2
+    cut = min(range(1, len(sentences)), key=lambda n: abs(len(prefix(n)) - middle))
+    yield prefix(cut)
+    yield ""
+    yield " ".join(sentences[cut:])
 
 
 # ---------------------------------------------------------------------------
@@ -459,16 +437,7 @@ def do_format_blog(params: FormatBlogInput) -> FormatBlogOutput:
         if len(paragraph) <= BLOG_PARAGRAPH_CHARS:
             yield paragraph
             return
-        mid = len(paragraph) // 2
-        break_point = paragraph.rfind(". ", 0, mid)
-        if break_point == -1:
-            break_point = paragraph.find(". ", mid)
-        if break_point == -1:
-            yield paragraph
-            return
-        yield paragraph[: break_point + 1].strip()
-        yield ""
-        yield paragraph[break_point + 1 :].strip()
+        yield from halved_at_sentence(paragraph)
 
     def rendered() -> Iterator[str]:
         """The post under its title, each block followed by a blank line."""

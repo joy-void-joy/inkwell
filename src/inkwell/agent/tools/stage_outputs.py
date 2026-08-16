@@ -13,14 +13,15 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, Literal
+from typing import Awaitable, Callable, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from lup.mcp import LupMcpTool, ToolError, ToolResponse, mcp_response
 from lup.telemetry.metrics import collector as metrics_collector
 from lup.types import JsonObject
 
+from inkwell.agent.format_checks import DeclaredCheck
 from inkwell.agent.models import (
     Assumption,
     AssumptionsList,
@@ -28,10 +29,21 @@ from inkwell.agent.models import (
     ResearchCompilation,
     ResearchFinding,
     ResearchQuestion,
+    ResearchSource,
     ReviewFinding,
     ReviewOutput,
     SectionPlan,
     SourceQuote,
+)
+from inkwell.agent.provenance import (
+    DEFAULT_VENUE_RULES,
+    UNDATED,
+    Acquisition,
+    EvidentialRole,
+    SourceProvenance,
+    Venue,
+    VenueRules,
+    calendar_date,
 )
 
 logger = logging.getLogger(__name__)
@@ -278,31 +290,151 @@ def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
 
 
 # ---------------------------------------------------------------------------
+# Format checks a custom format declares for itself
+# ---------------------------------------------------------------------------
+
+
+class DeclaredChecks(BaseModel):
+    """The rows a run declared for a format Python does not describe."""
+
+    checks: list[DeclaredCheck] = Field(
+        default_factory=list, description="The declared rows, in declared order"
+    )
+
+
+class DeclareFormatCheckInput(BaseModel):
+    check: DeclaredCheck = Field(
+        description=(
+            "The row to declare. `kind` selects which row it is and the rest "
+            "of the fields are that row's own; every kind carries a `name` the "
+            "report prints and a `rule` — the one sentence the row measures, "
+            "which the writer is shown before drafting."
+        )
+    )
+
+
+class FormatCheckCollector:
+    """Accumulates the rows a custom format declares, persisting after each.
+
+    A format invented for one run gets the same checking a built-in one has,
+    because the rows it declares here are the same declarations Python uses.
+    """
+
+    def __init__(self, output_path: Path) -> None:
+        self.output_path = output_path
+        self.declared = DeclaredChecks()
+
+    def save(self) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text(
+            self.declared.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+
+def load_declared_checks(path: Path) -> list[DeclaredCheck]:
+    """The rows a run declared for its format, or none when it declared any.
+
+    Validated back through the same union the tool validated them into, so a
+    row that survives the round trip is a row the checker can run.
+    """
+    if not path.exists():
+        return []
+    return DeclaredChecks.model_validate_json(path.read_text(encoding="utf-8")).checks
+
+
+def make_format_check_tools(collector: FormatCheckCollector) -> list[LupMcpTool]:
+    """The tool a custom-format run declares its own checkable rules with."""
+
+    async def handle_check(inp: DeclareFormatCheckInput) -> ToolOk:
+        collector.declared.checks.append(inp.check)
+        collector.save()
+        return ToolOk()
+
+    return [
+        build_stage_tool(
+            "declare_format_check",
+            (
+                "Declare one checkable rule for this run's output format. The "
+                "built-in formats declare their rules in Python; a format "
+                "invented for this run declares them here, so its rules are "
+                "measured rather than merely stated.\n\n"
+                "Reach for this when the format description carries a rule a "
+                "machine could verify off the finished draft — a banned "
+                "phrase, a length, a bolding convention, a rhythm — or a rule "
+                "only a reader could judge, which the `judged` kind spends a "
+                "reviewer on. Each row is re-read against every draft and "
+                "reported back to the rewrite stage. Rows are advisory: they "
+                "never block a stage, and the author's voice outranks them.\n\n"
+                "Declare a row once per rule. A format whose description "
+                "carries nothing measurable needs no rows."
+            ),
+            DeclareFormatCheckInput,
+            handle_check,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Research collector + tools
 # ---------------------------------------------------------------------------
 
 
-# lup: What the researcher records about a source carries no venue and no date,
-# so nothing downstream can tell a peer-reviewed paper from a preprint from a
-# forum post. citations.py declares a SourceType, but it sits on the
-# bibliography model the rewriter builds, which is too late — the researcher
-# never sets it. Two axes need separating rather than collapsing into one score:
-# venue authority (peer-reviewed, preprint, official report, lab publication,
-# dataset, book, forum post, blog, news, market) and evidential role (primary
-# source for this claim versus commentary on it). Reader feedback shows both
-# failing independently — Yudkowsky cited for I.J. Good's thesis is a
-# primary-source failure, not an authority one — and asks for the date outright.
-# Derive venue from where the document was acquired rather than asking the agent
-# to assert it, so a forum post cannot be labelled peer-reviewed; the agent
-# overrides only with a stated reason. Diversity checks then fall out: the
-# distribution over domain, organization, author, venue, and date, per section
-# and per book. The strongest request is diversity of position, not domain — for
-# a contested claim, is every cited source on one side?
 class ResearchSourceInput(BaseModel):
+    """One source cited for one finding, recorded as what was done to get it.
+
+    Nothing here asks the agent to rate the source. The venue is computed from
+    the acquisition, and the two fields that are judgements — the evidential role
+    and an override of the derived venue — are the ones the validators below
+    refuse to accept unsupported.
+    """
+
     title: str = Field(description="Source title")
-    url: str = Field(description="Source URL, or file path for source documents")
+    acquisition: Acquisition = Field(
+        description=(
+            "How you got this document: copy the `acquisition` object out of "
+            "the tool result that produced it — `path` (which research tool), "
+            "`url` (or the file path, for the author's own source material), "
+            "and `published` where that tool reported a date. The venue is "
+            "derived from it: path='arxiv' is a preprint, "
+            "path='source_document' is the author's own material, and for "
+            "path='url_fetch' or path='exa_search' the host decides. This "
+            "records what you did, not what you think of the source."
+        )
+    )
     relevance: str = Field(description="Why this source matters")
     key_excerpt: str = Field(description="Most relevant excerpt (exact quote)")
+    role: EvidentialRole = Field(
+        description=(
+            "What this source is for the claim you cite it for. 'primary': the "
+            "claim originates here — the paper reporting the result, the "
+            "dataset holding the number, an author's own words for their own "
+            "thesis. 'commentary': this document discusses or relays a claim "
+            "that originated elsewhere, and attributed_to names whose — "
+            "Yudkowsky writing about I. J. Good's intelligence-explosion "
+            "thesis is commentary on Good, not the primary source for it. "
+            "'background': context, definition, or framing, not evidence for a "
+            "specific claim."
+        )
+    )
+    attributed_to: str = Field(
+        default="",
+        description=(
+            "Whose claim a commentary source relays — the person or work it "
+            "originates with ('I. J. Good', 'Kahneman & Tversky 1979'). "
+            "Required for role='commentary': without it nothing downstream can "
+            "see that the primary source is still missing."
+        ),
+    )
+    published: str = Field(
+        default="",
+        description=(
+            "The source's publication date, needed only where the acquisition "
+            "reported none. ISO 8601 at whatever precision the source states "
+            "('2024', '2024-03', '2024-03-14'), or 'undated' when the source "
+            "genuinely carries no date — an explicit 'undated' is what lets a "
+            "later check tell a dateless source from an unasked question."
+        ),
+    )
     locator: str = Field(
         default="",
         description=(
@@ -311,6 +443,117 @@ class ResearchSourceInput(BaseModel):
             "the source is the author's source document."
         ),
     )
+    organization: str = Field(
+        default="",
+        description=(
+            "Who published this — the journal, lab, agency, outlet, or site "
+            "('Nature', 'RAND', 'OpenAI', 'the Guardian'). Read it off the "
+            "document; leave it empty rather than inferring one from the URL. "
+            "This is what makes a section leaning on one lab's output visible "
+            "as such, so an empty field is recorded as unknown, not as spread."
+        ),
+    )
+    authors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Whose names are on the document, as it gives them ('Kahneman, D.'). "
+            "Empty where it carries no byline — an institutional report often "
+            "does not. Cite the same three authors through a whole section and "
+            "the distribution says so."
+        ),
+    )
+    venue_override: Venue | None = Field(
+        default=None,
+        description=(
+            "Override the venue derived from the acquisition, for what the "
+            "derivation cannot see: a journal paper served from an author's "
+            "personal site, a lab's report posted to a forum. Costs an "
+            "override_reason, which is recorded beside the source."
+        ),
+    )
+    override_reason: str = Field(
+        default="",
+        description=(
+            "Why the derived venue is wrong for this document, in one "
+            "sentence. Required with venue_override."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def override_states_a_reason(self) -> Self:
+        """An asserted venue costs a reason, so nothing is relabelled silently."""
+        if self.venue_override is not None and not self.override_reason.strip():
+            raise ValueError(
+                "venue_override requires override_reason — say why the venue "
+                f"derived from a {self.acquisition.path!r} acquisition is wrong "
+                "for this document."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def commentary_names_whose_claim(self) -> Self:
+        """Commentary that never says whose claim it relays hides the missing source."""
+        if self.role == "commentary" and not self.attributed_to.strip():
+            raise ValueError(
+                "role='commentary' requires attributed_to — name whose claim "
+                "this source relays. If the claim originates in this document, "
+                "the role is 'primary'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def date_is_explicit(self) -> Self:
+        """A date, or a stated `undated` — never a blank that reads as neither."""
+        recorded = self.acquisition.published or self.published
+        if not recorded:
+            raise ValueError(
+                f"A {self.acquisition.path!r} acquisition reports no publication "
+                "date, so record one in published: ISO 8601 ('2024', '2024-03', "
+                f"'2024-03-14'), or {UNDATED!r} if the source carries none."
+            )
+        if recorded != UNDATED and calendar_date(recorded) is None:
+            raise ValueError(
+                f"{recorded!r} is not a date a check can read. Use ISO 8601 "
+                f"('2024', '2024-03', '2024-03-14') or {UNDATED!r}."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def document_is_locatable(self) -> Self:
+        """A citation has to say where the excerpt is, in the author's own material."""
+        if not self.acquisition.url.strip():
+            raise ValueError(
+                "acquisition.url is required — the URL the document was fetched "
+                "from, or the file path of the author's source material."
+            )
+        if self.acquisition.path == "source_document" and not self.locator.strip():
+            raise ValueError(
+                "A source_document acquisition requires a locator — the page or "
+                "section the excerpt is on ('p. 142', '§3.2'), so a reader can "
+                "check the quote against the document."
+            )
+        return self
+
+    def recorded(self, rules: VenueRules = DEFAULT_VENUE_RULES) -> ResearchSource:
+        """This source as it is stored, with its venue derived from the acquisition."""
+        return ResearchSource(
+            title=self.title,
+            url=self.acquisition.url,
+            relevance=self.relevance,
+            key_excerpt=self.key_excerpt,
+            locator=self.locator,
+            provenance=SourceProvenance(
+                venue=self.venue_override or self.acquisition.venue(rules),
+                role=self.role,
+                published=self.acquisition.published or self.published,
+                acquired_via=self.acquisition.path,
+                domain=self.acquisition.host(),
+                organization=self.organization,
+                authors=self.authors,
+                attributed_to=self.attributed_to,
+                venue_reason=self.override_reason,
+            ),
+        )
 
 
 class RecordFindingInput(BaseModel):
@@ -336,6 +579,31 @@ class RecordFindingInput(BaseModel):
     data_points: list[str] = Field(
         default_factory=list,
         description="Specific numbers, dates, or facts found",
+    )
+
+    def recorded(self, rules: VenueRules = DEFAULT_VENUE_RULES) -> ResearchFinding:
+        """The finding as it is stored, each source's venue derived as it is built."""
+        return ResearchFinding(
+            question=self.question,
+            answer=self.answer,
+            origin=self.origin,
+            confidence=self.confidence,
+            sources=[source.recorded(rules) for source in self.sources],
+            data_points=self.data_points,
+        )
+
+
+class FindingRecorded(ToolOk):
+    """What recording a finding leaves the researcher to act on."""
+
+    provenance_gaps: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the provenance you recorded shows is missing — a claim "
+            "reached only through commentary on it, an answer resting on "
+            "background alone. The artifact keeps these, and the fact-check "
+            "reviewer reads them; close them now rather than leaving them."
+        ),
     )
 
 
@@ -378,15 +646,32 @@ class ResearchCollector:
                 logger.warning("ResearchCollector on_save failed", exc_info=True)
 
 
-def make_research_output_tools(collector: ResearchCollector) -> list[LupMcpTool]:
-    """MCP tools for the researcher to record findings incrementally."""
+def make_research_output_tools(
+    collector: ResearchCollector,
+    *,
+    venue_rules: VenueRules = DEFAULT_VENUE_RULES,
+) -> list[LupMcpTool]:
+    """MCP tools for the researcher to record findings incrementally.
 
-    async def handle_finding(inp: RecordFindingInput) -> ToolOk:
-        collector.research.findings.append(
-            ResearchFinding.model_validate(inp.model_dump())
-        )
+    ``venue_rules`` is what venue each acquisition implies; a caller whose
+    sources are not the open web passes its own table.
+    """
+
+    async def handle_finding(inp: RecordFindingInput) -> FindingRecorded:
+        finding = inp.recorded(venue_rules)
+        claims_the_document = inp.origin in ("source_document", "mixed")
+        if claims_the_document and not finding.cites_source_document():
+            raise ToolError(
+                f"origin={inp.origin!r} says this was answered from the author's "
+                "own source material, but no source records a 'source_document' "
+                "acquisition. Read the document (consult_source, find_in_source, "
+                "Read) and record the excerpt with its page or section, or record "
+                "this finding as origin='external' — an external work's wording is "
+                "not evidence of what the source document says."
+            )
+        collector.research.findings.append(finding)
         await collector.save_and_notify()
-        return ToolOk()
+        return FindingRecorded(provenance_gaps=finding.provenance_gaps())
 
     async def handle_suggestion(inp: SuggestAdditionInput) -> ToolOk:
         collector.research.suggested_additions.append(inp.suggestion)
@@ -404,8 +689,15 @@ def make_research_output_tools(collector: ResearchCollector) -> list[LupMcpTool]
             (
                 "Record a research finding for one question. Call once per "
                 "research question after investigating it. Include all "
-                "sources with URLs and key excerpts, your synthesized answer, "
-                "and confidence level. Set origin honestly: claims about the "
+                "sources with their acquisition records and key excerpts, your "
+                "synthesized answer, and confidence level. Each source carries "
+                "two independent things: its venue, which is derived from the "
+                "acquisition you paste in rather than asserted, and its role "
+                "for this claim — primary where the claim originates in that "
+                "document, commentary where it relays someone else's, naming "
+                "whose. The tool answers with any gap the record shows, such as "
+                "a thesis reached only through commentary on it. Set origin "
+                "honestly: claims about the "
                 "author's source document require origin='source_document' "
                 "with a verbatim quote and locator (page/section) from that "
                 "document — an external paper's convention is not evidence "

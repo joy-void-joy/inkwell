@@ -11,10 +11,12 @@ from urllib.parse import quote
 
 import httpx
 from httpx import QueryParams
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
+
+from inkwell.agent.provenance import Acquisition
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +117,17 @@ class FetchWikipediaOutput(BaseModel):
     section_extracted: bool = Field(
         default=False, description="True if a specific section was extracted"
     )
+
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How this article was acquired — copy it into record_finding as it stands.
+
+        An encyclopedia article is background rather than a primary source, and
+        it carries no publication date, so record_finding asks for the date the
+        revision was read, or 'undated'.
+        """
+        return Acquisition(path="wikipedia", url=self.url)
 
 
 @lup_tool(

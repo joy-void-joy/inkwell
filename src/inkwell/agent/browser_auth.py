@@ -7,6 +7,8 @@ and survive the user logging out of their personal Chrome.
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -21,6 +23,8 @@ from inkwell.devtools.setup import (
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, CDPSession, Page, Playwright
+    from playwright.async_api import ViewportSize
+    from playwright.async_api._context_manager import PlaywrightContextManager
     from pyvirtualdisplay.display import Display
 
 logger = logging.getLogger(__name__)
@@ -59,6 +63,108 @@ def browser_context_dir(profile: str | None = None) -> Path:
     return BROWSER_CONTEXTS_DIR
 
 
+class BrowserViewport(BaseModel):
+    """The window size a context renders at, where a caller needs a fixed one."""
+
+    model_config = ConfigDict(frozen=True)
+
+    width: int = 1280
+    height: int = 800
+
+    def as_size(self) -> "ViewportSize":
+        return {"width": self.width, "height": self.height}
+
+
+def require_playwright() -> "Callable[[], PlaywrightContextManager]":
+    """Playwright's entry point, or a clear error saying how to install it.
+
+    Every browser use in this project comes through here, so the missing
+    dependency is reported once and in one wording.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "playwright not installed — run: uv add playwright && "
+            "uv run playwright install chromium"
+        ) from exc
+    return async_playwright
+
+
+async def launch_context(
+    driver: "Playwright",
+    profile: str | None = None,
+    *,
+    headless: bool = True,
+    viewport: BrowserViewport | None = None,
+    env: EnvVars | None = None,
+) -> "BrowserContext":
+    """Open the profile's persistent context on an already-started driver.
+
+    The one launch site for every browser use in this project — reading
+    cookies, logging in, and rendering a page a source only serves to
+    JavaScript. They share the profile directory, so a login done once is a
+    session every later use already has.
+    """
+    context_dir = browser_context_dir(profile)
+    context_dir.mkdir(parents=True, exist_ok=True)
+    return await driver.chromium.launch_persistent_context(
+        str(context_dir),
+        headless=headless,
+        args=LAUNCH_ARGS,
+        viewport=None if viewport is None else viewport.as_size(),
+        device_scale_factor=None if viewport is None else 1,
+        env=None if env is None else {**env},
+    )
+
+
+@asynccontextmanager
+async def persistent_context(
+    profile: str | None = None,
+    *,
+    headless: bool = True,
+    viewport: BrowserViewport | None = None,
+    env: EnvVars | None = None,
+) -> AsyncIterator["BrowserContext"]:
+    """The profile's persistent context, open for the duration of a block.
+
+    What every caller that finishes with the browser before returning uses. The
+    streamed login is the exception: it hands the context to a WebSocket route
+    that outlives any block, so it drives ``launch_context`` itself and closes
+    the context in its own teardown.
+    """
+    async_playwright = require_playwright()
+    async with async_playwright() as driver:
+        context = await launch_context(
+            driver, profile, headless=headless, viewport=viewport, env=env
+        )
+        try:
+            yield context
+        finally:
+            await context.close()
+
+
+async def rendered_html(
+    url: str,
+    *,
+    profile: str | None = None,
+    timeout_ms: int = 30_000,
+    settle_ms: int = 1_500,
+) -> str:
+    """The HTML a page produces once its scripts have run.
+
+    Some sources ship an empty shell and build the article in the browser, so a
+    plain fetch of them returns navigation and nothing else. This runs the page
+    in the profile's own persistent context — the same one that holds any
+    session cookies — and returns what the DOM became.
+    """
+    async with persistent_context(profile, headless=True) as context:
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        await page.wait_for_timeout(settle_ms)
+        return await page.content()
+
+
 async def context_has_cookies(profile: str | None = None) -> bool:
     """Check whether a browser context has a valid Claude.ai session cookie."""
     ctx_dir = browser_context_dir(profile)
@@ -81,20 +187,7 @@ async def extract_cookies(profile: str | None = None) -> StringMap:
         return {}
 
     try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        logger.warning(
-            "playwright not installed — run: uv add playwright && playwright install chromium"
-        )
-        return {}
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch_persistent_context(
-            str(ctx_dir),
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        try:
+        async with persistent_context(profile) as browser:
             page = browser.pages[0] if browser.pages else await browser.new_page()
             await page.goto(
                 "https://claude.ai", wait_until="domcontentloaded", timeout=15_000
@@ -109,8 +202,9 @@ async def extract_cookies(profile: str | None = None) -> StringMap:
                     "Extracted %d cookies from persistent browser context", len(cookies)
                 )
             return cookies
-        finally:
-            await browser.close()
+    except RuntimeError:
+        logger.warning("Cannot read browser cookies", exc_info=True)
+        return {}
 
 
 async def extract_cookie_header(profile: str | None = None) -> str | None:
@@ -136,23 +230,9 @@ async def login_interactive(profile: str | None = None) -> bool:
     Returns True if the login appears successful (session cookies present).
     """
     ctx_dir = browser_context_dir(profile)
-    ctx_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        logger.error(
-            "playwright not installed — run: uv add playwright && playwright install chromium"
-        )
-        return False
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch_persistent_context(
-            str(ctx_dir),
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        try:
+        async with persistent_context(profile, headless=False) as browser:
             page = browser.pages[0] if browser.pages else await browser.new_page()
 
             had_session = any(
@@ -178,8 +258,9 @@ async def login_interactive(profile: str | None = None) -> bool:
                     logged_in = True
                     break
                 await page.wait_for_timeout(2000)
-        finally:
-            await browser.close()
+    except RuntimeError:
+        logger.error("Cannot open a login browser", exc_info=True)
+        return False
 
     if logged_in:
         logger.info("Login successful — session saved to %s", ctx_dir)
@@ -276,6 +357,7 @@ class StreamingLoginSession:
     """
 
     def __init__(self, profile: str | None = None, *, max_frames: int = 2) -> None:
+        self.profile = profile
         self.context_dir = browser_context_dir(profile)
         self.frames: asyncio.Queue[str] = asyncio.Queue(maxsize=max_frames)
         self.playwright: Playwright | None = None
@@ -291,14 +373,9 @@ class StreamingLoginSession:
         Raises ``RuntimeError`` when Playwright is unavailable so the route can
         report it to the viewer rather than failing opaquely.
         """
-        self.context_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            from playwright.async_api import Error, async_playwright
-        except ImportError as exc:
-            raise RuntimeError(
-                "playwright not installed — run: uv add playwright && "
-                "uv run playwright install chromium"
-            ) from exc
+        async_playwright = require_playwright()
+        from playwright.async_api import Error
+
         self.error_cls = Error
         self.playwright = await async_playwright().start()
         self.display = virtual_display()
@@ -306,13 +383,12 @@ class StreamingLoginSession:
         launch_env: EnvVars | None = None
         if self.display is not None:
             launch_env = {k: v for k, v in self.display.env().items()}
-        self.context = await self.playwright.chromium.launch_persistent_context(
-            str(self.context_dir),
+        self.context = await launch_context(
+            self.playwright,
+            self.profile,
             headless=self.display is None,
-            args=LAUNCH_ARGS,
-            viewport={"width": 1280, "height": 800},
-            device_scale_factor=1,
-            env={**launch_env} if launch_env is not None else None,
+            viewport=BrowserViewport(),
+            env=launch_env,
         )
         self.context.on("page", self.on_new_page)
         page = (

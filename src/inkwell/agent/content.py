@@ -26,6 +26,7 @@ ContentRole = Literal[
     "style_reference",
     "draft",
     "feedback",
+    "reader_feedback",
     "review",
 ]
 

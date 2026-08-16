@@ -21,6 +21,7 @@ from collections.abc import (
     Iterator,
 )
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 
@@ -64,14 +65,31 @@ from inkwell.agent.models import (
     WritingOutput,
 )
 from inkwell.agent.content import ContentManifest
+from inkwell.agent.diversity import (
+    DEFAULT_DIVERSITY_RULES,
+    ContestedClaim,
+    DiversityReport,
+    DiversityRules,
+    JudgedClaim,
+    OneSidedVerdict,
+    contested_claims,
+    distribution_report,
+    judged_report,
+    merge_reports,
+)
 from inkwell.agent.notes import PipelineNotes
+from inkwell.agent.reader_feedback import (
+    ReaderFeedback,
+    ReaderFeedbackTree,
+    ingest_reader_feedback,
+)
 from inkwell.agent.watcher import (
     ACKNOWLEDGE_TEMPLATES,
     PollingWatcher,
     create_comment_watcher,
     create_source_watcher,
 )
-from inkwell.agent.session import AuthorComment, CommentLedger, WritingSessionState
+from inkwell.agent.session import AuthorComment, WritingSessionState
 from inkwell.agent.stages import (
     ASSUMPTIONS_PROMPT,
     COMMENT_CLASSIFIER_PROMPT,
@@ -81,6 +99,8 @@ from inkwell.agent.stages import (
     ORCHESTRATOR_PROMPT,
     PLANNER_SYSTEM,
     MERGE_PROMPT,
+    POSITION_DIVERSITY_PROMPT,
+    READER_FEEDBACK_NOTE,
     REFINER_SYSTEM,
     RESEARCHER_PROMPT,
     REWRITER_SYSTEM,
@@ -89,8 +109,18 @@ from inkwell.agent.stages import (
     SINGLE_WRITER_PROMPT,
     SOURCE_FIDELITY_REVIEWER_PROMPT,
     STYLE_REVIEWER_PROMPT,
+    declares_own_checks,
+    format_checks_for,
+    format_key,
     get_format_guidance,
 )
+from inkwell.agent.format_checks import (
+    DeclaredCheck,
+    Judge,
+    QueryJudge,
+    run_format_checks,
+)
+from inkwell.agent.segmenter import reader
 from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import (
@@ -129,6 +159,7 @@ from inkwell.agent.tools.formats import (
     do_format_twitter,
 )
 from inkwell.agent.tools.google_docs import (
+    COMMENT_READ_FAILURES,
     CommentSpec,
     configure_session_state,
     do_create_doc,
@@ -144,6 +175,7 @@ from inkwell.agent.tools.google_docs import (
     truncate_tab_title,
 )
 from inkwell.agent.tools.research.arxiv import ARXIV_TOOLS
+from inkwell.agent.tools.research.corpus import CORPUS_TOOLS
 from inkwell.agent.tools.research.exa import EXA_TOOLS
 from inkwell.agent.tools.research.fetch import FETCH_TOOLS
 from inkwell.agent.tools.research.fred import FRED_TOOLS
@@ -151,11 +183,14 @@ from inkwell.agent.tools.research.markets import MARKET_TOOLS
 from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 from inkwell.agent.tools.stage_outputs import (
     AssumptionsCollector,
+    FormatCheckCollector,
     PlanCollector,
     PlanFile,
     ResearchCollector,
     ReviewCollector,
+    load_declared_checks,
     make_assumptions_tools,
+    make_format_check_tools,
     make_glossary_tools,
     make_note_tool,
     make_plan_tools,
@@ -510,7 +545,7 @@ def render_source_lines(notes: PipelineNotes) -> str:
         return ""
     lines = [
         "Authoritative source documents (verify claims against these via "
-        "consult_source/find_in_source or Read):"
+        "consult_source or Read):"
     ]
     for doc in docs:
         pages = f" ({doc.page_count} pages)" if doc.page_count else ""
@@ -537,6 +572,78 @@ def add_voice_refs(manifest: ContentManifest, voice_file_paths: list[str]) -> No
             manifest.add(p, "voice_analysis", name, instruction="match this voice")
         else:
             manifest.add(p, "voice_analysis", name)
+
+
+READER_SECTION_INSTRUCTION = (
+    "readers of the published text on this section — their own words, not a "
+    "summary; weigh them as evidence alongside the reviewers"
+)
+
+READER_INDEX_INSTRUCTION = (
+    "reader feedback filed one file per section, by ordinal path — open the "
+    "sections this piece covers"
+)
+
+READER_UNROUTED_INSTRUCTION = (
+    "reader feedback that named no section — read as feedback on the work at large"
+)
+
+
+def add_reader_unrouted_ref(manifest: ContentManifest, reader: ReaderFeedback) -> None:
+    """List the unrouted reader feedback, where any submission landed there."""
+    if (unrouted := reader.unrouted()) is not None:
+        manifest.add(
+            unrouted,
+            "reader_feedback",
+            "Reader feedback (no section)",
+            instruction=READER_UNROUTED_INSTRUCTION,
+        )
+
+
+def add_reader_index_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
+    """List the whole ingested set, for a stage that has no plan to address yet."""
+    reader = ReaderFeedback.for_plan(notes.reader_dir, None)
+    if (index := reader.index()) is not None:
+        manifest.add(
+            index,
+            "reader_feedback",
+            "Reader feedback index",
+            instruction=READER_INDEX_INSTRUCTION,
+        )
+    add_reader_unrouted_ref(manifest, reader)
+
+
+def add_reader_section_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
+    """List a ref per plan section readers wrote about, for a whole-draft pass.
+
+    The plan comes off the notes tree rather than the caller, so every stage
+    revising the whole piece addresses sections through one derivation. A
+    section nobody wrote about contributes no line, so the manifest carries
+    the sections that have evidence rather than a row of empty promises.
+    """
+    reader = ReaderFeedback.for_plan(
+        notes.reader_dir, notes.load_artifact("plan", ArticlePlan)
+    )
+    for entry in reader.sections():
+        manifest.add(
+            entry.path,
+            "reader_feedback",
+            f"Reader feedback — {entry.title}",
+            instruction=READER_SECTION_INSTRUCTION,
+        )
+    add_reader_unrouted_ref(manifest, reader)
+
+
+def reader_feedback_block(manifest: ContentManifest) -> str:
+    """How to weigh the reader-feedback files, where the manifest lists any.
+
+    Read off the manifest rather than tracked separately, so the guidance
+    reaches exactly the stages whose inputs it is about and cannot promise a
+    file that was never listed.
+    """
+    if not any(ref.role == "reader_feedback" for ref in manifest.refs):
+        return ""
+    return f"{READER_FEEDBACK_NOTE}\n\n"
 
 
 def directions_block(notes: PipelineNotes) -> str:
@@ -891,6 +998,7 @@ class DraftSyncer:
 def build_research_tools() -> list[LupMcpTool]:
     """Flat list of all research MCP tools (excludes fetch — now in source server)."""
     return [
+        *CORPUS_TOOLS,
         *EXA_TOOLS,
         *ARXIV_TOOLS,
         *FRED_TOOLS,
@@ -931,7 +1039,7 @@ def build_source_server(
     """MCP server for source fetching/extraction — available to ALL pipeline stages.
 
     With ``registry_provider``, also exposes the source-document tools
-    (find_in_source, consult_source, list_source_documents) bound to the
+    (consult_source, list_source_documents) bound to the
     session's source registry.
     """
     tools = [*FETCH_TOOLS, *EXTRACT_MCP_TOOLS]
@@ -1013,6 +1121,73 @@ def build_note_server(stage: str, notes_collector: list[AuthorNote]) -> ToolServ
 def build_glossary_server(glossary_path: Path) -> ToolServers:
     """Build an MCP server with the shared glossary tools bound to a file."""
     return build_output_server("glossary", make_glossary_tools(glossary_path))
+
+
+def format_checks_path(notes: PipelineNotes) -> Path:
+    """Where the rows a run declared for its own format live."""
+    return notes.artifacts_dir / "format_checks.json"
+
+
+def build_format_check_server(notes: PipelineNotes) -> ToolServers:
+    """MCP server with the tool a custom format declares its rows through."""
+    return build_output_server(
+        "formatchecks",
+        make_format_check_tools(FormatCheckCollector(format_checks_path(notes))),
+    )
+
+
+def declared_format_checks(notes: PipelineNotes) -> list[DeclaredCheck]:
+    """The rows this run declared for its format, none if it declared none.
+
+    Read from the artifact rather than passed down the stage chain, so a row
+    the planner declared reaches the writer and the rewriter alike — including
+    across a resume, where the earlier stage is not in this process.
+    """
+    return load_declared_checks(format_checks_path(notes))
+
+
+async def add_format_check_report(
+    manifest: ContentManifest,
+    notes: PipelineNotes,
+    draft: str,
+    draft_path: Path,
+    *,
+    target_format: str,
+    judge: Judge | None = None,
+) -> None:
+    """Measure the format's declared rows off a draft and list the report.
+
+    Advisory at every step. A fired row becomes a line the rewriter reads, and
+    a failure to measure at all is logged and dropped rather than raised, so
+    neither a row nor a breakage in reading one can refuse a draft or stop the
+    stage that was about to revise it.
+    """
+    checks = format_checks_for(target_format, declared_format_checks(notes))
+    if not checks:
+        return
+    try:
+        report = await run_format_checks(
+            draft,
+            checks,
+            format_key=format_key(target_format),
+            draft_path=draft_path,
+            judge=judge or QueryJudge(),
+            reader=reader(),
+        )
+    except Exception:
+        logger.exception("Format checks could not be measured — continuing without")
+        return
+    manifest.add(
+        notes.save_text_artifact("format_checks", report.render()),
+        "review",
+        "Format checks",
+        instruction=(
+            f"{len(report.fired)} of {len(report.rows)} declared rows fired — "
+            "advisory, never blocking. The author's voice outranks every row: "
+            "where one fires against how the author actually writes, keep the "
+            "author and leave the row unactioned"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1116,6 +1291,8 @@ async def plan_article(
     stage_tools = build_output_server("output", make_plan_tools(collector)).merged(
         build_note_server("plan", note_collector)
     )
+    if declares_own_checks(target_format):
+        stage_tools = stage_tools.merged(build_format_check_server(notes))
     output_servers = stage_tools.servers
     output_tool_names = stage_tools.tool_names
 
@@ -1128,8 +1305,17 @@ async def plan_article(
         else f"Suggested format: {target_format} (override if content is better "
         f"suited to another format: {format_list})"
     )
+    if declares_own_checks(target_format):
+        format_hint += (
+            "\nA format you describe yourself carries no rules this codebase "
+            "knows. Where your description states something a machine could "
+            "check off a finished draft — a banned phrase, a length, a bolding "
+            "convention, a rhythm — declare it as a row, and declare a judged "
+            "row for a rule only a reader could settle. The rewrite stage "
+            "reads what they measure."
+        )
 
-    format_guidance = get_format_guidance(target_format)
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     conversation_path = notes.text_artifact_path("conversation")
 
     manifest = ContentManifest()
@@ -1146,6 +1332,7 @@ async def plan_article(
             )
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
+    add_reader_index_refs(manifest, notes)
 
     task = (
         f"Extract a structured article plan from the source material.\n"
@@ -1160,6 +1347,7 @@ async def plan_article(
         )
     if format_guidance:
         task += f"{format_guidance}\n\n"
+    task += reader_feedback_block(manifest)
     task += (
         "Read the file, then build the plan using set_plan_header, "
         "add_section, add_research_question, and add_source_quote."
@@ -1221,6 +1409,7 @@ async def refine_plan(
     manifest = ContentManifest()
     manifest.add(plan_path, "plan", "Current plan")
     add_voice_refs(manifest, voice_file_paths or [])
+    add_reader_section_refs(manifest, notes)
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
@@ -1228,6 +1417,7 @@ async def refine_plan(
         f"Refine the article plan using the research findings.\n\n"
         f"{manifest.render()}\n"
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
+        f"{reader_feedback_block(manifest)}"
         f"Read the plan, then build the refined plan using "
         f"set_plan_header, add_section, add_research_question, and add_source_quote."
     )
@@ -1416,6 +1606,7 @@ async def write_section(
     draft_path: Path,
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
+    reader_feedback_path: Path | None = None,
     section_context: str = "",
     target_format: str = "auto",
     servers: dict[str, McpServerEntry] | None = None,
@@ -1459,14 +1650,22 @@ async def write_section(
     add_voice_refs(manifest, voice_file_paths or [])
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
+    if reader_feedback_path:
+        manifest.add(
+            reader_feedback_path,
+            "reader_feedback",
+            f"Reader feedback — {section_title}",
+            instruction=READER_SECTION_INSTRUCTION,
+        )
 
-    format_guidance = get_format_guidance(target_format)
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f'Write the section "{section_title}" for the article.\n\n'
         f"{manifest.render()}\n"
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
     )
     task += author_context_block(notes)
+    task += reader_feedback_block(manifest)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     if section_context:
@@ -1570,10 +1769,11 @@ async def write_full_draft(
     manifest.add(notes.artifact_path("plan"), "plan", "Article plan")
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
+    add_reader_section_refs(manifest, notes)
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
-    format_guidance = get_format_guidance(target_format)
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f"Write the complete piece — every section of the plan, in order, "
         f"as one coherent document.\n\n"
@@ -1582,6 +1782,7 @@ async def write_full_draft(
         f"read_finding for details.\n\n"
     )
     task += author_context_block(notes)
+    task += reader_feedback_block(manifest)
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += (
@@ -1669,7 +1870,7 @@ async def merge_sections(
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
-    format_guidance = get_format_guidance(target_format)
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f"Assemble these independently-written sections into one continuous "
         f"piece, in this order:\n{drafts_list}\n\n"
@@ -2153,6 +2354,87 @@ async def review_all(
     return list(reported())
 
 
+CITATION_DIVERSITY_ARTIFACT = "citation_diversity"
+"""Where the advisory citation rows are written for the rewrite stage to read."""
+
+
+async def judge_positions(
+    claims: list[ContestedClaim],
+    *,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> list[JudgedClaim]:
+    """Ask, per contested claim, whether every source cited for it argues one side.
+
+    One judge per claim and all of them at once: a claim's own citation set is
+    everything a verdict needs, so they share no context. A judge that fails or
+    reaches no verdict costs its own row and nothing else — the check is advisory,
+    so a missing verdict makes the report quieter rather than breaking the stage.
+    """
+
+    async def judged(claim: ContestedClaim) -> JudgedClaim | None:
+        """One claim's verdict, or nothing where the judge reached none."""
+        verdict = await query(
+            f"Judge whether the sources cited for this claim all argue the same "
+            f"side of it.\n\n{claim.render()}",
+            output_type=OneSidedVerdict,
+            model=stage_model("review"),
+            system_prompt=POSITION_DIVERSITY_PROMPT,
+            max_thinking_tokens=128_000 - 1,
+            autonomy="unattended",
+            prefix="[review:diversity] ",
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+        )
+        if verdict is None:
+            return None
+        return JudgedClaim(claim=claim, verdict=verdict)
+
+    verdicts = await asyncio.gather(
+        *(judged(claim) for claim in claims), return_exceptions=True
+    )
+
+    def reached() -> Iterator[JudgedClaim]:
+        """Every verdict that came back; a judge that failed is logged, not raised."""
+        for verdict in verdicts:
+            if isinstance(verdict, BaseException):
+                logger.error("Position-diversity judge failed: %s", verdict)
+                continue
+            if verdict is not None:
+                yield verdict
+
+    return list(reached())
+
+
+async def check_citation_diversity(
+    notes: PipelineNotes,
+    research: ResearchCompilation,
+    *,
+    plan: ArticlePlan | None = None,
+    drafts: dict[str, SectionDraft] | None = None,
+    rules: DiversityRules = DEFAULT_DIVERSITY_RULES,
+    judge: bool = True,
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+) -> DiversityReport:
+    """Both citation checks, saved where the rewrite reads them.
+
+    Advisory throughout: the report is written and returned, and nothing here
+    raises on what it found — a lean is a fact about the draft, and the stage that
+    can act on it is the one rewriting the prose. ``judge`` is what a run that
+    cannot spend a reviewer turns off; the distribution still runs, because it
+    costs only the counting.
+    """
+    computed = distribution_report(research, plan=plan, drafts=drafts, rules=rules)
+    claims = contested_claims(research, plan=plan, rules=rules) if judge else []
+    judged = await judge_positions(
+        claims, trace_logger=trace_logger, cost_accumulator=cost_accumulator
+    )
+    report = merge_reports(computed, judged_report(judged))
+    notes.save_text_artifact(CITATION_DIVERSITY_ARTIFACT, report.render())
+    return report
+
+
 class ConsolidatedFindings(BaseModel):
     """What survived the budget, and how much of it did not."""
 
@@ -2291,12 +2573,38 @@ async def rewrite_final(
                 "as corrections; they outrank other inputs on correctness"
             ),
         )
+    diversity_path = notes.text_artifact_path(CITATION_DIVERSITY_ARTIFACT)
+    if diversity_path.exists():
+        manifest.add(
+            diversity_path,
+            "review",
+            "Citation diversity",
+            instruction=(
+                "advisory — how the citations distribute, and which claims rest "
+                "on one side of an argument; nothing here is a defect to fix by "
+                "deleting a citation"
+            ),
+        )
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
+    add_reader_section_refs(manifest, notes)
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
-    format_guidance = get_format_guidance(target_format)
+    await add_format_check_report(
+        manifest, notes, draft_content, draft_path, target_format=target_format
+    )
+
+    diversity_note = (
+        "Where the citation diversity rows report a lean, or a claim whose "
+        "sources all argue one side, act on it in the prose: attribute the lean "
+        "where it stands, or say plainly that the claim rests on one camp and "
+        "name the side that is missing. Never answer a row by deleting a "
+        "citation. "
+        if diversity_path.exists()
+        else ""
+    )
+    format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     task = (
         f"Produce the final version of this piece.\n\n"
         f"Target format: {target_format}\n\n"
@@ -2304,6 +2612,7 @@ async def rewrite_final(
     if format_guidance:
         task += f"{format_guidance}\n\n"
     task += author_context_block(notes)
+    task += reader_feedback_block(manifest)
     task += (
         f"{manifest.render()}\n\n"
         f"Read the annotated draft — review findings are marked inline. "
@@ -2311,6 +2620,7 @@ async def rewrite_final(
         f"their quality while editing around them. "
         f"Apply all critical findings and worthwhile suggestions. "
         f"Use list_research + read_finding to verify corrections against research findings. "
+        f"{diversity_note}"
         f"If a style rules file is available, read it and enforce every "
         f"hard editing rule with zero remaining violations.\n\n"
         f"Write the final piece to: {output_path}\n\n"
@@ -2666,8 +2976,8 @@ class PipelineRunner:
         from lup.workspace.content_safety import configure
 
         configure(directory=self.notes.base_dir / "content")
-        if self.state.agent_ids_path is None:
-            self.state.attach_agent_ids_registry(self.notes.base_dir / "agent_ids.txt")
+        if self.state.records is None:
+            self.state.attach_records(self.notes.base_dir)
         return self.notes
 
     def source_mounts(self) -> dict[Path, str]:
@@ -3035,6 +3345,7 @@ class PipelineRunner:
         self.install_block_callback()
         self.snapshot.profile = current_settings().profile
         configure_session_state(self.state)
+        await self.ingest_reader_channel()
         await self.setup_doc()
         policy_token = session_policy.set(self.session_policy_for_run())
 
@@ -3087,13 +3398,12 @@ class PipelineRunner:
         elif snapshot.output and snapshot.output.google_doc_id:
             self.existing_doc_id = snapshot.output.google_doc_id
 
-        self.state.seen_comments = CommentLedger(handled=snapshot.seen_comment_ids)
+        self.state.seen_comments.mark_all(snapshot.seen_comment_ids)
         self.state.agent_comments.mark_all(snapshot.agent_comment_ids)
+        self.state.seen_source_comments.mark_all(snapshot.seen_source_comment_ids)
         self.ensure_notes()
+        await self.ingest_reader_channel()
         self.rehydrate_draft_files()
-        self.state.seen_source_comments = CommentLedger(
-            handled=snapshot.seen_source_comment_ids
-        )
         self.state.source_doc_id = snapshot.source_doc_id
         self.state.pending_questions = list(snapshot.pending_questions)
         if snapshot.cost_state is not None:
@@ -3162,6 +3472,7 @@ class PipelineRunner:
             session_state=self.state,
             notes=self.notes,
             plan_breaking_signal=self.plan_breaking,
+            report_unreachable=partial(self.report_unreachable, "your Google Doc"),
         )
         await self.watcher.start()
         logger.info("Comment watcher started")
@@ -3171,6 +3482,9 @@ class PipelineRunner:
                 session_state=self.state,
                 notes=self.notes,
                 plan_breaking_signal=self.plan_breaking,
+                report_unreachable=partial(
+                    self.report_unreachable, "your source document"
+                ),
             )
             await self.source_watcher.start()
             logger.info("Source document watcher started")
@@ -3235,11 +3549,19 @@ class PipelineRunner:
         the same classify-and-record path, so impact classification (and
         plan-breaking detection) does not depend on which poller sees an
         item first. Returns the number of new items ingested.
+
+        A comment is accounted for only once its note is on disk, so an
+        interruption anywhere between the poll and the record leaves it for
+        the next poll instead of dropping it.
         """
         count = 0
 
-        for comment in await self.state.get_new_author_comments():
-            await self.classify_and_record_comment(comment)
+        intake = await self.state.poll_author_comments()
+        if not intake.reached:
+            await self.report_unreachable("your Google Doc", intake.unreachable)
+        for comment in intake.comments:
+            with self.state.seen_comments.recording(comment["comment_id"]):
+                await self.classify_and_record_comment(comment)
             count += 1
 
         for text in await self.hooks.collect_author_input(self.state):
@@ -3252,6 +3574,21 @@ class PipelineRunner:
                 count += 1
 
         return count
+
+    async def report_unreachable(self, where: str, failure: str) -> None:
+        """Tell the author a document's comments could not be read, and why.
+
+        The retries are already spent by the time this runs, so the run
+        carries on rather than halting — but it says so on the surface the
+        author is watching, because an empty poll and an unreadable one are
+        the same silence to them. Every later checkpoint polls again and
+        repeats the warning until one succeeds.
+        """
+        await self.hooks.on_progress(
+            f"⚠ Could not read comments on {where} ({failure}). Anything you "
+            "left there is still unread — continuing, and trying again at the "
+            "next checkpoint."
+        )
 
     async def classify_and_record_comment(self, comment: AuthorComment) -> None:
         """Classify a GDoc comment, record it, acknowledge it on the doc."""
@@ -3291,10 +3628,11 @@ class PipelineRunner:
         classified.anchor_text = comment["anchor_text"]
         classified.reply = comment["reply"]
 
+        notes = self.ensure_notes()
         if classified.impact == "dismiss":
+            await notes.add_dismissed(classified)
             return
 
-        notes = self.ensure_notes()
         await notes.add_comment(classified)
 
         reply_text = ACKNOWLEDGE_TEMPLATES[classified.impact]
@@ -3419,16 +3757,35 @@ class PipelineRunner:
             logger.info("Plan-breaking terminal input")
             self.plan_breaking.set()
 
-    # lup: Feedback reaches a stage only from the live channels — doc comments,
-    # terminal input, tab edits — so the readers who already read the published
-    # text are unheard. The author holds a Formspree export of 574 reader
-    # submissions keyed by chapter and section, 95 of them substantive, at
-    # tmp/formspree_mdkzezkv_2026-08-05T13_56_02_export.json. Ingest it into
-    # per-section files the plan and rewrite stages read, so revising section 1.3
-    # sees the comments about 1.3 rather than a general instruction to write
-    # well. This is the evidence in front of the stage that acts on it, instead
-    # of today's themes hardened into prompt lines that go stale, and it gives
-    # every future feedback round somewhere to land.
+    async def ingest_reader_channel(self) -> None:
+        """File the configured reader-feedback export, once, at session start.
+
+        Readers of the already-published text arrive as an export rather than
+        through the live channels, so this runs before the first stage — and
+        again at the head of a resume, since a run that resumes into rewrite
+        never passes through the stages that would otherwise have read it.
+        """
+        configured = current_settings().reader_feedback_path
+        if not configured:
+            return
+        source = Path(configured).expanduser()
+        if not source.exists():
+            logger.warning("Reader feedback path does not exist: %s", source)
+            return
+
+        notes = self.ensure_notes()
+        report = ingest_reader_feedback(
+            ReaderFeedbackTree(root=notes.reader_dir), source
+        )
+        logger.info("Reader feedback: %s", report.summary())
+        await self.hooks.on_progress(f"Reader feedback: {report.summary()}")
+
+    def reader_feedback(self) -> ReaderFeedback:
+        """This run's ingested reader feedback, addressed against its plan."""
+        return ReaderFeedback.for_plan(
+            self.ensure_notes().reader_dir, self.snapshot.plan
+        )
+
     async def prepare_feedback(self, stage: str) -> Path | None:
         """Ingest new feedback and render the accumulated set to a file."""
         await self.gather_feedback()
@@ -3449,8 +3806,13 @@ class PipelineRunner:
         """
         try:
             comments = await fetch_gdoc_comments(doc_id)
-        except (RuntimeError, OSError) as exc:
-            logger.warning("Could not fetch source doc comments: %s", exc)
+        except COMMENT_READ_FAILURES as exc:
+            logger.exception("Could not read source doc comments on %s", doc_id)
+            await self.hooks.on_progress(
+                "⚠ Could not read the comments already on your source document "
+                f"({type(exc).__name__}: {exc}). Planning from the document "
+                "alone — the notes on it did not reach this run."
+            )
             return 0
 
         if not comments:
@@ -4075,6 +4437,7 @@ class PipelineRunner:
 
         feedback_path = await self.prepare_feedback("write")
         notes = self.ensure_notes()
+        reader = self.reader_feedback()
         glossary_path = notes.artifacts_dir / "glossary.json"
         seed_glossary(glossary_path, plan.conventions)
         glossary = build_glossary_server(glossary_path)
@@ -4103,6 +4466,7 @@ class PipelineRunner:
                         draft_path=sc.output_path,
                         voice_file_paths=self.snapshot.voice_file_paths,
                         feedback_path=feedback_path,
+                        reader_feedback_path=reader.for_section(section.title),
                         section_context=self.build_neighbor_context(
                             plan, section.title
                         ),
@@ -4336,6 +4700,7 @@ class PipelineRunner:
                 cost_accumulator=self.cost_accumulator,
                 light=self.light,
             )
+        await self.check_diversity()
         await self.post_author_notes()
         consolidated = consolidate_findings(findings)
         findings = consolidated.findings
@@ -4350,6 +4715,32 @@ class PipelineRunner:
         )
         await self.write_review_tab(findings)
         await self.update_overview()
+
+    async def check_diversity(self) -> None:
+        """Report how the citations distribute and where they argue one side.
+
+        Advisory: the rows are saved for the rewrite to read, and the ones naming
+        a missing side join the author notes so they reach the author's document
+        as a comment. A run without research has no citations to weigh, and a
+        light run keeps the free distribution but not the judged pass.
+        """
+        research = self.snapshot.research
+        if research is None:
+            return
+        report = await check_citation_diversity(
+            self.ensure_notes(),
+            research,
+            plan=self.snapshot.plan,
+            drafts=self.snapshot.section_drafts,
+            judge=not self.light,
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
+        self.author_notes.extend(report.author_notes())
+        await self.hooks.on_progress(
+            f"Citation diversity: {len(report.rows)} advisory row(s) from "
+            f"{len(report.tallies)} tallies, {report.judged} contested claim(s) judged"
+        )
 
     async def stage_resolve(self) -> None:
         """Answer source-answerable open questions before the rewrite.
@@ -4747,6 +5138,7 @@ class PipelineRunner:
                 )
 
         feedback_path = await self.prepare_feedback("restart")
+        reader = self.reader_feedback()
         glossary = build_glossary_server(notes.artifacts_dir / "glossary.json")
         glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
@@ -4759,6 +5151,7 @@ class PipelineRunner:
                     draft_path=sc.output_path,
                     voice_file_paths=self.snapshot.voice_file_paths,
                     feedback_path=feedback_path,
+                    reader_feedback_path=reader.for_section(section_plan.title),
                     section_context=self.build_neighbor_context(
                         plan, section_plan.title
                     ),

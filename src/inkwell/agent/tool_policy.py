@@ -34,6 +34,9 @@ RESEARCH_TOOLS: tuple[str, ...] = (
     "mcp__research__polymarket_price",
     "mcp__research__wiki_search",
     "mcp__research__fetch_wikipedia",
+    "mcp__research__corpus_overview",
+    "mcp__research__corpus_titles",
+    "mcp__research__top_up_corpus",
 )
 """The research MCP tools the research-capable stages share."""
 
@@ -63,5 +66,7 @@ def review_tool_names() -> list[str]:
             "mcp__research__exa_search",
             "mcp__research__wiki_search",
             "mcp__research__fetch_wikipedia",
+            "mcp__research__corpus_overview",
+            "mcp__research__corpus_titles",
         }
     )

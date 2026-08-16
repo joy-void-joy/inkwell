@@ -22,16 +22,16 @@ import asyncio
 import json
 import logging
 import shutil
-from collections.abc import Callable
-from configparser import ConfigParser
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Literal
 
-import sh
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from inkwell.agent.config import stage_model
 from inkwell.agent.client import query, result_text
+from inkwell.agent.provenance import Acquisition
+from inkwell.pdf import page_count
 from lup.runtime.usage import CostAccumulator
 from lup.mcp import LupMcpTool, ToolError, lup_tool
 from lup.telemetry.trace import TraceLogger
@@ -49,34 +49,20 @@ class SourceDocument(BaseModel):
     kind: Literal["pdf", "text"] = Field(description="Document type")
     page_count: int = Field(default=0, description="Number of pages (PDFs)")
 
+    @computed_field
+    @property
+    def acquisition(self) -> Acquisition:
+        """How a citation of this document was acquired — the author's own material.
+
+        The venue derived from it says exactly that: this is the source the piece
+        is about, and it is the authority for what it itself says. Its date is the
+        author's to state, so record_finding asks for it.
+        """
+        return Acquisition(path="source_document", url=self.path)
+
 
 def registry_path_for(artifacts_dir: Path) -> Path:
     return artifacts_dir / REGISTRY_FILENAME
-
-
-def pdf_page_count(pdf_path: Path) -> int:
-    """How many pages a PDF has, read from its metadata by ``pdfinfo``.
-
-    A count is not content: poppler reports it from the page tree, so a
-    scanned document answers the same as a born-digital one and a reader
-    handed the number is never told a silence it should have questioned.
-
-    ``pdfinfo`` emits ``Key: value`` lines, which is what :mod:`configparser`
-    reads once given a section to hang them under. Its labels carry spaces
-    (``Custom Metadata``, ``Page size``) and its values carry colons and
-    percent signs, so interpolation is off and duplicate keys are tolerated
-    rather than fatal — poppler is describing a document, not writing us a
-    configuration file.
-
-    ``pdfinfo`` exits 0 even on a file that is not a PDF, printing its
-    complaint to stderr, so a missing count is what has to be caught rather
-    than the exit status.
-    """
-    report = ConfigParser(interpolation=None, strict=False)
-    report.read_string(f"[pdfinfo]\n{sh.Command('pdfinfo')(str(pdf_path))}")
-    if not report.has_option("pdfinfo", "Pages"):
-        raise ValueError(f"pdfinfo reported no page count for {pdf_path}")
-    return report.getint("pdfinfo", "Pages")
 
 
 def build_source_registry(
@@ -90,43 +76,25 @@ def build_source_registry(
     """
     sources_dir = artifacts_dir / "sources"
     sources_dir.mkdir(parents=True, exist_ok=True)
-    documents: list[SourceDocument] = []
-    for raw in source_paths:
-        original = Path(raw).expanduser()
-        if not original.is_file():
-            continue
-        path = sources_dir / original.name
-        if path.resolve() != original.resolve():
-            shutil.copy2(original, path)
-        label = path.stem
-        if path.suffix.lower() == ".pdf":
-            try:
-                page_count = pdf_page_count(path)
-            except (sh.ErrorReturnCode, sh.CommandNotFound, OSError, ValueError):
-                logger.warning(
-                    "pdfinfo could not count the pages of %s; registering it "
-                    "without page windows, so readers take it whole",
-                    path,
-                    exc_info=True,
-                )
-                page_count = 0
-            documents.append(
-                SourceDocument(
-                    label=label,
-                    path=str(path.resolve()),
-                    kind="pdf",
-                    page_count=page_count,
-                )
-            )
-        else:
-            documents.append(
-                SourceDocument(
-                    label=label,
-                    path=str(path.resolve()),
-                    kind="text",
-                )
+
+    def registered() -> Iterator[SourceDocument]:
+        """Each source path that exists, copied in beside the run and described."""
+        for raw in source_paths:
+            original = Path(raw).expanduser()
+            if not original.is_file():
+                continue
+            path = sources_dir / original.name
+            if path.resolve() != original.resolve():
+                shutil.copy2(original, path)
+            is_pdf = path.suffix.lower() == ".pdf"
+            yield SourceDocument(
+                label=path.stem,
+                path=str(path.resolve()),
+                kind="pdf" if is_pdf else "text",
+                page_count=page_count(path) if is_pdf else 0,
             )
 
+    documents = list(registered())
     registry = registry_path_for(artifacts_dir)
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(
@@ -197,6 +165,12 @@ class ConsultSourceInput(BaseModel):
 class ConsultSourceOutput(BaseModel):
     answer: str = Field(description="Verbatim quotes with page numbers + synthesis")
     label: str = Field(description="Document consulted")
+    acquisition: Acquisition = Field(
+        description=(
+            "How this document was acquired — copy it into record_finding, "
+            "with the page number from the answer as the locator"
+        )
+    )
 
 
 class ListSourceDocumentsInput(BaseModel):
@@ -281,7 +255,9 @@ def make_source_consult_tools(
                 "The reader produced no answer; retry with a narrower question "
                 "or an explicit page range."
             )
-        return ConsultSourceOutput(answer=answer, label=doc.label)
+        return ConsultSourceOutput(
+            answer=answer, label=doc.label, acquisition=doc.acquisition
+        )
 
     @lup_tool(
         "List the source documents registered for this session, with labels, "

@@ -74,12 +74,30 @@ PDF_BYTES_SAMPLE = b"%PDF-1.4\ntrailer<</Root 1 0 R>>\n"
 
 
 def one_page_pdf() -> bytes:
-    """A real one-page PDF, so reading its page count exercises the real path."""
-    import pymupdf
+    """A real one-page PDF, so reading its page count exercises the real path.
 
-    with pymupdf.open() as document:
-        document.new_page()
-        return bytes(document.tobytes())
+    Hand-built rather than produced by a library: nothing in this project
+    writes PDFs, so a fixture that needed one would be a dependency carried
+    for a test alone.
+    """
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>",
+    ]
+    body = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for number, payload in enumerate(objects, start=1):
+        offsets.append(len(body))
+        body += f"{number} 0 obj".encode() + payload + b"endobj\n"
+    xref_at = len(body)
+    body += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for offset in offsets:
+        body += f"{offset:010d} 00000 n \n".encode()
+    body += (
+        f"trailer<</Size {len(objects) + 1}/Root 1 0 R>>\nstartxref\n{xref_at}\n%%EOF\n"
+    ).encode()
+    return bytes(body)
 
 
 class FixturePage(BaseModel):

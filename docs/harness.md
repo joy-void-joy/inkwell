@@ -402,6 +402,30 @@ for the cache. Personal trust state, credentials, active run state, and cache
 contents are never generated and never committed. Review hook trust with the
 native hooks surface after generation.
 
+### Where a profile comes from
+
+A profile names one account and the configuration home it runs under, and which
+origin holds them is the project's to choose. A project that keeps accounts of
+its own keeps one directory per name — `.lup/profiles/<name>/`, with the Claude
+home at `claude-config/` inside it — so a name resolves inside the checkout
+rather than against anything under the operator's home, and `.lup` already being
+ignored is what keeps a login out of a commit. A project that keeps none falls
+back to the personal registry at `~/.lup/profiles.json`, whose names are
+registered by hand and each carry wherever its home already lives.
+
+`harness profile` and `setup profile` curate whichever origin the project
+supplied — `list`, `add`, `use`, `remove` — and `harness claude --profile`
+selects one for a single launch. Naming none selects the active profile; naming
+none with none active leaves whatever home the surrounding environment already
+selected, so a session launched from inside another stays on the account it was
+started under. A name no origin answers to is refused with the roster that would
+have answered, at the launcher as well as at the command tree.
+
+A directory profile's home is derived from its name, so `add --config-dir`
+pointing elsewhere is refused, and `remove` says to remove the directory rather
+than forgetting it: the directory is the profile and it holds the login. To
+point one at a home that already exists, symlink its `claude-config` at it.
+
 ### Workspace trust, and the profile it is recorded against
 
 Claude Code keeps workspace trust in its user-level configuration document,

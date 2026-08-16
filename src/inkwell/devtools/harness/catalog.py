@@ -93,9 +93,13 @@ def declared_hook_set() -> HookSet:
     return portable_harness().declared_hooks
 
 
-WORKFLOW = WorkflowSpec(branches=["main", "dev"])
+WORKFLOW = WorkflowSpec(branches=["main", "dev"], system_packages=["poppler-utils"])
 """Inkwell's gate: `dev` integrates and `main` carries what has landed, so
-both deserve a run of their own."""
+both deserve a run of their own.
+
+poppler is what reads a PDF's page count, and no lock file installs it — a
+runner without it registers every PDF with no pages, which surfaces as a
+test asserting a count several steps from the cause."""
 
 
 RETIRED_RULES = RuleSelection(

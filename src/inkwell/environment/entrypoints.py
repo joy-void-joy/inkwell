@@ -977,8 +977,22 @@ REVISE_INSTRUCTION = """\
 Revise the draft above. Rewrite it for clarity and currency: sharpen what is \
 vague, cut what does not earn its place, and bring every fact, figure, and \
 reference up to date. Keep the author's voice, argument, and structure — this is \
-a revision of their piece, not a new one."""
-"""What the revise entry point always asks for, beside the draft it is given."""
+a revision of their piece, not a new one.
+
+Plan it as the piece it already is: its sections are the draft's sections, and \
+its research questions are the draft's own claims asked again — for every fact, \
+figure, and citation the draft rests on, ask whether it still holds and whether \
+anything has superseded it. A revision that only re-proses a stale claim has \
+failed at the thing it was for."""
+"""What the revise entry point always asks for, beside the draft it is given.
+
+Carrying the currency check here rather than in a stage is what keeps revise a
+declaration: the planner reads it through the ordinary source path, so no stage
+had to learn which entry point launched the run. The research questions follow
+from the draft's own citations because this says to derive them that way —
+which is also why revise skips no stage, since research is where that check is
+actually spent.
+"""
 
 
 WRITE = WriteEntryPoint(
@@ -1040,13 +1054,17 @@ Examples:
     inkwell revise draft.md
     inkwell revise "https://docs.google.com/document/d/abc123/edit\"""",
     standing_instruction=REVISE_INSTRUCTION,
-    # lup: defer: revise skips no stage yet. Its concern asks for extraction
+    # lup: solved: revise skips no stage yet. Its concern asks for extraction
     # and planning-from-scratch to be skipped, but a draft may be a Doc, a
     # URL, or a file — `stage_extract` is what turns those into text — and
     # `stage_research` raises without a plan, so skipping both leaves a run
     # that cannot complete. What a revision should do instead of planning
     # afresh is the open question; the standing instruction already tells the
     # planner to keep the author's structure.
+    # Settled: revise skips nothing, and the standing instruction is what
+    # makes it a revision — it reaches the planner through the ordinary
+    # source path, telling it to keep the author's structure and to question
+    # the draft's own claims for currency.
     parameters=[
         DRAFT,
         REFS,

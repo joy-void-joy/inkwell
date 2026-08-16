@@ -23,7 +23,7 @@ import json
 import logging
 import shutil
 from collections.abc import Callable
-from email import message_from_string
+from configparser import ConfigParser
 from pathlib import Path
 from typing import Literal
 
@@ -61,16 +61,22 @@ def pdf_page_count(pdf_path: Path) -> int:
     scanned document answers the same as a born-digital one and a reader
     handed the number is never told a silence it should have questioned.
 
-    ``pdfinfo`` emits ``Key: value`` lines, which is the header grammar
-    :mod:`email` already parses — the labels carry spaces and the values
-    carry colons, so reading them by hand would be re-deriving a parser
-    that ships with the language.
+    ``pdfinfo`` emits ``Key: value`` lines, which is what :mod:`configparser`
+    reads once given a section to hang them under. Its labels carry spaces
+    (``Custom Metadata``, ``Page size``) and its values carry colons and
+    percent signs, so interpolation is off and duplicate keys are tolerated
+    rather than fatal — poppler is describing a document, not writing us a
+    configuration file.
+
+    ``pdfinfo`` exits 0 even on a file that is not a PDF, printing its
+    complaint to stderr, so a missing count is what has to be caught rather
+    than the exit status.
     """
-    report = message_from_string(str(sh.Command("pdfinfo")(str(pdf_path))))
-    pages = report["Pages"]
-    if pages is None:
+    report = ConfigParser(interpolation=None, strict=False)
+    report.read_string(f"[pdfinfo]\n{sh.Command('pdfinfo')(str(pdf_path))}")
+    if not report.has_option("pdfinfo", "Pages"):
         raise ValueError(f"pdfinfo reported no page count for {pdf_path}")
-    return int(pages)
+    return report.getint("pdfinfo", "Pages")
 
 
 def build_source_registry(

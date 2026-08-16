@@ -81,9 +81,15 @@ class TestTextbookFormat:
         assert any("teach from" in c.rule or "teach from" in c.question for c in judged)
 
     def test_reaches_the_cli_format_keys(self) -> None:
-        from inkwell.environment.cli.__main__ import FORMAT_HELP
+        """The CLI's help is derived from the format roster, not restated.
 
-        assert "textbook" in FORMAT_HELP
+        Asserted on the declaration the command file is generated from: a
+        format added to OUTPUT_FORMATS reaches `--format` by being in the
+        roster, so there is no second list here that could fall behind.
+        """
+        from inkwell.environment.entrypoints import TARGET_FORMAT
+
+        assert "textbook" in TARGET_FORMAT.help
         assert "textbook" in FORMAT_KEYS
 
     async def test_reaches_the_formats_endpoint(self) -> None:

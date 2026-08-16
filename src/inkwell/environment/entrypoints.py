@@ -586,6 +586,28 @@ class EntryPoint(BaseModel):
     parameters: list[EntryPointParameter] = Field(
         description="Every parameter this entry point takes, on any surface"
     )
+    skipped_stages: list[str] = Field(
+        default=[],
+        description=(
+            "Backbone stages this entry point's runs do not perform. Declared "
+            "here so the pipeline reads one list, rather than each stage "
+            "growing a conditional about which entry point launched it — a "
+            "second entry point skipping the same stage would otherwise have "
+            "to find every one of them. Empty for one that skips nothing, and "
+            "for one continuing a saved run, which takes the stages it left"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def skips_name_real_stages(self) -> "EntryPoint":
+        """Refuse a skip naming no stage, which would silently skip nothing."""
+        unknown = [s for s in self.skipped_stages if s not in PIPELINE_STAGES]
+        if unknown:
+            raise ValueError(
+                f"{self.name} skips {', '.join(unknown)}, which name no stage; "
+                f"the stages are {', '.join(PIPELINE_STAGES)}"
+            )
+        return self
 
     @property
     def command_parameters(self) -> list[EntryPointParameter]:
@@ -1018,6 +1040,13 @@ Examples:
     inkwell revise draft.md
     inkwell revise "https://docs.google.com/document/d/abc123/edit\"""",
     standing_instruction=REVISE_INSTRUCTION,
+    # lup: defer: revise skips no stage yet. Its concern asks for extraction
+    # and planning-from-scratch to be skipped, but a draft may be a Doc, a
+    # URL, or a file — `stage_extract` is what turns those into text — and
+    # `stage_research` raises without a plan, so skipping both leaves a run
+    # that cannot complete. What a revision should do instead of planning
+    # afresh is the open question; the standing instruction already tells the
+    # planner to keep the author's structure.
     parameters=[
         DRAFT,
         REFS,

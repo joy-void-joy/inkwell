@@ -103,4 +103,5 @@ async def run_declared_session(
             cost_accumulator=cost_accumulator,
             stop_after=STOP_AFTER.read(values),
             light=LIGHT.read(values),
+            skipped_stages=entry_point.skipped_stages,
         )

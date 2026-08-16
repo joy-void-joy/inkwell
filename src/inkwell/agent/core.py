@@ -179,6 +179,7 @@ async def run_session(
     cost_accumulator: CostAccumulator | None = None,
     stop_after: str | None = None,
     light: bool = False,
+    skipped_stages: list[str] | None = None,
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
@@ -190,6 +191,8 @@ async def run_session(
       discarding their prior output rather than resuming an interrupted agent
     - stop_after: Pause cleanly once this stage finishes (fresh run or resume),
       leaving a checkpoint to resume from after the author reviews the Doc
+    - skipped_stages: Backbone stages this run does not perform, read off the
+      entry point that launched it rather than decided stage by stage
     """
     if session_id is None:
         session_id = resume_session_id or uuid.uuid4().hex[:16]
@@ -247,6 +250,7 @@ async def run_session(
                 cost_accumulator=cost_acc,
                 stop_after=stop_after,
                 light=light,
+                skipped_stages=skipped_stages or [],
             )
             output = await runner.run_from(snapshot, restart=bool(restart_from_stage))
         else:
@@ -262,6 +266,7 @@ async def run_session(
                 cost_accumulator=cost_acc,
                 stop_after=stop_after,
                 light=light,
+                skipped_stages=skipped_stages or [],
             )
     finally:
         setup.trace_logger.save()

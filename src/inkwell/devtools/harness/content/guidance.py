@@ -141,6 +141,7 @@ uv run lup-devtools trace show <session_id>
         ),
         *conventions.PLAN_AT_AGENT_SPEED,
         *conventions.AGENT_VOCABULARY,
+        *conventions.THE_GATES,
         models.TextPart(
             text=r"""## Development Workflow
 
@@ -175,21 +176,13 @@ Work in a **git worktree**, not a branch switched in place, and never commit _co
 | `meta` | The harness declaration and what it generates |
 | `data` | Generated data and outputs |
 
-### Editing Style
-
-**Prefer small, atomic edits.** The edit hook auto-allows a change block of at most three "real" changed lines. `docs/permissions.md` carries what counts as real, and which gates stay explicit approvals in every mode.
-
-- Split large changes into multiple small edits (<=3 real lines per Edit call)
-- Separate concerns — imports in one edit, logic in another
-- Use `rename_symbol` for identifier renames instead of `Edit` with `replace_all`
-
 ---
 
 ## Code Conventions
 
-### Primary Libraries
+Build on claude-agent-sdk and pydantic, with pydantic-settings for configuration rather than dotenv; `docs/conventions.md` names each library and what it is for, and puts each typed form beside the raw dict it replaces — including tool inputs, which are BaseModel classes with `Field(description=...)` that give both the `@tool` schema and the validation.
 
-Build on claude-agent-sdk and pydantic, with pydantic-settings for configuration rather than dotenv; `docs/conventions.md` names each library and what it is for.
+Use existing Python libraries from PyPI before writing raw HTTP requests. Don't rebuild the wheel.
 
 ### Model Selection
 
@@ -197,13 +190,8 @@ Default to the **strongest** tier for the main agent, every subagent, reviewer, 
 
 """
         ),
-        *conventions.TYPE_SAFETY,
         models.TextPart(
-            text=r"""### Tool Input Schemas
-
-Define tool inputs as BaseModel classes with `Field(description=...)`, and take both the `@tool` schema and the validation from that model. `docs/conventions.md` puts each form beside the raw dict it replaces.
-
-### Error Handling
+            text=r"""### Error Handling
 
 **MCP tools:** Return `{"content": [...], "is_error": True}` for recoverable errors. Log with `logger.exception()`. Include actionable messages.
 
@@ -211,27 +199,12 @@ Define tool inputs as BaseModel classes with `Field(description=...)`, and take 
 
 **Never silently swallow errors** — handle them meaningfully or let them propagate.
 
-### Structured Data, Not Strings
-
-If you're reaching for `re`, `.replace()`, `.split()`, or string slicing to process structured data, something is wrong. `docs/conventions.md` names the parser to reach for, per format.
-
-`import re` is a code smell — look for the structured API first.
-
-### Standard Libraries
-
-Use existing Python libraries from PyPI before writing raw HTTP requests. Don't rebuild the wheel.
-
-### Code as Documentation
-
-The codebase should read as a **monolithic source of truth** — understandable without knowledge of its history.
-
-**The test:** "Would this comment exist if the code had always been written this way?" If no — don't add it.
-
-- Never reference what code used to do or explain modifications you made
-- Never use "now", "new", "updated", "fixed", or "changed" in comments
-- Use commit messages for change history, not code comments
-
-### Inline `# lup:` Notes
+"""
+        ),
+        *conventions.DESIGN_PRINCIPLES,
+        *conventions.SANCTIONED_EXCEPTIONS,
+        models.TextPart(
+            text=r"""### Inline `# lup:` Notes
 
 A `# lup:` (or `// lup:`) comment is **actionable review feedback** left in the code for the agent to address. A note that runs to several lines carries the marker on its **first line only**, continuing with bare `#` comments — every `# lup:` line starts a new note, so repeating the marker turns one concern into a note per line, and the resolver then plans each fragment separately. Four flavors, and only the removal rules differ:
 
@@ -240,7 +213,7 @@ A `# lup:` (or `// lup:`) comment is **actionable review feedback** left in the 
 | `# lup: <text>` — open feedback | **denied**; resolve it into a claim instead |
 | `# lup: solved: <text>` — a claim you addressed it | **denied**; only the verify-solved review pass retires one |
 | `# lup: defer: <text>` — parked work (§ Deferred Work) | **denied** while parked |
-| `# lup: ignore[<rule>]` — an anti-pattern hatch (§ Type Safety), not feedback | fine once the violation is gone |
+| `# lup: ignore[<rule>]` — the rule-checker hatch (§ The Gates You Will Meet), not feedback | fine once the violation is gone |
 
 Resolve open feedback by fixing what it points at, or, for a question, by answering it definitively in the code, the docs, or a recorded user decision. Then rewrite the marker as **`# lup: solved: <the note's original words>`**, text unchanged, so the claim sits beside what it claims to fix and can be checked against what was asked. `docs/contributing.md` carries the full lifecycle (use """
         ),
@@ -254,8 +227,6 @@ Resolve open feedback by fixing what it points at, or, for a question, by answer
 
 """
         ),
-        *conventions.NO_BARREL_FILES,
-        *conventions.NO_PRIVATE_PREFIXES,
         models.TextPart(
             text=r"""---
 
@@ -283,18 +254,11 @@ Run `uv run lup-devtools --help` for the command tree. `lup-devtools harness gen
 
 Permissions come from the canonical semantic policies in `lup.policy` and the application-owned `HookSet` in `devtools/harness/catalog.py`. Harness generation compiles one hermetic dispatcher and runtime for the native plugin. Never edit generated dispatcher or runtime files.
 
-Every shell command, URL scope, and edit in a batch is classified. Segments join deny > ask > defer > allow, and malformed input fails conservatively. `docs/permissions.md` carries the full lattice — shell vocabulary, `$(...)` recursion, write targets, fetch scopes, and edit gates. You rarely need to read it first: a denial names what tripped and how to recover.
-
-**Two markers change a decision, so keep them in mind before you are stopped:**
-
-- `# lup: escalate: <why>` as the leading line of a shell command promotes a classified deny or ask into an approval question carrying that reason.
-- `# lup: ignore[<rule-id>]` on the offending line suppresses exactly that anti-pattern, and no other.
-
-Use """
+Change the policy those gates enforce with """
         ),
         models.SkillInvocation(plugin="lup", skill="hooks"),
         models.TextPart(
-            text=r""" to change the canonical policy inputs, regenerate, and run the shared fixture suite. `settings.json` holds only native settings outside this semantic policy boundary.
+            text=r""", which edits the canonical policy inputs, regenerates the plugin, and runs the shared fixture suite. `settings.json` holds only native settings outside this semantic policy boundary.
 
 ### Code Intelligence
 

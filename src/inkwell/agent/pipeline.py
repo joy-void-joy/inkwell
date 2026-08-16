@@ -2901,6 +2901,7 @@ class PipelineRunner:
         cost_accumulator: CostAccumulator | None = None,
         stop_after: str | None = None,
         light: bool = False,
+        skipped_stages: list[str] | None = None,
     ) -> None:
         self.sources = sources
         self.refs = refs or []
@@ -2914,6 +2915,7 @@ class PipelineRunner:
         self.hooks = listener or PipelineListener()
         self.stop_after = validate_checkpoint_stage(stop_after)
         self.explicit_light = light
+        self.skipped_stages = skipped_stages or []
 
         if cost_accumulator is None:
             cost_accumulator = CostAccumulator()
@@ -2969,9 +2971,15 @@ class PipelineRunner:
 
         Light runs trim the heavy stages to LIGHT_STAGES; the fresh run and the
         resume loop both read the sequence here so they stay in lockstep.
+
+        What the launching entry point declared it does not do is dropped here
+        too, which is the only place a stage is left out — a revise run skips
+        extraction and planning because its declaration says so, not because
+        either stage learned to recognise one.
         """
         backbone = LIGHT_STAGES if self.light else DISPLAY_STAGES
-        return ["preprocess", *backbone]
+        kept = [stage for stage in backbone if stage not in self.skipped_stages]
+        return ["preprocess", *kept]
 
     def ensure_notes(self) -> PipelineNotes:
         """Return notes, creating a temp dir if needed."""
@@ -5638,6 +5646,7 @@ async def run_pipeline(
     cost_accumulator: CostAccumulator | None = None,
     stop_after: str | None = None,
     light: bool = False,
+    skipped_stages: list[str] | None = None,
 ) -> WritingOutput:
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
@@ -5652,5 +5661,6 @@ async def run_pipeline(
         cost_accumulator=cost_accumulator,
         stop_after=stop_after,
         light=light,
+        skipped_stages=skipped_stages,
     )
     return await runner.run()

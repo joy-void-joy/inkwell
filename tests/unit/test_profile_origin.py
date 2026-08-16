@@ -67,7 +67,12 @@ def test_the_environment_still_wins_over_the_recorded_selection(
 
 
 def test_an_unknown_profile_is_a_loud_error(project: Path) -> None:
-    with pytest.raises(KeyError, match="unknown inkwell profile 'ghost'"):
+    """The directory formats the refusal, so every caller reads one wording.
+
+    Still a KeyError, which is what this origin raises, so the store did not
+    have to learn a new type to be reported well.
+    """
+    with pytest.raises(KeyError, match="unknown profile 'ghost'"):
         inkwell_profile_directory().launch_home("ghost")
 
 

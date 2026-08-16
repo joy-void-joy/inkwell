@@ -10,14 +10,14 @@ no second list to register a profile in, and so none to fall out of step.
 
 from pathlib import Path
 
-from lup.runtime.profiles import ProfileDirectory, ProfileStore
+from lup.runtime.profiles import ProfileDirectory, ProfileNames, ProfileRegistrar
 
 import inkwell.agent.config as config
 import inkwell.devtools.setup as setup
 from inkwell.agent.client import PROVIDER_LOGIN
 
 
-class InkwellProfileStore(ProfileStore):
+class InkwellProfileStore(ProfileNames, ProfileRegistrar):
     """The project's profile directories, answered as named accounts."""
 
     def known(self, name: str) -> str:
@@ -73,4 +73,5 @@ class InkwellProfileStore(ProfileStore):
 
 def inkwell_profile_directory() -> ProfileDirectory:
     """The profile surface every inkwell entry point selects through."""
-    return ProfileDirectory(InkwellProfileStore(), PROVIDER_LOGIN)
+    store = InkwellProfileStore()
+    return ProfileDirectory(store, store, PROVIDER_LOGIN)

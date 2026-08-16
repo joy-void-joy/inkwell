@@ -31,7 +31,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from inkwell.corpus.discovery import DiscoveryOutcome
 from inkwell.corpus.quality import QualityReport
-from inkwell.corpus.registry import Authority, SourceDeclaration
+from inkwell.agent.provenance import Venue
+from inkwell.corpus.registry import SourceDeclaration
 from inkwell.corpus.tags import DocumentTags
 
 logger = logging.getLogger(__name__)
@@ -163,7 +164,7 @@ class SourceShard(BaseModel):
     display_name: str = ""
     organization: str = ""
     venue: str = ""
-    authority: Authority = "institute"
+    authority: Venue = "lab_publication"
     active: bool = True
     updated_at: str = ""
     crawl_degraded: bool = False

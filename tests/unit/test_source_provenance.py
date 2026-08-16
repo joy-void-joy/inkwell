@@ -9,7 +9,7 @@ artifact instead of leaving it for a reviewer to catch.
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import arxiv
 import pytest
@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from inkwell.agent.models import ResearchCompilation
 from inkwell.agent.provenance import (
+    PATH_VENUES,
     UNDATED,
     Acquisition,
     DomainVenue,
@@ -27,6 +28,7 @@ from inkwell.agent.provenance import (
     Venue,
     VenueRules,
 )
+from inkwell.corpus.registry import DECLARED_SOURCES, corpus_host_venues
 from inkwell.agent.tools.citations import BibliographyEntry, do_format_bibliography
 from inkwell.agent.tools.query_artifacts import make_query_tools
 from inkwell.agent.tools.research.arxiv import FetchArxivOutput, result_to_paper
@@ -169,6 +171,34 @@ class TestVenueDerivedFromAcquisition:
         data = Acquisition(path="url_fetch", url="https://data.worldbank.org/ind/X")
         assert reports.venue() == "official_report"
         assert data.venue() == "dataset"
+
+    def test_a_corpus_document_derives_its_venue_like_any_other(self) -> None:
+        """The corpus is a research path, so its documents carry an acquisition.
+
+        Without this a researcher citing a corpus document had no record to
+        derive from and had to assert a venue by hand — the exact thing venue
+        derivation exists to prevent.
+        """
+        rules = VenueRules(by_host=corpus_host_venues())
+        official = Acquisition(path="corpus", url="https://www.aisi.gov.uk/work/x")
+        lab = Acquisition(path="corpus", url="https://www.anthropic.com/research/y")
+
+        assert official.venue(rules) == "official_report"
+        assert lab.venue(rules) == "lab_publication"
+
+    def test_the_corpus_path_settles_no_venue_of_its_own(self) -> None:
+        """A shelf holding many kinds cannot settle one venue for all of them.
+
+        Like url_fetch and exa_search, the host decides — which is what lets
+        one corpus hold a government report beside a lab's own write-up.
+        """
+        assert "corpus" not in {known.path for known in PATH_VENUES}
+
+    def test_a_source_declaration_speaks_the_venue_vocabulary(self) -> None:
+        """One vocabulary, so nothing has to be kept in agreement with it."""
+        venues = get_args(Venue.__value__)
+
+        assert all(entry.authority in venues for entry in DECLARED_SOURCES)
 
     def test_the_rules_are_a_caller_s_to_replace(self) -> None:
         internal = VenueRules(

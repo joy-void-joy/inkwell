@@ -7,8 +7,17 @@ entry here is a few lines rather than a module.
 
 Declaring venue and authority here is what lets a citation *derive* its
 authority instead of asserting one per claim: the writer already knows that a
-document under ``anthropic`` is first-party from the lab it describes, and that
-one under ``aisi`` is a government institute, because the source said so once.
+document under ``anthropic`` is a lab publication and one under ``aisi`` an
+official report, because the source said so once.
+
+That standing is spelled in :data:`~inkwell.agent.provenance.Venue`, the same
+vocabulary every other acquisition path is judged in. A list of its own here
+would be a second table to keep in agreement with that one — what
+``provenance``'s own docstring rules out — and the disagreement would surface
+as a corpus document cited with a standing no other path could have given it.
+Whether a source describes its own work or somebody else's is the other axis,
+``EvidentialRole``, and belongs per citation rather than per source: a lab is
+the primary source for its own results and commentary on everyone else's.
 
 ``active`` is honesty, not a bug. A source can be worth tracking before its
 enumeration is proven, and marking it inactive says "declared, not yet swept"
@@ -18,10 +27,9 @@ either declared, or in ``DROPPED_SOURCES`` with the reason it is not a corpus
 source at all.
 """
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
 
+from inkwell.agent.provenance import DomainVenue, Venue
 from inkwell.corpus.discovery import (
     Avenue,
     ListingAvenue,
@@ -41,16 +49,6 @@ from inkwell.corpus.tags import (
     organization_term,
 )
 
-type Authority = Literal["first-party", "government", "institute", "independent"]
-"""What kind of standing a source's documents have.
-
-- ``first-party`` — the organization describing its own work, which is the
-  strongest evidence of what it did and the weakest of whether that was wise.
-- ``government`` — a public body publishing in an official capacity.
-- ``institute`` — a research organization publishing about others' work.
-- ``independent`` — an individual or unaffiliated venue.
-"""
-
 
 class SourceDeclaration(BaseModel):
     """One tracked source: where it publishes, and what its word is worth."""
@@ -61,7 +59,13 @@ class SourceDeclaration(BaseModel):
     display_name: str = Field(description="How the source is named to a reader")
     organization: str = Field(description="Who publishes it")
     venue: str = Field(description="The publication venue a citation should name")
-    authority: Authority = Field(description="What kind of standing its word has")
+    authority: Venue = Field(
+        description=(
+            "What kind of thing this source publishes, in the same vocabulary "
+            "every other acquisition path is judged in — so a citation derives "
+            "its standing here instead of asserting one"
+        )
+    )
     hosts: tuple[str, ...] = Field(
         default=(), description="Hosts whose documents belong to this source"
     )
@@ -140,7 +144,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="UK AI Security Institute",
         organization="UK AI Security Institute",
         venue="AISI Research",
-        authority="government",
+        authority="official_report",
         hosts=("aisi.gov.uk",),
         avenues=(
             SitemapAvenue(
@@ -162,7 +166,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Anthropic",
         organization="Anthropic",
         venue="Anthropic Research",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("anthropic.com",),
         avenues=(
             SitemapAvenue(
@@ -189,7 +193,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Apollo Research",
         organization="Apollo Research",
         venue="Apollo Research",
-        authority="institute",
+        authority="lab_publication",
         hosts=("apolloresearch.ai",),
         avenues=(
             SitemapAvenue(
@@ -220,7 +224,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Epoch AI",
         organization="Epoch AI",
         venue="Epoch AI",
-        authority="institute",
+        authority="lab_publication",
         hosts=("epoch.ai",),
         avenues=(
             SitemapAvenue(
@@ -252,7 +256,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="GovAI (Centre for the Governance of AI)",
         organization="Centre for the Governance of AI",
         venue="GovAI",
-        authority="institute",
+        authority="lab_publication",
         tags=(GOVERNANCE,),
         hosts=("governance.ai",),
         avenues=(
@@ -284,7 +288,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Institute for AI Policy and Strategy",
         organization="Institute for AI Policy and Strategy",
         venue="IAPS",
-        authority="institute",
+        authority="lab_publication",
         tags=(GOVERNANCE,),
         hosts=("iaps.ai",),
         avenues=(
@@ -303,7 +307,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="METR",
         organization="METR",
         venue="METR",
-        authority="institute",
+        authority="lab_publication",
         tags=(EVALUATIONS,),
         hosts=("metr.org",),
         avenues=(
@@ -326,7 +330,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="OpenAI",
         organization="OpenAI",
         venue="OpenAI",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("openai.com",),
         avenues=(
             SweepAvenue(
@@ -351,7 +355,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Google DeepMind",
         organization="Google DeepMind",
         venue="Google DeepMind",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("deepmind.google",),
         avenues=(
             SweepAvenue(domains=("https://deepmind.google",), apex="deepmind.google"),
@@ -369,7 +373,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Mistral AI",
         organization="Mistral AI",
         venue="Mistral AI",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("mistral.ai",),
         avenues=(SweepAvenue(domains=("https://mistral.ai",), apex="mistral.ai"),),
         active=False,
@@ -383,7 +387,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="xAI",
         organization="xAI",
         venue="xAI",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("x.ai",),
         avenues=(SweepAvenue(domains=("https://x.ai",), apex="x.ai"),),
         active=False,
@@ -398,7 +402,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Meta AI",
         organization="Meta",
         venue="Meta AI",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("ai.meta.com",),
         avenues=(SweepAvenue(domains=("https://ai.meta.com",), apex="meta.com"),),
         active=False,
@@ -409,7 +413,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="DeepSeek",
         organization="DeepSeek",
         venue="DeepSeek",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("deepseek.com",),
         avenues=(
             SweepAvenue(
@@ -428,7 +432,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Alibaba Qwen",
         organization="Alibaba",
         venue="Qwen",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("qwen.ai", "qwenlm.github.io"),
         avenues=(
             SweepAvenue(
@@ -446,7 +450,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Moonshot AI (Kimi)",
         organization="Moonshot AI",
         venue="Moonshot AI",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("moonshot.ai",),
         avenues=(
             SweepAvenue(domains=("https://www.moonshot.ai",), apex="moonshot.ai"),
@@ -462,7 +466,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         display_name="Zhipu AI (GLM)",
         organization="Zhipu AI",
         venue="Zhipu AI",
-        authority="first-party",
+        authority="lab_publication",
         hosts=("z.ai",),
         avenues=(SweepAvenue(domains=("https://z.ai",), apex="z.ai"),),
         active=False,
@@ -555,3 +559,20 @@ def active_declarations() -> tuple[SourceDeclaration, ...]:
 def source_owning(host: str) -> SourceDeclaration | None:
     """Which declared source publishes on ``host``, where one does."""
     return next((entry for entry in DECLARED_SOURCES if entry.owns(host)), None)
+
+
+def corpus_host_venues() -> list[DomainVenue]:
+    """Every declared source's hosts, as rows the venue derivation reads.
+
+    This is how a corpus document gets a venue nobody asserted: the source
+    already declares which hosts it publishes under and what kind of thing it
+    publishes there, so handing those rows to :class:`VenueRules` lets the
+    ordinary derivation answer for a corpus document exactly as it does for a
+    fetched one. Composing rather than mapping is the point — there is one
+    vocabulary and one lookup, not two tables to keep in agreement.
+    """
+    return [
+        DomainVenue(domain=host, venue=declaration.authority)
+        for declaration in DECLARED_SOURCES
+        for host in declaration.hosts
+    ]

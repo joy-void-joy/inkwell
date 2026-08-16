@@ -23,6 +23,7 @@ import logging
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import corpus_root
+from inkwell.agent.provenance import Acquisition
 from inkwell.corpus.fetch import DocumentFetcher, corpus_client
 from inkwell.corpus.ingest import SourceReport, ingest_source
 from inkwell.corpus.registry import (
@@ -172,6 +173,18 @@ class CorpusDocumentEntry(BaseModel):
             "it is reachable by its source and by nothing else"
         ),
     )
+
+    def acquisition(self) -> Acquisition:
+        """How this document reached the run, for a citation to derive venue from.
+
+        The corpus is a research path like any other, so a document taken from
+        it carries the same acquisition record a fetched one does and its
+        venue is read off that record rather than asserted by whoever cites
+        it. The published URL is what the derivation reads, which is why it is
+        carried through ingestion rather than discarded once the file is
+        stored.
+        """
+        return Acquisition(path="corpus", url=self.url)
 
 
 def document_entries(

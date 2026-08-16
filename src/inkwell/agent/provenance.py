@@ -68,6 +68,7 @@ type AcquisitionPath = Literal[
     "fred",
     "prediction_market",
     "source_document",
+    "corpus",
 ]
 """How a document reached the run — which research path produced it."""
 
@@ -167,8 +168,10 @@ PATH_VENUES: list[PathVenue] = [
 ]
 """The acquisition paths whose venue the path itself settles.
 
-``url_fetch`` and ``exa_search`` are absent because either can return anything —
-for those the host decides.
+``url_fetch``, ``exa_search`` and ``corpus`` are absent because any of them can
+return anything — for those the host decides. A corpus source declares the
+hosts it publishes under and what they publish, so its rows join the host
+table rather than settling one venue for a shelf holding many.
 """
 
 PUBLISHER_HOSTS: dict[Venue, tuple[str, ...]] = {

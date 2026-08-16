@@ -9,11 +9,13 @@ transport, so the real extraction, hashing, and merge paths all run.
 
 import json
 from pathlib import Path
+from typing import get_args
 
 import httpx
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from inkwell.agent.provenance import Venue
 from inkwell.corpus.discovery import (
     Avenue,
     DiscoveredItem,
@@ -146,7 +148,7 @@ def fixture_declaration(
         display_name=display_name,
         organization="Fixture Org",
         venue="Fixture Venue",
-        authority="institute",
+        authority="lab_publication",
         hosts=("fixture.test",),
         avenues=avenues or (SitemapAvenue(category="research", sitemap=SITEMAP),),
     )
@@ -268,16 +270,16 @@ def test_an_inactive_source_still_declares_where_and_why() -> None:
 
 
 def test_every_declaration_carries_venue_and_authority() -> None:
-    """Authority is derived from the declaration, never asserted per citation."""
+    """Authority is derived from the declaration, never asserted per citation.
+
+    Checked against the venue vocabulary itself rather than a list repeated
+    here, because a second list is the thing this collapse removed: one that
+    fell behind would pass a declaration the derivation cannot read.
+    """
     for entry in DECLARED_SOURCES:
         assert entry.venue
         assert entry.organization
-        assert entry.authority in (
-            "first-party",
-            "government",
-            "institute",
-            "independent",
-        )
+        assert entry.authority in get_args(Venue.__value__)
 
 
 def test_dropped_sources_are_recorded_with_a_reason() -> None:

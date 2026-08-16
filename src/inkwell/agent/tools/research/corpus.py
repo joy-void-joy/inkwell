@@ -83,12 +83,8 @@ class CorpusSourceSummary(BaseModel):
     display_name: str = Field(description="How to name the source to a reader")
     organization: str = Field(description="Who publishes it")
     venue: str = Field(description="The venue a citation of it should name")
-    authority: str = Field(
-        description=(
-            "What kind of standing its word has: 'first-party' (the "
-            "organization describing its own work), 'government', 'institute', "
-            "or 'independent'"
-        )
+    authority: Venue = Field(
+        description="What kind of standing its word has, in the venue vocabulary"
     )
     active: bool = Field(description="Whether ingestion sweeps this source at all")
     stored: int = Field(default=0, description="Documents held for this source")

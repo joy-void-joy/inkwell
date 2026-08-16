@@ -31,6 +31,7 @@ from lup.harness.models import (
     SkillInvocation,
 )
 from lup.policy.kernel.rows import PathRoleRow
+from lup.policy.vocabulary import runner_target_rules
 from lup.workspace.paths import project_root, read_project_name
 from inkwell.devtools.harness.content.catalog import AGENTS, PLUGIN_NAME, SKILLS
 from inkwell.devtools.harness.content.guidance import DOCUMENT as GUIDANCE
@@ -196,7 +197,9 @@ def portable_harness(version: str = "0.2.0", root: Path | None = None) -> Harnes
             ],
             human_owned_files=[Path("README.md")],
             shell_rules=SHELL_RULES,
-            runner_targets=["pyright", "pytest", "ruff", "lup-devtools", "inkwell"],
+            runner_targets=runner_target_rules(
+                session_opening=("lup-devtools", "inkwell")
+            ),
             sandbox=HookSandbox(
                 extra_domains=["api.anthropic.com"],
                 credential_paths=["~/.ssh", "~/.aws/credentials"],

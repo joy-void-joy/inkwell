@@ -16,6 +16,7 @@ declaration looked at.
     uv run lup-devtools corpus status
     uv run lup-devtools corpus tags
     uv run lup-devtools corpus retag
+    uv run lup-devtools corpus embed
 """
 
 import asyncio
@@ -23,7 +24,7 @@ import logging
 
 import typer
 
-from inkwell.agent.config import corpus_root
+from inkwell.agent.config import corpus_root, current_settings
 from inkwell.corpus.ingest import (
     DEFAULT_CONCURRENCY,
     IngestReport,
@@ -36,6 +37,7 @@ from inkwell.corpus.registry import (
     DROPPED_SOURCES,
     corpus_vocabulary,
 )
+from inkwell.corpus.semantics import LocalEmbedder, embed_source
 from inkwell.corpus.storage import CorpusStore
 from inkwell.corpus.tagging import retag_corpus
 
@@ -144,6 +146,35 @@ def retag(
         retag_corpus(declarations, corpus, force=force, concurrency=concurrency)
     )
     for report in reports:
+        typer.echo(report.summary())
+
+
+@app.command("embed")
+def embed(
+    source: list[str] = typer.Argument(
+        default=None, help="Sources to embed (default: every source with an index)"
+    ),
+    model: str = typer.Option(
+        "", "--model", help="Embedding model to use (default: the configured one)"
+    ),
+) -> None:
+    """Compute the optional semantic layer's vectors, one file per source.
+
+    Nothing else needs this to have been run: browsing, filtering, and every
+    ordering are structural and answer with no vectors at all. What this buys
+    is the question that shares no vocabulary with the corpus, and it is worth
+    running after a sync rather than before one.
+    """
+    corpus = store()
+    keys = tuple(source or corpus.sources())
+    if not keys:
+        typer.echo("Nothing is ingested yet — run `corpus sync` first.")
+        raise typer.Exit(code=1)
+
+    embedder = LocalEmbedder(model or current_settings().corpus_embedding_model)
+    typer.echo(f"embedding with {embedder.identity()}\n")
+    for key in keys:
+        report = asyncio.run(embed_source(key, corpus, embedder))
         typer.echo(report.summary())
 
 

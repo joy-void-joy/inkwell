@@ -18,6 +18,8 @@ from pydantic_settings import (
 from lup.types import EnvVars
 
 from inkwell.agent.client import PROVIDER_LOGIN
+from inkwell.corpus.semantics import DEFAULT_LOCAL_MODEL, SemanticLayer
+from inkwell.corpus.storage import CorpusStore
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +356,28 @@ class Settings(BaseSettings):
         ),
     )
 
+    corpus_embeddings: bool = Field(
+        default=False,
+        validation_alias="INKWELL_CORPUS_EMBEDDINGS",
+        description=(
+            "Whether the corpus's optional semantic layer answers nearest-"
+            "neighbour queries. Off by default: browsing, filtering, and "
+            "ordering are structural and need no vectors, so the layer is worth "
+            "switching on for the question that shares no vocabulary with the "
+            "corpus and costs nothing to leave off"
+        ),
+    )
+
+    corpus_embedding_model: str = Field(
+        default=DEFAULT_LOCAL_MODEL,
+        validation_alias="INKWELL_CORPUS_EMBEDDING_MODEL",
+        description=(
+            "Which model the semantic layer embeds with when it is switched on. "
+            "A local static-embedding model by default, so enabling the layer "
+            "needs no API key and no per-query network call"
+        ),
+    )
+
     # ==========================================================================
     # LIMITS
     # ==========================================================================
@@ -454,6 +478,16 @@ def stage_model(stage: PipelineStage) -> str:
 def corpus_root() -> Path:
     """Where the research corpus lives for the current execution context."""
     return Path(current_settings().corpus_path).expanduser()
+
+
+def corpus_semantics(store: CorpusStore) -> SemanticLayer:
+    """The corpus's semantic layer for the current context.
+
+    Switched on by configuration rather than by any code path deciding it is
+    time: retrieval holds this whether or not it can answer, and asks it, and
+    carries on with the structural result when it says it cannot.
+    """
+    return SemanticLayer(store=store, enabled=current_settings().corpus_embeddings)
 
 
 def subprocess_auth_env(session_settings: Settings) -> EnvVars:

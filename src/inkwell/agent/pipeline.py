@@ -189,11 +189,14 @@ from inkwell.agent.tools.research.markets import MARKET_TOOLS
 from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 from inkwell.agent.tools.stage_outputs import (
     AssumptionsCollector,
+    BookGlossary,
     FormatCheckCollector,
+    GlossaryScope,
     PlanCollector,
     PlanFile,
     ResearchCollector,
     ReviewCollector,
+    RunGlossary,
     load_declared_checks,
     make_assumptions_tools,
     make_format_check_tools,
@@ -1186,9 +1189,9 @@ def build_note_server(stage: str, notes_collector: list[AuthorNote]) -> ToolServ
     return build_output_server("notes", [make_note_tool(notes_collector, stage)])
 
 
-def build_glossary_server(glossary_path: Path) -> ToolServers:
-    """Build an MCP server with the shared glossary tools bound to a file."""
-    return build_output_server("glossary", make_glossary_tools(glossary_path))
+def build_glossary_server(scope: GlossaryScope) -> ToolServers:
+    """Build an MCP server with the shared glossary tools bound to a scope."""
+    return build_output_server("glossary", make_glossary_tools(scope))
 
 
 def format_checks_path(notes: PipelineNotes) -> Path:
@@ -3040,6 +3043,31 @@ class PipelineRunner:
         return self.snapshot.plan.placement if self.snapshot.plan else None
 
     @property
+    def glossary_scope(self) -> GlossaryScope:
+        """Where this run's writers coin terms and read the ones already coined.
+
+        Read off the placement rather than settled once at launch, so every
+        stage that hands writers a glossary — writing, merging, rewriting after
+        a restart — is reaching into the same scope, and a chapter's coinages
+        cannot reach the merge that assembles it only for one of the three.
+        """
+        placement = self.placement
+        if placement is None:
+            return RunGlossary(path=self.ensure_notes().artifacts_dir / "glossary.json")
+        return BookGlossary(store=book_store(), placement=placement)
+
+    @property
+    def glossary_server(self) -> ToolServers:
+        """The glossary tools handed to every stage that gives writers one.
+
+        Named once rather than built at each stage, so writing, merging and
+        rewriting cannot end up scoped differently: a merge enforcing a
+        narrower glossary than the writers coined into would leave a rival name
+        for an earlier chapter's term standing rather than substituting it.
+        """
+        return build_glossary_server(self.glossary_scope)
+
+    @property
     def effective_format(self) -> str:
         plan = self.snapshot.plan
         if plan and plan.target_format and plan.target_format != "auto":
@@ -4541,9 +4569,8 @@ class PipelineRunner:
         feedback_path = await self.prepare_feedback("write")
         notes = self.ensure_notes()
         reader = self.reader_feedback()
-        glossary_path = notes.artifacts_dir / "glossary.json"
-        seed_glossary(glossary_path, plan.conventions)
-        glossary = build_glossary_server(glossary_path)
+        seed_glossary(self.glossary_scope, notes.run, plan.conventions)
+        glossary = self.glossary_server
         glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         completed = already
@@ -4716,7 +4743,7 @@ class PipelineRunner:
         await self.update_overview(active_stage="merge")
         feedback_path = await self.prepare_feedback("merge")
         notes = self.ensure_notes()
-        glossary = build_glossary_server(notes.artifacts_dir / "glossary.json")
+        glossary = self.glossary_server
         glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         async def merge_heartbeat(elapsed: float) -> None:
@@ -5242,7 +5269,7 @@ class PipelineRunner:
 
         feedback_path = await self.prepare_feedback("restart")
         reader = self.reader_feedback()
-        glossary = build_glossary_server(notes.artifacts_dir / "glossary.json")
+        glossary = self.glossary_server
         glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
         async def rewrite_coro(section_plan: SectionPlan) -> SectionDraft:

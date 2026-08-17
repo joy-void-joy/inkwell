@@ -88,6 +88,17 @@ class PipelineNotes:
         self.comment_counter = max_file_index(self.comments_dir)
         self.terminal_counter = max_file_index(self.terminal_dir)
 
+    @property
+    def run(self) -> str:
+        """What tells this run apart from another run of the same chapter.
+
+        The notes directory is the run: a resumed run reopens the one it had,
+        and a fresh one gets its own. That is exactly the distinction a record
+        outliving the run needs in order to keep what a resumed stage already
+        coined while dropping what a previous run did.
+        """
+        return str(self.base_dir)
+
     def draft_path(self, slug: str) -> Path:
         """Return path for a draft file: ``drafts/{slug}.md``."""
         return self.drafts_dir / f"{slug}.md"

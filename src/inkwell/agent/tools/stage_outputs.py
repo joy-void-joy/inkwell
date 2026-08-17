@@ -17,10 +17,12 @@ from typing import Awaitable, Callable, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from lup.channels.models import publish_atomic
 from lup.mcp import LupMcpTool, ToolError, ToolResponse, mcp_response
 from lup.telemetry.metrics import collector as metrics_collector
 from lup.types import JsonObject
 
+from inkwell.agent.book import BookStore, ChapterPlacement
 from inkwell.agent.format_checks import DeclaredCheck
 from inkwell.agent.models import (
     Assumption,
@@ -958,74 +960,193 @@ class LookupTermsInput(BaseModel):
 
 
 class GlossaryView(BaseModel):
-    """The shared glossary: what the plan seeded, and what writers coined."""
+    """The glossary as a writer reads it: conventions, and what has been coined."""
+
+    conventions: list[str] = Field(
+        default=[],
+        description="Plan-level conventions this chapter seeded before writing",
+    )
+    terms: list[GlossaryEntry] = Field(
+        default=[],
+        description=(
+            "Terms coined so far, in book order — the other chapters of this "
+            "book first, then what sibling writers here have coined"
+        ),
+    )
+
+
+class ChapterGlossary(BaseModel):
+    """One glossary file: what a chapter seeded, what it coined, and whose run.
+
+    Distinct from :class:`GlossaryView` because the file has to record which
+    run wrote it, and a writer reading the glossary has no use for that.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
+    run: str = Field(
+        default="",
+        description="Which run last seeded this chapter — see seed_glossary",
+    )
     conventions: list[str] = Field(
-        default_factory=list,
-        description="Plan-level conventions seeded before writing",
+        default=[], description="What this chapter's plan seeded"
     )
     terms: list[GlossaryEntry] = Field(
-        default_factory=list,
-        description="Terms coined by section writers so far",
+        default=[], description="What this chapter's writers coined"
     )
 
 
-def load_glossary(path: Path) -> GlossaryView:
-    """Read the shared glossary file, empty when nothing has been written yet."""
+class RunGlossary(BaseModel, frozen=True):
+    """The glossary of a piece that belongs to no book: one file, this run's.
+
+    It lives in the run's own notes and dies with them, which is right for a
+    standalone article: there is no later run whose writers would need the
+    terms this one settled.
+    """
+
+    path: Path
+
+    def own(self) -> Path:
+        """The one file this run coins into."""
+        return self.path
+
+    def read_order(self) -> tuple[Path, ...]:
+        """Every file a term may already be defined in, in that order."""
+        return (self.path,)
+
+
+class BookGlossary(BaseModel, frozen=True):
+    """A book's glossary, partitioned one file per chapter.
+
+    A chapter coins into its own file and reads every chapter's, so a term one
+    chapter settles binds the next chapter to run — months later, in another
+    process — while no two chapter runs of one book ever write the same path.
+
+    Reading in chapter order is what keeps first-definition-wins deterministic
+    when two chapters coined one term without seeing each other: the lower
+    ordinal is the one a reader of the book meets first, so it is the one that
+    wins, for every writer and for the merge that follows.
+    """
+
+    store: BookStore
+    placement: ChapterPlacement
+
+    def own(self) -> Path:
+        """The one file this chapter coins into, and the only one it writes."""
+        return self.store.glossary_path(self.placement)
+
+    def read_order(self) -> tuple[Path, ...]:
+        """Every chapter's file, in chapter order."""
+        directory = self.store.glossary_dir(self.placement.book)
+        return tuple(sorted(directory.glob("*.json")))
+
+
+GlossaryScope = RunGlossary | BookGlossary
+"""Where one run's glossary lives — its own notes, or its book's record."""
+
+
+def load_chapter_glossary(path: Path) -> ChapterGlossary:
+    """Read one chapter's glossary file, empty when nothing has been written."""
     if not path.exists():
-        return GlossaryView()
-    return GlossaryView.model_validate_json(path.read_text(encoding="utf-8"))
+        return ChapterGlossary()
+    return ChapterGlossary.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def write_glossary(path: Path, glossary: GlossaryView) -> None:
-    """Persist the shared glossary file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(glossary.model_dump_json(indent=2), encoding="utf-8")
+def write_chapter_glossary(path: Path, glossary: ChapterGlossary) -> None:
+    """Persist one chapter's glossary file, atomically.
+
+    A run of a neighbouring chapter may read this file at any moment, and the
+    temp-and-rename is what has it see either the whole glossary or the one
+    before it, never a half-written mix of the two.
+    """
+    publish_atomic(path, glossary)
 
 
-def seed_glossary(path: Path, conventions: list[str]) -> None:
-    """Seed the glossary with the plan's conventions, preserving coined terms."""
-    write_glossary(
-        path,
-        GlossaryView(conventions=conventions, terms=load_glossary(path).terms),
+def read_glossary(scope: GlossaryScope) -> GlossaryView:
+    """The conventions this chapter seeded and every term the piece has coined.
+
+    Conventions come from this chapter alone — a plan's conventions are its
+    instructions to its own writers, so re-running chapter one is not governed
+    by a plan written for chapter nine — while terms come from the whole book,
+    because what something is called is a fact about the book rather than an
+    instruction from any one plan.
+    """
+    return GlossaryView(
+        conventions=load_chapter_glossary(scope.own()).conventions,
+        terms=[
+            entry
+            for path in scope.read_order()
+            for entry in load_chapter_glossary(path).terms
+        ],
     )
 
 
-def define_term_in_glossary(path: Path, term: str, meaning: str) -> DefineTermResult:
-    """Register a term unless a sibling already defined it — first definition wins."""
-    glossary = load_glossary(path)
-    for entry in glossary.terms:
+def seed_glossary(scope: GlossaryScope, run: str, conventions: list[str]) -> None:
+    """Seed this chapter's glossary with its plan's conventions.
+
+    What the chapter coined is kept when the same run seeds again — a resumed
+    write stage must not lose the terms its finished sections already used —
+    and dropped when a different run does, so a term the chapter has since
+    withdrawn stops binding every later chapter rather than outliving the prose
+    that introduced it. Either way this writes the chapter's own file, so no
+    other chapter's coinages are in reach to discard.
+    """
+    held = load_chapter_glossary(scope.own())
+    write_chapter_glossary(
+        scope.own(),
+        ChapterGlossary(
+            run=run,
+            conventions=conventions,
+            terms=held.terms if held.run == run else [],
+        ),
+    )
+
+
+def define_term_in_glossary(
+    scope: GlossaryScope, term: str, meaning: str
+) -> DefineTermResult:
+    """Register a term unless the book already has one — first definition wins.
+
+    The whole book is scanned, so a chapter about to rename what an earlier one
+    defined is handed the earlier meaning instead; only this chapter's own file
+    is written, so a chapter run of the same book coining at the same moment is
+    never writing here.
+    """
+    for entry in read_glossary(scope).terms:
         if entry.term.casefold() == term.casefold():
             return DefineTermResult(
                 term=entry.term, meaning=entry.meaning, already_defined=True
             )
-    write_glossary(
-        path,
-        GlossaryView(
-            conventions=glossary.conventions,
-            terms=[*glossary.terms, GlossaryEntry(term=term, meaning=meaning)],
+    held = load_chapter_glossary(scope.own())
+    write_chapter_glossary(
+        scope.own(),
+        held.model_copy(
+            update={"terms": [*held.terms, GlossaryEntry(term=term, meaning=meaning)]}
         ),
     )
     return DefineTermResult(term=term, meaning=meaning, already_defined=False)
 
 
-def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
-    """MCP tools for the shared cross-writer glossary.
+def make_glossary_tools(scope: GlossaryScope) -> list[LupMcpTool]:
+    """MCP tools for the shared glossary.
 
     Parallel section writers share only the filesystem, so both tools read the
-    glossary file fresh on every call. A term, once defined, is never
-    overwritten — the first definition wins and later writers are handed it,
-    which keeps independently-written sections from coining rival names for the
-    same thing.
+    glossary fresh on every call, and neither handler awaits between reading
+    and writing — siblings run on one event loop, so a read-modify-write that
+    never yields is the whole of the guarantee among them. Chapter runs share
+    no loop, and there the guarantee is the partition: each writes only its own
+    chapter's file, atomically.
+
+    A term, once defined, is never overwritten — the first definition wins and
+    later writers are handed it, whether the first was a sibling section this
+    afternoon or a chapter of the same book written last month.
     """
 
     async def handle_define(inp: DefineTermInput) -> DefineTermResult:
-        return define_term_in_glossary(glossary_path, inp.term, inp.meaning)
+        return define_term_in_glossary(scope, inp.term, inp.meaning)
 
     async def handle_lookup(inp: LookupTermsInput) -> GlossaryView:
-        glossary = load_glossary(glossary_path)
+        glossary = read_glossary(scope)
         if not inp.contains:
             return glossary
         needle = inp.contains.casefold()
@@ -1041,8 +1162,9 @@ def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
                 "Register a term, name, symbol, or abbreviation in the shared "
                 "glossary so the section writers working in parallel use it the "
                 "same way. Call this the moment you coin anything the plan's "
-                "conventions don't already cover. If a sibling already defined "
-                "the term, the tool returns their canonical meaning instead of "
+                "conventions don't already cover. If the term is already "
+                "defined — by a sibling section, or by another chapter of this "
+                "book — the tool returns that canonical meaning instead of "
                 "overwriting it — adopt it so the assembled piece stays "
                 "consistent."
             ),
@@ -1052,11 +1174,11 @@ def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
         build_stage_tool(
             "lookup_terms",
             (
-                "Read the shared glossary: the plan's conventions plus every "
-                "term sibling writers have coined so far. Call this before "
-                "naming a key concept or introducing notation, so you reuse an "
-                "existing term instead of inventing a rival one for the same "
-                "thing."
+                "Read the shared glossary: this chapter's conventions plus "
+                "every term coined so far — by sibling writers, and by the "
+                "other chapters of this book. Call this before naming a key "
+                "concept or introducing notation, so you reuse an existing term "
+                "instead of inventing a rival one for the same thing."
             ),
             LookupTermsInput,
             handle_lookup,

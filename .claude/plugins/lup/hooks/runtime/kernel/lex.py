@@ -12,6 +12,7 @@ from .decision import (
     SUBSTITUTION_SENTINEL,
     unjudged,
 )
+from .archives import archive_write
 from .roles import path_role
 from .rows import PathRoleRow, PathRuleRow
 from .words import (
@@ -747,6 +748,12 @@ def shell_path_verb_targets(command: str) -> list[str]:
         restore = git_restore_operands(words)
         if restore is not None:
             targets.extend(restore["paths"])
+            continue
+        archived = archive_write(words)
+        if archived is not None:
+            targets.extend([*archived["authored"], *archived["consumed"]])
+            if archived["directory"] is not None:
+                targets.append(archived["directory"])
             continue
         if posixpath.basename(words[0]) not in SCRATCH_VERB_FLAGS:
             continue

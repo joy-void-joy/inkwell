@@ -166,7 +166,7 @@ def dev_project() -> DevProject:
         roots=application_roots(),
         rules=hooks.rules,
         path_roles=[
-            PathRoleRow(root=role.root.as_posix(), role=role.role, kind=role.kind)
+            PathRoleRow(root=role.root.as_posix(), role=role.role)
             for role in hooks.path_roles
         ],
     )

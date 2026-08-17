@@ -31,6 +31,7 @@ from .words import (
     is_help_probe,
     is_trusted_script,
     opaque_argument,
+    archive_lands_on_nothing,
     confined_to_recoverable_roots,
     refuses_generated_plugin_write,
     xargs_payload,
@@ -73,6 +74,7 @@ class ShellContext(TypedDict):
     existing_targets: list[str] | None
     recoverable_targets: list[str]
     directory_targets: list[str]
+    empty_directories: list[str]
     recoverable_target_limit: int
     runner_targets: list[RunnerTargetRow]
     target_tables: list[ShellRuleRow]
@@ -88,6 +90,7 @@ def shell_context(
     existing_targets: list[str] | None = None,
     recoverable_targets: list[str] | None = None,
     directory_targets: list[str] | None = None,
+    empty_directories: list[str] | None = None,
     recoverable_target_limit: int = 5,
     runner_targets: list[RunnerTargetRow] | None = None,
     target_tables: list[ShellRuleRow] | None = None,
@@ -108,6 +111,7 @@ def shell_context(
         existing_targets=existing_targets,
         recoverable_targets=recoverable_targets or [],
         directory_targets=directory_targets or [],
+        empty_directories=empty_directories or [],
         recoverable_target_limit=recoverable_target_limit,
         runner_targets=runner_targets or [],
         target_tables=target_tables or [],
@@ -221,6 +225,16 @@ def decide_shell_segment(segment: list[str], context: ShellContext) -> KernelDec
     )
     if recoverable is not None:
         return recoverable
+    landed = archive_lands_on_nothing(
+        words,
+        context["path_roles"],
+        context["recoverable_targets"],
+        context["path_rules"],
+        context["existing_targets"],
+        context["empty_directories"],
+    )
+    if landed is not None:
+        return landed
     directory = asks_before_removing_a_directory(
         words, context["path_roles"], context["directory_targets"]
     )
@@ -772,6 +786,7 @@ def classify_shell(
     existing_targets: list[str] | None = None,
     recoverable_targets: list[str] | None = None,
     directory_targets: list[str] | None = None,
+    empty_directories: list[str] | None = None,
     recoverable_target_limit: int = 5,
     runner_targets: list[RunnerTargetRow] | None = None,
     target_tables: list[ShellRuleRow] | None = None,
@@ -782,19 +797,23 @@ def classify_shell(
     )
     if isinstance(segments, KernelDecision):
         return segments
+    # Named rather than positional: twelve lists of the same shape, and a
+    # thirteenth inserted anywhere but the end silently re-seats every one
+    # after it — passing a limit where a path list belongs.
     context = shell_context(
         rows,
-        allowed_scopes,
-        denied_scopes,
-        trusted_script_roots,
-        path_roles,
-        path_rules,
-        existing_targets,
-        recoverable_targets,
-        directory_targets,
-        recoverable_target_limit,
-        runner_targets,
-        target_tables,
+        allowed_scopes=allowed_scopes,
+        denied_scopes=denied_scopes,
+        trusted_script_roots=trusted_script_roots,
+        path_roles=path_roles,
+        path_rules=path_rules,
+        existing_targets=existing_targets,
+        recoverable_targets=recoverable_targets,
+        directory_targets=directory_targets,
+        empty_directories=empty_directories,
+        recoverable_target_limit=recoverable_target_limit,
+        runner_targets=runner_targets,
+        target_tables=target_tables,
     )
     decisions = decide_segment_list(segments, context)
     placement = joined_placement(decisions)
@@ -867,6 +886,7 @@ def decide_shell(
     existing_targets: list[str] | None = None,
     recoverable_targets: list[str] | None = None,
     directory_targets: list[str] | None = None,
+    empty_directories: list[str] | None = None,
     recoverable_target_limit: int = 5,
     runner_targets: list[RunnerTargetRow] | None = None,
     target_tables: list[ShellRuleRow] | None = None,
@@ -931,6 +951,7 @@ def decide_shell(
             existing_targets=existing_targets,
             recoverable_targets=recoverable_targets,
             directory_targets=directory_targets,
+            empty_directories=empty_directories,
             recoverable_target_limit=recoverable_target_limit,
             runner_targets=runner_targets,
             target_tables=target_tables,
@@ -952,6 +973,7 @@ def decide_shell(
             existing_targets=existing_targets,
             recoverable_targets=recoverable_targets,
             directory_targets=directory_targets,
+            empty_directories=empty_directories,
             recoverable_target_limit=recoverable_target_limit,
             runner_targets=runner_targets,
             target_tables=target_tables,

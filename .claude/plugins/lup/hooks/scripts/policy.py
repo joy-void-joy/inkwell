@@ -298,6 +298,28 @@ def recoverable_write_targets(
     ]
 
 
+def empty_directory_targets(targets: list[str], root: Path | None = None) -> list[str]:
+    """Report which targets are directories with nothing in them.
+
+    An archive unpacked into one replaces nothing, whatever the archive
+    holds — which is the only way to answer that without reading the archive
+    itself. A path that is absent, a file, or unreadable is not reported, so
+    an unanswerable question reads as "something is already there".
+    """
+    where = Path.cwd() if root is None else root
+    found: list[str] = []
+    for target in targets:
+        path = where / target
+        if not path.is_dir():
+            continue
+        try:
+            if not any(path.iterdir()):
+                found.append(target)
+        except OSError:
+            continue
+    return found
+
+
 def directory_write_targets(targets: list[str], root: Path | None = None) -> list[str]:
     """Report which of a command's targets are directories on disk.
 
@@ -413,6 +435,7 @@ def bash_decision(
             [*shell_write_targets(command), *acted_on]
         ),
         directory_targets=directory_write_targets(acted_on),
+        empty_directories=empty_directory_targets(acted_on),
         recoverable_target_limit=RECOVERABLE_TARGET_LIMIT,
         runner_targets=RUNNER_TARGETS,
         target_tables=RUNNER_TARGET_TABLES,

@@ -139,7 +139,9 @@ def sandbox_escaped(sandbox: SandboxPlacement, agent_escaped: bool) -> bool:
 KERNEL_IMPORT_ALLOWLIST = (
     "ast",
     "collections.abc",
+    "fnmatch",
     "io",
+    "pathlib",
     "posixpath",
     "re",
     "tokenize",

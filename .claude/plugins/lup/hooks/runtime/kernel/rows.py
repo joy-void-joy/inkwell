@@ -58,12 +58,12 @@ class PathRuleRow(TypedDict):
 type PathRoleName = Literal["production", "test", "scratch"]
 
 type PathRoleKind = Literal["subtree", "contains_part"]
-"""How a role declaration reaches the paths it governs.
+"""The two directory shapes :func:`root_matches` tells apart.
 
-The two spellings :data:`PathRuleKind` already uses for the same shapes, and
-the same distinction: ``subtree`` anchors a root at the repository top, while
-``contains_part`` matches the directory wherever it sits, for a tree that is
-what it is regardless of which package holds it.
+The narrow pair out of :data:`PathRuleKind`, named separately because that is
+the whole of what one function answers for: ``subtree`` anchors a root at the
+repository top, while ``contains_part`` matches the directory wherever it
+sits, for a tree that is what it is regardless of which package holds it.
 """
 
 
@@ -76,14 +76,13 @@ class PathRoleRow(TypedDict):
     by construction, so the verbs that ask before destroying something have
     nothing to protect there.
 
-    ``kind`` says how far the declaration reaches, and is absent from a table
-    generated before the axis existed, where every root was anchored at the
-    repository top — so a missing one reads as ``subtree``.
+    ``root`` is a pattern, which is what says how far the declaration reaches:
+    a bare root is anchored at the repository top, and a leading ``**/`` names
+    the directory wherever it sits.
     """
 
     root: str
     role: PathRoleName
-    kind: PathRoleKind
 
 
 class AcceptanceGuardRow(TypedDict):

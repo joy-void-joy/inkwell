@@ -1577,12 +1577,10 @@ PATH_ROLES: list[PathRoleRow] = [
     {
         "root": "tests",
         "role": "test",
-        "kind": "subtree",
     },
     {
         "root": "tmp",
         "role": "scratch",
-        "kind": "subtree",
     },
 ]
 
@@ -2640,20 +2638,6 @@ SHELL_RULES: list[ShellRuleRow] = [
         "reason": "copying over files requires approval",
     },
     {
-        "command": "touch",
-        "subcommand": "",
-        "operation": "",
-        "effect": "ask",
-        "effect_source": "command",
-        "ask_flags": [],
-        "allow_flags": [],
-        "read_verbs": [],
-        "value_flags": [],
-        "sandbox": "ambient",
-        "sandbox_source": "root",
-        "reason": "creating files requires approval \u2014 prefer the Write tool",
-    },
-    {
         "command": "chmod",
         "subcommand": "",
         "operation": "",
@@ -3143,6 +3127,20 @@ SHELL_RULES: list[ShellRuleRow] = [
     },
     {
         "command": "mkdir",
+        "subcommand": "",
+        "operation": "",
+        "effect": "allow",
+        "effect_source": "command",
+        "ask_flags": [],
+        "allow_flags": [],
+        "read_verbs": [],
+        "value_flags": [],
+        "sandbox": "ambient",
+        "sandbox_source": "root",
+        "reason": "",
+    },
+    {
+        "command": "touch",
         "subcommand": "",
         "operation": "",
         "effect": "allow",
@@ -6902,7 +6900,7 @@ KNOWN_ALLOWANCES: list[str] = [
 
 MAXIMUM_ADDED_LINES = 3
 
-RECOVERABLE_TARGET_LIMIT = 5
+RECOVERABLE_TARGET_LIMIT = 20
 
 RUNNER_TARGETS: list[RunnerTargetRow] = [
     {

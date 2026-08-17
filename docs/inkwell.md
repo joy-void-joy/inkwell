@@ -18,6 +18,7 @@ src/inkwell/
 │   ├── models.py           # ArticlePlan, WritingOutput, ReviewFinding
 │   ├── provenance.py       # Venue, evidential role, and acquisition records
 │   ├── book.py             # Which chapter of which book, and the record it outlives
+│   ├── book_links.py       # A chapter pointing at the book, resolved at the write
 │   ├── diversity.py        # Citation distribution and position-diversity checks
 │   ├── prompts.py          # System prompt for the writing agent
 │   ├── stages.py           # Stage prompts and tool lists, per pipeline stage

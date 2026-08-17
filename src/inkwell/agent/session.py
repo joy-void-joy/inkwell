@@ -31,12 +31,13 @@ class SectionStatus(TypedDict):
 
 
 class CommentLedger(BaseModel):
-    """The comment ids a session has already accounted for.
+    """What a session has already accounted for, by id or by key.
 
     Membership is the only question ever asked of it — has this comment been
-    surfaced to the author, did the agent write it — so it answers that
-    instead of handing out the collection it keeps. The order it keeps them
-    in is the order the append-only registry file on disk records them.
+    surfaced to the author, did the agent write it, has this unresolved
+    reference already been raised — so it answers that instead of handing out
+    the collection it keeps. The order it keeps them in is the order the
+    append-only registry file on disk records them.
 
     An id is *claimed* from the moment a poll hands it to a caller until that
     caller has written it down, and *handled* once the record is on disk. A
@@ -231,6 +232,7 @@ class WritingSessionState:
         self.doc_id: str = ""
         self.doc_url: str = ""
         self.title: str = ""
+        self.book: str = ""
         self.source_doc_id: str = ""
         self.stage: str = "starting"
         self.sections: list[SectionStatus] = []
@@ -238,6 +240,7 @@ class WritingSessionState:
         self.seen_comments = CommentLedger(name="seen_comments")
         self.agent_comments = CommentLedger(name="agent_ids")
         self.seen_source_comments = CommentLedger(name="seen_source_comments")
+        self.raised_references = CommentLedger(name="raised_references")
         self.sleep_entered: asyncio.Event = asyncio.Event()
         self.directions_tab_id: str = ""
         self.last_directions_content: str = ""
@@ -280,6 +283,7 @@ class WritingSessionState:
             self.agent_comments,
             self.seen_comments,
             self.seen_source_comments,
+            self.raised_references,
         ):
             ledger.attach(records.ledger(ledger.name))
         self.records = records

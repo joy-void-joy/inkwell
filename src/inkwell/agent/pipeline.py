@@ -54,6 +54,7 @@ from inkwell.agent.book import (
     ChapterPlacement,
     ChapterRecord,
 )
+from inkwell.agent.book_links import pointing
 from inkwell.agent.config import (
     book_store,
     current_settings,
@@ -672,7 +673,8 @@ def reader_feedback_block(manifest: ContentManifest) -> str:
 
 BOOK_INSTRUCTION = (
     "what the other chapters of this book already claimed and already named — "
-    "keep their terms and do not re-argue what they settled"
+    "keep their terms, do not re-argue what they settled, and point at them "
+    "with the keys this file lists rather than with a number or a path"
 )
 
 
@@ -693,6 +695,10 @@ def add_book_refs(
     chapter, and reads the cross-references narrowed to the chapter it is. One
     that left the ordinal open reads the book whole, because which chapter it is
     is not settled until its plan has a title to be matched on.
+
+    How to point at any of it is rendered onto the end of the same file: the
+    keys a writer may spell are these chapters' own, so the form and the keys
+    belong in one place rather than in a prompt that could only describe them.
     """
     if assignment is None:
         return
@@ -701,7 +707,9 @@ def add_book_refs(
     visible = record if declared is None else record.besides(declared)
     if not visible.chapters and visible.outline is None:
         return
-    path = notes.save_text_artifact("book", visible.render(declared))
+    path = notes.save_text_artifact(
+        "book", f"{visible.render(declared)}\n\n{pointing(visible)}\n"
+    )
     manifest.add(
         path,
         "book",
@@ -3574,7 +3582,14 @@ class PipelineRunner:
         then honors a configured stop point. Centralizing the boundary keeps
         the fresh run and the resume loop in lockstep and gives the stop point
         one unmissable place to fire.
+
+        It is also where the session is told which book it is writing into, so
+        that every document this stage writes resolves its references against
+        that book. Here rather than once at the top of the run, because the
+        plan stage is what settles the placement of a run launched without one.
         """
+        assignment = self.assignment
+        self.state.book = assignment.book if assignment is not None else ""
         method = getattr(self, f"stage_{stage_name}")
         await method()
         if stage_name in ("research", "write", "review"):

@@ -40,6 +40,8 @@ from inkwell.agent.tools.google_docs_schema import (
     Tab,
     UploadedFile,
 )
+from inkwell.agent.book_links import BookReferences, raised
+from inkwell.agent.config import book_store
 from inkwell.agent.markdown_to_docs import (
     DocsRequest,
     InsertInlineImage,
@@ -541,6 +543,51 @@ async def do_create_tab(
     return tab_id
 
 
+async def deliverable_requests(markdown: str, tab_id: str | None) -> list[DocsRequest]:
+    """This markdown as the requests that write it, its book references resolved.
+
+    The one seam where inkwell renders its own deliverable, and therefore where
+    a reference into the book the run is writing becomes a link to a published
+    page. Every tab is rendered through here, so a reference resolves the same
+    way and an unresolved one is marked and raised the same way whichever tab
+    it was written into, rather than however its call site remembered to.
+
+    Which book is read from the session rather than taken as an argument:
+    there are many callers and one book, and a caller that forgot to hand it
+    along would leave that tab's references silently unresolved. The record is
+    re-read per write because the run is writing into that same book — a
+    chapter numbered since the last write resolves at this one.
+
+    The author meets an unresolved reference twice, which is what was asked
+    for: a marker in the prose, put there by the walk, and a comment raised
+    here against the same words. Raised once per target for the whole session,
+    so rewriting a tab does not file the same note again.
+    """
+    state = get_session_state()
+    record = book_store().load(state.book) if state is not None and state.book else None
+    references = BookReferences(record=record)
+    requests = markdown_to_requests(markdown, tab_id=tab_id, references=references)
+    if state is None or not state.doc_id or not references.unresolved:
+        return requests
+
+    def unraised() -> Iterator[CommentSpec]:
+        """A comment for each target the author has not already been told of."""
+        for reference in references.unresolved:
+            spelled = reference.target.spelled()
+            if spelled in state.raised_references:
+                continue
+            state.raised_references.mark(spelled)
+            yield CommentSpec(
+                content=raised(reference.target), anchor_text=reference.text
+            )
+
+    async with gdoc_nonfatal("raise unresolved book references"):
+        await do_insert_comments_batch(
+            state.doc_id, list(unraised()), session_state=state
+        )
+    return requests
+
+
 async def do_write_tab(
     doc_id: str,
     tab_id: str,
@@ -551,7 +598,9 @@ async def do_write_tab(
     """Write content to a tab (replaces existing content).
 
     ``plain=True`` inserts the text verbatim, with no markdown rendering — for
-    raw LaTeX source and other content that must not be reinterpreted.
+    raw LaTeX source and other content that must not be reinterpreted, and so
+    also with no reference resolution, since nothing in it is markdown to
+    resolve.
     """
     svc = services()
     docs = svc.docs_service()
@@ -573,7 +622,7 @@ async def do_write_tab(
         ]
         formatting_requests: list[DocsRequest] = []
     else:
-        all_requests = markdown_to_requests(markdown, tab_id=tab_id)
+        all_requests = await deliverable_requests(markdown, tab_id)
         batch = split_markdown_batch(all_requests)
         content_requests = batch["content"]
         formatting_requests = batch["formatting"]
@@ -1144,7 +1193,7 @@ async def update_overview(params: UpdateOverviewInput) -> UpdateOverviewOutput:
 
     end_index = get_tab_end_index(find_tab_by_id(doc, overview_tab_id))
     ov_batch = split_markdown_batch(
-        markdown_to_requests(params.content, tab_id=overview_tab_id)
+        await deliverable_requests(params.content, overview_tab_id)
     )
 
     phase1: list[DocsRequest] = []

@@ -27,6 +27,15 @@ Renumbering would be cheap here and ruinous outside — the reader-feedback expo
 is keyed by chapter and section ordinals readers have already seen published, so
 shifting them re-addresses every row that was already filed.
 
+Because the ordinals are identities, an **address** built from them is stable
+too, and both of the things that need one live outside this module: the
+reader-feedback export routes a submission by ``chapter.section``, and a
+reference in a chapter's prose resolves to ``/chapters/01/03``. So
+:class:`ChapterAddress` and :class:`SectionAddress` are declared here, where
+the ordinals are, rather than beside either consumer — neither imports the
+other for it, and the published path is derived from the same padded ordinals
+as the file stem rather than kept in step with it as a second string.
+
 The record lives outside any session, beside the research corpus and for the
 same reason — a session's notes die with the run, and a book assembled one
 chapter per run would have nothing left to read.
@@ -81,6 +90,143 @@ def comparable(title: str) -> str:
     to decide that two chapters are the same chapter.
     """
     return " ".join(title.split()).casefold()
+
+
+def comparable_key(name: str) -> str:
+    """A declared name reduced to what two spellings of it share.
+
+    Beside :func:`comparable` and for the same reason, one step further. A key
+    is written into a URL, where a title's spaces become hyphens and its
+    punctuation is dropped, so only letters and digits survive on both sides:
+    "The Calibration Curve" and ``the-calibration-curve`` are one name. Used
+    only to match a name against one already on record.
+    """
+    return "".join(char for char in name.casefold() if char.isalnum())
+
+
+ORDINAL_DIGITS = 2
+"""How wide an ordinal is written wherever this book is addressed.
+
+Measured rather than chosen: the reader export's own ``pathname`` field
+records ``/chapters/01/03``, so two digits is the width readers have already
+been given links in. Every address spells its ordinals through :func:`padded`,
+so a file stem and a published path cannot drift into two paddings.
+"""
+
+
+def padded(ordinal: int) -> str:
+    """One ordinal as every address of this book spells it."""
+    return f"{ordinal:0{ORDINAL_DIGITS}d}"
+
+
+CHAPTERS_ROOT = "/chapters"
+"""The published path every chapter of a book hangs under.
+
+Read off the reader export rather than guessed at, and a default rather than a
+constant: a second publication that serves the same book somewhere else
+overrides this instead of forking the addressing.
+"""
+
+
+class ChapterAddress(BaseModel, frozen=True):
+    """Where a chapter sits, as the published book addresses it.
+
+    One of the two forms the reader export records — ``/chapters/01``, the
+    chapter's own index page — and what a reference naming a chapter rather
+    than a section inside it resolves to.
+    """
+
+    chapter: int = Field(description="1-based chapter ordinal")
+
+    def ordinals(self) -> list[str]:
+        """This address's ordinals, each spelled the one way."""
+        return [padded(self.chapter)]
+
+    @property
+    def key(self) -> str:
+        """The address as a file stem, zero-padded so a listing sorts."""
+        return ".".join(self.ordinals())
+
+    @property
+    def path(self) -> str:
+        """The published path — the same ordinals under a different separator.
+
+        Derived rather than stored beside :attr:`key`, so the padding readers
+        already have links in cannot come to differ between the two.
+        """
+        return "/".join([CHAPTERS_ROOT, *self.ordinals()])
+
+    def label(self) -> str:
+        """The address as a reader of the outline would say it."""
+        return str(self.chapter)
+
+
+class SectionAddress(BaseModel, frozen=True):
+    """Where a submission or a plan section sits in the work's ordinal outline.
+
+    The one identity both sides share: the reader-feedback export keys rows by
+    chapter and section number, the plan's own sections yield the same path,
+    and a reference into the book's prose resolves to it. It lives here rather
+    than beside either of those because it is neither's — it is the book's
+    ordinals, which this module already holds fixed as identities, and a
+    consumer reaching it here reaches it for that reason rather than through a
+    module it wanted nothing else from.
+    """
+
+    chapter: int = Field(description="1-based chapter ordinal")
+    section: int = Field(description="1-based section ordinal within the chapter")
+
+    def ordinals(self) -> list[str]:
+        """This address's ordinals, each spelled the one way."""
+        return [padded(self.chapter), padded(self.section)]
+
+    @property
+    def key(self) -> str:
+        """The address as a file stem, zero-padded so a listing sorts."""
+        return ".".join(self.ordinals())
+
+    @property
+    def path(self) -> str:
+        """The published path — the same ordinals under a different separator."""
+        return "/".join([CHAPTERS_ROOT, *self.ordinals()])
+
+    def label(self) -> str:
+        """The address as a reader of the outline would say it."""
+        return f"{self.chapter}.{self.section}"
+
+
+type BookAddress = ChapterAddress | SectionAddress
+"""Somewhere in the published book, at whichever depth it was addressed.
+
+The two forms the reader export measures, and no third: a chapter index and a
+section of a chapter. Both answer :attr:`~ChapterAddress.path`, so a caller
+rendering a link never asks which one it is holding.
+"""
+
+
+class BookTarget(BaseModel, frozen=True):
+    """What one reference in a chapter's prose names, by key rather than number.
+
+    A key, because the target may have no ordinal yet: chapter three can be
+    written on its own and still point at chapter seven, which nothing has
+    numbered and nobody has written. The chapter is named by the key its
+    book's layout declared, and the section — where a reference names one at
+    all — by that section's declared title, matched through
+    :func:`comparable_key` however either side happens to be spelled.
+    """
+
+    chapter: str = Field(description="Declared key of the chapter referred to")
+    section: str = Field(
+        default="",
+        description=(
+            "The section within that chapter, by its declared title, empty "
+            "where the reference names the chapter itself"
+        ),
+    )
+
+    def spelled(self) -> str:
+        """This target as a reference writes it: ``chapter`` or ``chapter/section``."""
+        return f"{self.chapter}/{self.section}" if self.section else self.chapter
 
 
 class ChapterPlacement(BaseModel, frozen=True):
@@ -664,6 +810,43 @@ class BookRecord(BaseModel):
             )
         )
         return found[0] if len(found) == 1 else None
+
+    def address(self, target: BookTarget) -> BookAddress | None:
+        """Where ``target`` sits in this book, once something has numbered it.
+
+        The lookup a reference in a chapter's prose is resolved through, and
+        the whole of what resolution is: a key the layout declared, read back
+        as the ordinal that layout assigned it. Nothing here assigns one — an
+        ordinal is an identity and handing one out is the outline's to do — so
+        a chapter this book has not laid out, a chapter dropped from the
+        reading order, and a section its chapter has not recorded all answer
+        None. The caller says so in the document rather than inventing a
+        number or renumbering the target to suit the sentence that wanted it.
+        """
+        wanted = comparable_key(target.chapter)
+        outlined = self.outline.chapters if self.outline is not None else []
+        entry = next(
+            (held for held in outlined if comparable_key(held.key) == wanted), None
+        )
+        if entry is None:
+            return None
+        if not target.section:
+            return ChapterAddress(chapter=entry.ordinal)
+        held = self.chapter(entry.ordinal)
+        titled = comparable_key(target.section)
+        ordinal = next(
+            (
+                position
+                for position, section in enumerate(
+                    held.sections if held is not None else [], 1
+                )
+                if comparable_key(section) == titled
+            ),
+            None,
+        )
+        if ordinal is None:
+            return None
+        return SectionAddress(chapter=entry.ordinal, section=ordinal)
 
     def identify(self, assignment: ChapterAssignment, title: str) -> ChapterIdentity:
         """Which chapter of this book a run writing ``title`` is.

@@ -7,7 +7,10 @@ whatever form collected them, read once at session start and filed as one
 file per section of the work.
 
 Both sides of that filing use the same identity: an ordinal path,
-``chapter.section``. The export keys its rows by chapter and section number;
+``chapter.section``, which is :class:`~inkwell.agent.book.SectionAddress` and
+belongs to the book rather than to this reader — the same address a reference
+in a chapter's prose resolves to, so it is declared where the ordinals are.
+The export keys its rows by chapter and section number;
 ``SectionAddresses`` reads the same path off the plan's own sections. So a
 stage revising one section opens one file, the plan stage reads the index of
 all of them, and no theme drawn from any particular round of feedback is
@@ -42,6 +45,7 @@ from pydantic import (
 
 from lup.types import JsonObject, JsonValue
 
+from inkwell.agent.book import SectionAddress
 from inkwell.agent.models import ArticlePlan
 
 logger = logging.getLogger(__name__)
@@ -104,28 +108,6 @@ class SubstantiveRule(BaseModel):
             if prose.field in self.prose_fields
             and len(prose.text.strip()) >= self.min_length
         ]
-
-
-class SectionAddress(BaseModel):
-    """Where a submission or a plan section sits in the work's ordinal outline.
-
-    The one identity both sides share: the export keys rows by chapter and
-    section number, and the plan's own sections yield the same path.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    chapter: int = Field(description="1-based chapter ordinal")
-    section: int = Field(description="1-based section ordinal within the chapter")
-
-    @property
-    def key(self) -> str:
-        """The address as a file stem, zero-padded so a listing sorts."""
-        return f"{self.chapter:02d}.{self.section:02d}"
-
-    def label(self) -> str:
-        """The address as a reader of the outline would say it."""
-        return f"{self.chapter}.{self.section}"
 
 
 def ordinal_prefix(title: str) -> SectionAddress | None:

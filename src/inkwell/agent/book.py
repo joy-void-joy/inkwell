@@ -17,20 +17,31 @@ The record lives outside any session, beside the research corpus and for the
 same reason — a session's notes die with the run, and a book assembled one
 chapter per run would have nothing left to read.
 
-**Concurrency.** One file per chapter, written by the run that owns that
-chapter. Two chapter runs of one book therefore never write the same path, and
-that partition — not a lock — is the guarantee: :meth:`BookStore.chapter_path`
-derives the file from the record's own placement, so a run has no way to name
-another chapter's file. Each write is an atomic temp-and-rename through
+**Concurrency.** One file per chapter per kind of record, written by the run
+that owns that chapter. Two chapter runs of one book therefore never write the
+same path, and that partition — not a lock — is the guarantee:
+:meth:`BookStore.chapter_path` and :meth:`BookStore.citations_path` derive the
+file from the record's own placement, so a run has no way to name another
+chapter's file. Each write is an atomic temp-and-rename through
 ``publish_atomic``, so a reader assembling the book sees whole chapter records
 or none, never a half-written one. Two runs of the *same* chapter do land on
 one path; there the rename decides, and the later record replaces the earlier
 one whole rather than blending with it.
 
+What a chapter leaves arrives at two different points of its run — the plan
+when it is planned and again when it is refined, the citations when its
+research completes — so the two are two files rather than halves of one. Each
+write stays the whole-file replace the rename gives it, instead of a
+read-modify-write that would have to preserve a half it knows nothing about,
+and the citation listing sits under its own directory so neither listing picks
+the other up.
+
     books/
     └── ai-safety-textbook/
-        ├── 001.json     # one file per chapter, written by that chapter's run
-        └── 003.json
+        ├── 001.json          # what chapter one planned, written by its run
+        ├── 003.json
+        └── citations/
+            └── 003.json      # what chapter three cited, as its research landed
 """
 
 import logging
@@ -41,6 +52,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 from lup.channels.models import publish_atomic, utc_now
+
+from inkwell.agent.provenance import SourceProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +122,35 @@ class ChapterRecord(BaseModel):
         return "\n\n".join(lines())
 
 
+class ChapterCitations(BaseModel):
+    """What one chapter cited, kept as provenance rather than as sources.
+
+    Every axis a citation set is measured on reads a field the researcher
+    recorded, so what was recorded about a source is the whole of what a
+    distribution over the book can see. Holding that, rather than the sources
+    themselves, is what keeps the widest scope as cheap as the narrowest:
+    measuring a book reads these records instead of every chapter's research
+    compilation, so a check that re-runs on every draft still costs nothing.
+
+    A citation research recorded nothing about is held as ``None`` rather than
+    left out, because a chapter nobody characterized has to report as unknown
+    rather than vanish out of a set that would then read as spread.
+    """
+
+    placement: ChapterPlacement = Field(description="Which chapter cited these")
+    citations: list[SourceProvenance | None] = Field(
+        default=[],
+        description=(
+            "What research recorded about each citation this chapter made, and "
+            "None where it recorded nothing. One entry per citation rather than "
+            "per source: a document two findings cite was leaned on twice"
+        ),
+    )
+    written_at: datetime = Field(
+        default_factory=utc_now, description="When the record was written"
+    )
+
+
 class BookRecord(BaseModel):
     """Every chapter record one book holds, read as one.
 
@@ -154,6 +196,39 @@ class BookRecord(BaseModel):
         return f"{header}\n{body}\n"
 
 
+class BookCitations(BaseModel):
+    """Every chapter's citation record one book holds, read as one.
+
+    A chapter that has not run yet has left no record, so it contributes
+    nothing here rather than an empty chapter that would count as one citing
+    nothing.
+    """
+
+    book: str = Field(pattern=BOOK_ID_PATTERN, description="Which book this is")
+    chapters: list[ChapterCitations] = Field(
+        default=[], description="Chapter citation records on file, in chapter order"
+    )
+
+    def citations(self) -> list[SourceProvenance | None]:
+        """Every citation every chapter on record made, in chapter order."""
+        return [recorded for held in self.chapters for recorded in held.citations]
+
+
+def records[Held: BaseModel](directory: Path, kind: type[Held]) -> Iterator[Held]:
+    """Every record of one kind on file in a directory, in path order.
+
+    A file that no longer parses is reported and left out rather than taking
+    the whole book down — the other chapters are still readable, and re-running
+    that chapter rewrites it. A directory nothing has been written to yet lists
+    nothing rather than being created by the read.
+    """
+    for path in sorted(directory.glob("*.json")):
+        try:
+            yield kind.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValidationError, OSError):
+            logger.warning("Unreadable %s at %s", kind.__name__, path)
+
+
 class BookStore(BaseModel, frozen=True):
     """The book records on disk, addressed by book identity.
 
@@ -177,32 +252,47 @@ class BookStore(BaseModel, frozen=True):
         """
         return self.book_dir(placement.book) / f"{placement.chapter:03d}.json"
 
+    def citations_dir(self, book: str) -> Path:
+        """Where one book's chapter citation records sit.
+
+        Under the book rather than beside its chapter records, so a listing of
+        either kind cannot pick up the other.
+        """
+        return self.book_dir(book) / "citations"
+
+    def citations_path(self, placement: ChapterPlacement) -> Path:
+        """The one citation file a chapter run writes, named as its record is."""
+        return self.citations_dir(placement.book) / f"{placement.chapter:03d}.json"
+
     def load(self, book: str) -> BookRecord:
         """Every chapter of one book, empty where nothing has been written yet.
 
         Constructing the empty record first is what checks the identity, so no
-        unvalidated name reaches a path. A chapter file that no longer parses is
-        reported and left out rather than taking the whole book down — the other
-        chapters are still readable, and re-running that chapter rewrites it.
+        unvalidated name reaches a path.
         """
         empty = BookRecord(book=book)
-        directory = self.book_dir(empty.book)
-        if not directory.is_dir():
-            return empty
-
-        def held() -> Iterator[ChapterRecord]:
-            """Each chapter file under this book that still parses as one."""
-            for path in sorted(directory.glob("*.json")):
-                try:
-                    yield ChapterRecord.model_validate_json(
-                        path.read_text(encoding="utf-8")
-                    )
-                except (ValidationError, OSError):
-                    logger.warning("Unreadable chapter record at %s", path)
-
         return BookRecord(
             book=empty.book,
-            chapters=sorted(held(), key=lambda record: record.placement.chapter),
+            chapters=sorted(
+                records(self.book_dir(empty.book), ChapterRecord),
+                key=lambda record: record.placement.chapter,
+            ),
+        )
+
+    def citations(self, book: str) -> BookCitations:
+        """What every chapter of one book cited, empty before any has run.
+
+        The read a book-wide citation check makes on every draft: small records
+        each chapter's own run left behind, rather than the research
+        compilations they were read off.
+        """
+        empty = BookCitations(book=book)
+        return BookCitations(
+            book=empty.book,
+            chapters=sorted(
+                records(self.citations_dir(empty.book), ChapterCitations),
+                key=lambda record: record.placement.chapter,
+            ),
         )
 
     def publish(self, record: ChapterRecord) -> Path:
@@ -213,6 +303,18 @@ class BookStore(BaseModel, frozen=True):
         and a concurrent reader of the book sees this record whole or not yet.
         """
         path = self.chapter_path(record.placement)
+        publish_atomic(path, record)
+        return path
+
+    def publish_citations(self, record: ChapterCitations) -> Path:
+        """Write what one chapter cited, replacing whatever that chapter had.
+
+        The same partition and the same atomicity as its chapter record, and a
+        separate file for the same reason a separate stage writes it: a run
+        that has just researched replaces its own citations whole without
+        touching what it planned.
+        """
+        path = self.citations_path(record.placement)
         publish_atomic(path, record)
         return path
 

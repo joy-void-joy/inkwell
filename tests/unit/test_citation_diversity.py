@@ -1,11 +1,14 @@
 """What the citation checks say about a citation set, and what they never do.
 
-Two properties carry most of the weight. The distribution is read off the fields
+Three properties carry most of the weight. The distribution is read off the fields
 research recorded, so a section whose sources carry none reports as unknown rather
 than as a handful of distinct values that look like spread — the failure a check
-counting URLs would make. And both checks are advisory: a leaning citation set, a
+counting URLs would make. Both checks are advisory: a leaning citation set, a
 one-sided claim, and a judge that dies mid-verdict all leave the run going, with
 the rows reaching the stage that rewrites the prose and the author's document.
+And the scope a lean is measured over reaches past the run: quoting one forum
+over and over is a claim about the whole book, which every chapter of it can sit
+under its own ceilings while making.
 """
 
 from datetime import timedelta
@@ -16,17 +19,28 @@ from lup.runtime.models import SessionId, TurnId, TurnIdentifiers, TurnResult
 from lup.types import Usage
 from pydantic import ValidationError
 
+from inkwell.agent import config as config_mod
+from inkwell.agent.book import (
+    BookCitations,
+    BookStore,
+    ChapterCitations,
+    ChapterPlacement,
+)
 from inkwell.agent.diversity import (
     DEFAULT_DIVERSITY_RULES,
+    WHOLE_BOOK,
     WHOLE_WORK,
     AuthorAxis,
+    AxisTally,
     ContestedClaim,
     ContestedSignal,
+    DiversityReport,
     DiversityRules,
     DomainAxis,
     JudgedClaim,
     OneSidedVerdict,
     OrganizationAxis,
+    book_scope,
     contested_claims,
     distribution_report,
     judged_report,
@@ -45,6 +59,7 @@ from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     CITATION_DIVERSITY_ARTIFACT,
     check_citation_diversity,
+    record_citations,
     rewrite_final,
 )
 from inkwell.agent.provenance import SourceProvenance, Venue
@@ -138,9 +153,67 @@ def finished_turn() -> TurnResult[None]:
     )
 
 
+BOOK = "textbook"
+"""The book every chapter in these tests belongs to."""
+
+CHAPTER_3 = ChapterPlacement(book=BOOK, chapter=3)
+"""The chapter the run under test is writing, where it is writing one."""
+
+
+def cited_by(ordinal: int, *sources: ResearchSource) -> ChapterCitations:
+    """One chapter's citation record, as that chapter's own run left it."""
+    return ChapterCitations(
+        placement=ChapterPlacement(book=BOOK, chapter=ordinal),
+        citations=[source.provenance for source in sources],
+    )
+
+
+def book_of(*chapters: ChapterCitations) -> BookCitations:
+    """What the book holds — only the chapters that have run."""
+    return BookCitations(book=BOOK, chapters=list(chapters))
+
+
+def chapter_sources(ordinal: int) -> list[ResearchSource]:
+    """One chapter's citations: half one forum, half hosts of its own.
+
+    Exactly half, which is what the chapter's domain ceiling lets pass, so a
+    chapter shaped like this reports nothing about its own domains.
+    """
+    return [
+        *(
+            recorded(f"https://lesswrong.com/{ordinal}/{n}", domain="lesswrong.com")
+            for n in range(2)
+        ),
+        *(
+            recorded(
+                f"https://host{ordinal}{n}.example/a",
+                domain=f"host{ordinal}{n}.example",
+            )
+            for n in range(2)
+        ),
+    ]
+
+
+def domains(report: DiversityReport, scope: str) -> AxisTally:
+    """How one scope of a report distributes over domains."""
+    return next(
+        tally
+        for tally in report.tallies
+        if tally.scope == scope and tally.axis == "domain"
+    )
+
+
 @pytest.fixture
 def notes(tmp_path: Path) -> PipelineNotes:
     return PipelineNotes(tmp_path / "notes")
+
+
+@pytest.fixture
+def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BookStore:
+    """The book store every part of the run resolves, pointed at a temp root."""
+    root = tmp_path / "books"
+    monkeypatch.setattr(config_mod.settings, "books_path", str(root))
+    return BookStore(root=root)
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +460,304 @@ def test_a_draft_citing_another_sections_source_counts_it_for_both() -> None:
     )
 
     assert {share.value for share in growth.shares} == {"arxiv.org", "nature.com"}
+
+
+# ---------------------------------------------------------------------------
+# Scope: the whole book, which no chapter of it can see
+# ---------------------------------------------------------------------------
+
+
+def test_the_book_leans_on_a_domain_no_chapter_of_it_leans_on() -> None:
+    """The reason the scope exists. Every chapter puts half its citations on one
+    forum, which every chapter's own ceiling lets pass; the book is then half
+    one forum, and only the wider scope has anything to say about it."""
+    book = book_of(*(cited_by(n, *chapter_sources(n)) for n in (1, 2, 3)))
+    report = distribution_report(compiled(finding(*chapter_sources(3))), book=book)
+    leaning = [row for row in report.rows if row.check == "domain concentration"]
+
+    assert domains(report, WHOLE_WORK).share() == pytest.approx(0.5)
+    assert not domains(report, WHOLE_WORK).leans(DEFAULT_DIVERSITY_RULES.min_citations)
+    assert domains(report, book_scope(BOOK)).recorded == 12
+    assert [row.scope for row in leaning] == [book_scope(BOOK)]
+    assert "lesswrong.com" in leaning[0].detail
+    assert "6 of 12" in leaning[0].detail
+
+
+def test_a_book_row_names_a_scope_no_chapter_could_be_mistaken_for() -> None:
+    """The job the scope field does: a rewrite can act on its own chapter's
+    lean and cannot act on the book's, so it has to be able to tell them apart."""
+    book = book_of(cited_by(3, *chapter_sources(3)))
+    report = distribution_report(compiled(finding(*chapter_sources(3))), book=book)
+    rendered = report.render()
+
+    assert book_scope(BOOK) != WHOLE_WORK
+    assert {WHOLE_WORK, book_scope(BOOK)} <= {tally.scope for tally in report.tallies}
+    assert f"[{WHOLE_BOOK} — {BOOK}]" in rendered
+    assert f"[{WHOLE_WORK}]" in rendered
+
+
+def test_a_run_placed_in_no_book_reports_exactly_its_own_scopes() -> None:
+    research = compiled(
+        finding(
+            *chapter_sources(1),
+            question="How fast did capability grow?",
+        )
+    )
+    plan = planned(
+        ResearchQuestion(question="How fast did capability grow?", section="Growth"),
+        sections=["Growth"],
+    )
+    report = distribution_report(research, plan=plan)
+
+    assert {tally.scope for tally in report.tallies} == {WHOLE_WORK, "Growth"}
+    assert WHOLE_BOOK not in report.render()
+    assert (
+        report.render() == distribution_report(research, plan=plan, book=None).render()
+    )
+
+
+def test_a_chapter_that_has_not_run_contributes_nothing() -> None:
+    """Chapter two has written nothing down, so the book is what one and three
+    cited — not a chapter of nothing counted against them."""
+    book = book_of(cited_by(1, *chapter_sources(1)), cited_by(3, *chapter_sources(3)))
+    report = distribution_report(compiled(finding(*chapter_sources(3))), book=book)
+    tally = domains(report, book_scope(BOOK))
+
+    assert (tally.recorded, tally.unrecorded) == (8, 0)
+    assert tally.share() == pytest.approx(0.5)
+
+
+def test_a_chapter_that_cited_nothing_adds_no_unrecorded_citations() -> None:
+    book = book_of(cited_by(1, *chapter_sources(1)), cited_by(2))
+    report = distribution_report(compiled(finding(*chapter_sources(1))), book=book)
+    tally = domains(report, book_scope(BOOK))
+
+    assert (tally.recorded, tally.unrecorded) == (4, 0)
+
+
+def test_an_unrecorded_chapter_reports_unknown_at_book_scope() -> None:
+    """The same refusal to re-derive provenance, one scope wider: four sources
+    nobody characterized are one unknown, not four hosts that look like spread."""
+    book = book_of(
+        cited_by(1, *(unrecorded(f"https://host{n}.example/a") for n in range(4)))
+    )
+    report = distribution_report(
+        compiled(
+            finding(*(unrecorded(f"https://host{n}.example/a") for n in range(4)))
+        ),
+        book=book,
+    )
+    tally = domains(report, book_scope(BOOK))
+    row = next(
+        row
+        for row in report.rows
+        if row.scope == book_scope(BOOK) and row.check == "domain unrecorded"
+    )
+
+    assert tally.silent()
+    assert tally.shares == []
+    assert "unknown, not spread" in row.detail
+
+
+def test_an_unrecorded_chapter_does_not_dilute_a_recorded_ones_lean() -> None:
+    """What a check that re-derived provenance from URLs would get wrong: the
+    chapter nobody recorded is unknown, so it neither hides nor spreads the lean."""
+    book = book_of(
+        cited_by(
+            1,
+            *(
+                recorded(f"https://lesswrong.com/{n}", domain="lesswrong.com")
+                for n in range(3)
+            ),
+        ),
+        cited_by(2, *(unrecorded(f"https://host{n}.example/a") for n in range(3))),
+    )
+    tally = domains(
+        distribution_report(compiled(finding()), book=book), book_scope(BOOK)
+    )
+
+    assert (tally.recorded, tally.unrecorded) == (3, 3)
+    assert tally.share() == pytest.approx(1.0)
+
+
+def test_the_books_ceilings_are_stricter_than_a_chapters_by_default() -> None:
+    """Spread costs less over more citations, so the same share reports at the
+    wider scope and passes at the narrower one."""
+    strict = DEFAULT_DIVERSITY_RULES.book_axes
+    lenient = DEFAULT_DIVERSITY_RULES.axes
+
+    assert [axis.name for axis in strict] == [axis.name for axis in lenient]
+    assert all(
+        book.share_ceiling < chapter.share_ceiling
+        for book, chapter in zip(strict, lenient, strict=True)
+    )
+
+
+def test_the_book_ceiling_is_an_overridable_default() -> None:
+    book = book_of(*(cited_by(n, *chapter_sources(n)) for n in (1, 2, 3)))
+    research = compiled(finding(*chapter_sources(3)))
+    lenient = DiversityRules(
+        axes=[DomainAxis()], book_axes=[DomainAxis(share_ceiling=0.9)]
+    )
+
+    assert "domain concentration" in {
+        row.check for row in distribution_report(research, book=book).rows
+    }
+    assert distribution_report(research, book=book, rules=lenient).rows == []
+
+
+def test_the_citation_floor_guards_small_numbers_at_book_scope() -> None:
+    """Two citations across a whole book always look like a lean, so the floor
+    that keeps a chapter quiet has to keep the book quiet too."""
+    book = book_of(
+        *(
+            cited_by(n, recorded(f"https://lesswrong.com/{n}", domain="lesswrong.com"))
+            for n in (1, 2)
+        )
+    )
+    research = compiled(
+        finding(recorded("https://lesswrong.com/2", domain="lesswrong.com"))
+    )
+
+    def leaning(min_citations: int) -> list[str]:
+        """Which scopes report a lean when this many citations are enough."""
+        rules = DiversityRules(
+            axes=[DomainAxis()],
+            book_axes=[DomainAxis(share_ceiling=0.35)],
+            min_citations=min_citations,
+        )
+        return [
+            row.scope
+            for row in distribution_report(research, book=book, rules=rules).rows
+        ]
+
+    assert leaning(3) == []
+    assert leaning(2) == [book_scope(BOOK)]
+
+
+# ---------------------------------------------------------------------------
+# What the book scope reads, and what it costs
+# ---------------------------------------------------------------------------
+
+
+def test_a_chapter_records_what_it_cited_as_its_research_completes(
+    store: BookStore,
+) -> None:
+    record_citations(CHAPTER_3, compiled(finding(*chapter_sources(3))))
+    held = store.citations(BOOK).chapters
+
+    assert [record.placement for record in held] == [CHAPTER_3]
+    assert [each.domain for each in held[0].citations if each is not None] == [
+        "lesswrong.com",
+        "lesswrong.com",
+        "host30.example",
+        "host31.example",
+    ]
+
+
+def test_a_standalone_run_records_no_citations(store: BookStore) -> None:
+    record_citations(None, compiled(finding(*chapter_sources(1))))
+
+    assert store.citations(BOOK).chapters == []
+
+
+def test_the_book_is_measured_from_records_rather_than_from_research(
+    store: BookStore,
+) -> None:
+    """What the whole scope rests on: re-running the check on every draft reads
+    small per-chapter records, never every chapter's research compilation."""
+    record_citations(
+        CHAPTER_3,
+        compiled(
+            finding(
+                recorded(
+                    "https://lesswrong.com/a",
+                    domain="lesswrong.com",
+                    title="A very long document",
+                )
+            )
+        ),
+    )
+    written = store.citations_path(CHAPTER_3).read_text(encoding="utf-8")
+
+    assert "lesswrong.com" in written
+    assert "A very long document" not in written
+    assert "A quoted line" not in written
+
+
+async def test_the_check_weighs_the_book_the_run_is_placed_in(
+    notes: PipelineNotes, store: BookStore
+) -> None:
+    for ordinal in (1, 2, 3):
+        record_citations(
+            ChapterPlacement(book=BOOK, chapter=ordinal),
+            compiled(finding(*chapter_sources(ordinal))),
+        )
+    report = await check_citation_diversity(
+        notes,
+        compiled(finding(*chapter_sources(3))),
+        placement=CHAPTER_3,
+        judge=False,
+    )
+    artifact = notes.text_artifact_path(CITATION_DIVERSITY_ARTIFACT)
+
+    assert [
+        row.scope for row in report.rows if row.check == "domain concentration"
+    ] == [book_scope(BOOK)]
+    assert book_scope(BOOK) in artifact.read_text(encoding="utf-8")
+
+
+async def test_a_run_placed_nowhere_is_weighed_against_no_book(
+    notes: PipelineNotes, store: BookStore
+) -> None:
+    record_citations(
+        ChapterPlacement(book=BOOK, chapter=1),
+        compiled(
+            finding(
+                *(
+                    recorded(f"https://lesswrong.com/{n}", domain="lesswrong.com")
+                    for n in range(4)
+                )
+            )
+        ),
+    )
+    report = await check_citation_diversity(
+        notes, compiled(finding(*chapter_sources(3))), judge=False
+    )
+
+    assert {tally.scope for tally in report.tallies} == {WHOLE_WORK}
+    assert {row.scope for row in report.rows} == {WHOLE_WORK}
+
+
+async def test_a_leaning_book_never_fails_the_check_and_stays_off_the_document(
+    notes: PipelineNotes, store: BookStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A book-wide lean is a row for the rewrite, exactly as a chapter's is; the
+    author is asked only about the side nobody cited."""
+
+    async def one_sided(*_args: object, **_kwargs: object) -> OneSidedVerdict:
+        return OneSidedVerdict(
+            one_sided=True, missing_side="the other camp", reason="All one way."
+        )
+
+    monkeypatch.setattr("inkwell.agent.pipeline.query", one_sided)
+    for ordinal in (1, 2, 3):
+        record_citations(
+            ChapterPlacement(book=BOOK, chapter=ordinal),
+            compiled(finding(*chapter_sources(ordinal), confidence=0.2)),
+        )
+    report = await check_citation_diversity(
+        notes,
+        compiled(finding(*chapter_sources(3), confidence=0.2)),
+        placement=CHAPTER_3,
+    )
+    reported = {row.scope for row in report.rows}
+
+    assert book_scope(BOOK) in reported
+    assert [note.note for note in report.author_notes()] == [
+        note.note for note in report.author_notes() if "the other camp" in note.note
+    ]
+    assert report.author_notes()
 
 
 # ---------------------------------------------------------------------------

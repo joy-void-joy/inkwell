@@ -240,7 +240,6 @@ export interface ServerCapabilities {
 // added on the server still renders rather than blanking the bar.
 export const STAGE_LABELS: Record<string, string> = {
   starting: "Starting",
-  preprocess: "Classify",
   extract: "Extract",
   voice: "Voice",
   book: "Book",
@@ -270,7 +269,7 @@ const TERMINAL_STAGES = new Set(["done", "complete", "sync", "revise"]);
 
 // Index of the active stage within `stages`; everything before it is complete.
 // Off-backbone stages resolve to an end (terminal) or the start (lead-ins like
-// preprocess/starting, and anything unrecognized) so the bar never blanks.
+// starting, and anything unrecognized) so the bar never blanks.
 export function stageProgressIndex(stage: string, stages: string[]): number {
   if (stages.length === 0) return -1;
   const idx = stages.indexOf(stage);

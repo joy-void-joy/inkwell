@@ -6,6 +6,7 @@ Handles HTML, PDF, plain text, and JSON responses.
 
 import hashlib
 import logging
+from email.message import EmailMessage
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
@@ -16,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_fie
 from inkwell.agent.config import stage_model
 from inkwell.agent.provenance import Acquisition
 from lup.workspace.content_safety import SavedContent, save_content
+from lup.workspace.fetch_cache import Fetched, cached_fetch
 from lup.mcp import ToolError, lup_tool
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,20 @@ def content_type(response: httpx.Response) -> str:
     """
     headers = response.headers
     return headers["content-type"] if "content-type" in headers else ""
+
+
+def declared_charset(content_type_header: str) -> str:
+    """The encoding a content-type header names, UTF-8 where it names none.
+
+    Read by the email package's header parser rather than picked out by hand:
+    the parameter grammar is that header's own, quoting and all. This is what
+    keeps a cached payload decoding the way the live response did — the bytes
+    are stored as they arrived, so the charset the server declared has to be
+    stored with them rather than assumed later.
+    """
+    message = EmailMessage()
+    message["Content-Type"] = content_type_header or "text/plain"
+    return message.get_content_charset() or "utf-8"
 
 
 class ExtractedMetadata(BaseModel):
@@ -174,10 +190,14 @@ class FetchSourceOutput(BaseModel):
         return Acquisition(path="url_fetch", url=self.url)
 
 
-async def do_fetch_source(url: str) -> FetchSourceOutput:
-    """Fetch a URL and extract text. Callable from both MCP tools and Python."""
-    resolved_url = github_blob_to_raw(url) or url
+async def download_source(url: str, resolved_url: str) -> Fetched:
+    """Go and get one URL, refusing everything that must never be cached.
 
+    Every refusal here raises rather than returning, which is what keeps a 404,
+    an outage, an oversized PDF, and an anti-bot interstitial out of the store:
+    the only payload a later run can be given is one this function was willing
+    to hand back.
+    """
     try:
         async with httpx.AsyncClient(
             timeout=20.0,
@@ -210,16 +230,37 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
                 f"or exa_search for cached content."
             )
 
+    if "application/pdf" in ct and len(resp.content) > MAX_PDF_BYTES:
+        raise ToolError(f"PDF too large ({len(resp.content) / 1024 / 1024:.0f} MB).")
+
+    return Fetched(payload=resp.content, content_type=ct)
+
+
+async def do_fetch_source(url: str) -> FetchSourceOutput:
+    """Fetch a URL and extract text. Callable from both MCP tools and Python.
+
+    The download goes through the shared fetch cache, so a URL this project has
+    read before is read from disk instead. The extraction below still runs on
+    every call: what the cache holds is the payload as it arrived, not anything
+    drawn out of it, so changing how a page is parsed costs a parse rather than
+    a download.
+    """
+    resolved_url = github_blob_to_raw(url) or url
+    fetched = await cached_fetch(
+        "url", resolved_url, lambda: download_source(url, resolved_url)
+    )
+    ct = fetched.entry.content_type
+
+    def decoded() -> str:
+        """The payload as text, in the encoding the response declared."""
+        return fetched.text(encoding=declared_charset(ct))
+
     if "application/pdf" in ct:
-        if len(resp.content) > MAX_PDF_BYTES:
-            raise ToolError(
-                f"PDF too large ({len(resp.content) / 1024 / 1024:.0f} MB)."
-            )
         target = DOWNLOADS_DIR / "pdf"
         target.mkdir(parents=True, exist_ok=True)
         slug = hashlib.sha256(url.encode()).hexdigest()[:12]
         pdf_path = target / f"{slug}.pdf"
-        pdf_path.write_bytes(resp.content)
+        pdf_path.write_bytes(fetched.payload())
         pdf_note = f"PDF downloaded to {pdf_path.resolve()}. Use Read to read it."
         saved = save_content("fetch", url, pdf_note)
         return FetchSourceOutput(
@@ -230,7 +271,7 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
         )
 
     if "text/plain" in ct or "application/json" in ct:
-        text = resp.text
+        text = decoded()
         saved = save_content("fetch", url, text)
         return FetchSourceOutput(
             url=url,
@@ -239,7 +280,7 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
         )
 
     if resolved_url != url:
-        text = resp.text
+        text = decoded()
         title = PurePosixPath(urlparse(resolved_url).path).name
         saved = save_content("fetch", url, text)
         return FetchSourceOutput(
@@ -249,7 +290,7 @@ async def do_fetch_source(url: str) -> FetchSourceOutput:
             content=saved,
         )
 
-    extracted = extract_page(resp.text, url=url)
+    extracted = extract_page(decoded(), url=url)
     if extracted is not None:
         saved = save_content("fetch", url, extracted.text)
         return FetchSourceOutput(

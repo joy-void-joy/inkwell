@@ -22,8 +22,14 @@ from pydantic import (
 )
 
 from inkwell.agent.config import active_profile, settings
+from inkwell.agent.tools.research.fetch import (
+    challenge_page_marker,
+    content_type,
+    declared_charset,
+)
 from inkwell.pdf import reads_by_page
 from lup.workspace.content_safety import SavedContent, save_content
+from lup.workspace.fetch_cache import Fetched, cached_fetch
 from lup.mcp import ToolError, lup_tool
 from lup.types import EnvVars, JsonValue, StringMap
 
@@ -494,10 +500,31 @@ async def fetch_snapshot(share_id: str) -> ShareSnapshot:
         return fetched.snapshot
 
 
+async def cached_snapshot(share_id: str) -> ShareSnapshot:
+    """A shared conversation, from disk wherever a run has already fetched it.
+
+    What is kept is this project's own reading of the snapshot rather than the
+    response behind it: the conversation is reached by up to three different
+    requests depending on which organization it turns out to live in, so there
+    is no one raw payload to hold. Keeping the snapshot spares a repeat run the
+    whole authenticated search, not just the transfer.
+    """
+
+    async def download() -> Fetched:
+        snapshot = await fetch_snapshot(share_id)
+        return Fetched(
+            payload=snapshot.model_dump_json().encode(),
+            content_type="application/json",
+        )
+
+    fetched = await cached_fetch("conversation", share_id, download)
+    return ShareSnapshot.model_validate_json(fetched.payload())
+
+
 async def do_extract_conversation(url: str) -> ExtractConversationOutput:
     """Extract a Claude conversation into structured markdown, saved to disk."""
     share_id = extract_share_id(url)
-    data = await fetch_snapshot(share_id)
+    data = await cached_snapshot(share_id)
 
     spoken = [
         ConversationMessage(
@@ -784,12 +811,8 @@ def parse_lesswrong_slug(url: str) -> str:
     return segments[slug_at]
 
 
-async def do_extract_lesswrong(url: str) -> ExtractLessWrongOutput:
-    """Fetch a LessWrong post via GraphQL. Returns structured output with post body only."""
-    import markdownify
-
-    slug = parse_lesswrong_slug(url)
-
+async def download_lesswrong(slug: str) -> Fetched:
+    """Ask the GraphQL API for one post, refusing anything that is not an answer."""
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(
@@ -803,7 +826,17 @@ async def do_extract_lesswrong(url: str) -> ExtractLessWrongOutput:
     if resp.status_code != 200:
         raise ToolError(f"LessWrong API returned HTTP {resp.status_code}")
 
-    post = LessWrongResponse.model_validate(resp.json()).data.post.result
+    return Fetched(payload=resp.content, content_type="application/json")
+
+
+async def do_extract_lesswrong(url: str) -> ExtractLessWrongOutput:
+    """Fetch a LessWrong post via GraphQL. Returns structured output with post body only."""
+    import markdownify
+
+    slug = parse_lesswrong_slug(url)
+    fetched = await cached_fetch("lesswrong", slug, lambda: download_lesswrong(slug))
+
+    post = LessWrongResponse.model_validate_json(fetched.payload()).data.post.result
     if post is None:
         raise ToolError(f"Post not found for slug '{slug}'")
 
@@ -870,15 +903,24 @@ async def extract_webpage_batch(
         raise ToolError("No URLs provided")
 
     async def fetch_one(client: httpx.AsyncClient, url: str) -> BatchResult | None:
-        try:
+        async def download() -> Fetched:
             resp = await client.get(url)
             if resp.status_code >= 400:
-                return None
-        except httpx.HTTPError:
+                raise ToolError(f"HTTP {resp.status_code} for {url}")
+            marker = challenge_page_marker(resp.text)
+            if marker is not None:
+                raise ToolError(f"{url} served a challenge page (matched {marker!r})")
+            return Fetched(payload=resp.content, content_type=content_type(resp))
+
+        try:
+            fetched = await cached_fetch("url", url, download)
+        except (ToolError, httpx.HTTPError):
             return None
 
+        page = fetched.text(encoding=declared_charset(fetched.entry.content_type))
+
         text = trafilatura.extract(
-            resp.text,
+            page,
             include_comments=False,
             include_tables=True,
             no_fallback=False,
@@ -889,7 +931,7 @@ async def extract_webpage_batch(
 
         title = ""
         title_json = trafilatura.extract(
-            resp.text, output_format="json", include_links=False
+            page, output_format="json", include_links=False
         )
         if title_json:
             try:
@@ -1070,7 +1112,13 @@ def format_comments_as_markdown(comments: list[GdocComment]) -> str:
 
 
 async def do_extract_gdoc(url: str) -> ExtractGdocOutput:
-    """Extract content, comments, and links from a Google Doc."""
+    """Extract content, comments, and links from a Google Doc.
+
+    Alone among the extractors in going to the network every time, and
+    deliberately: the document is the surface the author is writing on, and
+    their comments are picked up by re-reading it. A cached copy would answer
+    with the version from before they replied.
+    """
     from inkwell.agent.tools.google_docs import (
         extract_tab_markdown,
         fetch_document,

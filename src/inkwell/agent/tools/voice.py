@@ -108,8 +108,9 @@ async def read_style_samples(
 ) -> list[StyleSample]:
     """Every sample a style directory holds: its prose files, and its URLs.
 
-    A ``urls.txt`` in the directory lists references to fetch; each is cached
-    beside it so a later run reads the copy rather than the network.
+    A ``urls.txt`` in the directory lists references to fetch; each goes
+    through the shared fetch cache, so a later run reads what is on disk
+    rather than the network.
     """
     if not directory.exists():
         return []
@@ -134,9 +135,9 @@ async def read_style_samples(
             url = line.strip()
             if not url:
                 continue
-            cached = await fetch_cached_url(directory, url)
-            if cached:
-                yield StyleSample(label=url, text=cached, source_type=source_type)
+            prose = await fetch_style_url(url)
+            if prose:
+                yield StyleSample(label=url, text=prose, source_type=source_type)
 
     return list(local()) + [sample async for sample in fetched()]
 
@@ -156,31 +157,22 @@ async def load_style_corpus() -> list[StyleSample]:
     )
 
 
-async def fetch_cached_url(cache_parent: Path, url: str) -> str | None:
-    """Return cached text for a URL, or fetch and cache it."""
-    cache_dir = cache_parent / ".cache"
-    cache_dir.mkdir(exist_ok=True)
+async def fetch_style_url(url: str) -> str | None:
+    """The prose at a style-corpus URL, or nothing where it cannot be read.
 
-    slug = hashlib.sha256(url.encode()).hexdigest()[:12]
-    cache_path = cache_dir / f"{slug}.txt"
-
-    if cache_path.exists():
-        return cache_path.read_text(encoding="utf-8")
+    Asks for the text on every run and pays for the transfer once: the fetch
+    beneath this consults the shared fetch cache, so the corpus no longer keeps
+    a second copy of its own beside the style directory.
+    """
+    from inkwell.agent.tools.research.fetch import do_fetch_source
 
     try:
-        from pathlib import Path
-
-        from inkwell.agent.tools.research.fetch import do_fetch_source
-
         result = await do_fetch_source(url)
-        text = Path(result.content.path).read_text(encoding="utf-8")
-        if text:
-            cache_path.write_text(text, encoding="utf-8")
-            return text
     except Exception:
         logger.debug("Failed to fetch style corpus URL: %s", url)
+        return None
 
-    return None
+    return Path(result.content.path).read_text(encoding="utf-8") or None
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,12 @@ spend a reviewer on what counting cannot settle — whether a passage is
 concrete enough to teach from — and land their verdict in that same row, so
 the rewrite stage reads one report rather than two.
 
+A row need not reach a verdict at all. Where the guidance asks *for* a pattern
+rather than against it — contractions, a question, a semicolon — there is no
+count that is a fault, and a threshold would only invent one. Such a row
+reports its number and stops, through `FormatCheck.reading` rather than
+`FormatCheck.result`, and the report prints it as a measurement.
+
 Adding a row to a format is a constructor call in that format's declaration.
 Adding a *kind* of row is one class here, and no edit to any report, renderer,
 or stage: the base declares `run` and each row answers it.
@@ -46,7 +52,14 @@ from inkwell.agent.book_links import LINK_SCHEME, BookReferences, UnresolvedRefe
 from inkwell.agent.config import PipelineStage, stage_model
 from inkwell.agent.glossary import GlossaryScope, GlossaryView
 from inkwell.agent.markdown_to_docs import markdown_to_requests
-from inkwell.agent.prose import Paragraph, Prose, ProseReader, Sentence, spread
+from inkwell.agent.prose import (
+    Paragraph,
+    Prose,
+    ProseReader,
+    Sentence,
+    carries_a_word,
+    spread,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +69,11 @@ that fired is not on its own a reason to change anything. The author's voice \
 profile and the plan's voice_notes outrank every row below: where a row fires \
 against how the author actually writes — their rhythm, their asides, their \
 hedges, their self-implication — the author wins and the row is noise. Act on \
-a row only where acting on it also makes the passage better."""
+a row only where acting on it also makes the passage better.
+
+A row printed as `measured` reached no verdict and holds nothing against the \
+draft. It counts a pattern the guidance asks for rather than against, where \
+no number is a fault and a low one is only worth seeing."""
 """Travels at the head of every report, so no stage reads the rows without the
 precedence that decides what to do when one fires against the author."""
 
@@ -96,11 +113,22 @@ class CheckRow(BaseModel):
         default_factory=list,
         description="The concrete places the row is about",
     )
+    measurement: bool = Field(
+        default=False,
+        description="Whether this row reports a number and reaches no verdict, "
+        "for a pattern the format's guidance asks for rather than against",
+    )
+
+    @property
+    def state(self) -> str:
+        """What the row concluded, or that it only counted."""
+        if self.measurement:
+            return "measured"
+        return f"{len(self.findings)} finding(s) (advisory)" if self.fired else "ok"
 
     def render(self) -> Iterator[str]:
         """This row as `dev check` prints one: a verdict line, then detail."""
-        state = f"{len(self.findings)} finding(s) (advisory)" if self.fired else "ok"
-        yield f"{self.name}: {state} — {self.measured}"
+        yield f"{self.name}: {self.state} — {self.measured}"
         if self.fired:
             yield from (f"  {finding}" for finding in self.findings)
 
@@ -164,9 +192,16 @@ class DraftUnderCheck:
 
 
 def contains(words: list[str], phrase: list[str]) -> bool:
-    """Whether `phrase` appears as a run of whole words in `words`."""
+    """Whether `phrase` appears as a run of whole words in `words`.
+
+    A one-word phrase is asked as membership rather than as a run of one,
+    which is what most of a banned-vocabulary list is and is the difference
+    between a scan per word and a slice per position.
+    """
     if not phrase or len(phrase) > len(words):
         return False
+    if len(phrase) == 1:
+        return phrase[0] in words
     return any(
         words[start : start + len(phrase)] == phrase
         for start in range(len(words) - len(phrase) + 1)
@@ -219,6 +254,14 @@ class FormatCheck(BaseModel):
             name=self.name, measured=measured, fired=fired, findings=list(findings)
         )
 
+    def reading(self, measured: str) -> CheckRow:
+        """This row's number, with no verdict attached to it.
+
+        For a pattern the guidance asks for rather than against, where a
+        threshold would invent a fault the guidance never claimed.
+        """
+        return CheckRow(name=self.name, measured=measured, measurement=True)
+
 
 class BannedVocabulary(FormatCheck):
     """Words and phrases the format's guidance rules out.
@@ -238,11 +281,12 @@ class BannedVocabulary(FormatCheck):
     )
 
     async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        watched = [(phrase, draft.phrase(phrase)) for phrase in self.phrases]
         matched = [
             f"“{phrase}” — {sentence.text}"
             for sentence in draft.prose.sentences
-            for phrase in self.phrases
-            if contains(sentence.words, draft.phrase(phrase))
+            for phrase, words in watched
+            if contains(sentence.words, words)
         ]
         return self.result(
             f"{len(matched)} use(s) of {len(self.phrases)} banned phrase(s), "
@@ -253,12 +297,18 @@ class BannedVocabulary(FormatCheck):
 
 
 class PunctuationDensity(FormatCheck):
-    """How often the draft reaches for a mark it is meant to ration.
+    """How often the draft reaches for a mark, and whether that is a fault.
 
-    One kind for every mark the author rations — em dashes, semicolons,
-    parentheses — because they differ only in which character is counted and
-    how many are too many. A format declares one row per mark it cares about,
-    and its name is what the report prints.
+    One kind for every mark a format has a position on — em dashes,
+    semicolons, parentheses — because they differ only in which character is
+    counted. A format declares one row per mark it cares about, and its name
+    is what the report prints.
+
+    Whether the density is judged is the format's call, and it makes it by
+    stating a ceiling or leaving one out. A mark the guidance rations gets a
+    ceiling. A mark the guidance asks the writer to *use* gets none, because
+    machine prose avoids semicolons and parentheses and no number of them is
+    the fault — the density is worth seeing and nothing more.
     """
 
     kind: Literal["punctuation-density"] = "punctuation-density"
@@ -266,18 +316,24 @@ class PunctuationDensity(FormatCheck):
         description="The marks this row counts, as written. Several together "
         "count as one budget, which is how a paired mark is declared"
     )
-    per_thousand_ceiling: float = Field(
-        default=4.0,
-        description="Marks per thousand words past which the row fires",
+    per_thousand_ceiling: float | None = Field(
+        default=None,
+        description="Marks per thousand words past which the row fires, or "
+        "none to report the density as a measurement with no verdict",
     )
 
     async def run(self, draft: DraftUnderCheck) -> CheckRow:
         words = draft.prose.length
         found = draft.prose.marks(self.marks)
         density = share(found, words) * 1000
-        return self.result(
+        counted = (
             f"{found} of {''.join(self.marks)} in {words} words "
-            f"({density:.1f} per thousand, ceiling {self.per_thousand_ceiling})",
+            f"({density:.1f} per thousand"
+        )
+        if self.per_thousand_ceiling is None:
+            return self.reading(f"{counted})")
+        return self.result(
+            f"{counted}, ceiling {self.per_thousand_ceiling})",
             fired=density > self.per_thousand_ceiling,
             findings=[
                 paragraph.block.plain
@@ -467,25 +523,58 @@ INFLATED_COPULAS = [
     "constitutes",
     "amounts to",
 ]
-"""The substitutions the author's guidance names for a plain `is` — a copula
-wearing more words. The default for `LinkingPredicates`, which takes an
-override: which phrasings read as inflated is a judgement about register."""
+"""The substitutions the author's guidance names for a plain `is` or `has` — a
+copula wearing more words."""
+
+INFLATED_VERBS = [
+    "utilize",
+    "utilizes",
+    "utilizing",
+    "facilitate",
+    "facilitates",
+    "facilitating",
+    "leverage",
+    "leverages",
+    "leveraging",
+    "optimize",
+    "optimizes",
+    "optimizing",
+    "navigate",
+    "navigates",
+    "navigating",
+    "implement",
+    "implements",
+    "implementing",
+    "harness",
+    "harnesses",
+    "harnessing",
+]
+"""The same move made on an ordinary verb: `use` written as `utilize`, `help`
+as `facilitate`, `deal with` as `navigate`. The guidance names the swap and the
+plain word it stands in for, so both families are one row's business."""
+
+INFLATED_PREDICATES = [*INFLATED_COPULAS, *INFLATED_VERBS]
+"""The default for `LinkingPredicates`, which takes an override: which
+phrasings read as inflated is a judgement about register."""
 
 
 class LinkingPredicates(FormatCheck):
-    """How much of the draft describes with an inflated copula rather than acts.
+    """How much of the draft predicates with an inflated verb rather than acts.
 
-    A declared detector: the author enumerated the substitutions that stand in
-    for `is` — `serves as`, `stands as`, `holds the distinction of being` — and
-    this matches them on each sentence's own words, so extending the list is
-    data. A `Segmenter` backed by a parser would let the same row generalize to
-    constructions nobody wrote down, and the row above would not change.
+    A declared detector over two families the guidance names together. The
+    first stands in for a copula — `serves as`, `stands as`, `holds the
+    distinction of being` for `is`, `features` and `boasts` for `has`. The
+    second swaps a plain verb for a longer one that means the same thing —
+    `utilize` for `use`, `facilitate` for `help`. Both are matched on each
+    sentence's own words, so extending either list is data. A `Segmenter`
+    backed by a parser would let the same row generalize to constructions
+    nobody wrote down, and the row above would not change.
     """
 
     kind: Literal["linking-predicates"] = "linking-predicates"
     phrases: list[str] = Field(
-        default_factory=INFLATED_COPULAS.copy,
-        description="The inflated copula substitutions this row counts",
+        default_factory=INFLATED_PREDICATES.copy,
+        description="The inflated copulas and verb swaps this row counts",
     )
     share_ceiling: float = Field(
         default=0.2,
@@ -495,18 +584,16 @@ class LinkingPredicates(FormatCheck):
 
     async def run(self, draft: DraftUnderCheck) -> CheckRow:
         sentences = draft.prose.sentences
+        watched = [draft.phrase(phrase) for phrase in self.phrases]
         linking = [
             sentence
             for sentence in sentences
-            if any(
-                contains(sentence.words, draft.phrase(phrase))
-                for phrase in self.phrases
-            )
+            if any(contains(sentence.words, phrase) for phrase in watched)
         ]
         measured = share(len(linking), len(sentences))
         return self.result(
             f"{len(linking)}/{len(sentences)} sentence(s) predicate with an "
-            f"inflated copula ({measured:.0%}, ceiling {self.share_ceiling:.0%})",
+            f"inflated verb ({measured:.0%}, ceiling {self.share_ceiling:.0%})",
             fired=measured > self.share_ceiling,
             findings=[sentence.text for sentence in linking],
         )
@@ -572,6 +659,477 @@ class ParticipialTails(FormatCheck):
             f"tail ({measured:.0%}, ceiling {self.share_ceiling:.0%})",
             fired=measured > self.share_ceiling,
             findings=[sentence.text for sentence in tailed],
+        )
+
+
+class SynonymSet(BaseModel):
+    """Terms that name the same thing, each written with the forms it takes.
+
+    A term is a list of forms rather than a single word, because cycling means
+    reaching for a *different* word and a plural is the same one. `researcher`
+    and `researchers` are one term; `researcher` and `scholar` are two.
+    """
+
+    terms: list[list[str]] = Field(
+        description="Each entry is one term's forms; a paragraph using any "
+        "form of it has used that term once"
+    )
+
+
+INTERCHANGEABLE_TERMS = [
+    SynonymSet(
+        terms=[
+            ["researcher", "researchers"],
+            ["scientist", "scientists"],
+            ["academic", "academics"],
+            ["scholar", "scholars"],
+            ["expert", "experts"],
+        ]
+    ),
+    SynonymSet(
+        terms=[
+            ["company", "companies"],
+            ["firm", "firms"],
+            ["organization", "organizations"],
+            ["business", "businesses"],
+            ["enterprise", "enterprises"],
+        ]
+    ),
+    SynonymSet(
+        terms=[
+            ["method", "methods"],
+            ["approach", "approaches"],
+            ["technique", "techniques"],
+            ["strategy", "strategies"],
+        ]
+    ),
+    SynonymSet(
+        terms=[
+            ["problem", "problems"],
+            ["issue", "issues"],
+            ["challenge", "challenges"],
+            ["difficulty", "difficulties"],
+        ]
+    ),
+    SynonymSet(
+        terms=[
+            ["user", "users"],
+            ["customer", "customers"],
+            ["client", "clients"],
+            ["consumer", "consumers"],
+        ]
+    ),
+    SynonymSet(
+        terms=[
+            ["chip", "chips"],
+            ["semiconductor", "semiconductors"],
+            ["processor", "processors"],
+        ]
+    ),
+    SynonymSet(
+        terms=[
+            ["show", "shows", "showed"],
+            ["demonstrate", "demonstrates", "demonstrated"],
+            ["reveal", "reveals", "revealed"],
+            ["illustrate", "illustrates", "illustrated"],
+            ["indicate", "indicates", "indicated"],
+        ]
+    ),
+]
+"""The families the guidance's own examples name, plus the ones a draft in any
+subject cycles through. The default for `SynonymCycling`, which takes an
+override: a piece about carrots declares the carrot family, and only the format
+knows which words its subject makes interchangeable."""
+
+
+class SynonymCycling(FormatCheck):
+    """Paragraphs that rename one thing rather than repeat its name.
+
+    A repetition penalty makes machine prose reach for a synonym where a
+    writer would say the word again — the researcher becomes the scientist,
+    then the academic, then the expert. The guidance asks for the opposite:
+    say `carrot` twice.
+
+    That is exactly why this row knows nothing general about synonymy. Ordinary
+    variation is not the tell and repeating a word is what the guidance wants,
+    so a row that inferred synonymy would fire on prose doing the right thing
+    and turn the whole report into noise. It fires only on terms a format
+    declared interchangeable, and only inside one paragraph, where cycling is
+    something a reader actually notices.
+    """
+
+    kind: Literal["synonym-cycling"] = "synonym-cycling"
+    families: list[SynonymSet] = Field(
+        default_factory=INTERCHANGEABLE_TERMS.copy,
+        description="The sets of terms this format treats as naming one thing",
+    )
+    distinct_ceiling: int = Field(
+        default=2,
+        description="How many terms of one family a paragraph may use before "
+        "the row fires. Two is a writer varying a phrase; three is the cycle",
+    )
+
+    def cycled(self, paragraph: Paragraph) -> Iterator[str]:
+        """The families this paragraph names one thing through, one line each."""
+        said = {word for sentence in paragraph.sentences for word in sentence.words}
+        for family in self.families:
+            used = [terms[0] for terms in family.terms if not said.isdisjoint(terms)]
+            if len(used) > self.distinct_ceiling:
+                yield f"{', '.join(used)} — {paragraph.block.plain}"
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        paragraphs = draft.prose.paragraphs
+        cycling = [line for p in paragraphs for line in self.cycled(p)]
+        return self.result(
+            f"{len(cycling)} paragraph(s) of {len(paragraphs)} name one thing "
+            f"through more than {self.distinct_ceiling} declared term(s)",
+            fired=bool(cycling),
+            findings=cycling,
+        )
+
+
+COORDINATORS = [
+    "and",
+    "or",
+]
+"""The conjunctions a series closes on. The default for `RuleOfThree`, which
+takes an override so a format writing in another register can name its own."""
+
+
+class RuleOfThree(FormatCheck):
+    """Sentences that group their content in threes.
+
+    Machine prose reaches for the triad wherever it can: three adjectives,
+    three reasons, three implications, whether or not the content has three of
+    anything. The guidance asks for the number the content actually has.
+
+    Read as a shape rather than as a list of phrases: a conjunction, the short
+    run after it, and the short comma-separated runs before it. Requiring every
+    item to be short is what keeps a sentence coordinating two full clauses
+    from reading as a list, and the leftmost item may be the end of a longer
+    run because a series' first item sits attached to whatever introduces it.
+
+    A triple is not itself a fault — plenty of things genuinely come in three —
+    so the ceiling sits above zero and only a draft reaching for the shape over
+    and over fires the row.
+    """
+
+    kind: Literal["rule-of-three"] = "rule-of-three"
+    coordinators: list[str] = Field(
+        default_factory=COORDINATORS.copy,
+        description="The conjunctions a coordinated series closes on",
+    )
+    item_words: int = Field(
+        default=2,
+        description="Most words a series item may run to. The guidance names "
+        "the tell as short items — adjective, adjective, and adjective — and "
+        "the cap is what separates those from two coordinated clauses",
+    )
+    share_ceiling: float = Field(
+        default=0.08,
+        description="Share of sentences that may close on a three-item series "
+        "before the row fires. Above zero on purpose: a list the content fixed "
+        "at three is not a fault, and only the habit of reaching for three is",
+    )
+
+    def items(self, tokens: list[str], join: int) -> list[str]:
+        """The series the conjunction at `join` closes, read outward from it."""
+        after = tokens[join + 1 :]
+        stop = after.index(",") if "," in after else len(after)
+        tail = [token for token in after[:stop] if carries_a_word(token)]
+        if not 0 < len(tail) <= self.item_words:
+            return []
+        opens = join - 1 if join and tokens[join - 1] == "," else join
+
+        def pieces() -> Iterator[str]:
+            """Each comma-separated item before the conjunction, right to left."""
+            run = tokens[:opens]
+            while run:
+                cut = max((i for i, t in enumerate(run) if t == ","), default=-1)
+                words = [token for token in run[cut + 1 :] if carries_a_word(token)]
+                if not words:
+                    return
+                yield " ".join(words[-self.item_words :])
+                if len(words) > self.item_words or cut < 0:
+                    return
+                run = run[:cut]
+
+        return [*reversed(list(pieces())), " ".join(tail)]
+
+    def series(self, sentence: Sentence) -> str:
+        """The three-item series this sentence coordinates, or empty."""
+        for join, token in enumerate(sentence.tokens):
+            if token in self.coordinators:
+                items = self.items(sentence.tokens, join)
+                if len(items) == 3:
+                    return ", ".join(items)
+        return ""
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        sentences = draft.prose.sentences
+        grouped = [
+            f"“{found}” — {sentence.text}"
+            for sentence in sentences
+            if (found := self.series(sentence))
+        ]
+        measured = share(len(grouped), len(sentences))
+        return self.result(
+            f"{len(grouped)}/{len(sentences)} sentence(s) group in threes "
+            f"({measured:.0%}, ceiling {self.share_ceiling:.0%})",
+            fired=measured > self.share_ceiling,
+            findings=grouped,
+        )
+
+
+VAGUE_ATTRIBUTIONS = [
+    "studies show",
+    "studies suggest",
+    "studies indicate",
+    "studies have shown",
+    "research shows",
+    "research suggests",
+    "research indicates",
+    "research has shown",
+    "researchers have found",
+    "researchers found",
+    "researchers note",
+    "experts say",
+    "experts suggest",
+    "experts argue",
+    "experts agree",
+    "scholars have noted",
+    "scholars note",
+    "scholars argue",
+    "critics say",
+    "critics argue",
+    "analysts predict",
+    "observers note",
+    "many have argued",
+    "many argue",
+    "some argue",
+    "some have argued",
+    "it is widely believed",
+    "it is often said",
+    "it is generally accepted",
+]
+"""The appeals the guidance calls weasel words — a claim handed to scholars,
+experts, or research without naming any. The default for `VagueAttribution`,
+which takes an override: `the evidence suggests` is on the guidance's own list
+of *good* moves, so which appeals read as evasion is a judgement a format makes.
+"""
+
+
+class VagueAttribution(FormatCheck):
+    """Claims handed to an authority the sentence never names.
+
+    The guidance's fix is one line — if someone said it, say who — and that is
+    what this row measures rather than the phrase alone. A sentence carrying an
+    appeal is counted only when nothing in it is capitalized past its first
+    word, so `Researchers at DeepMind found` and `Chen and Park showed` are the
+    attribution working and never become findings. What survives is the appeal
+    with nobody behind it.
+
+    The cost of that reading is a claim whose source is named in the sentence
+    next door, which is why a format that cites in a following sentence raises
+    the ceiling rather than dropping the row.
+    """
+
+    kind: Literal["vague-attribution"] = "vague-attribution"
+    phrases: list[str] = Field(
+        default_factory=VAGUE_ATTRIBUTIONS.copy,
+        description="The appeals this row counts when nobody is named",
+    )
+    ceiling: int = Field(
+        default=0,
+        description="How many unattributed appeals the format tolerates before "
+        "the row fires",
+    )
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        watched = [(phrase, draft.phrase(phrase)) for phrase in self.phrases]
+        unnamed = [
+            f"“{phrase}” — {sentence.text}"
+            for sentence in draft.prose.sentences
+            if not sentence.names
+            for phrase, words in watched
+            if contains(sentence.words, words)
+        ]
+        return self.result(
+            f"{len(unnamed)} appeal(s) to a source the sentence does not name, "
+            f"{self.ceiling} tolerated",
+            fired=len(unnamed) > self.ceiling,
+            findings=unnamed,
+        )
+
+
+CONTRACTIONS = [
+    "don't",
+    "doesn't",
+    "didn't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "can't",
+    "won't",
+    "couldn't",
+    "shouldn't",
+    "wouldn't",
+    "hasn't",
+    "haven't",
+    "hadn't",
+    "it's",
+    "that's",
+    "there's",
+    "here's",
+    "what's",
+    "who's",
+    "he's",
+    "she's",
+    "let's",
+    "you're",
+    "we're",
+    "they're",
+    "i'm",
+    "i've",
+    "we've",
+    "they've",
+    "you've",
+    "i'd",
+    "we'd",
+    "they'd",
+    "you'd",
+    "i'll",
+    "we'll",
+    "they'll",
+    "you'll",
+]
+"""The contracted forms written out, rather than a rule about apostrophes,
+because `the model's weights` carries one too and is no contraction. The
+default for `ContractionRate`, which takes an override."""
+
+
+class ContractionRate(FormatCheck):
+    """How much of the draft contracts, reported and not judged.
+
+    Machine prose avoids contractions, which is what gives it perfect grammar
+    and no personality. The guidance asks for them, so there is no count that
+    is a fault here and no ceiling to state: a low rate is a tell worth seeing
+    and the writer decides what to do about it.
+    """
+
+    kind: Literal["contraction-rate"] = "contraction-rate"
+    forms: list[str] = Field(
+        default_factory=CONTRACTIONS.copy,
+        description="The contracted forms this row counts, as written",
+    )
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        sentences = draft.prose.sentences
+        watched = [draft.phrase(form) for form in self.forms]
+        contracted = [
+            sentence
+            for sentence in sentences
+            if any(contains(sentence.words, form) for form in watched)
+        ]
+        measured = share(len(contracted), len(sentences))
+        return self.reading(
+            f"{len(contracted)}/{len(sentences)} sentence(s) contract ({measured:.0%})"
+        )
+
+
+NATURAL_OPENERS = [
+    "and",
+    "but",
+    "so",
+    "yet",
+]
+"""The conjunctions the guidance says a sentence may open on. The default for
+`SentenceOpeners`, which takes an override."""
+
+
+class SentenceOpeners(FormatCheck):
+    """How often the draft opens a sentence on a conjunction, reported only.
+
+    Machine prose will not start a sentence with `And` or `But`. The guidance
+    says to, which makes this a count and never a verdict — a draft whose
+    register has no place for the move is not writing badly.
+    """
+
+    kind: Literal["sentence-openers"] = "sentence-openers"
+    openers: list[str] = Field(
+        default_factory=NATURAL_OPENERS.copy,
+        description="The words a sentence may open on, counted when it does",
+    )
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        sentences = draft.prose.sentences
+        opened = [
+            sentence
+            for sentence in sentences
+            if sentence.words and sentence.words[0] in self.openers
+        ]
+        measured = share(len(opened), len(sentences))
+        return self.reading(
+            f"{len(opened)}/{len(sentences)} sentence(s) open on "
+            f"{'/'.join(self.openers)} ({measured:.0%})"
+        )
+
+
+class QuestionRate(FormatCheck):
+    """How often the draft asks the reader something, reported only.
+
+    A question pulls a reader forward without a formal transition, and the
+    guidance lists it among the moves to use. No number of them is a fault, so
+    this row reaches no verdict.
+    """
+
+    kind: Literal["question-rate"] = "question-rate"
+    marks: list[str] = Field(
+        default=["?"],
+        description="The marks that end a question, as written",
+    )
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        sentences = draft.prose.sentences
+        asked = [
+            sentence
+            for sentence in sentences
+            if any(token in self.marks for token in sentence.tokens)
+        ]
+        measured = share(len(asked), len(sentences))
+        return self.reading(
+            f"{len(asked)}/{len(sentences)} sentence(s) ask a question ({measured:.0%})"
+        )
+
+
+class ShortSentences(FormatCheck):
+    """How much of the draft runs short, reported and not judged.
+
+    The guidance asks for fragments and one-line emphasis, and a fragment is
+    what this cannot see: telling one from a short sentence needs a parse, and
+    the segmenter behind these rows hands over tokens. So the row counts what
+    it can actually count — sentences under a declared length — and names that
+    rather than claiming to find fragments. Nothing rests on the distinction,
+    because the row reaches no verdict either way, and it becomes the real
+    thing the day a parser fills the seam.
+    """
+
+    kind: Literal["short-sentences"] = "short-sentences"
+    word_ceiling: int = Field(
+        default=5,
+        description="Most words a sentence may run to and still count as short",
+    )
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        sentences = draft.prose.sentences
+        short = [
+            sentence for sentence in sentences if sentence.length <= self.word_ceiling
+        ]
+        measured = share(len(short), len(sentences))
+        return self.reading(
+            f"{len(short)}/{len(sentences)} sentence(s) run to "
+            f"{self.word_ceiling} words or fewer ({measured:.0%})"
         )
 
 
@@ -783,6 +1341,13 @@ DeclaredCheck = Annotated[
     | ParagraphLengthVariance
     | LinkingPredicates
     | ParticipialTails
+    | SynonymCycling
+    | RuleOfThree
+    | VagueAttribution
+    | ContractionRate
+    | SentenceOpeners
+    | QuestionRate
+    | ShortSentences
     | BoldedSummaries
     | ParagraphSentences
     | BlockLength
@@ -1045,6 +1610,11 @@ class DraftCheckReport(BaseModel):
         """The rows that fired, for a summary line."""
         return [row for row in self.rows if row.fired]
 
+    @property
+    def measurements(self) -> list[CheckRow]:
+        """The rows that report a number rather than reach a verdict."""
+        return [row for row in self.rows if row.measurement]
+
     def render(self) -> str:
         """The report as `dev check` prints one, under the precedence note."""
 
@@ -1060,7 +1630,11 @@ class DraftCheckReport(BaseModel):
             for row in self.rows:
                 yield from row.render()
             yield ""
-            yield f"{len(self.fired)}/{len(self.rows)} rows fired (advisory)"
+            judged = len(self.rows) - len(self.measurements)
+            yield (
+                f"{len(self.fired)}/{judged} rows fired (advisory), "
+                f"{len(self.measurements)} measured"
+            )
 
         return "\n".join(lines())
 

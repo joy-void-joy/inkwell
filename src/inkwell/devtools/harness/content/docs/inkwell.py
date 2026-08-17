@@ -37,6 +37,7 @@ src/inkwell/
 │   ├── stages.py           # Stage prompts and tool lists, per pipeline stage
 │   ├── pipeline.py         # The unified pipeline and its listener
 │   ├── format_checks.py    # The rows a format declares beside its guidance
+│   ├── voice_tells.py      # The house voice's banned vocabulary and its rows
 │   ├── prose.py            # A draft read as blocks and sentences
 │   ├── segmenter.py        # The syntok segmenter filling the sentence seam
 │   ├── session.py          # WritingSessionState, WritingContext
@@ -141,22 +142,37 @@ Adding a row to a format is a constructor call in that format's list; adding a
 carries — terminology held to what the shared glossary already settled — is one
 entry in `EVERY_FORMAT_CHECKS` rather than a copy in each format's list.
 
-Two tiers, one row shape. **Mechanical** rows are data — a threshold and the
+Three tiers, one row shape. **Mechanical** rows are data — a threshold and the
 guidance sentence they measure — and read the draft structurally through
 `agent/prose.py`: blocks from markdown-it, sentences and tokens from the
 segmenter in `agent/segmenter.py`. **Judged** rows spend a reviewer on what
 counting cannot settle, and land the verdict in the same `CheckRow`, so the
-rewrite stage reads one report.
+rewrite stage reads one report. **Measurements** reach no verdict at all: where
+the guidance asks *for* a pattern rather than against it — contractions, a
+question, a semicolon — no count is a fault and a threshold would invent one,
+so the row reports its number through `FormatCheck.reading` and the report
+prints it as `measured` rather than as `ok`.
+
+The tells that belong to no one format live in `agent/voice_tells.py`. An
+inflated copula and an unattributed appeal to studies read the same in a
+textbook chapter and a blog post, so the banned vocabulary and the rows that
+measure the house voice are declared there once and a format splices in
+`VOICE_TELL_CHECKS`. The vocabulary is declared as the groups the voice
+guidance itself names, and both readers come off that one declaration — the row
+measures `LLM_VOCABULARY`, the writer reads `BANNED_VOCABULARY_PROSE` — so the
+list a writer is given and the list a draft is checked against are one thing
+stated once.
 
 `Segmenter` is the seam that decides how much a row can know about a sentence,
 and syntok fills it: boundaries an abbreviation or a decimal does not fool, plus
 tokens a row can match a construction against by position. syntok is here
 because it is pure Python and the project floor is 3.14, which no spaCy wheel
 covers; `pyproject.toml` declares spaCy as the `pos` extra to record where a
-parser-backed implementation drops in. The two rows that would read a parse —
-copula avoidance and participial tails — ship as declared detectors over those
-tokens, matching the tells the author enumerated, and generalize the day the
-seam is filled by a parser without changing.
+parser-backed implementation drops in. The rows that would read a parse —
+inflated predicates, participial tails, the rule of three, and the fragments
+`ShortSentences` counts the length of instead — ship as declared detectors over
+those tokens, matching the tells the author enumerated, and generalize the day
+the seam is filled by a parser without changing.
 
 Rows are **advisory in the `dev check` sense**: they report and never gate. A
 fired row is a line in an artifact the rewriter is handed, a failure to measure

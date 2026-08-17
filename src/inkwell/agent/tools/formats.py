@@ -42,7 +42,13 @@ class FormatLesswrongInput(BaseModel):
     )
     crossrefs: list[str] = Field(
         default_factory=list,
-        description="Related posts/articles to cross-reference",
+        description=(
+            "Other people's posts and articles this one is related to, listed "
+            "under a Related heading at the foot of the submission. Nothing to "
+            "do with a reference into the book a chapter belongs to, which is "
+            "written inline as a book: link and resolved against that book's "
+            "own order — see inkwell.agent.book_links"
+        ),
     )
 
 

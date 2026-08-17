@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from inkwell.agent.book import ChapterPlacement, SectionAddress, ordinal_prefix
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.models import ArticlePlan, SectionPlan
 from inkwell.agent.notes import PipelineNotes
@@ -27,11 +28,9 @@ from inkwell.agent.reader_feedback import (
     ReaderFeedback,
     ReaderFeedbackTree,
     ReaderSubmission,
-    SectionAddress,
-    SectionAddressBook,
+    SectionAddresses,
     SubstantiveRule,
     ingest_reader_feedback,
-    ordinal_prefix,
     read_export,
 )
 
@@ -54,6 +53,13 @@ def plan_with(*titles: str) -> ArticlePlan:
         source_quotes=[],
         author_direction="",
         voice_notes="",
+    )
+
+
+def placed_plan(chapter: int, *titles: str) -> ArticlePlan:
+    """The same plan, saying which chapter of which book it is."""
+    return plan_with(*titles).model_copy(
+        update={"placement": ChapterPlacement(book="adaptation", chapter=chapter)}
     )
 
 
@@ -164,29 +170,76 @@ class TestIdentityMapping:
         assert ordinal_prefix("") is None
 
     def test_titled_sections_are_placed_by_their_own_ordinal(self) -> None:
-        book = SectionAddressBook.for_plan(plan_with("1.3 Intelligence", "7.3 Goals"))
-        placed = book.entry_for("7.3 Goals")
+        addresses = SectionAddresses.for_plan(
+            plan_with("1.3 Intelligence", "7.3 Goals")
+        )
+        placed = addresses.entry_for("7.3 Goals")
         assert placed is not None
         assert (placed.chapter, placed.section) == (7, 3)
 
     def test_untitled_sections_fall_back_to_the_plans_ordering(self) -> None:
-        book = SectionAddressBook.for_plan(plan_with("Intelligence", "Goals"))
-        placed = book.entry_for("Goals")
+        addresses = SectionAddresses.for_plan(plan_with("Intelligence", "Goals"))
+        placed = addresses.entry_for("Goals")
         assert placed is not None
         assert placed.section == 2
         assert placed.chapter is None
 
     def test_a_title_the_plan_does_not_carry_is_not_placed(self) -> None:
-        book = SectionAddressBook.for_plan(plan_with("1.3 Intelligence"))
-        assert book.entry_for("Nowhere") is None
+        addresses = SectionAddresses.for_plan(plan_with("1.3 Intelligence"))
+        assert addresses.entry_for("Nowhere") is None
 
     def test_a_mixed_plan_places_only_its_numbered_sections(self) -> None:
-        book = SectionAddressBook.for_plan(
+        addresses = SectionAddresses.for_plan(
             plan_with("Introduction", "1.1 Foo", "1.2 Bar", "Conclusion")
         )
-        assert [entry.title for entry in book.entries] == ["1.1 Foo", "1.2 Bar"]
-        assert book.entry_for("Introduction") is None
-        assert book.entry_for("Conclusion") is None
+        assert [entry.title for entry in addresses.entries] == ["1.1 Foo", "1.2 Bar"]
+        assert addresses.entry_for("Introduction") is None
+        assert addresses.entry_for("Conclusion") is None
+
+
+class TestChapterFromThePlansIdentity:
+    """Which chapter a plan is, read off the plan rather than off its titles."""
+
+    def test_a_placed_plan_places_its_untitled_sections_in_its_chapter(self) -> None:
+        addresses = SectionAddresses.for_plan(
+            placed_plan(4, "Intelligence", "Goals"),
+        )
+        placed = addresses.entry_for("Goals")
+        assert placed is not None
+        assert (placed.chapter, placed.section) == (4, 2)
+
+    def test_an_unplaced_plan_of_plain_titles_still_knows_no_chapter(self) -> None:
+        addresses = SectionAddresses.for_plan(plan_with("Intelligence", "Goals"))
+        placed = addresses.entry_for("Goals")
+        assert placed is not None
+        assert placed.chapter is None
+
+    def test_the_plans_identity_outranks_a_carried_over_title_prefix(self) -> None:
+        addresses = SectionAddresses.for_plan(placed_plan(4, "7.3 Goals"))
+        placed = addresses.entry_for("7.3 Goals")
+        assert placed is not None
+        assert (placed.chapter, placed.section) == (4, 3)
+
+    def test_a_placed_mixed_plan_still_places_only_its_numbered_sections(self) -> None:
+        addresses = SectionAddresses.for_plan(
+            placed_plan(4, "Introduction", "4.1 Foo", "4.2 Bar", "Conclusion")
+        )
+        assert [entry.title for entry in addresses.entries] == ["4.1 Foo", "4.2 Bar"]
+        assert addresses.entry_for("Introduction") is None
+
+    def test_a_placed_plan_of_plain_titles_reaches_its_chapters_file(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        """The point of the identity: the same three plain titles route nowhere
+        unplaced, because several chapters have a section 3 on file."""
+        ingest_reader_feedback(tree, EXPORT)
+        titles = ("Why adaptation", "What breaks", "What holds")
+        placed = ReaderFeedback.for_plan(notes.reader_dir, placed_plan(1, *titles))
+        unplaced = ReaderFeedback.for_plan(notes.reader_dir, plan_with(*titles))
+        assert placed.for_section("What holds") == tree.section_path(
+            SectionAddress(chapter=1, section=3)
+        )
+        assert unplaced.for_section("What holds") is None
 
 
 class TestIngestion:

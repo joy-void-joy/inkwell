@@ -555,7 +555,7 @@ class TestVoiceOutranksFormatChecks:
                 "signature, not a slip — keep it."
             ),
         )
-        mechanical = [c for c in format_checks_for("textbook") if c.kind != "judged"]
+        mechanical = [c for c in format_checks_for("textbook") if c.mechanical]
         report = await run_format_checks(
             SIGNATURE_PROSE,
             mechanical,

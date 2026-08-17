@@ -17,6 +17,8 @@ src/inkwell/
 │   ├── config.py           # Settings — Google OAuth, research API keys, budgets
 │   ├── models.py           # ArticlePlan, WritingOutput, ReviewFinding
 │   ├── provenance.py       # Venue, evidential role, and acquisition records
+│   ├── book.py             # Which chapter of which book, and the record it outlives
+│   ├── book_links.py       # A chapter pointing at the book, resolved at the write
 │   ├── diversity.py        # Citation distribution and position-diversity checks
 │   ├── prompts.py          # System prompt for the writing agent
 │   ├── stages.py           # Stage prompts and tool lists, per pipeline stage
@@ -92,6 +94,7 @@ keyed on, so it is the unit the feedback loop reports against.
 
 | Stage | Produces |
 | --- | --- |
+| `book_planner` | The book's chapters, their reading order, and the cross-references between them — above the plan, and only for a run assigned to a book |
 | `planner` | The article outline, research questions, preservable quotes, voice notes |
 | `researcher` | Answers to every research question, with sources |
 | `section_writer` | One section, in its own Google Doc tab, sharing a glossary |
@@ -103,6 +106,15 @@ keyed on, so it is the unit the feedback loop reports against.
 
 Section writers run in parallel and never share a tab, which is what makes the
 Google Doc safe to write into while the author is reading it.
+
+A book's chapters are one run each, so the book stage above the plan is what
+owns the order and the cross-references no single chapter could settle for
+itself, and it writes them into the book's own record rather than into the
+session. `inkwell chapter <book>[:<n>] <sources>` skips it: a chapter written
+on its own reads the recorded order rather than laying one out again, and where
+the book has no record yet it appends and says what it assumed. An ordinal is
+an identity — assigned once, never reassigned — because the reader-feedback
+export is keyed by numbers readers have already been given.
 
 ## Output formats and the checks they declare
 

@@ -200,7 +200,7 @@ class TestBoldCollisionPerFormat:
 
     async def test_textbook_rows_pass_a_draft_written_to_them(self) -> None:
         """Every mechanical textbook row holds on prose that follows the format."""
-        mechanical = [c for c in format_checks_for("textbook") if c.kind != "judged"]
+        mechanical = [c for c in format_checks_for("textbook") if c.mechanical]
         report = await run_format_checks(
             TEXTBOOK_PROSE,
             mechanical,
@@ -214,7 +214,7 @@ class TestBoldCollisionPerFormat:
 
 class TestAdvisoryNotGating:
     async def test_a_draft_firing_every_row_still_reports(self) -> None:
-        mechanical = [c for c in format_checks_for("textbook") if c.kind != "judged"]
+        mechanical = [c for c in format_checks_for("textbook") if c.mechanical]
         report = await run_format_checks(
             TEMPLATED,
             mechanical,

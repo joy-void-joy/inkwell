@@ -18,6 +18,7 @@ from lup.runtime.usage import CostAccumulator
 from lup.types import JsonObject, JsonValue, StringMap
 from lup.workspace.history import SessionResult
 
+from inkwell.agent.book import BookOutline, ChapterPlacement
 from inkwell.agent.provenance import SourceProvenance, Venue
 
 
@@ -69,6 +70,16 @@ class ArticlePlan(BaseModel):
     thesis: str = Field(description="Core argument or insight in one sentence")
     target_format: str = Field(
         description="Output format: 'academic', 'lesswrong', 'twitter', 'blog', 'dialog', 'memo', or 'custom:<description>'. Choose based on what best fits the content."
+    )
+    placement: ChapterPlacement | None = Field(
+        default=None,
+        description=(
+            "Which chapter of which book this plan is, absent for a standalone "
+            "piece. Absent means bookless rather than a book of one chapter: a "
+            "piece is only part of a book where the run that produced it was "
+            "launched as one, so nothing is silently promoted into a book it "
+            "was never placed in"
+        ),
     )
     sections: list[SectionPlan] = Field(description="Ordered list of planned sections")
     research_questions: list[ResearchQuestion] = Field(
@@ -583,6 +594,14 @@ class PipelineSnapshot(BaseModel):
     )
     voice_file_paths: list[str] = Field(
         default_factory=list, description="Voice analysis artifact paths"
+    )
+    outline: BookOutline | None = Field(
+        default=None,
+        description=(
+            "The book's order and cross-references as the book stage left "
+            "them, absent for a standalone run and for one whose book was laid "
+            "out by an earlier run rather than this one"
+        ),
     )
     plan: ArticlePlan | None = Field(default=None)
     research: ResearchCompilation | None = Field(default=None)

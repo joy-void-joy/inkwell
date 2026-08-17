@@ -635,17 +635,26 @@ def saved_static_model(directory: Path, words: tuple[str, ...]) -> Path:
     than pulled from the hub: what wants exercising is that this project calls
     the library the way the library expects, and a download would test the
     network instead.
+
+    The optional libraries are asked for by name rather than imported at module
+    scope, the way ``static_encoder`` asks for the same one, because a checkout
+    without the embeddings extra is the ordinary state and has to type-check
+    and collect exactly as one with it does. Asking here rather than only at
+    each caller is also what makes this helper skip on its own.
     """
     import numpy
-    from model2vec import StaticModel
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import Whitespace
+
+    model2vec = pytest.importorskip("model2vec", reason=EMBEDDINGS_ABSENT)
+    tokenizers = pytest.importorskip("tokenizers", reason=EMBEDDINGS_ABSENT)
+    models = pytest.importorskip("tokenizers.models", reason=EMBEDDINGS_ABSENT)
+    pre = pytest.importorskip("tokenizers.pre_tokenizers", reason=EMBEDDINGS_ABSENT)
 
     vocabulary = {word: index for index, word in enumerate((UNKNOWN_TOKEN, *words))}
-    tokenizer = Tokenizer(WordLevel(vocab=vocabulary, unk_token=UNKNOWN_TOKEN))
-    tokenizer.pre_tokenizer = Whitespace()
-    StaticModel(
+    tokenizer = tokenizers.Tokenizer(
+        models.WordLevel(vocab=vocabulary, unk_token=UNKNOWN_TOKEN)
+    )
+    tokenizer.pre_tokenizer = pre.Whitespace()
+    model2vec.StaticModel(
         vectors=numpy.eye(len(vocabulary), dtype=numpy.float32), tokenizer=tokenizer
     ).save_pretrained(directory)
     return directory
@@ -654,6 +663,9 @@ def saved_static_model(directory: Path, words: tuple[str, ...]) -> Path:
 UNKNOWN_TOKEN = "[UNK]"
 """What the fixture model calls a word it has no vector for."""
 
+EMBEDDINGS_ABSENT = "the embeddings extra is not installed"
+"""Why a test needing the real embedding library skips instead of failing."""
+
 
 async def test_the_local_embedder_drives_the_real_library(tmp_path: Path) -> None:
     """The shipped implementation, against the library rather than a stand-in.
@@ -661,7 +673,7 @@ async def test_the_local_embedder_drives_the_real_library(tmp_path: Path) -> Non
     Skipped where the optional extra is not installed, which is the state a
     fresh clone is in and the state every structural test above runs in.
     """
-    pytest.importorskip("model2vec", reason="the embeddings extra is not installed")
+    pytest.importorskip("model2vec", reason=EMBEDDINGS_ABSENT)
 
     model = saved_static_model(tmp_path / "model", ("grader", "regulator"))
     embedder = LocalEmbedder(str(model))
@@ -677,7 +689,7 @@ async def test_the_local_embedder_answers_a_neighbour_query_end_to_end(
     corpus: CorpusStore, tmp_path: Path
 ) -> None:
     """Embed the corpus and ask it a question, through the shipped implementation."""
-    pytest.importorskip("model2vec", reason="the embeddings extra is not installed")
+    pytest.importorskip("model2vec", reason=EMBEDDINGS_ABSENT)
 
     embedder = LocalEmbedder(
         str(saved_static_model(tmp_path / "model", ("capability", "regulator")))

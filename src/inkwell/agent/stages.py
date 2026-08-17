@@ -19,6 +19,7 @@ from inkwell.agent.format_checks import (
     BoldEmphasis,
     DeclaredCheck,
     DraftWords,
+    FormatCheck,
     FormulaicOpenings,
     JudgedRow,
     LinkingPredicates,
@@ -584,6 +585,49 @@ mind, the honest answer is one_sided=False.
 
 Default to False when you are unsure. This check is advisory and a false \
 alarm costs the author a note about nothing."""
+
+
+BOOK_PLANNER_SYSTEM = """\
+You lay out a book. Not one chapter of it — the whole spine: which \
+chapters it has, in what order they are read, and what each one needs \
+from the others.
+
+Build the layout using your tools:
+
+1. Call set_book_title with what the book is called
+2. Call add_chapter for each chapter, in reading order, with a stable \
+key, its title, and the one line it argues
+3. Call add_cross_reference for each thing one chapter needs from \
+another — the term it must use, the result it rests on, the case it \
+argues against
+
+## Keys and ordinals
+
+You give each chapter a **key**: a lowercase hyphenated slug that names \
+the chapter itself rather than its place ("measurement-and-scaling", not \
+"chapter-four"). The key is how a later layout recognises a chapter it \
+has seen before, so spell it the same way every time you lay this book \
+out, and never recycle one for a different chapter.
+
+You do **not** number chapters. Ordinals are assigned for you and held \
+fixed: a chapter that already has one keeps it wherever you move it, an \
+inserted chapter takes a number the book has never used, and a dropped \
+chapter's number is retired rather than passed on. Readers have already \
+seen the published numbers, so a chapter's ordinal is its identity — the \
+order you declare is the reading order, and that is the thing you own.
+
+## Cross-references are the point
+
+A book is not a pile of articles. What makes it one is that chapter nine \
+can say "the calibration curve from chapter four" and mean it. Declare \
+those links: which chapter establishes each load-bearing term, result, \
+or claim, and which chapters spend it later. Name the subject exactly as \
+the establishing chapter will name it — a link whose subject is vague \
+buys nothing when the chapter that depends on it is written months \
+later, by a run that can read only what you wrote down.
+
+Be complete about the book and terse about each chapter: one line of \
+thesis is enough. The chapter's own planning stage does the rest."""
 
 
 PLANNER_SYSTEM = """\
@@ -1559,13 +1603,19 @@ def format_spec(target_format: str) -> OutputFormatSpec | None:
 
 
 def format_checks_for(
-    target_format: str, declared: Sequence[DeclaredCheck] = ()
-) -> list[DeclaredCheck]:
+    target_format: str, declared: Sequence[FormatCheck] = ()
+) -> list[FormatCheck]:
     """Every row a draft in this format is measured against.
 
-    The format's own declared rows, plus any a custom-format run declared at
-    runtime through the tool. A format that declares none returns none, which
-    is a valid format with an empty report.
+    The format's own declared rows, plus any this run declared at runtime — a
+    custom format's, through the tool, and any row that follows what the run
+    *is* rather than what format it writes in. A format that declares none
+    returns none, which is a valid format with an empty report.
+
+    Taken and returned as the base row rather than as the union a format
+    declares in, because a row declared at runtime need not be one a format
+    description could have named: nothing here reads a row's kind, so widening
+    the type is all it takes for a new one to travel.
     """
     spec = format_spec(target_format)
     return [*(spec.checks if spec else []), *declared]
@@ -1596,7 +1646,7 @@ always beats the same content forced into a bolded, segmented template."""
 
 
 def get_format_guidance(
-    target_format: str, declared: Sequence[DeclaredCheck] = ()
+    target_format: str, declared: Sequence[FormatCheck] = ()
 ) -> str:
     """Return structural guidance for a target format, or empty string.
 

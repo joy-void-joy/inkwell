@@ -15,9 +15,17 @@ the rewrite stage reads one report rather than two.
 Adding a row to a format is a constructor call in that format's declaration.
 Adding a *kind* of row is one class here, and no edit to any report, renderer,
 or stage: the base declares `run` and each row answers it.
+
+A row need not belong to a format at all. One that measures something about
+what the run *is* rather than what it is written in — a chapter of a book has
+references into that book, whatever format the chapter takes — is constructed
+per run and handed to the same check, so it reaches every format without being
+named by any, and stays silent by being absent rather than by declaring
+nothing.
 """
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Iterator, Sequence
@@ -26,8 +34,20 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+from inkwell.agent.book import (
+    BookAddress,
+    BookRecord,
+    ChapterAddress,
+    ChapterPlacement,
+    SectionAddress,
+    placed_sections,
+)
+from inkwell.agent.book_links import LINK_SCHEME, BookReferences, UnresolvedReference
 from inkwell.agent.config import PipelineStage, stage_model
+from inkwell.agent.markdown_to_docs import markdown_to_requests
 from inkwell.agent.prose import Paragraph, Prose, ProseReader, Sentence, spread
+
+logger = logging.getLogger(__name__)
 
 ADVISORY_PREAMBLE = """\
 These rows are advisory. They report; they do not gate this stage, and a row \
@@ -157,6 +177,16 @@ class FormatCheck(BaseModel):
         description="The guidance sentence this row measures, rendered to the "
         "writer so the rule and its check stay one declaration"
     )
+
+    @property
+    def mechanical(self) -> bool:
+        """Whether counting settles this row, rather than a reviewer.
+
+        Answered by the row itself, so a caller wanting the rows that cost
+        nothing to run asks each one instead of matching on a discriminator it
+        would have to keep in step with the declarations.
+        """
+        return True
 
     @abstractmethod
     async def run(self, draft: DraftUnderCheck) -> CheckRow:
@@ -664,6 +694,11 @@ class JudgedRow(FormatCheck):
         "answered against the draft alone"
     )
 
+    @property
+    def mechanical(self) -> bool:
+        """A judged row spends a reviewer, which is the whole of what it is."""
+        return False
+
     async def run(self, draft: DraftUnderCheck) -> CheckRow:
         verdict = await draft.decide(self.question)
         return self.result(
@@ -695,6 +730,233 @@ against exactly the declarations written here.
 
 This union deserializes; it never dispatches. What a row *does* stays on the
 row, so a new kind is one class above and no arm anywhere."""
+
+
+def unplaced(markdown: str, record: BookRecord) -> list[UnresolvedReference]:
+    """Every reference in one passage of markdown this book could not place.
+
+    Rendered the way the delivered document is rendered, so that what decides
+    a destination here is the same `BookReferences.destination` the write goes
+    through rather than a second reading of the book free to disagree with it.
+    The requests it builds are thrown away: what is wanted is what the book
+    could not answer while it built them.
+
+    A passage at a time, because a finding has to name the page the reference
+    sits on and the words it sits in, and the walk over a whole document
+    reports neither. The cost is a link written in markdown's reference style,
+    whose destination is defined in a block of its own: that definition belongs
+    to the document rather than to any passage, so it is invisible here and
+    such a reference goes unreported. Every reference this codebase asks a
+    writer for is inline — :func:`~inkwell.agent.book_links.pointing` spells
+    the form — and no passage-level walk can see past its own passage.
+    """
+    references = BookReferences(record=record)
+    markdown_to_requests(markdown, references=references)
+    return references.unresolved
+
+
+def listed(findings: Sequence[str], ceiling: int) -> list[str]:
+    """The findings a row prints, saying so where it printed only some.
+
+    A list cut short with nothing said reads as everything it left out having
+    resolved, which is the one thing a report about broken links must never
+    imply.
+    """
+    if len(findings) <= ceiling:
+        return list(findings)
+    return [
+        *findings[:ceiling],
+        f"… and {len(findings) - ceiling} more not listed, "
+        f"{len(findings)} broken reference(s) in all",
+    ]
+
+
+class PointedReference(BaseModel, frozen=True):
+    """One reference a draft made that its book could not place, and where it sits.
+
+    The address is the passage's rather than the target's, because it is the
+    one a reader meets the broken link on and the one whoever publishes has to
+    open to see it.
+    """
+
+    source: BookAddress = Field(
+        description="The published page the passage carrying the reference is on"
+    )
+    reference: UnresolvedReference = Field(
+        description="What the reference named, and the words it was written on"
+    )
+    passage: str = Field(description="The passage it sits in, as a reader meets it")
+
+
+class UnresolvedReferences(FormatCheck):
+    """References that would ship as broken links into this book's own pages.
+
+    A chapter and its sections are addressed as public URL paths, so a
+    reference the book cannot place is a link a reader follows to nothing
+    rather than a cosmetic gap. What the row reports is therefore a fact about
+    published addresses and not a judgement about the writing, which is also
+    why it is declared per run rather than by a format: a reference can only go
+    unresolved where there is a book to resolve it against, and the formats
+    that can carry no chapters would each be declaring a permanently silent
+    row. It is no member of :data:`DeclaredCheck` for the same reason — it is
+    built from a book's record, which is not something a format description
+    could state nor a run could be asked to supply.
+
+    **What is not a finding.** A book still being written is full of references
+    that do not resolve and should not: chapter three points at chapter seven
+    before anything has numbered it, which is exactly what
+    :func:`~inkwell.agent.book_links.pointing` asks a writer to do. The line is
+    drawn by the book's own record rather than by a threshold nobody wrote
+    down — only a reference whose target chapter has been written was ever
+    expected to resolve.
+
+    **Both scopes.** This chapter's prose is resolved through the same
+    resolver that renders the deliverable. Beside it the book's own retirements
+    are read, so a chapter that places every reference it makes still surfaces
+    what the book as a whole does not — a page it stopped serving while the
+    chapter behind it goes on existing, which breaks references written in
+    chapters this run cannot see.
+    """
+
+    kind: Literal["unresolved-references"] = "unresolved-references"
+    name: str = "book references"
+    rule: str = (
+        "Every reference into this book points at a chapter by its declared "
+        "key, and one whose target chapter has already been written resolves "
+        "to a published path. What this row reports is a link fact rather than "
+        "a judgement about the writing — whether /chapters/03/07 is a page "
+        "this book serves is not something a voice settles — and it is "
+        "advisory like every row here: it says what would ship as a broken "
+        "link and stops nothing. Pointing forward at a chapter nobody has "
+        "written yet is not a fault and is not reported."
+    )
+    record: BookRecord = Field(
+        description="The book this chapter is written into, as its record stands"
+    )
+    placement: ChapterPlacement = Field(
+        description="Which chapter of that book this draft is, which is what "
+        "the published address of a finding is measured from"
+    )
+    listed_ceiling: int = Field(
+        default=20,
+        description="How many broken references are listed before the row "
+        "states only how many more there are",
+    )
+
+    def source(self, heading: str) -> BookAddress:
+        """Where a passage under ``heading`` is published, at the depth it sits.
+
+        A section this chapter's own record gives an ordinal is addressed as
+        that section; anything else is addressed as the chapter, because a
+        section holding no ordinal has no page of its own. Placed through
+        :func:`~inkwell.agent.book.placed_sections`, which is the same rule
+        that decides where a reference *into* this chapter lands.
+        """
+        chapter = ChapterAddress(chapter=self.placement.chapter)
+        held = self.record.chapter(self.placement.chapter)
+        if held is None or not heading:
+            return chapter
+        for placed in placed_sections(held.sections):
+            if placed.section is not None and placed.answers(heading):
+                return SectionAddress(
+                    chapter=self.placement.chapter, section=placed.section
+                )
+        return chapter
+
+    def pointed(self, draft: DraftUnderCheck) -> Iterator[PointedReference]:
+        """Every reference this draft makes that the book could not place.
+
+        Each paired with the published address of the passage carrying it,
+        which is what a heading changes as the walk passes one: the block a
+        reference sits in decides which page a reader meets it on.
+        """
+        source = self.source("")
+        for block in draft.prose.blocks:
+            if block.is_heading:
+                source = self.source(block.text)
+            for reference in unplaced(block.source, self.record):
+                yield PointedReference(
+                    source=source, reference=reference, passage=block.plain
+                )
+
+    def here(self, pointed: Sequence[PointedReference]) -> Iterator[str]:
+        """Each of this chapter's references that a written chapter did not place.
+
+        Two ways a written target fails to place, and the finding says which,
+        because they are fixed differently: a chapter still in the reading
+        order that records no such section wants the section named or written,
+        and a chapter that has left the reading order wants the reference
+        pointed somewhere a reader can still reach.
+        """
+        for pointing in pointed:
+            target = pointing.reference.target
+            written = self.record.written(target.chapter)
+            if written is None:
+                continue
+            missing = (
+                f"records no section “{target.section}”"
+                if self.record.keyed(target.chapter) is not None
+                else "is no longer in the reading order"
+            )
+            yield (
+                f"{pointing.source.path} — “{pointing.reference.text}” points "
+                f"at {LINK_SCHEME}:{target.spelled()}, and {target.chapter} is "
+                f"written at "
+                f"{ChapterAddress(chapter=written.placement.chapter).path} but "
+                f"{missing}. In: {pointing.passage}"
+            )
+
+    def across(self) -> Iterator[str]:
+        """Each chapter this book wrote that the reading order no longer holds.
+
+        The book's own scope, and the one this chapter's prose cannot show: a
+        chapter dropped from the order keeps its ordinal and keeps its record
+        on file, so its page stops being served while its content goes on
+        existing, and every reference to it breaks at once — in this chapter,
+        and in chapters delivered long before anyone dropped it.
+
+        The retirement is read rather than the references into it, because the
+        retirement is what survives. :meth:`~inkwell.agent.book.BookOutline.
+        relaid` rebuilds ``cross_references`` from the layout it is handed and
+        carries only those with both ends in the new reading order, so the very
+        relayout that retires a chapter discards the references naming it —
+        into a log, and nowhere a later run could read. What is left on file is
+        the retired entry beside the chapter record it still has, which is the
+        same breakage in the form the book actually keeps.
+        """
+        outline = self.record.outline
+        if outline is None:
+            return
+        for entry in outline.retired:
+            if self.record.chapter(entry.ordinal) is None:
+                continue
+            yield (
+                f"{ChapterAddress(chapter=entry.ordinal).path} — “{entry.title}” "
+                f"is written and the reading order no longer holds it, so every "
+                f"reference to {LINK_SCHEME}:{entry.key} breaks wherever it was "
+                f"written, in this chapter or in one already delivered"
+            )
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        try:
+            pointed = list(self.pointed(draft))
+            here = list(self.here(pointed))
+            across = list(self.across())
+        except Exception:
+            logger.exception("Book references could not be read off this draft")
+            return self.result(
+                "this book's references could not be read — nothing reported",
+                fired=False,
+            )
+        broken = [*here, *across]
+        return self.result(
+            f"this chapter: {len(here)} reference(s) into a written chapter "
+            f"did not resolve, {len(pointed) - len(here)} forward reference(s) "
+            f"not expected to yet; this book: {len(across)} written chapter(s) "
+            f"the reading order no longer holds",
+            fired=bool(broken),
+            findings=listed(broken, self.listed_ceiling),
+        )
 
 
 class DraftCheckReport(BaseModel):

@@ -26,6 +26,7 @@ from lup.workspace.paths import agent_version
 from lup.telemetry.trace import TraceLogger
 
 import inkwell.agent.config as config_mod
+from inkwell.agent.book import ChapterAssignment
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
@@ -170,6 +171,7 @@ async def run_session(
     resume_from_stage: str | None = None,
     restart_from_stage: str | None = None,
     target_format: str = "auto",
+    assignment: ChapterAssignment | None = None,
     existing_doc_id: str | None = None,
     session_id: str | None = None,
     task_id: str | None = None,
@@ -193,6 +195,9 @@ async def run_session(
       leaving a checkpoint to resume from after the author reviews the Doc
     - skipped_stages: Backbone stages this run does not perform, read off the
       entry point that launched it rather than decided stage by stage
+    - assignment: Which book this run writes a chapter of, and which chapter of
+      it where the launch settled that too; absent for a standalone piece,
+      which stays bookless rather than becoming a book of one chapter
     """
     if session_id is None:
         session_id = resume_session_id or uuid.uuid4().hex[:16]
@@ -242,6 +247,7 @@ async def run_session(
                 sources=sources or [],
                 refs=refs or [],
                 target_format=target_format,
+                assignment=assignment,
                 existing_doc_id=existing_doc_id,
                 session_state=setup.session_state,
                 notes=pipeline_notes,
@@ -258,6 +264,7 @@ async def run_session(
                 sources=sources or [],
                 refs=refs or [],
                 target_format=target_format,
+                assignment=assignment,
                 existing_doc_id=existing_doc_id,
                 session_state=setup.session_state,
                 notes=pipeline_notes,

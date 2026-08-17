@@ -17,6 +17,7 @@ from pydantic_settings import (
 
 from lup.types import EnvVars
 
+from inkwell.agent.book import BookStore
 from inkwell.agent.client import PROVIDER_LOGIN
 from inkwell.corpus.semantics import DEFAULT_LOCAL_MODEL, SemanticLayer
 from inkwell.corpus.storage import CorpusStore
@@ -81,6 +82,16 @@ artifact here that is expensive to build and worth nothing if it is rebuilt per
 run: a session reads what earlier runs already enumerated. Resolving it against
 the shared checkout also means every worktree reads one corpus instead of each
 re-scraping the same sources.
+"""
+
+BOOKS_DIR = profile_store_root() / "books"
+"""Where a book's cross-chapter record lives unless configured otherwise.
+
+Beside ``corpus/`` and for the same reason. A book is written one chapter per
+run, so a record kept in the session notes tree would die with the run that
+made it and chapter nine would have nothing of chapter one left to read.
+Resolving it against the shared checkout also means every worktree reads one
+book, rather than each starting a fresh one under whichever branch it is on.
 """
 
 ACTIVE_PROFILE_FILE = PROFILES_DIR / ".active"
@@ -356,6 +367,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    books_path: str = Field(
+        default=str(BOOKS_DIR),
+        validation_alias="INKWELL_BOOKS_PATH",
+        description=(
+            "Where cross-chapter book records are stored — one directory per "
+            "book, one file per chapter. Shared across sessions and worktrees, "
+            "so a chapter run reads what earlier chapter runs wrote."
+        ),
+    )
+
     corpus_embeddings: bool = Field(
         default=False,
         validation_alias="INKWELL_CORPUS_EMBEDDINGS",
@@ -478,6 +499,16 @@ def stage_model(stage: PipelineStage) -> str:
 def corpus_root() -> Path:
     """Where the research corpus lives for the current execution context."""
     return Path(current_settings().corpus_path).expanduser()
+
+
+def book_store() -> BookStore:
+    """The cross-chapter book records for the current execution context.
+
+    Resolved here rather than held by a run, because the store outlives every
+    run that writes to it: a chapter reaches it the same way whether it is the
+    first of its book or the ninth.
+    """
+    return BookStore(root=Path(current_settings().books_path).expanduser())
 
 
 def corpus_semantics(store: CorpusStore) -> SemanticLayer:

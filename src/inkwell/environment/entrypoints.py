@@ -38,6 +38,7 @@ from pydantic.fields import FieldInfo
 
 from lup.types import StringMap
 
+from inkwell.agent.book import ChapterPlacement
 from inkwell.agent.config import PIPELINE_STAGES, PipelineStage
 from inkwell.agent.stages import OUTPUT_FORMATS
 
@@ -107,6 +108,30 @@ def document_id(value: str) -> str:
         ),
         "",
     )
+
+
+def chapter_placement(value: str, what: str) -> ChapterPlacement:
+    """``value`` read as ``book:chapter``, or a ``ValueError`` naming the shape.
+
+    ``book:chapter`` is the URL scheme grammar — a name, a colon, the rest — so
+    it is read with that parser rather than cut apart by hand, and a book id
+    carrying hyphens reads the same way ``atlas:4`` does. What each half may be
+    is the placement's own rule, checked by constructing one: a surface refuses
+    ``atlas:0`` and a book id that could name another directory where the author
+    typed it, rather than once the run is already under way. ``what`` is the
+    parameter asking, so the error names it.
+    """
+    read = urlparse(value)
+    if not read.scheme or not read.path:
+        raise ValueError(
+            f"{what} takes a book and a chapter number, spelled book:chapter — "
+            f"'atlas:4', the book a lowercase hyphenated name; not {value!r}"
+        )
+    if not read.path.isdecimal():
+        raise ValueError(
+            f"{what} takes a chapter number after the colon, not {read.path!r}"
+        )
+    return ChapterPlacement(book=read.scheme, chapter=int(read.path))
 
 
 def checkpoint_stage(value: str, what: str) -> str:
@@ -374,6 +399,51 @@ class StageParameter(OptionalTextParameter):
         if not isinstance(raw, str):
             raise ValueError(f"{self.name} takes a stage name")
         return checkpoint_stage(raw, self.name)
+
+
+class PlacementParameter(EntryPointParameter):
+    """Which chapter of which book a run writes, spelled ``book:chapter``.
+
+    One value rather than two, because half of it is not a placement: a book
+    with no chapter and a chapter with no book are each nothing a run can be
+    launched with, and a surface able to collect one without the other would
+    have to say what that means somewhere else. Text on the wire, so every
+    surface renders it with the control it already has — the option, the
+    request field, and the browser's own text box — and it is read back as a
+    placement here, once, rather than by each of them.
+
+    A kind of its own rather than a text parameter with a rule bolted on: this
+    is what its own ``read`` returning a placement means, and inheriting one
+    that returns text would leave every caller narrowing the string again.
+    """
+
+    @property
+    def annotation(self) -> FieldAnnotation:
+        """Optional text: a run either says where it sits or says nothing."""
+        return str | None
+
+    @property
+    def help_text(self) -> str:
+        return f"{self.help} Spelled book:chapter, as in 'atlas:4'."
+
+    def coerce(self, raw: SuppliedValue) -> SuppliedValue:
+        if not isinstance(raw, str):
+            raise ValueError(f"{self.name} takes a book and a chapter as book:chapter")
+        if not raw:
+            return ""
+        placed = chapter_placement(raw, self.name)
+        return f"{placed.book}:{placed.chapter}"
+
+    def read(self, values: "EntryPointValues") -> ChapterPlacement | None:
+        """Where this run was placed, or None where the surface placed it nowhere.
+
+        Nowhere is a standalone piece, not a book of one chapter: a run says
+        which book it belongs to or belongs to none.
+        """
+        raw = self.raw(values)
+        if not isinstance(raw, str) or not raw:
+            return None
+        return chapter_placement(raw, self.name)
 
 
 class FlagParameter(EntryPointParameter):
@@ -815,6 +885,15 @@ TARGET_FORMAT = TextParameter(
     surfaces=SurfacePlan(form="bespoke"),
 )
 
+CHAPTER = PlacementParameter(
+    name="chapter",
+    label="Chapter of a book",
+    help="Which chapter of which book this run writes, so it reads what the "
+    "book's other chapters recorded and files its own record beside them. "
+    "Leave it unset for a standalone piece, which belongs to no book.",
+    flags=["--chapter"],
+)
+
 EXISTING_DOC_ID = DocumentParameter(
     name="existing_doc_id",
     label="Existing Google Doc",
@@ -1011,6 +1090,7 @@ Examples:
         SOURCES,
         REFS,
         TARGET_FORMAT,
+        CHAPTER,
         EXISTING_DOC_ID,
         STOP_AFTER,
         LIGHT,
@@ -1032,6 +1112,7 @@ Examples:
     parameters=[
         TASK,
         TARGET_FORMAT,
+        CHAPTER,
         EXISTING_DOC_ID,
         STOP_AFTER,
         LIGHT,
@@ -1052,6 +1133,7 @@ voice or its argument.
 
 Examples:
     inkwell revise draft.md
+    inkwell revise chapter4.md --chapter atlas:4   # one chapter of a book
     inkwell revise "https://docs.google.com/document/d/abc123/edit\"""",
     standing_instruction=REVISE_INSTRUCTION,
     # lup: solved: revise skips no stage yet. Its concern asks for extraction
@@ -1069,6 +1151,7 @@ Examples:
         DRAFT,
         REFS,
         TARGET_FORMAT,
+        CHAPTER,
         EXISTING_DOC_ID,
         STOP_AFTER,
         LIGHT,

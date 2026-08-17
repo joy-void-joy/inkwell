@@ -16,6 +16,7 @@ from inkwell.agent.models import AgentSessionResult
 from inkwell.agent.pipeline import PipelineListener
 from inkwell.agent.session import WritingSessionState
 from inkwell.environment.entrypoints import (
+    CHAPTER,
     EXISTING_DOC_ID,
     LIGHT,
     MODEL,
@@ -95,6 +96,7 @@ async def run_declared_session(
             resume_from_stage=entry_point.resume_from(values),
             restart_from_stage=entry_point.restart_from(values),
             target_format=TARGET_FORMAT.read(values),
+            placement=CHAPTER.read(values),
             existing_doc_id=EXISTING_DOC_ID.read(values),
             session_id=session_id,
             listener=listener,

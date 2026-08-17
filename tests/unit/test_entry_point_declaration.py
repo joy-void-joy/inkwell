@@ -21,10 +21,12 @@ from rich.text import Text
 from typer.testing import CliRunner
 
 import inkwell.environment.cli.compile as compile_module
+from inkwell.agent.book import ChapterPlacement
 from inkwell.devtools.harness.composition import write_entry_point_commands
 from inkwell.environment.cli.compile import command_lines, render_entry_point_commands
 from inkwell.environment.entrypoints import (
     ENTRY_POINTS,
+    CHAPTER,
     LIGHT,
     RESTART,
     RESTART_FROM,
@@ -243,6 +245,47 @@ class TestDriftIsClosed:
 
     def test_light_reaches_the_command_line_help(self) -> None:
         assert "--light" in command_help("write")
+
+    @pytest.mark.parametrize("entry_point", [WRITE, RUN, REVISE], ids=lambda e: e.name)
+    def test_a_chapter_reaches_every_surface_of_every_fresh_entry_point(
+        self, entry_point: EntryPoint
+    ) -> None:
+        """A chapter is launched alone, so every way a run starts can place it —
+        and the browser gets it as an ordinary text control rather than as a
+        CLI-only option someone has to remember to add to the form."""
+        assert CHAPTER in entry_point.parameters
+        assert "chapter" in signature_names(rendered_command(entry_point.name))
+        assert "chapter" in request_model(entry_point).model_fields
+        descriptor = next(
+            p for p in entry_point.descriptor().parameters if p.name == "chapter"
+        )
+        assert descriptor.widget == "text"
+        assert descriptor.rendered is True
+        assert descriptor.label == "Chapter of a book"
+
+    def test_a_chapter_reaches_the_command_line_help(self) -> None:
+        assert "--chapter" in command_help("revise")
+
+    def test_a_placement_is_read_off_the_values_whatever_surface_sent_them(
+        self,
+    ) -> None:
+        values = EntryPointValues.declared("revise", {"chapter": "atlas:4"})
+        assert CHAPTER.read(values) == ChapterPlacement(book="atlas", chapter=4)
+
+    def test_a_run_that_names_no_chapter_is_placed_nowhere(self) -> None:
+        values = EntryPointValues.declared("revise", {"draft": "draft.md"})
+        assert CHAPTER.read(values) is None
+
+    @pytest.mark.parametrize(
+        "refused",
+        ["atlas", "4", "atlas:", "atlas:none", "atlas:0", "../elsewhere:1"],
+    )
+    def test_a_placement_that_names_no_chapter_of_a_book_is_refused_at_the_surface(
+        self, refused: str
+    ) -> None:
+        """Refused where the author typed it, rather than once the run is under way."""
+        with pytest.raises(ValueError):
+            EntryPointValues.declared("revise", {"chapter": refused})
 
     def test_restart_and_revise_have_commands(self) -> None:
         """Restart had no command at all, and revise is new; both are declared."""

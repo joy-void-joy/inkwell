@@ -19,6 +19,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import inkwell.environment.launch as launch_module
+from inkwell.agent.book import ChapterPlacement
 from inkwell.agent.client import CostAccumulator
 from inkwell.agent.core import SessionTrace
 from inkwell.agent.models import AgentSessionResult, ArticlePlan, WritingOutput
@@ -85,6 +86,7 @@ type LaunchArgument = (
     | bool
     | list[str]
     | None
+    | ChapterPlacement
     | PipelineListener
     | SessionTrace
     | WritingSessionState

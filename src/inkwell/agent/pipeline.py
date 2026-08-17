@@ -46,7 +46,13 @@ from lup.sandbox.container import Sandbox
 from lup.telemetry.blocks import extract_block_info
 from lup.telemetry.trace import TraceLogger
 
-from inkwell.agent.config import current_settings, load_settings, stage_model
+from inkwell.agent.book import ChapterPlacement, ChapterRecord
+from inkwell.agent.config import (
+    book_store,
+    current_settings,
+    load_settings,
+    stage_model,
+)
 from inkwell.agent.models import (
     ArticlePlan,
     AssumptionsList,
@@ -648,6 +654,64 @@ def reader_feedback_block(manifest: ContentManifest) -> str:
     if not any(ref.role == "reader_feedback" for ref in manifest.refs):
         return ""
     return f"{READER_FEEDBACK_NOTE}\n\n"
+
+
+BOOK_INSTRUCTION = (
+    "what the other chapters of this book already claimed and already named — "
+    "keep their terms and do not re-argue what they settled"
+)
+
+
+def add_book_refs(
+    manifest: ContentManifest, notes: PipelineNotes, placement: ChapterPlacement | None
+) -> None:
+    """List what the other chapters of this book have written down, if any.
+
+    The record outlives every run, so it is rendered into this run's notes and
+    listed as a file: a stage reads files, and what it reads is this run's view
+    of the book rather than a store it would have to hold. A standalone piece
+    is placed nowhere and lists nothing, which is the whole of its book path.
+    """
+    if placement is None:
+        return
+    siblings = book_store().load(placement.book).besides(placement)
+    if not siblings.chapters:
+        return
+    path = notes.save_text_artifact("book", siblings.render())
+    manifest.add(
+        path,
+        "book",
+        f"The book so far — {placement.book}",
+        instruction=BOOK_INSTRUCTION,
+    )
+
+
+def record_placement(
+    notes: PipelineNotes, plan: ArticlePlan, placement: ChapterPlacement | None
+) -> ArticlePlan:
+    """Write the run's identity into its plan, and the plan into the book.
+
+    The identity is the run's rather than the planner's: which chapter of which
+    book this is, is a decision the run was launched with, so it is stamped
+    onto the plan rather than asked of an agent that would have to invent a
+    book id and might not spell it the same way twice. Saving the artifact is
+    what carries it to the stages that read the plan off disk, and publishing
+    is what leaves this chapter where the book's other chapters can read it.
+    """
+    placed = (
+        plan if placement is None else plan.model_copy(update={"placement": placement})
+    )
+    notes.save_artifact("plan", placed)
+    if placed.placement is not None:
+        book_store().publish(
+            ChapterRecord(
+                placement=placed.placement,
+                title=placed.title,
+                thesis=placed.thesis,
+                sections=[section.title for section in placed.sections],
+            )
+        )
+    return placed
 
 
 def directions_block(notes: PipelineNotes) -> str:
@@ -1276,6 +1340,7 @@ async def plan_article(
     notes: PipelineNotes,
     *,
     target_format: str = "auto",
+    placement: ChapterPlacement | None = None,
     voice_file_paths: list[str] | None = None,
     source_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
@@ -1337,6 +1402,7 @@ async def plan_article(
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
     add_reader_index_refs(manifest, notes)
+    add_book_refs(manifest, notes, placement)
 
     task = (
         f"Extract a structured article plan from the source material.\n"
@@ -1381,7 +1447,8 @@ async def plan_article(
     )
     if not plan_path.exists():
         raise PipelineError("Planner produced no output (plan file not written)")
-    return ArticlePlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+    planned = ArticlePlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+    return record_placement(notes, planned, placement)
 
 
 async def refine_plan(
@@ -1398,8 +1465,16 @@ async def refine_plan(
     cost_accumulator: CostAccumulator | None = None,
     on_plan_update: Callable[[], Awaitable[None]] | None = None,
 ) -> ArticlePlan:
-    """Refine the initial plan using research findings."""
+    """Refine the initial plan using research findings.
+
+    The plan going in already says which chapter of which book it is, and the
+    refiner rebuilds a plan from its tools rather than editing that one — so
+    the placement is read off the plan on disk and carried onto the refined
+    one. Read rather than re-derived: a refinement that renumbered its own
+    sections would otherwise re-place the chapter as a side effect.
+    """
     plan_path = notes.artifact_path("plan")
+    current = notes.load_artifact("plan", ArticlePlan)
     refined_path = notes.artifacts_dir / "plan_refined.json"
     collector = PlanCollector(refined_path, on_save=on_plan_update)
     outputs = build_output_server("output", make_plan_tools(collector))
@@ -1414,6 +1489,7 @@ async def refine_plan(
     manifest.add(plan_path, "plan", "Current plan")
     add_voice_refs(manifest, voice_file_paths or [])
     add_reader_section_refs(manifest, notes)
+    add_book_refs(manifest, notes, current.placement if current else None)
     if feedback_path:
         manifest.add(feedback_path, "feedback", "Author feedback")
 
@@ -1449,7 +1525,7 @@ async def refine_plan(
         cost_accumulator=cost_accumulator,
     )
     if not refined_path.exists():
-        return notes.load_artifact("plan", ArticlePlan) or ArticlePlan(
+        return current or ArticlePlan(
             title="Untitled",
             thesis="",
             target_format="auto",
@@ -1460,8 +1536,7 @@ async def refine_plan(
             voice_notes="",
         )
     refined = ArticlePlan.model_validate_json(refined_path.read_text(encoding="utf-8"))
-    notes.save_artifact("plan", refined)
-    return refined
+    return record_placement(notes, refined, current.placement if current else None)
 
 
 async def research_plan(
@@ -2893,6 +2968,7 @@ class PipelineRunner:
         sources: list[str],
         refs: list[str] | None = None,
         target_format: str = "auto",
+        placement: ChapterPlacement | None = None,
         existing_doc_id: str | None = None,
         session_state: WritingSessionState | None = None,
         notes: PipelineNotes | None = None,
@@ -2908,6 +2984,7 @@ class PipelineRunner:
         self.style_refs: list[str] = []
         self.context_refs: list[str] = list(self.refs)
         self.target_format = target_format
+        self.launched_placement = placement
         self.existing_doc_id = existing_doc_id
         self.state = session_state or WritingSessionState()
         self.notes = notes
@@ -2948,6 +3025,19 @@ class PipelineRunner:
         self.watcher: PollingWatcher | None = None
         self.source_watcher: PollingWatcher | None = None
         self.source_is_extracted_gdoc = False
+
+    @property
+    def placement(self) -> ChapterPlacement | None:
+        """Which chapter of which book this run is writing, where it is placed.
+
+        The launch supplies it. A resumed run is reconstructed from a surface
+        that carries none, so it reads the placement back off the plan its
+        snapshot holds — otherwise re-planning a resumed chapter would quietly
+        turn it into a standalone article and drop it out of its book.
+        """
+        if self.launched_placement is not None:
+            return self.launched_placement
+        return self.snapshot.plan.placement if self.snapshot.plan else None
 
     @property
     def effective_format(self) -> str:
@@ -4265,6 +4355,7 @@ class PipelineRunner:
             plan = await plan_article(
                 notes,
                 target_format=self.target_format,
+                placement=self.placement,
                 voice_file_paths=self.snapshot.voice_file_paths,
                 source_file_paths=self.snapshot.source_file_paths,
                 author_notes=self.author_notes,
@@ -5047,10 +5138,10 @@ class PipelineRunner:
     async def execute_strategy(self, strategy: RestartStrategy) -> None:
         notes = self.ensure_notes()
         if strategy.new_plan:
-            self.snapshot.plan = strategy.new_plan
-            notes.save_artifact("plan", strategy.new_plan)
-            await self.write_plan_tab(strategy.new_plan)
-            await self.create_section_tabs(strategy.new_plan)
+            replanned = record_placement(notes, strategy.new_plan, self.placement)
+            self.snapshot.plan = replanned
+            await self.write_plan_tab(replanned)
+            await self.create_section_tabs(replanned)
 
         queue = RestartQueue()
         for action in strategy.actions:
@@ -5638,6 +5729,7 @@ async def run_pipeline(
     sources: list[str],
     refs: list[str] | None = None,
     target_format: str = "auto",
+    placement: ChapterPlacement | None = None,
     existing_doc_id: str | None = None,
     session_state: WritingSessionState | None = None,
     notes: PipelineNotes | None = None,
@@ -5653,6 +5745,7 @@ async def run_pipeline(
         sources=sources,
         refs=refs,
         target_format=target_format,
+        placement=placement,
         existing_doc_id=existing_doc_id,
         session_state=session_state,
         notes=notes,

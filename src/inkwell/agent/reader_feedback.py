@@ -8,7 +8,7 @@ file per section of the work.
 
 Both sides of that filing use the same identity: an ordinal path,
 ``chapter.section``. The export keys its rows by chapter and section number;
-``SectionAddressBook`` reads the same path off the plan's own sections. So a
+``SectionAddresses`` reads the same path off the plan's own sections. So a
 stage revising one section opens one file, the plan stage reads the index of
 all of them, and no theme drawn from any particular round of feedback is
 carried in a prompt — the stage reads the evidence.
@@ -153,10 +153,11 @@ def ordinal_prefix(title: str) -> SectionAddress | None:
 class PlanSectionAddress(BaseModel):
     """Where a plan section sits in the outline, as far as the plan says.
 
-    The section ordinal is always known; the chapter is absent when the plan
-    does not say which chapter it is. A plan of plain titles is one chapter's
-    sections in order, and which chapter that is, is written down nowhere in
-    the plan — so the chapter stays unknown rather than being guessed at.
+    The section ordinal is always known; the chapter is absent only when the
+    plan is genuinely unplaced — no chapter placement of its own, and no title
+    carrying an ordinal to read one off. A plan that says which chapter of
+    which book it is places every section it places, whatever its titles are
+    spelled like.
     """
 
     title: str = Field(description="The plan's own title for the section")
@@ -173,7 +174,7 @@ class AddressedFile(BaseModel):
     path: Path
 
 
-class SectionAddressBook(BaseModel):
+class SectionAddresses(BaseModel):
     """Where each plan section sits in the outline the export is keyed by.
 
     Built once from the plan and handed to whatever needs it, so the mapping
@@ -191,9 +192,17 @@ class SectionAddressBook(BaseModel):
     def for_plan(cls, plan: ArticlePlan) -> Self:
         """Place every section of ``plan`` the plan itself places.
 
-        A title carrying its own ordinal is placed by it. Where no title in
-        the plan carries one, the plan is one chapter's sections in order, so
-        position supplies the section ordinal and the chapter stays unknown.
+        The chapter comes from the plan's own placement, which is the one
+        thing that actually knows it: a plan launched as chapter 7 of a book
+        places its sections in chapter 7 whether or not any title says so, and
+        outranks a title's own prefix where the two disagree, because the
+        placement is a recorded decision and a carried-over prefix is not.
+        Where the plan is unplaced, a title's ordinal supplies the chapter as
+        it always did, and where no title carries one either, the chapter
+        stays unknown rather than being guessed at.
+
+        The section ordinal is the title's own where it has one, and its
+        position in the plan otherwise.
 
         A mixed plan — numbered sections beside an unnumbered introduction or
         conclusion — places only the numbered ones. Position inside a chapter
@@ -203,12 +212,15 @@ class SectionAddressBook(BaseModel):
         1.1's readers. Unplaced is the honest answer, and the stage still has
         the index and the unrouted file.
         """
+        placed = plan.placement.chapter if plan.placement is not None else None
         titled = [ordinal_prefix(section.title) for section in plan.sections]
         if any(own is not None for own in titled):
             return cls(
                 entries=[
                     PlanSectionAddress(
-                        title=section.title, section=own.section, chapter=own.chapter
+                        title=section.title,
+                        section=own.section,
+                        chapter=placed if placed is not None else own.chapter,
                     )
                     for section, own in zip(plan.sections, titled)
                     if own is not None
@@ -216,7 +228,9 @@ class SectionAddressBook(BaseModel):
             )
         return cls(
             entries=[
-                PlanSectionAddress(title=section.title, section=position)
+                PlanSectionAddress(
+                    title=section.title, section=position, chapter=placed
+                )
                 for position, section in enumerate(plan.sections, 1)
             ]
         )
@@ -848,7 +862,7 @@ class ReaderFeedback(BaseModel):
     """
 
     tree: ReaderFeedbackTree
-    book: SectionAddressBook = Field(default_factory=SectionAddressBook)
+    addresses: SectionAddresses = Field(default_factory=SectionAddresses)
 
     @classmethod
     def for_plan(cls, reader_dir: Path, plan: ArticlePlan | None) -> Self:
@@ -859,7 +873,7 @@ class ReaderFeedback(BaseModel):
         """
         return cls(
             tree=ReaderFeedbackTree(root=reader_dir),
-            book=SectionAddressBook.for_plan(plan) if plan else SectionAddressBook(),
+            addresses=SectionAddresses.for_plan(plan) if plan else SectionAddresses(),
         )
 
     def index(self) -> Path | None:
@@ -884,7 +898,7 @@ class ReaderFeedback(BaseModel):
         section's readers is worse than handing them none, and the stage still
         has the index and the unrouted file either way.
         """
-        entry = self.book.entry_for(title)
+        entry = self.addresses.entry_for(title)
         if entry is None:
             return None
         if entry.chapter is not None:
@@ -904,7 +918,7 @@ class ReaderFeedback(BaseModel):
 
         def found() -> Iterator[SectionFeedbackFile]:
             """Each section the same lookup a single writer would make resolves."""
-            for entry in self.book.entries:
+            for entry in self.addresses.entries:
                 if (path := self.for_section(entry.title)) is not None:
                     yield SectionFeedbackFile(title=entry.title, path=path)
 

@@ -38,6 +38,13 @@ def write(
             help="Suggested format (the agent may override): academic, lesswrong, textbook, blog, twitter, dialog, memo, newsletter, linkedin, custom:<description>",
         ),
     ] = "auto",
+    chapter: Annotated[
+        str | None,
+        typer.Option(
+            "--chapter",
+            help="Which chapter of which book this run writes, so it reads what the book's other chapters recorded and files its own record beside them. Leave it unset for a standalone piece, which belongs to no book. Spelled book:chapter, as in 'atlas:4'.",
+        ),
+    ] = None,
     existing_doc_id: Annotated[
         str | None,
         typer.Option(
@@ -117,6 +124,7 @@ def write(
             "sources": sources,
             "refs": refs,
             "target_format": target_format,
+            "chapter": chapter,
             "existing_doc_id": existing_doc_id,
             "stop_after": stop_after,
             "light": light,
@@ -144,6 +152,13 @@ def run(
             help="Suggested format (the agent may override): academic, lesswrong, textbook, blog, twitter, dialog, memo, newsletter, linkedin, custom:<description>",
         ),
     ] = "auto",
+    chapter: Annotated[
+        str | None,
+        typer.Option(
+            "--chapter",
+            help="Which chapter of which book this run writes, so it reads what the book's other chapters recorded and files its own record beside them. Leave it unset for a standalone piece, which belongs to no book. Spelled book:chapter, as in 'atlas:4'.",
+        ),
+    ] = None,
     existing_doc_id: Annotated[
         str | None,
         typer.Option(
@@ -219,6 +234,7 @@ def run(
         {
             "task": task,
             "target_format": target_format,
+            "chapter": chapter,
             "existing_doc_id": existing_doc_id,
             "stop_after": stop_after,
             "light": light,
@@ -254,6 +270,13 @@ def revise(
             help="Suggested format (the agent may override): academic, lesswrong, textbook, blog, twitter, dialog, memo, newsletter, linkedin, custom:<description>",
         ),
     ] = "auto",
+    chapter: Annotated[
+        str | None,
+        typer.Option(
+            "--chapter",
+            help="Which chapter of which book this run writes, so it reads what the book's other chapters recorded and files its own record beside them. Leave it unset for a standalone piece, which belongs to no book. Spelled book:chapter, as in 'atlas:4'.",
+        ),
+    ] = None,
     existing_doc_id: Annotated[
         str | None,
         typer.Option(
@@ -323,6 +346,7 @@ def revise(
 
     Examples:
         inkwell revise draft.md
+        inkwell revise chapter4.md --chapter atlas:4   # one chapter of a book
         inkwell revise "https://docs.google.com/document/d/abc123/edit"
     """
     from inkwell.environment.cli.chat import run_entry_point
@@ -333,6 +357,7 @@ def revise(
             "draft": draft,
             "refs": refs,
             "target_format": target_format,
+            "chapter": chapter,
             "existing_doc_id": existing_doc_id,
             "stop_after": stop_after,
             "light": light,

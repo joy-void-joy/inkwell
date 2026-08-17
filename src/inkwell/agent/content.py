@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 ContentRole = Literal[
     "source",
     "plan",
+    "book",
     "research",
     "voice_analysis",
     "prescriptive_rules",

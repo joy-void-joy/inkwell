@@ -469,7 +469,7 @@ async def read_terminal_input(
             continue
 
         input_queue.put_nowait(stripped)
-        console.print(f"  [dim]Queued: {stripped[:60]}[/dim]")
+        console.print(f"  [dim]Queued: {stripped}[/dim]")
 
 
 async def chat_session(values: EntryPointValues) -> None:
@@ -513,10 +513,7 @@ async def chat_session(values: EntryPointValues) -> None:
 
         resolved_sources = entry_point.sources(values)
         if resolved_sources:
-            label = ", ".join(s[:40] for s in resolved_sources)
-            if len(label) > 80:
-                label = label[:77] + "..."
-            console.print(f"  [dim]Sources: {label}[/dim]")
+            console.print(f"  [dim]Sources: {', '.join(resolved_sources)}[/dim]")
         elif resumed_session:
             console.print(f"  [dim]Resuming session: {resumed_session}[/dim]")
 

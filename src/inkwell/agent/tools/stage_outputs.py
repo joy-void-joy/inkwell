@@ -1032,7 +1032,7 @@ def make_note_tool(notes_collector: list[AuthorNote], stage: str) -> LupMcpTool:
         notes_collector.append(
             AuthorNote(note=inp.note, anchor=inp.anchor, stage=stage)
         )
-        logger.info("[%s] Author note: %s", stage, inp.note[:80])
+        logger.info("[%s] Author note: %s", stage, inp.note)
         return ToolOk()
 
     return build_stage_tool(

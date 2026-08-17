@@ -912,12 +912,11 @@ def dropping_a_written_chapter(
     return before.model_copy(update={"outline": relaid})
 
 
-def book_row(record: BookRecord, listed_ceiling: int = 20) -> UnresolvedReferences:
+def book_row(record: BookRecord) -> UnresolvedReferences:
     """The row as a run writing chapter two of that book declares it."""
     return UnresolvedReferences(
         record=record,
         placement=ChapterPlacement(book="textbook", chapter=2),
-        listed_ceiling=listed_ceiling,
     )
 
 
@@ -1043,15 +1042,15 @@ class TestUnresolvedReferences:
         assert "this chapter:" in result.measured
         assert "this book:" in result.measured
 
-    async def test_a_bounded_list_says_what_it_left_out(self) -> None:
-        """A list cut short would otherwise read as the rest resolving."""
+    async def test_every_broken_reference_is_listed(self) -> None:
+        """A list cut short reads as the references it left out resolving."""
         pointing = " ".join(
             f"[budget {n}](book:foundations/the-budget-{n})." for n in range(5)
         )
-        result = await run_row(book_row(book(), listed_ceiling=2), PLACED + pointing)
-        assert len(result.findings) == 3
-        assert "3 more not listed" in result.findings[-1]
-        assert "5 broken reference(s) in all" in result.findings[-1]
+        result = await run_row(book_row(book()), PLACED + pointing)
+        assert len(result.findings) == 5
+        for n in range(5):
+            assert any(f"the-budget-{n}" in finding for finding in result.findings)
 
     async def test_the_rule_states_it_reports_a_link_fact(self) -> None:
         """Not a voice judgement, and claiming no authority to stop anything."""

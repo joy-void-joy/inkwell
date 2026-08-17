@@ -662,7 +662,11 @@ async def do_write_tab(
 
 
 TAB_CONTINUATION_CHARS = 50_000
-MAX_CONTINUATION_TABS = 4
+"""How much content a single tab carries before the next one starts.
+
+A ceiling on one tab, never on the content: whatever a document holds is
+written across as many tabs as it takes.
+"""
 
 
 async def write_with_continuation(
@@ -673,11 +677,15 @@ async def write_with_continuation(
     session_state: WritingSessionState | None = None,
     plain: bool = False,
 ) -> list[str]:
-    """Write content to one or more tabs, splitting at heading boundaries when large.
+    """Write content across as many tabs as it takes, split at heading boundaries.
 
-    Under TAB_CONTINUATION_CHARS: writes to a single tab (existing behavior).
-    Over: splits at ## heading boundaries into continuation tabs named
-    "{tab_name}", "{tab_name} (2/N)", etc.
+    Content within TAB_CONTINUATION_CHARS lands in a single tab. Longer content
+    is split at its headings into continuation tabs named "{tab_name}",
+    "{tab_name} (2/N)", and so on for however many the content needs.
+
+    The tab count follows the content rather than bounding it. A document with
+    more to say gets more tabs, because a reader who opens the last one has no
+    way to tell a document that ended from one that was cut off.
 
     Returns the list of tab IDs written to.
     """
@@ -704,22 +712,6 @@ async def write_with_continuation(
             yield current
 
     merged = list(packed())
-
-    if len(merged) > MAX_CONTINUATION_TABS:
-        dropped = len(merged) - MAX_CONTINUATION_TABS
-        logger.warning(
-            "Content for '%s' needs %d tabs but max is %d — dropping %d tab(s)",
-            tab_name,
-            len(merged),
-            MAX_CONTINUATION_TABS,
-            dropped,
-        )
-        merged = merged[:MAX_CONTINUATION_TABS]
-        merged[-1] += (
-            f"\n\n---\n*{dropped} additional section(s) omitted from Google Doc. "
-            f"Full content available in local draft files.*"
-        )
-
     total = len(merged)
 
     async def written_tab(index: int, chunk_content: str) -> str:

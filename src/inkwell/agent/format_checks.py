@@ -1388,22 +1388,6 @@ def unplaced(markdown: str, record: BookRecord) -> list[UnresolvedReference]:
     return references.unresolved
 
 
-def listed(findings: Sequence[str], ceiling: int) -> list[str]:
-    """The findings a row prints, saying so where it printed only some.
-
-    A list cut short with nothing said reads as everything it left out having
-    resolved, which is the one thing a report about broken links must never
-    imply.
-    """
-    if len(findings) <= ceiling:
-        return list(findings)
-    return [
-        *findings[:ceiling],
-        f"… and {len(findings) - ceiling} more not listed, "
-        f"{len(findings)} broken reference(s) in all",
-    ]
-
-
 class PointedReference(BaseModel, frozen=True):
     """One reference a draft made that its book could not place, and where it sits.
 
@@ -1469,11 +1453,6 @@ class UnresolvedReferences(FormatCheck):
     placement: ChapterPlacement = Field(
         description="Which chapter of that book this draft is, which is what "
         "the published address of a finding is measured from"
-    )
-    listed_ceiling: int = Field(
-        default=20,
-        description="How many broken references are listed before the row "
-        "states only how many more there are",
     )
 
     def source(self, heading: str) -> BookAddress:
@@ -1588,7 +1567,7 @@ class UnresolvedReferences(FormatCheck):
             f"not expected to yet; this book: {len(across)} written chapter(s) "
             f"the reading order no longer holds",
             fired=bool(broken),
-            findings=listed(broken, self.listed_ceiling),
+            findings=list(broken),
         )
 
 

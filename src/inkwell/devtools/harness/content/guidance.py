@@ -201,6 +201,8 @@ Default to the **strongest** tier for the main agent, every subagent, reviewer, 
 
 **Never silently swallow errors** — handle them meaningfully or let them propagate.
 
+**Never silently truncate content** — the container grows to fit what it holds, not the reverse. Cut only where a document format or a function contract imposes a hard limit, never for printing space, log volume, or ease of reading, and where a cut is forced save the full copy and point at it from what survives. A cut artifact looks exactly like a complete one, which is why `[:200]` on something an author wrote loses the rest with nothing said.
+
 """
         ),
         *conventions.design_principles(selection),

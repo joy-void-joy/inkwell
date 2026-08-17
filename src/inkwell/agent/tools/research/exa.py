@@ -159,9 +159,7 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(url, json=payload, headers=headers)
         if 400 <= response.status_code < 500:
-            raise ToolError(
-                f"Exa API error {response.status_code}: {response.text[:200]}"
-            )
+            raise ToolError(f"Exa API error {response.status_code}: {response.text}")
         response.raise_for_status()
         found = WireSearchResponse.model_validate(response.json())
 
@@ -181,7 +179,7 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
             title=hit.title or None,
             url=hit.url or None,
             snippet=hit.text[:SNIPPET_LENGTH] or None,
-            highlights=[h[:SNIPPET_LENGTH] for h in hit.highlights[:3]] or None,
+            highlights=list(hit.highlights) or None,
             published_date=hit.published_at(),
             score=hit.score,
             full_text_path=stored(hit),

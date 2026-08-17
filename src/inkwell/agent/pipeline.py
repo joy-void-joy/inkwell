@@ -311,8 +311,8 @@ def summarize_inputs(inputs: list[str]) -> str:
         if Path(stripped).is_file():
             return f"[file] {Path(stripped).name}"
         if stripped.startswith(("http://", "https://")):
-            return f"[url] {stripped[:60]}"
-        return f"[text {len(stripped)}ch] {stripped[:50]!r}"
+            return f"[url] {stripped}"
+        return f"[text {len(stripped)}ch] {stripped!r}"
 
     parts = [describe(value) for value in inputs]
     return "; ".join(parts) if parts else "(none)"
@@ -2834,13 +2834,6 @@ async def check_citation_diversity(
     return report
 
 
-class ConsolidatedFindings(BaseModel):
-    """What survived the budget, and how much of it did not."""
-
-    findings: list[ReviewFinding]
-    dropped_suggestions: int
-
-
 class StandbyWake(BaseModel):
     """Why standby woke: an author revision, a sync request, or both."""
 
@@ -2855,11 +2848,15 @@ class StyleSamples(BaseModel):
     labels: list[str] = Field(default_factory=list)
 
 
-def consolidate_findings(
-    findings: list[ReviewFinding],
-    max_suggestions: int = 15,
-) -> ConsolidatedFindings:
-    """Deduplicate and budget review findings to prevent cumulative smoothing."""
+def consolidate_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
+    """Fold review findings that flag the same passage into one.
+
+    Every finding reaches the rewrite. Two reviewers objecting to one sentence
+    is one thing to fix and folds into a single entry, but a finding no one
+    else raised is never dropped to keep the list short: the rewriter is the
+    only reader who can weigh a suggestion against the draft, and one it never
+    sees is one the author silently loses.
+    """
     critical = [f for f in findings if f.severity == "critical"]
     praise = [f for f in findings if f.severity == "praise"]
 
@@ -2885,17 +2882,8 @@ def consolidate_findings(
 
     anchored = [s for s in suggestions if s.text_excerpt]
     unanchored = [s for s in suggestions if not s.text_excerpt]
-    ranked = anchored + unanchored
-    capped = ranked[:max_suggestions]
-    dropped = len(ranked) - len(capped)
 
-    if dropped > 0:
-        logger.info("Capped suggestions from %d to %d", len(ranked), max_suggestions)
-
-    return ConsolidatedFindings(
-        findings=critical + capped + praise,
-        dropped_suggestions=dropped,
-    )
+    return critical + anchored + unanchored + praise
 
 
 async def rewrite_final(
@@ -2907,7 +2895,6 @@ async def rewrite_final(
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
     target_format: str = "auto",
-    dropped_suggestions: int = 0,
     author_notes: list[AuthorNote] | None = None,
     source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
@@ -2945,11 +2932,6 @@ async def rewrite_final(
         f"({n_total} total findings)\n",
         "Review findings are annotated inline in the draft file.\n",
     ]
-    if dropped_suggestions > 0:
-        summary_lines.append(
-            f"\n**Note:** {dropped_suggestions} lower-priority suggestion(s) were "
-            f"omitted to keep the rewrite focused. All critical findings are included.\n"
-        )
     review_summary_path.write_text("".join(summary_lines), encoding="utf-8")
 
     manifest = ContentManifest()
@@ -3982,7 +3964,7 @@ class PipelineRunner:
             self.known_tabs = {t.title: t.tab_id for t in existing}
         else:
             created = await do_create_doc(
-                f"Inkwell — {', '.join(s[:30] for s in self.sources)[:60]}",
+                f"Inkwell — {', '.join(self.sources)}",
                 share_with=current_settings().author_email,
                 session_state=self.state,
             )
@@ -4007,7 +3989,7 @@ class PipelineRunner:
                 self.overview_tab_id,
                 (
                     f"# Writing Pipeline\n\n"
-                    f"**Sources:** {', '.join(self.sources)[:120]}\n\n"
+                    f"**Sources:** {', '.join(self.sources)}\n\n"
                     f"**Stage:** starting\n\n"
                     f"*Comment on any tab to give feedback. "
                     f"Edit directly to override agent decisions.*"
@@ -4170,9 +4152,7 @@ class PipelineRunner:
         if classified.impact == "revert_suggested":
             logger.info("Suggesting revert for accidental edit on '%s'", edit.tab)
             async with gdoc_nonfatal("post revert suggestion"):
-                snippet = (
-                    edit.original_snippet[:500] if edit.original_snippet else edit.diff
-                )
+                snippet = edit.original_snippet or edit.diff
                 await do_insert_comment(
                     self.doc_id,
                     (
@@ -4181,9 +4161,7 @@ class PipelineRunner:
                         f"Original text:\n{snippet}\n\n"
                         f"(Reply 'yes' to keep the edit, or 'no' / ignore to revert.)"
                     ),
-                    anchor_text=edit.original_snippet[:200]
-                    if edit.original_snippet
-                    else None,
+                    anchor_text=edit.original_snippet or None,
                     session_state=self.state,
                 )
             return
@@ -5236,9 +5214,7 @@ class PipelineRunner:
             )
         await self.check_diversity()
         await self.post_author_notes()
-        consolidated = consolidate_findings(findings)
-        findings = consolidated.findings
-        self.dropped_suggestions = consolidated.dropped_suggestions
+        findings = consolidate_findings(findings)
         self.snapshot.findings = findings
         self.snapshot.stage = "review"
         await self.save_snapshot()
@@ -5368,7 +5344,6 @@ class PipelineRunner:
                     voice_file_paths=self.snapshot.voice_file_paths,
                     feedback_path=feedback_path,
                     target_format=self.effective_format,
-                    dropped_suggestions=getattr(self, "dropped_suggestions", 0),
                     author_notes=self.author_notes,
                     source_servers=self.source_servers,
                     source_tool_names_list=self.source_tool_names,
@@ -5801,7 +5776,7 @@ class PipelineRunner:
                 "sync" if from_sync and not batch else "revise",
                 "Syncing feedback"
                 if from_sync and not batch
-                else f"Revising: {' | '.join(batch)[:60]}",
+                else f"Revising: {' | '.join(batch)}",
             )
             self.state.set_stage("revising")
 

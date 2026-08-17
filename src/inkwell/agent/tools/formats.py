@@ -281,6 +281,30 @@ def do_format_lesswrong(params: FormatLesswrongInput) -> FormatLesswrongOutput:
     )
 
 
+def tweet_sized(paragraph: str) -> Iterator[str]:
+    """`paragraph` as tweets, broken at sentence ends where it can be.
+
+    Every character arrives in some tweet: a sentence longer than a tweet on
+    its own is wrapped at word boundaries rather than cut, because the
+    alternative loses the tail of whatever the author was saying.
+    """
+    current = ""
+    for sentence in split_sentences(paragraph):
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) <= TWEET_CHARS:
+            current = candidate
+            continue
+        if current:
+            yield current
+        if len(sentence) <= TWEET_CHARS:
+            current = sentence
+            continue
+        yield from textwrap.wrap(sentence, TWEET_CHARS)
+        current = ""
+    if current:
+        yield current
+
+
 def number_thread(tweets: list[str]) -> list[str]:
     """Append n/total markers to each tweet."""
     total = len(tweets)
@@ -297,32 +321,14 @@ def split_thread(content: str, hook: str) -> list[str]:
     blocks = markdown_blocks(content)
     opening = hook or (blocks[0].text if blocks else "") or "Thread:"
 
-    def packed(paragraph: str) -> Iterator[str]:
-        """One paragraph as tweets, broken at sentence ends where it can be."""
-        current = ""
-        for sentence in split_sentences(paragraph):
-            candidate = f"{current} {sentence}".strip() if current else sentence
-            if len(candidate) <= TWEET_CHARS:
-                current = candidate
-                continue
-            if current:
-                yield current
-            if len(sentence) <= TWEET_CHARS:
-                current = sentence
-                continue
-            yield from textwrap.wrap(sentence, TWEET_CHARS)
-            current = ""
-        if current:
-            yield current
-
     def thread() -> Iterator[str]:
-        """The hook, then each block of the draft cut to tweet length."""
-        yield opening.strip()[:TWEET_CHARS]
+        """The hook, then each block of the draft broken to tweet length."""
+        yield from tweet_sized(opening.strip())
         for block in blocks:
             if len(block.text) <= TWEET_CHARS:
                 yield block.text
             else:
-                yield from packed(block.text)
+                yield from tweet_sized(block.text)
 
     return list(thread())
 
@@ -370,7 +376,19 @@ async def do_format_twitter(params: FormatTwitterInput) -> FormatTwitterOutput:
         system_prompt=THREAD_WRITER_SYSTEM,
     )
 
-    tweets = [t.strip()[:260] for t in result.tweets if t.strip()] if result else []
+    def written() -> Iterator[str]:
+        """Every tweet the writer returned, re-broken where one ran long.
+
+        The writer is asked for tweets inside the limit and usually obliges.
+        Where it does not, the overflow moves into a further tweet rather
+        than being cut off: a long tweet costs an extra number in the thread,
+        never the end of the sentence it was making.
+        """
+        for tweet in result.tweets if result else []:
+            if tweet.strip():
+                yield from tweet_sized(tweet.strip())
+
+    tweets = list(written())
     if not tweets:
         logger.warning("Thread writer produced no tweets — using mechanical split")
         tweets = split_thread(params.content, params.hook)

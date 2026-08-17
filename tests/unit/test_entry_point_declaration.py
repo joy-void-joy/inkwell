@@ -21,7 +21,7 @@ from rich.text import Text
 from typer.testing import CliRunner
 
 import inkwell.environment.cli.compile as compile_module
-from inkwell.agent.book import ChapterPlacement
+from inkwell.agent.book import ChapterAssignment
 from inkwell.devtools.harness.composition import write_entry_point_commands
 from inkwell.environment.cli.compile import command_lines, render_entry_point_commands
 from inkwell.environment.entrypoints import (
@@ -136,6 +136,7 @@ class TestEachSurfaceRendersTheDeclaration:
             "write": True,
             "run": True,
             "revise": True,
+            "chapter": True,
             "resume": False,
             "restart": False,
         }
@@ -270,7 +271,15 @@ class TestDriftIsClosed:
         self,
     ) -> None:
         values = EntryPointValues.declared("revise", {"chapter": "atlas:4"})
-        assert CHAPTER.read(values) == ChapterPlacement(book="atlas", chapter=4)
+        assert CHAPTER.read(values) == ChapterAssignment(book="atlas", chapter=4)
+
+    def test_a_book_named_without_a_chapter_leaves_the_ordinal_to_the_record(
+        self,
+    ) -> None:
+        """The half a book's own record can answer is the half a surface may
+        leave open; the half nothing else knows is the one it insists on."""
+        values = EntryPointValues.declared("revise", {"chapter": "atlas"})
+        assert CHAPTER.read(values) == ChapterAssignment(book="atlas", chapter=None)
 
     def test_a_run_that_names_no_chapter_is_placed_nowhere(self) -> None:
         values = EntryPointValues.declared("revise", {"draft": "draft.md"})
@@ -278,9 +287,9 @@ class TestDriftIsClosed:
 
     @pytest.mark.parametrize(
         "refused",
-        ["atlas", "4", "atlas:", "atlas:none", "atlas:0", "../elsewhere:1"],
+        ["4", "atlas:", "atlas:none", "atlas:0", "../elsewhere:1", "../elsewhere"],
     )
-    def test_a_placement_that_names_no_chapter_of_a_book_is_refused_at_the_surface(
+    def test_an_assignment_that_names_no_book_is_refused_at_the_surface(
         self, refused: str
     ) -> None:
         """Refused where the author typed it, rather than once the run is under way."""

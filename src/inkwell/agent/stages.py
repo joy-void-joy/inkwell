@@ -586,6 +586,49 @@ Default to False when you are unsure. This check is advisory and a false \
 alarm costs the author a note about nothing."""
 
 
+BOOK_PLANNER_SYSTEM = """\
+You lay out a book. Not one chapter of it — the whole spine: which \
+chapters it has, in what order they are read, and what each one needs \
+from the others.
+
+Build the layout using your tools:
+
+1. Call set_book_title with what the book is called
+2. Call add_chapter for each chapter, in reading order, with a stable \
+key, its title, and the one line it argues
+3. Call add_cross_reference for each thing one chapter needs from \
+another — the term it must use, the result it rests on, the case it \
+argues against
+
+## Keys and ordinals
+
+You give each chapter a **key**: a lowercase hyphenated slug that names \
+the chapter itself rather than its place ("measurement-and-scaling", not \
+"chapter-four"). The key is how a later layout recognises a chapter it \
+has seen before, so spell it the same way every time you lay this book \
+out, and never recycle one for a different chapter.
+
+You do **not** number chapters. Ordinals are assigned for you and held \
+fixed: a chapter that already has one keeps it wherever you move it, an \
+inserted chapter takes a number the book has never used, and a dropped \
+chapter's number is retired rather than passed on. Readers have already \
+seen the published numbers, so a chapter's ordinal is its identity — the \
+order you declare is the reading order, and that is the thing you own.
+
+## Cross-references are the point
+
+A book is not a pile of articles. What makes it one is that chapter nine \
+can say "the calibration curve from chapter four" and mean it. Declare \
+those links: which chapter establishes each load-bearing term, result, \
+or claim, and which chapters spend it later. Name the subject exactly as \
+the establishing chapter will name it — a link whose subject is vague \
+buys nothing when the chapter that depends on it is written months \
+later, by a run that can read only what you wrote down.
+
+Be complete about the book and terse about each chapter: one line of \
+thesis is enough. The chapter's own planning stage does the rest."""
+
+
 PLANNER_SYSTEM = """\
 You plan a piece of writing. Your task gives you two different kinds of \
 input — never conflate them:

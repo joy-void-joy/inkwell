@@ -21,6 +21,7 @@ from lup.mcp import LupMcpTool, ToolError, ToolResponse, mcp_response
 from lup.telemetry.metrics import collector as metrics_collector
 from lup.types import JsonObject
 
+from inkwell.agent.book import BookLayout, ProposedChapter, ProposedReference
 from inkwell.agent.format_checks import DeclaredCheck
 from inkwell.agent.models import (
     Assumption,
@@ -285,6 +286,132 @@ def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
             ),
             AddSourceQuoteInput,
             handle_quote,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Book layout collector + tools
+# ---------------------------------------------------------------------------
+
+
+class SetBookTitleInput(BaseModel):
+    title: str = Field(description="What the book is called")
+
+
+class AddChapterInput(BaseModel):
+    chapter: ProposedChapter = Field(
+        description=(
+            "The chapter to append to the reading order. Its `key` is a stable "
+            "slug naming the chapter itself, not its position — spell it the "
+            "same way every time this book is laid out, so the chapter keeps "
+            "the ordinal it was already given. Ordinals are assigned for you."
+        )
+    )
+
+
+class AddCrossReferenceInput(BaseModel):
+    reference: ProposedReference = Field(
+        description=(
+            "What one chapter needs from another, by the two chapters' keys. "
+            "Add both chapters before the reference that links them."
+        )
+    )
+
+
+class BookCollector:
+    """Accumulates the book layout, persisting after each call.
+
+    The same shape as :class:`PlanCollector` and for the same reason: a stage
+    that died halfway leaves a readable prefix rather than nothing. Ordinals are
+    absent throughout — this holds what the stage proposed, and
+    :meth:`~inkwell.agent.book.BookOutline.relaid` is what turns keys into
+    numbers against what the book has already handed out.
+    """
+
+    def __init__(self, output_path: Path) -> None:
+        self.output_path = output_path
+        self.layout = BookLayout()
+
+    def save(self) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text(
+            self.layout.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+    def keyed(self, key: str) -> bool:
+        """Whether a chapter under this key has been added yet."""
+        return any(held.key == key for held in self.layout.chapters)
+
+
+def make_book_tools(collector: BookCollector) -> list[LupMcpTool]:
+    """Create MCP tools for laying a book's chapters and links out.
+
+    Each tool refuses what the outline could not later resolve — a key used
+    twice, a reference to a chapter nobody declared — so the stage is told
+    where it went wrong while it can still fix it, rather than having the link
+    dropped silently when the layout is numbered.
+    """
+
+    async def handle_title(inp: SetBookTitleInput) -> ToolOk:
+        collector.layout.title = inp.title
+        collector.save()
+        return ToolOk()
+
+    async def handle_chapter(inp: AddChapterInput) -> ToolOk:
+        if collector.keyed(inp.chapter.key):
+            raise ToolError(
+                f"This book already has a chapter keyed {inp.chapter.key!r}. A "
+                "key names one chapter, so give this one a key of its own."
+            )
+        collector.layout.chapters.append(inp.chapter)
+        collector.save()
+        return ToolOk()
+
+    async def handle_reference(inp: AddCrossReferenceInput) -> ToolOk:
+        missing = [
+            key
+            for key in (inp.reference.from_key, inp.reference.to_key)
+            if not collector.keyed(key)
+        ]
+        if missing:
+            raise ToolError(
+                f"No chapter of this book is keyed {', '.join(missing)}. Add "
+                "the chapters with add_chapter first, then link them."
+            )
+        collector.layout.references.append(inp.reference)
+        collector.save()
+        return ToolOk()
+
+    return [
+        build_stage_tool(
+            "set_book_title",
+            "Set what the book is called. Call this once, before adding chapters.",
+            SetBookTitleInput,
+            handle_title,
+        ),
+        build_stage_tool(
+            "add_chapter",
+            (
+                "Append a chapter to the book's reading order. Call once per "
+                "chapter, in the order a reader meets them. You supply the "
+                "key, title, and one-line thesis; the ordinal is assigned for "
+                "you and held fixed across layouts."
+            ),
+            AddChapterInput,
+            handle_chapter,
+        ),
+        build_stage_tool(
+            "add_cross_reference",
+            (
+                "Record what one chapter needs from another — the term, "
+                "result, or claim it carries across, and which way the "
+                "dependency runs. This is what a chapter written months later, "
+                "on its own, reads to know what it may lean on and what it "
+                "owes the chapters after it."
+            ),
+            AddCrossReferenceInput,
+            handle_reference,
         ),
     ]
 

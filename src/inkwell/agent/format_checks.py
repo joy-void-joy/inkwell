@@ -35,7 +35,6 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from inkwell.agent.book import (
-    RELATION_PHRASING,
     BookAddress,
     BookRecord,
     ChapterAddress,
@@ -736,13 +735,20 @@ row, so a new kind is one class above and no arm anywhere."""
 def unplaced(markdown: str, record: BookRecord) -> list[UnresolvedReference]:
     """Every reference in one passage of markdown this book could not place.
 
-    Read by rendering the passage the way the delivered document is rendered,
-    because that walk is where a link destination is answered. A second walk
-    written here would be a second reading of the same markdown, free to
-    disagree with the one that decides what actually ships — and a report that
-    disagreed with the document would be worse than no report at all. The
-    requests it builds are thrown away: what is wanted is what the book could
-    not answer while it built them.
+    Rendered the way the delivered document is rendered, so that what decides
+    a destination here is the same `BookReferences.destination` the write goes
+    through rather than a second reading of the book free to disagree with it.
+    The requests it builds are thrown away: what is wanted is what the book
+    could not answer while it built them.
+
+    A passage at a time, because a finding has to name the page the reference
+    sits on and the words it sits in, and the walk over a whole document
+    reports neither. The cost is a link written in markdown's reference style,
+    whose destination is defined in a block of its own: that definition belongs
+    to the document rather than to any passage, so it is invisible here and
+    such a reference goes unreported. Every reference this codebase asks a
+    writer for is inline — :func:`~inkwell.agent.book_links.pointing` spells
+    the form — and no passage-level walk can see past its own passage.
     """
     references = BookReferences(record=record)
     markdown_to_requests(markdown, references=references)
@@ -804,10 +810,12 @@ class UnresolvedReferences(FormatCheck):
     down — only a reference whose target chapter has been written was ever
     expected to resolve.
 
-    **Both scopes.** This chapter's prose is walked through the same resolver
-    that renders the deliverable, and the book's declared cross-references are
-    read off its outline, so a chapter that places every reference it makes
-    still surfaces what the book as a whole does not.
+    **Both scopes.** This chapter's prose is resolved through the same
+    resolver that renders the deliverable. Beside it the book's own retirements
+    are read, so a chapter that places every reference it makes still surfaces
+    what the book as a whole does not — a page it stopped serving while the
+    chapter behind it goes on existing, which breaks references written in
+    chapters this run cannot see.
     """
 
     kind: Literal["unresolved-references"] = "unresolved-references"
@@ -872,7 +880,14 @@ class UnresolvedReferences(FormatCheck):
                 )
 
     def here(self, pointed: Sequence[PointedReference]) -> Iterator[str]:
-        """Each of this chapter's references that a written chapter did not place."""
+        """Each of this chapter's references that a written chapter did not place.
+
+        Two ways a written target fails to place, and the finding says which,
+        because they are fixed differently: a chapter still in the reading
+        order that records no such section wants the section named or written,
+        and a chapter that has left the reading order wants the reference
+        pointed somewhere a reader can still reach.
+        """
         for pointing in pointed:
             target = pointing.reference.target
             written = self.record.written(target.chapter)
@@ -880,8 +895,8 @@ class UnresolvedReferences(FormatCheck):
                 continue
             missing = (
                 f"records no section “{target.section}”"
-                if target.section
-                else "answers to no page"
+                if self.record.keyed(target.chapter) is not None
+                else "is no longer in the reading order"
             )
             yield (
                 f"{pointing.source.path} — “{pointing.reference.text}” points "
@@ -892,30 +907,34 @@ class UnresolvedReferences(FormatCheck):
             )
 
     def across(self) -> Iterator[str]:
-        """Each cross-reference the book declares into a chapter nobody reads.
+        """Each chapter this book wrote that the reading order no longer holds.
 
-        The book's own scope, and the one this chapter's prose cannot show:
-        the outline records what each chapter needs from the others, and a
-        reference whose target has left the reading order is a link from a page
-        that ships to a page that does not.
+        The book's own scope, and the one this chapter's prose cannot show: a
+        chapter dropped from the order keeps its ordinal and keeps its record
+        on file, so its page stops being served while its content goes on
+        existing, and every reference to it breaks at once — in this chapter,
+        and in chapters delivered long before anyone dropped it.
+
+        The retirement is read rather than the references into it, because the
+        retirement is what survives. :meth:`~inkwell.agent.book.BookOutline.
+        relaid` rebuilds ``cross_references`` from the layout it is handed and
+        carries only those with both ends in the new reading order, so the very
+        relayout that retires a chapter discards the references naming it —
+        into a log, and nowhere a later run could read. What is left on file is
+        the retired entry beside the chapter record it still has, which is the
+        same breakage in the form the book actually keeps.
         """
         outline = self.record.outline
         if outline is None:
             return
-        for reference in outline.cross_references:
-            if outline.entry(reference.from_chapter) is None:
-                continue
-            if outline.entry(reference.to_chapter) is not None:
-                continue
-            if self.record.chapter(reference.to_chapter) is None:
+        for entry in outline.retired:
+            if self.record.chapter(entry.ordinal) is None:
                 continue
             yield (
-                f"{ChapterAddress(chapter=reference.from_chapter).path} — the "
-                f"book declares chapter {reference.from_chapter} "
-                f"{RELATION_PHRASING[reference.relation]} chapter "
-                f"{reference.to_chapter} for {reference.subject}, and "
-                f"{ChapterAddress(chapter=reference.to_chapter).path} is "
-                f"written but no longer in the reading order"
+                f"{ChapterAddress(chapter=entry.ordinal).path} — “{entry.title}” "
+                f"is written and the reading order no longer holds it, so every "
+                f"reference to {LINK_SCHEME}:{entry.key} breaks wherever it was "
+                f"written, in this chapter or in one already delivered"
             )
 
     async def run(self, draft: DraftUnderCheck) -> CheckRow:
@@ -933,9 +952,8 @@ class UnresolvedReferences(FormatCheck):
         return self.result(
             f"this chapter: {len(here)} reference(s) into a written chapter "
             f"did not resolve, {len(pointed) - len(here)} forward reference(s) "
-            f"not expected to yet; this book: {len(across)} declared "
-            f"cross-reference(s) point into a chapter the reading order no "
-            f"longer holds",
+            f"not expected to yet; this book: {len(across)} written chapter(s) "
+            f"the reading order no longer holds",
             fired=bool(broken),
             findings=listed(broken, self.listed_ceiling),
         )

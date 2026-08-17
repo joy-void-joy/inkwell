@@ -509,6 +509,22 @@ class ChapterEntry(BaseModel, frozen=True):
         return f"chapter {self.ordinal} ({self.title})"
 
 
+def entry_keyed(entries: Sequence[ChapterEntry], key: str) -> ChapterEntry | None:
+    """The chapter ``key`` names among ``entries``, however either side spells it.
+
+    *Which* entries to search is the caller's question and deliberately not
+    this function's, because two different questions are asked of the same
+    match. Where a reference *lands* is asked of the reading order, since a
+    chapter dropped from it is a page nothing may be addressed to. Whether a
+    target was ever *written* is asked of every ordinal the book has handed
+    out, since a dropped chapter was written all the same. Sharing the match
+    but not the list is what keeps the two from disagreeing about which
+    chapter a key names while still answering different things.
+    """
+    wanted = comparable_key(key)
+    return next((held for held in entries if comparable_key(held.key) == wanted), None)
+
+
 class ResolvedReference(BaseModel, frozen=True):
     """A cross-reference paired with the two chapters it actually names.
 
@@ -919,21 +935,18 @@ class BookRecord(BaseModel):
         return found[0] if len(found) == 1 else None
 
     def keyed(self, key: str) -> ChapterEntry | None:
-        """The outlined chapter one key names, however either side spells it.
+        """The chapter ``key`` names in the reading order, where it still holds one.
 
-        The one match, because two questions are asked of it — where a
-        reference lands, and whether its target has been written — and a book
-        whose two answers disagreed about which chapter a key names would
-        report a link as broken while sending readers somewhere else.
+        The reading order and not every ordinal ever assigned, because this is
+        what a reference is resolved through: a retired chapter is a page the
+        book no longer serves, so nothing may be addressed to it.
         """
-        wanted = comparable_key(key)
-        outlined = self.outline.chapters if self.outline is not None else []
-        return next(
-            (held for held in outlined if comparable_key(held.key) == wanted), None
+        return entry_keyed(
+            self.outline.chapters if self.outline is not None else [], key
         )
 
     def written(self, key: str) -> ChapterRecord | None:
-        """What the chapter one key names wrote down, where it has been written.
+        """What the chapter ``key`` names wrote down, where it has been written.
 
         The other half of :meth:`address`, and what keeps an unfinished book
         from reading as a broken one: chapter three points at chapter seven
@@ -942,12 +955,23 @@ class BookRecord(BaseModel):
         whose target is on file was ever expected to resolve, so this is what a
         reader of the two answers together asks second.
 
-        A key no layout declared answers None whether or not some chapter of
-        this book happens to carry that title: until the book stage names it,
-        nothing has given the key an ordinal, which is exactly the state
+        Asked of every ordinal the book has ever assigned, retirements
+        included, because it answers about the past where :meth:`address`
+        answers about what is served now. A chapter dropped from the reading
+        order was written all the same and keeps its record on file, and a
+        reference into it is exactly the link that ships broken — reusing the
+        reading-order lookup here would import that refusal, which is right
+        for addressing and wrong for this, and the reference would go
+        unreported precisely because it cannot resolve.
+
+        A key no layout ever declared answers None whether or not some chapter
+        of this book happens to carry that title: until the book stage names
+        it, nothing has given the key an ordinal, which is exactly the state
         :func:`~inkwell.agent.book_links.pointing` tells a writer to expect.
         """
-        entry = self.keyed(key)
+        entry = entry_keyed(
+            self.outline.every() if self.outline is not None else [], key
+        )
         return None if entry is None else self.chapter(entry.ordinal)
 
     def address(self, target: BookTarget) -> BookAddress | None:

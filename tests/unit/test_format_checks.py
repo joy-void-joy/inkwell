@@ -10,12 +10,14 @@ import pytest
 from inkwell.agent import config as config_mod
 from inkwell.agent import format_checks
 from inkwell.agent.book import (
+    BookLayout,
     BookOutline,
     BookRecord,
     ChapterEntry,
     ChapterPlacement,
     ChapterRecord,
     CrossReference,
+    ProposedChapter,
 )
 from inkwell.agent.book_links import BookReferences
 from inkwell.agent.format_checks import (
@@ -512,20 +514,59 @@ WROTE_DROPPED = ChapterRecord(
 def book(
     *,
     written: Sequence[ChapterRecord] = (WROTE_FOUNDATIONS, WROTE_MEASUREMENT),
+    chapters: Sequence[ChapterEntry] = (FOUNDATIONS, MEASUREMENT, CONSEQUENCES),
     retired: Sequence[ChapterEntry] = (),
-    cross_references: Sequence[CrossReference] = (),
 ) -> BookRecord:
     """A book laid out in three chapters, with what it has written on file."""
     return BookRecord(
         book="textbook",
         outline=BookOutline(
-            book="textbook",
-            chapters=[FOUNDATIONS, MEASUREMENT, CONSEQUENCES],
-            retired=list(retired),
-            cross_references=list(cross_references),
+            book="textbook", chapters=list(chapters), retired=list(retired)
         ),
         chapters=list(written),
     )
+
+
+def dropping_a_written_chapter(
+    written: Sequence[ChapterRecord] = (
+        WROTE_FOUNDATIONS,
+        WROTE_MEASUREMENT,
+        WROTE_DROPPED,
+    ),
+) -> BookRecord:
+    """The book after a layout that drops a written chapter from the order.
+
+    Laid out through `relaid` rather than assembled by hand, because the whole
+    question the book scope turns on is whether the state it reads is one the
+    book stage can actually produce. `relaid` is the only writer of an
+    outline, and it is what moves a dropped chapter into `retired` — while
+    discarding, into a log, every cross-reference that named it.
+    """
+    before = BookRecord(
+        book="textbook",
+        outline=BookOutline(
+            book="textbook",
+            chapters=[FOUNDATIONS, MEASUREMENT, CONSEQUENCES, DROPPED],
+            cross_references=[
+                CrossReference(
+                    from_chapter=1,
+                    to_chapter=4,
+                    relation="depends_on",
+                    subject="the error budget",
+                )
+            ],
+        ),
+        chapters=list(written),
+    )
+    relaid = before.relaid(
+        BookLayout(
+            chapters=[
+                ProposedChapter(key=held.key, title=held.title)
+                for held in (FOUNDATIONS, MEASUREMENT, CONSEQUENCES)
+            ]
+        )
+    )
+    return before.model_copy(update={"outline": relaid})
 
 
 def book_row(record: BookRecord, listed_ceiling: int = 20) -> UnresolvedReferences:
@@ -601,40 +642,54 @@ class TestUnresolvedReferences:
         result = await run_row(book_row(book()), draft)
         assert result.findings[0].startswith("/chapters/02 ")
 
-    async def test_the_book_scope_fires_where_the_chapter_resolves(self) -> None:
-        """A chapter that places everything it names still reports the book's own."""
-        record = book(
-            written=[WROTE_FOUNDATIONS, WROTE_MEASUREMENT, WROTE_DROPPED],
-            retired=[DROPPED],
-            cross_references=[
-                CrossReference(
-                    from_chapter=1,
-                    to_chapter=4,
-                    relation="depends_on",
-                    subject="the error budget",
-                )
-            ],
+    async def test_a_written_then_retired_target_is_a_finding(self) -> None:
+        """It was written, so it was expected to resolve — and now it cannot.
+
+        The reference ships into the delivered document as a marker, which is
+        exactly the link this row exists to report.
+        """
+        draft = f"{PLACED}Settled back in [the dropped one](book:dropped)."
+        result = await run_row(book_row(dropping_a_written_chapter()), draft)
+        assert result.fired
+        assert result.findings[0] == (
+            "/chapters/02/01 — “the dropped one” points at book:dropped, and "
+            "dropped is written at /chapters/04 but is no longer in the "
+            "reading order. In: Settled back in the dropped one."
         )
+
+    async def test_a_retired_chapter_nobody_wrote_is_not_a_finding(self) -> None:
+        """Dropped before anyone wrote it: nothing was ever expected to resolve."""
+        record = dropping_a_written_chapter(
+            written=[WROTE_FOUNDATIONS, WROTE_MEASUREMENT]
+        )
+        draft = f"{PLACED}Settled back in [the dropped one](book:dropped)."
+        result = await run_row(book_row(record), draft)
+        assert not result.fired
+
+    async def test_the_book_scope_fires_where_the_chapter_resolves(self) -> None:
+        """A chapter that places everything it names still reports the book's own.
+
+        The state is one `relaid` produced, so this exercises what a run can
+        reach rather than an outline assembled to suit the assertion.
+        """
+        record = dropping_a_written_chapter()
+        outline = record.outline
+        assert outline is not None
+        assert [held.key for held in outline.retired] == ["dropped"]
+        assert outline.cross_references == []
         result = await run_row(book_row(record), f"{PLACED}Nothing points anywhere.")
         assert result.fired
         assert result.findings == [
-            "/chapters/01 — the book declares chapter 1 depends on chapter 4 "
-            "for the error budget, and /chapters/04 is written but no longer "
-            "in the reading order"
+            "/chapters/04 — “Dropped” is written and the reading order no "
+            "longer holds it, so every reference to book:dropped breaks "
+            "wherever it was written, in this chapter or in one already "
+            "delivered"
         ]
 
     async def test_the_book_scope_spares_a_chapter_nobody_wrote(self) -> None:
-        """A declared reference into an unwritten chapter is a forward one too."""
-        record = book(
-            retired=[DROPPED],
-            cross_references=[
-                CrossReference(
-                    from_chapter=1,
-                    to_chapter=4,
-                    relation="depends_on",
-                    subject="the error budget",
-                )
-            ],
+        """A chapter retired before it was written left no page to break."""
+        record = dropping_a_written_chapter(
+            written=[WROTE_FOUNDATIONS, WROTE_MEASUREMENT]
         )
         result = await run_row(book_row(record), f"{PLACED}Nothing points anywhere.")
         assert not result.fired

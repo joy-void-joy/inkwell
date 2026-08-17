@@ -89,7 +89,13 @@ class TestResolveWriterMode:
 
 
 class TestConsolidateFindingsCoverage:
-    def test_coverage_critical_survives_the_suggestion_cap(self) -> None:
+    def test_every_distinct_suggestion_reaches_the_rewrite(self) -> None:
+        """No finding is dropped to keep the list short.
+
+        The rewriter is the only reader that can weigh a suggestion against
+        the draft, so a suggestion it never sees is one the author loses with
+        nothing said.
+        """
         coverage = ReviewFinding(
             reviewer="coverage",
             severity="critical",
@@ -107,12 +113,29 @@ class TestConsolidateFindingsCoverage:
             )
             for i in range(20)
         ]
-        result = consolidate_findings([coverage, *suggestions], max_suggestions=15)
+        result = consolidate_findings([coverage, *suggestions])
         assert any(
-            f.reviewer == "coverage" and f.severity == "critical"
-            for f in result.findings
+            f.reviewer == "coverage" and f.severity == "critical" for f in result
         )
-        assert result.dropped_suggestions == 5
+        assert len(result) == len(suggestions) + 1
+
+    def test_two_reviewers_on_one_passage_fold_into_one_finding(self) -> None:
+        """Folding a duplicate is not dropping it — both suggestions survive."""
+        quoted = [
+            ReviewFinding(
+                reviewer=reviewer,
+                severity="suggestion",
+                location="§1",
+                issue="hedged",
+                text_excerpt="the same sentence",
+                suggestion=f"{reviewer} says cut it",
+            )
+            for reviewer in ("style", "narrative")
+        ]
+        result = consolidate_findings(quoted)
+        assert len(result) == 1
+        assert "style says cut it" in result[0].suggestion
+        assert "narrative says cut it" in result[0].suggestion
 
 
 class TestFormatGuidancePrecedence:

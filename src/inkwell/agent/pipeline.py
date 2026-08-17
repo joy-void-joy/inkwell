@@ -2834,13 +2834,6 @@ async def check_citation_diversity(
     return report
 
 
-class ConsolidatedFindings(BaseModel):
-    """What survived the budget, and how much of it did not."""
-
-    findings: list[ReviewFinding]
-    dropped_suggestions: int
-
-
 class StandbyWake(BaseModel):
     """Why standby woke: an author revision, a sync request, or both."""
 
@@ -2855,11 +2848,15 @@ class StyleSamples(BaseModel):
     labels: list[str] = Field(default_factory=list)
 
 
-def consolidate_findings(
-    findings: list[ReviewFinding],
-    max_suggestions: int = 15,
-) -> ConsolidatedFindings:
-    """Deduplicate and budget review findings to prevent cumulative smoothing."""
+def consolidate_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
+    """Fold review findings that flag the same passage into one.
+
+    Every finding reaches the rewrite. Two reviewers objecting to one sentence
+    is one thing to fix and folds into a single entry, but a finding no one
+    else raised is never dropped to keep the list short: the rewriter is the
+    only reader who can weigh a suggestion against the draft, and one it never
+    sees is one the author silently loses.
+    """
     critical = [f for f in findings if f.severity == "critical"]
     praise = [f for f in findings if f.severity == "praise"]
 
@@ -2885,17 +2882,8 @@ def consolidate_findings(
 
     anchored = [s for s in suggestions if s.text_excerpt]
     unanchored = [s for s in suggestions if not s.text_excerpt]
-    ranked = anchored + unanchored
-    capped = ranked[:max_suggestions]
-    dropped = len(ranked) - len(capped)
 
-    if dropped > 0:
-        logger.info("Capped suggestions from %d to %d", len(ranked), max_suggestions)
-
-    return ConsolidatedFindings(
-        findings=critical + capped + praise,
-        dropped_suggestions=dropped,
-    )
+    return critical + anchored + unanchored + praise
 
 
 async def rewrite_final(
@@ -2907,7 +2895,6 @@ async def rewrite_final(
     voice_file_paths: list[str] | None = None,
     feedback_path: Path | None = None,
     target_format: str = "auto",
-    dropped_suggestions: int = 0,
     author_notes: list[AuthorNote] | None = None,
     source_servers: dict[str, McpServerEntry] | None = None,
     source_tool_names_list: list[str] | None = None,
@@ -2945,11 +2932,6 @@ async def rewrite_final(
         f"({n_total} total findings)\n",
         "Review findings are annotated inline in the draft file.\n",
     ]
-    if dropped_suggestions > 0:
-        summary_lines.append(
-            f"\n**Note:** {dropped_suggestions} lower-priority suggestion(s) were "
-            f"omitted to keep the rewrite focused. All critical findings are included.\n"
-        )
     review_summary_path.write_text("".join(summary_lines), encoding="utf-8")
 
     manifest = ContentManifest()
@@ -5236,9 +5218,7 @@ class PipelineRunner:
             )
         await self.check_diversity()
         await self.post_author_notes()
-        consolidated = consolidate_findings(findings)
-        findings = consolidated.findings
-        self.dropped_suggestions = consolidated.dropped_suggestions
+        findings = consolidate_findings(findings)
         self.snapshot.findings = findings
         self.snapshot.stage = "review"
         await self.save_snapshot()
@@ -5368,7 +5348,6 @@ class PipelineRunner:
                     voice_file_paths=self.snapshot.voice_file_paths,
                     feedback_path=feedback_path,
                     target_format=self.effective_format,
-                    dropped_suggestions=getattr(self, "dropped_suggestions", 0),
                     author_notes=self.author_notes,
                     source_servers=self.source_servers,
                     source_tool_names_list=self.source_tool_names,

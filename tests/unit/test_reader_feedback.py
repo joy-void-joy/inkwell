@@ -3,9 +3,15 @@
 The export is keyed by chapter and section ordinal; the plan's sections carry
 the same ordinal path. These tests pin the whole route: the export's actual
 field set parses, prose is separated from bare votes by a declared rule, each
-substantive submission lands in its section's file, the ones naming no section
-land in an explicit unrouted file, and a stage's task text carries the path of
-the file for the section it is acting on.
+substantive submission lands in the file for the address it named — a section,
+or the chapter where it named no section — the ones naming neither land in an
+explicit unrouted file, and a stage's task text carries the path of the file
+for the section it is acting on.
+
+An export spans chapters, so the load-bearing case is a run of one chapter
+reaching its own chapter's readers and no others. ``TestAMultiChapterExport``
+runs that against a fixture built to the shape the author's real export was
+measured to have.
 """
 
 import json
@@ -39,7 +45,15 @@ from inkwell.agent.reader_feedback import (
 EXPORT = Path(__file__).parent / "data" / "formspree_export_sample.json"
 """A fixture derived from the author's Formspree export, one row per shape the
 real file carries: bare votes, prose under each of the three prose fields, a
-chapter-level row with no section ordinal, and a row that fails validation."""
+chapter-level row with no section ordinal, a row naming neither ordinal, and a
+row that fails validation."""
+
+CHAPTERS = Path(__file__).parent / "data" / "formspree_export_chapters.json"
+"""A fixture built to the shape the author's real 574-row export was measured
+to have: nine chapters recorded as 01 through 09, section ordinals that every
+one of those chapters carries, chapter-level rows naming a chapter and no
+section, a row naming neither, and both spellings the form records an ordinal
+in — a zero-padded string and a bare integer."""
 
 
 def plan_with(*titles: str) -> ArticlePlan:
@@ -80,7 +94,7 @@ class TestParsingTheExport:
 
     def test_reads_every_row_that_parses(self) -> None:
         parsed = read_export(EXPORT)
-        assert len(parsed.submissions) == 8
+        assert len(parsed.submissions) == 9
 
     def test_reports_a_failing_row_with_its_position(self) -> None:
         parsed = read_export(EXPORT)
@@ -251,11 +265,13 @@ class TestIngestion:
         self, tree: ReaderFeedbackTree
     ) -> None:
         report = ingest_reader_feedback(tree, EXPORT)
-        assert report.read == 9
-        assert report.substantive == 4
+        assert report.read == 10
+        assert report.substantive == 5
         assert report.votes == 4
+        assert report.chapter_level == 1
         assert report.unrouted == 1
         assert report.sections == 3
+        assert report.chapters == [1]
         assert [row.position for row in report.malformed] == [8]
 
     def test_writes_one_file_per_addressed_section(
@@ -283,12 +299,20 @@ class TestIngestion:
         ingest_reader_feedback(tree, EXPORT)
         assert not tree.section_path(SectionAddress(chapter=1, section=1)).exists()
 
-    def test_prose_naming_no_section_lands_in_the_unrouted_file(
+    def test_prose_naming_a_chapter_and_no_section_lands_on_the_chapter(
+        self, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, EXPORT)
+        filed = tree.chapter_path(1).read_text(encoding="utf-8")
+        assert "Not sure what all those icons do" in filed
+
+    def test_prose_naming_neither_ordinal_lands_in_the_unrouted_file(
         self, tree: ReaderFeedbackTree
     ) -> None:
         ingest_reader_feedback(tree, EXPORT)
         unrouted = tree.unrouted_path.read_text(encoding="utf-8")
-        assert "Not sure what all those icons do" in unrouted
+        assert "The site search returns nothing" in unrouted
+        assert "Not sure what all those icons do" not in unrouted
 
     def test_the_index_lists_every_section_file_and_the_counts(
         self, tree: ReaderFeedbackTree
@@ -316,7 +340,7 @@ class TestIngestion:
                 EXPORT.read_text(encoding="utf-8"), encoding="utf-8"
             )
         report = ingest_reader_feedback(tree, drop)
-        assert report.read == 18
+        assert report.read == 20
         assert len(report.sources) == 2
 
     def test_a_missing_source_ingests_nothing(self, tree: ReaderFeedbackTree) -> None:
@@ -330,11 +354,13 @@ class TestIngestion:
         ingest_reader_feedback(tree, EXPORT)
         withdrawn = tree.section_path(SectionAddress(chapter=7, section=3))
         assert withdrawn.exists()
+        assert tree.chapter_path(1).exists()
 
         ingest_reader_feedback(
             tree, EXPORT, rule=SubstantiveRule(prose_fields=["improvement"])
         )
         assert not withdrawn.exists()
+        assert not tree.chapter_path(1).exists()
         assert not tree.unrouted_path.exists()
 
     def test_an_overridden_rule_changes_the_split(
@@ -343,7 +369,7 @@ class TestIngestion:
         report = ingest_reader_feedback(
             tree, EXPORT, rule=SubstantiveRule(prose_fields=["comments"], min_length=1)
         )
-        assert report.substantive == 3
+        assert report.substantive == 4
         assert report.votes == 5
 
     def test_a_corrupt_re_export_leaves_a_good_ingestion_standing(
@@ -405,7 +431,7 @@ class TestScanningASource:
         assert ingest_reader_feedback(tree, drop).read == 0
 
         report = ingest_reader_feedback(tree, drop, suffixes=(".formspree",))
-        assert report.read == 9
+        assert report.read == 10
         assert report.skipped == []
 
     def test_a_file_named_outright_is_read_whatever_it_is_called(
@@ -413,7 +439,7 @@ class TestScanningASource:
     ) -> None:
         renamed = tmp_path / "export.txt"
         renamed.write_text(EXPORT.read_text(encoding="utf-8"), encoding="utf-8")
-        assert ingest_reader_feedback(tree, renamed).read == 9
+        assert ingest_reader_feedback(tree, renamed).read == 10
 
 
 class TestReadingBySection:
@@ -454,23 +480,158 @@ class TestReadingBySection:
         assert reader.index() is None
         assert reader.unrouted() is None
 
-    def test_an_untitled_plan_takes_a_section_ordinal_only_one_chapter_has(
+    def test_an_untitled_unplaced_plan_reaches_nothing(
         self, notes: PipelineNotes, tree: ReaderFeedbackTree
     ) -> None:
+        """A plan that names no chapter — not in its placement, not in its
+        titles — sits at no address, however few chapters filed its ordinal."""
         ingest_reader_feedback(tree, EXPORT)
         untitled = plan_with(*[f"Section {n}" for n in range(1, 12)])
         reader = ReaderFeedback.for_plan(notes.reader_dir, untitled)
-        assert reader.for_section("Section 11") == tree.section_path(
-            SectionAddress(chapter=1, section=11)
-        )
+        assert reader.for_section("Section 11") is None
+        assert reader.for_section("Section 3") is None
+        assert reader.sections() == []
 
-    def test_an_untitled_plan_routes_nothing_when_chapters_disagree(
+
+class TestAMultiChapterExport:
+    """One chapter's run reading an export that spans nine of them.
+
+    The case the whole address exists for. Every section ordinal in this
+    fixture is carried by every chapter, so an ordinal on its own names no
+    file — what resolves a section is the chapter the plan says it is, and
+    what a chapter run never reaches is a sibling chapter's readers.
+    """
+
+    def test_the_counts_reconcile_with_what_was_read(
+        self, tree: ReaderFeedbackTree
+    ) -> None:
+        report = ingest_reader_feedback(tree, CHAPTERS)
+        assert report.read == 27
+        assert report.substantive == 25
+        assert report.votes == 2
+        assert report.chapter_level == 4
+        assert report.unrouted == 1
+        assert report.sections == 19
+        assert report.chapters == [2, 4, 7]
+        assert report.malformed == []
+        assert report.substantive + report.votes == report.read
+
+    def test_a_section_resolves_to_its_own_chapters_file(
         self, notes: PipelineNotes, tree: ReaderFeedbackTree
     ) -> None:
-        ingest_reader_feedback(tree, EXPORT)
-        untitled = plan_with("Section 1", "Section 2", "Section 3")
-        reader = ReaderFeedback.for_plan(notes.reader_dir, untitled)
-        assert reader.for_section("Section 3") is None
+        ingest_reader_feedback(tree, CHAPTERS)
+        reader = ReaderFeedback.for_plan(
+            notes.reader_dir, placed_plan(4, "Constraints", "Trade-offs", "Costs")
+        )
+        assert [entry.path for entry in reader.sections()] == [
+            tree.section_path(SectionAddress(chapter=4, section=ordinal))
+            for ordinal in (1, 2, 3)
+        ]
+
+    def test_a_sibling_chapters_readers_never_reach_this_run(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        """Nine chapters filed a section 1; only chapter 4's reaches chapter 4."""
+        ingest_reader_feedback(tree, CHAPTERS)
+        reader = ReaderFeedback.for_plan(
+            notes.reader_dir, placed_plan(4, "Constraints", "Trade-offs", "Costs")
+        )
+        reached = "\n".join(
+            entry.path.read_text(encoding="utf-8") for entry in reader.sections()
+        )
+        assert "Section 4.1 lists constraints" in reached
+        assert "Section 3.1 jumps to populations" not in reached
+        assert "Section 9.1 states a limit" not in reached
+
+    def test_both_ordinal_spellings_reach_the_same_address(
+        self, tree: ReaderFeedbackTree
+    ) -> None:
+        """A zero-padded "04"/"02" and a bare 4/2 are one section, not two."""
+        ingest_reader_feedback(tree, CHAPTERS)
+        filed = tree.section_path(SectionAddress(chapter=4, section=2)).read_text(
+            encoding="utf-8"
+        )
+        assert "Section 4.2 loses me at the second worked example." in filed
+        assert "Section 4.2 should name the trade-off in the heading." in filed
+
+    def test_chapter_level_rows_reach_the_chapters_own_file(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, CHAPTERS)
+        reader = ReaderFeedback.for_plan(
+            notes.reader_dir, placed_plan(4, "Constraints")
+        )
+        assert reader.for_chapter() == tree.chapter_path(4)
+        filed = tree.chapter_path(4).read_text(encoding="utf-8")
+        assert "Chapter 4 reads like three separate essays" in filed
+        assert "Chapter 4 needs a summary" in filed
+        assert "Chapter 2 as a whole" not in filed
+
+    def test_a_chapter_nobody_wrote_about_whole_gets_no_file(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, CHAPTERS)
+        reader = ReaderFeedback.for_plan(
+            notes.reader_dir, placed_plan(3, "Populations")
+        )
+        assert reader.for_chapter() is None
+
+    def test_a_row_naming_neither_ordinal_is_still_unrouted(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, CHAPTERS)
+        reader = ReaderFeedback.for_plan(
+            notes.reader_dir, placed_plan(4, "Constraints")
+        )
+        assert reader.unrouted() == tree.unrouted_path
+        assert "The glossary link" in tree.unrouted_path.read_text(encoding="utf-8")
+
+    def test_a_plan_placing_no_chapter_still_reaches_nothing(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        """The deliberate nothing: every chapter carries a section 1, so an
+        ordinal with no chapter would pick one of nine at random. The stage
+        keeps the index and the unrouted file either way."""
+        ingest_reader_feedback(tree, CHAPTERS)
+        reader = ReaderFeedback.for_plan(
+            notes.reader_dir, plan_with("Constraints", "Trade-offs", "Costs")
+        )
+        assert reader.for_section("Constraints") is None
+        assert reader.for_section("Nowhere in the plan") is None
+        assert reader.sections() == []
+        assert reader.for_chapter() is None
+        assert reader.index() == tree.index_path
+        assert reader.unrouted() == tree.unrouted_path
+
+    def test_the_plan_stage_of_a_chapter_run_lists_only_its_own(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, CHAPTERS)
+        manifest = ContentManifest()
+        add_reader_index_refs(
+            manifest, notes, ChapterPlacement(book="adaptation", chapter=4)
+        )
+        assert [ref.label for ref in manifest.refs] == [
+            "Reader feedback — section 4.1",
+            "Reader feedback — section 4.2",
+            "Reader feedback — section 4.3",
+            "Reader feedback — chapter 4",
+            "Reader feedback (no section)",
+        ]
+
+    def test_a_whole_draft_pass_gets_its_sections_and_its_chapter(
+        self, notes: PipelineNotes, tree: ReaderFeedbackTree
+    ) -> None:
+        ingest_reader_feedback(tree, CHAPTERS)
+        notes.save_artifact("plan", placed_plan(4, "Constraints", "Trade-offs"))
+        manifest = ContentManifest()
+        add_reader_section_refs(manifest, notes)
+        assert [ref.label for ref in manifest.refs] == [
+            "Reader feedback — Constraints",
+            "Reader feedback — Trade-offs",
+            "Reader feedback — chapter 4",
+            "Reader feedback (no section)",
+        ]
 
 
 class TestMixedTitlePlan:

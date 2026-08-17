@@ -612,13 +612,19 @@ READER_SECTION_INSTRUCTION = (
     "summary; weigh them as evidence alongside the reviewers"
 )
 
+READER_CHAPTER_INSTRUCTION = (
+    "readers of the published text writing about this chapter whole rather "
+    "than about one of its sections — how it opens, how it holds together, "
+    "where it lost them"
+)
+
 READER_INDEX_INSTRUCTION = (
-    "reader feedback filed one file per section, by ordinal path — open the "
+    "reader feedback filed one file per address, by ordinal path — open the "
     "sections this piece covers"
 )
 
 READER_UNROUTED_INSTRUCTION = (
-    "reader feedback that named no section — read as feedback on the work at large"
+    "reader feedback that named no ordinal — read as feedback on the work at large"
 )
 
 
@@ -633,10 +639,39 @@ def add_reader_unrouted_ref(manifest: ContentManifest, reader: ReaderFeedback) -
         )
 
 
-def add_reader_index_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
-    """List the whole ingested set, for a stage that has no plan to address yet."""
-    reader = ReaderFeedback.for_plan(notes.reader_dir, None)
-    if (index := reader.index()) is not None:
+def add_reader_chapter_ref(manifest: ContentManifest, reader: ReaderFeedback) -> None:
+    """List this chapter's own reader feedback, where readers wrote about it."""
+    if (chapter := reader.for_chapter()) is not None:
+        manifest.add(
+            chapter,
+            "reader_feedback",
+            f"Reader feedback — chapter {reader.chapter}",
+            instruction=READER_CHAPTER_INSTRUCTION,
+        )
+
+
+def add_reader_index_refs(
+    manifest: ContentManifest,
+    notes: PipelineNotes,
+    placement: ChapterPlacement | None = None,
+) -> None:
+    """List the ingested set for a stage that has no plan to address yet.
+
+    A run that knows which chapter it is addresses that chapter's files
+    directly — by ordinal, there being no section titles to match against yet
+    — so no other chapter's readers reach it. A run with no placement has
+    nothing to select by, and reads the index of the whole filed set.
+    """
+    reader = ReaderFeedback.for_placement(notes.reader_dir, placement)
+    for entry in reader.chapter_sections():
+        manifest.add(
+            entry.path,
+            "reader_feedback",
+            f"Reader feedback — section {entry.address.label()}",
+            instruction=READER_SECTION_INSTRUCTION,
+        )
+    add_reader_chapter_ref(manifest, reader)
+    if reader.chapter is None and (index := reader.index()) is not None:
         manifest.add(
             index,
             "reader_feedback",
@@ -653,6 +688,9 @@ def add_reader_section_refs(manifest: ContentManifest, notes: PipelineNotes) -> 
     revising the whole piece addresses sections through one derivation. A
     section nobody wrote about contributes no line, so the manifest carries
     the sections that have evidence rather than a row of empty promises.
+
+    The chapter's own file joins them: readers who wrote about the chapter
+    whole are writing about exactly what a whole-draft pass acts on.
     """
     reader = ReaderFeedback.for_plan(
         notes.reader_dir, notes.load_artifact("plan", ArticlePlan)
@@ -664,6 +702,7 @@ def add_reader_section_refs(manifest: ContentManifest, notes: PipelineNotes) -> 
             f"Reader feedback — {entry.title}",
             instruction=READER_SECTION_INSTRUCTION,
         )
+    add_reader_chapter_ref(manifest, reader)
     add_reader_unrouted_ref(manifest, reader)
 
 
@@ -1650,7 +1689,9 @@ async def plan_article(
             )
     add_source_refs(manifest, notes)
     add_voice_refs(manifest, voice_file_paths or [])
-    add_reader_index_refs(manifest, notes)
+    add_reader_index_refs(
+        manifest, notes, assignment.declared() if assignment is not None else None
+    )
     add_book_refs(manifest, notes, assignment)
 
     task = (

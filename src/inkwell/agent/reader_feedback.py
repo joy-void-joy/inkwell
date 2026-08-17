@@ -1,20 +1,28 @@
-"""Reader feedback on already-published text, ingested one file per section.
+"""Reader feedback on already-published text, ingested one file per address.
 
 The live channels — Google Doc comments, terminal input, tab edits — carry
 only the author, and only while a run is in flight. Readers of text that
 already shipped are a second channel with its own shape: an export from
-whatever form collected them, read once at session start and filed as one
-file per section of the work.
+whatever form collected them, read once at session start and filed under the
+ordinal path each row names.
 
 Both sides of that filing use the same identity: an ordinal path,
 ``chapter.section``, which is :class:`~inkwell.agent.book.SectionAddress` and
 belongs to the book rather than to this reader — the same address a reference
 in a chapter's prose resolves to, so it is declared where the ordinals are.
-The export keys its rows by chapter and section number;
-``SectionAddresses`` reads the same path off the plan's own sections. So a
-stage revising one section opens one file, the plan stage reads the index of
-all of them, and no theme drawn from any particular round of feedback is
-carried in a prompt — the stage reads the evidence.
+The export keys its rows by chapter and section number; ``SectionAddresses``
+reads the same path off the plan's own sections and off the chapter the plan
+says it is. A row naming a chapter and a section addresses that section; a row
+naming a chapter alone is about the chapter whole and is filed under the
+chapter. So a stage revising one section opens one file, a stage working on the
+chapter opens its chapter's file, the plan stage reads the index of all of
+them, and no theme drawn from any particular round of feedback is carried in a
+prompt — the stage reads the evidence.
+
+The whole export is filed, whatever chapter each row names, and a run selects
+its own chapter when it reads. One ingestion therefore serves every chapter
+run of a book, a chapter run never clears a sibling chapter's files, and a
+correction to the export replaces the set rather than layering on it.
 
 The export this was built against is a Formspree JSON dump: a metadata
 header, then one row per submission — most a bare up/down vote, a minority
@@ -22,8 +30,9 @@ carrying prose.
 
     notes/reader/
     ├── sections/01.03.md   # one file per addressed section
-    ├── unrouted.md         # submissions no section ordinal addressed
-    ├── index.md            # the routed set, with a path per section
+    ├── chapters/01.md      # one file per chapter written about whole
+    ├── unrouted.md         # submissions no ordinal addressed at all
+    ├── index.md            # the filed set, with a path per address
     └── ingestion.json      # what the run read, kept, and could not route
 """
 
@@ -45,7 +54,7 @@ from pydantic import (
 
 from lup.types import JsonObject, JsonValue
 
-from inkwell.agent.book import SectionAddress, placed_sections
+from inkwell.agent.book import ChapterPlacement, SectionAddress, placed_sections
 from inkwell.agent.models import ArticlePlan
 
 logger = logging.getLogger(__name__)
@@ -59,8 +68,12 @@ argument — a form that also exports CSV needs a caller's override, not a fork.
 Whatever a scan passes over is counted and named, so a dropped file that this
 reader cannot read says so instead of reading as an empty inbox."""
 
-UNADDRESSED = "no section ordinal — chapter-level feedback, or an incomplete row"
-"""Why a substantive submission ends up unrouted rather than on a section."""
+UNADDRESSED = "no chapter and no section ordinal — an incomplete row"
+"""Why a substantive submission ends up unrouted rather than on an address.
+
+A row naming a chapter is about that chapter even where it names no section,
+so it is filed under the chapter rather than landing here. Only a row naming
+neither has nothing to be filed under."""
 
 
 class ProseField(BaseModel):
@@ -129,6 +142,13 @@ class AddressedFile(BaseModel):
     path: Path
 
 
+class ChapterFile(BaseModel):
+    """One chapter's own feedback file, and the chapter it is filed under."""
+
+    chapter: int = Field(description="1-based chapter ordinal")
+    path: Path
+
+
 class SectionAddresses(BaseModel):
     """Where each plan section sits in the outline the export is keyed by.
 
@@ -192,6 +212,23 @@ class SectionAddresses(BaseModel):
     def entry_for(self, title: str) -> PlanSectionAddress | None:
         """Where the plan places one of its sections, by the plan's own title."""
         return next((entry for entry in self.entries if entry.title == title), None)
+
+    @property
+    def chapter(self) -> int | None:
+        """Which chapter this plan is, where every section it places agrees.
+
+        A plan that says which chapter of which book it is places all of its
+        sections there, so the answer is that chapter. An unplaced plan whose
+        titles carry one chapter's ordinals is that chapter too: the titles
+        are the only thing that said so, and they agree.
+
+        A plan whose sections span chapters is not one chapter, and neither is
+        a plan that places none — both answer nothing rather than picking one,
+        because what this is read for is which chapter's readers a run may
+        reach, and a wrong answer reaches somebody else's.
+        """
+        named = {entry.chapter for entry in self.entries if entry.chapter is not None}
+        return next(iter(named)) if len(named) == 1 else None
 
 
 class ReaderSubmission(BaseModel):
@@ -277,7 +314,8 @@ class ReaderSubmission(BaseModel):
 
         A chapter-level row — the conclusion form, or a section form submitted
         from a chapter index — carries no section ordinal, so it addresses no
-        section and is left unrouted rather than guessed at.
+        section. Which section of its chapter it meant is not guessed at; the
+        row is filed under its chapter instead, where it keeps its identity.
         """
         if self.chapter_number is None or self.section_number is None:
             return None
@@ -446,11 +484,18 @@ class Routed(BaseModel):
     address: SectionAddress
 
 
-class Unroutable(BaseModel):
-    """A substantive submission no section ordinal addressed, and why not."""
+class ChapterRouted(BaseModel):
+    """A substantive submission about a chapter whole, and which chapter."""
 
     submission: ReaderSubmission
-    reason: str = Field(description="What kept the submission off a section")
+    chapter: int = Field(description="1-based chapter ordinal the row named")
+
+
+class Unroutable(BaseModel):
+    """A substantive submission no ordinal addressed at all, and why not."""
+
+    submission: ReaderSubmission
+    reason: str = Field(description="What kept the submission off an address")
 
 
 class SortedSubmissions(BaseModel):
@@ -459,41 +504,57 @@ class SortedSubmissions(BaseModel):
     routed: list[Routed] = Field(
         default_factory=list, description="Prose about an identified section"
     )
+    chaptered: list[ChapterRouted] = Field(
+        default=[], description="Prose about a chapter whole, naming no section"
+    )
     unroutable: list[Unroutable] = Field(
-        default_factory=list, description="Prose that named no section"
+        default=[], description="Prose that named no ordinal at all"
     )
     votes: int = Field(
         default=0, description="Bare votes and ratings, carrying no prose"
     )
 
+    def by_address(self) -> dict[SectionAddress, list[ReaderSubmission]]:
+        """Group section-addressed submissions under the address each named."""
+        ordered = sorted(self.routed, key=lambda entry: entry.address.key)
+        return {
+            address: [entry.submission for entry in group]
+            for address, group in groupby(ordered, key=lambda entry: entry.address)
+        }
+
+    def by_chapter(self) -> dict[int, list[ReaderSubmission]]:
+        """Group chapter-level submissions under the chapter each one named."""
+        ordered = sorted(self.chaptered, key=lambda entry: entry.chapter)
+        return {
+            chapter: [entry.submission for entry in group]
+            for chapter, group in groupby(ordered, key=lambda entry: entry.chapter)
+        }
+
 
 def sort_submissions(
     submissions: list[ReaderSubmission], rule: SubstantiveRule
 ) -> SortedSubmissions:
-    """Split submissions into section-addressed prose, loose prose, and votes."""
+    """Split submissions into section prose, chapter prose, loose prose, votes."""
     substantive = [one for one in submissions if rule.substantive_prose(one)]
+    unaddressed = [one for one in substantive if one.address() is None]
     return SortedSubmissions(
         routed=[
             Routed(submission=one, address=address)
             for one in substantive
             if (address := one.address()) is not None
         ],
+        chaptered=[
+            ChapterRouted(submission=one, chapter=chapter)
+            for one in unaddressed
+            if (chapter := one.chapter_number) is not None
+        ],
         unroutable=[
             Unroutable(submission=one, reason=UNADDRESSED)
-            for one in substantive
-            if one.address() is None
+            for one in unaddressed
+            if one.chapter_number is None
         ],
         votes=len(submissions) - len(substantive),
     )
-
-
-def by_address(routed: list[Routed]) -> dict[SectionAddress, list[ReaderSubmission]]:
-    """Group routed submissions under the section address each one named."""
-    ordered = sorted(routed, key=lambda entry: entry.address.key)
-    return {
-        address: [entry.submission for entry in group]
-        for address, group in groupby(ordered, key=lambda entry: entry.address)
-    }
 
 
 class IngestionReport(BaseModel):
@@ -521,8 +582,25 @@ class IngestionReport(BaseModel):
     votes: int = Field(
         default=0, description="Submissions that were a bare vote or rating"
     )
+    chapter_level: int = Field(
+        default=0,
+        description=(
+            "Substantive submissions about a chapter whole — naming a chapter "
+            "but no section. Counted apart from the section-addressed ones so "
+            "the substantive total still splits into the buckets it was filed "
+            "into: sections, chapters, and the unrouted remainder"
+        ),
+    )
     unrouted: int = Field(
-        default=0, description="Substantive submissions no section addressed"
+        default=0, description="Substantive submissions no ordinal addressed at all"
+    )
+    chapters: list[int] = Field(
+        default=[],
+        description=(
+            "Which chapters got a chapter-level file, recorded for the same "
+            "reason the section addresses are: a reader of the tree takes them "
+            "from what the writer wrote down rather than off file names"
+        ),
     )
     addresses: list[SectionAddress] = Field(
         default_factory=list,
@@ -553,9 +631,9 @@ class IngestionReport(BaseModel):
         """One line naming every count, for a progress message or a log."""
         return (
             f"{self.read} reader submissions read, {self.substantive} substantive "
-            f"across {self.sections} section(s), {self.votes} bare vote(s), "
-            f"{self.unrouted} unroutable, {len(self.malformed)} malformed, "
-            f"{len(self.skipped)} file(s) skipped"
+            f"across {self.sections} section(s) and {len(self.chapters)} chapter(s), "
+            f"{self.votes} bare vote(s), {self.unrouted} unroutable, "
+            f"{len(self.malformed)} malformed, {len(self.skipped)} file(s) skipped"
         )
 
 
@@ -606,13 +684,29 @@ def render_section_file(address: SectionAddress, group: list[ReaderSubmission]) 
     return f"{header}\n{body}\n"
 
 
-def render_unrouted_file(unroutable: list[Unroutable]) -> str:
-    """Substantive submissions naming no section, kept where a stage sees them."""
+def render_chapter_file(chapter: int, group: list[ReaderSubmission]) -> str:
+    """Every submission about one chapter whole, in the order they came in."""
     header = (
-        f"# Reader feedback with no section address\n\n"
-        f"{len(unroutable)} substantive submission(s) whose section could not be "
-        f"resolved. They are here rather than dropped: read them as feedback on "
-        f"the work at large.\n"
+        f"# Reader feedback on chapter {chapter}\n\n"
+        f"{len(group)} substantive submission(s) from readers who wrote about "
+        f"this chapter rather than about one of its sections. Their words, not "
+        f"a summary — weigh them as reader evidence about the chapter whole: "
+        f"how it opens, how it holds together, where it lost them.\n"
+    )
+    body = "\n\n".join(
+        render_submission(submission, ordinal)
+        for ordinal, submission in enumerate(group, 1)
+    )
+    return f"{header}\n{body}\n"
+
+
+def render_unrouted_file(unroutable: list[Unroutable]) -> str:
+    """Substantive submissions naming no ordinal, kept where a stage sees them."""
+    header = (
+        f"# Reader feedback with no address\n\n"
+        f"{len(unroutable)} substantive submission(s) naming neither a chapter "
+        f"nor a section. They are here rather than dropped: read them as "
+        f"feedback on the work at large.\n"
     )
 
     def entries() -> Iterator[str]:
@@ -624,17 +718,21 @@ def render_unrouted_file(unroutable: list[Unroutable]) -> str:
 
 
 def render_index_file(
-    report: IngestionReport, routed: list[AddressedFile], unrouted: Path
+    report: IngestionReport,
+    routed: list[AddressedFile],
+    chaptered: list[ChapterFile],
+    unrouted: Path,
 ) -> str:
-    """The routed set as a listing: one line per section, with its file path."""
+    """The filed set as a listing: one line per address, with its file path."""
 
     def lines() -> Iterator[str]:
         """A header carrying the counts, then the listing as one tight block."""
-        yield "# Reader feedback, by section"
+        yield "# Reader feedback, by address"
         yield (
             "Readers of the already-published text, filed by the ordinal path "
-            "(chapter.section) their submission named. Read the file for the "
-            "section you are acting on."
+            "(chapter.section, or the chapter alone) their submission named. "
+            "Read the file for the chapter and section you are acting on, and "
+            "leave the other chapters' files to the runs that own them."
         )
         yield report.summary()
         if routed:
@@ -642,8 +740,13 @@ def render_index_file(
             yield "\n".join(
                 f"- section {entry.address.label()}: {entry.path}" for entry in routed
             )
+        if chaptered:
+            yield "## Chapters"
+            yield "\n".join(
+                f"- chapter {entry.chapter}: {entry.path}" for entry in chaptered
+            )
         if report.unrouted:
-            yield "## No section address"
+            yield "## No address"
             yield (
                 f"- {report.unrouted} submission(s) about the work at large: {unrouted}"
             )
@@ -666,6 +769,20 @@ class ReaderFeedbackTree(BaseModel):
         return self.sections_dir / f"{address.key}.md"
 
     @property
+    def chapters_dir(self) -> Path:
+        """Where the per-chapter files sit, beside the per-section ones."""
+        return self.root / "chapters"
+
+    def chapter_path(self, chapter: int) -> Path:
+        """The file one chapter's own feedback is filed under.
+
+        Addressed by the chapter ordinal alone, the way a section file is
+        addressed by the whole path, so a run holding its own chapter reaches
+        its file and has no way to name a sibling chapter's.
+        """
+        return self.chapters_dir / f"{chapter:02d}.md"
+
+    @property
     def unrouted_path(self) -> Path:
         """Where feedback that named no section is kept."""
         return self.root / "unrouted.md"
@@ -684,33 +801,46 @@ class ReaderFeedbackTree(BaseModel):
         """Whether an ingestion has written anything here."""
         return self.index_path.exists()
 
-    def addressed_files(self) -> list[AddressedFile]:
-        """Every per-section file the last ingestion filed, by its address."""
+    def last_ingestion(self) -> IngestionReport | None:
+        """What the last ingestion recorded here, where one has run."""
         if not self.report_path.exists():
-            return []
-        report = IngestionReport.model_validate_json(
+            return None
+        return IngestionReport.model_validate_json(
             self.report_path.read_text(encoding="utf-8")
         )
+
+    def addressed_files(self) -> list[AddressedFile]:
+        """Every per-section file the last ingestion filed, by its address."""
+        report = self.last_ingestion()
         return [
             AddressedFile(address=address, path=self.section_path(address))
-            for address in report.addresses
+            for address in (report.addresses if report else [])
+        ]
+
+    def chapter_files(self) -> list[ChapterFile]:
+        """Every per-chapter file the last ingestion filed, by its chapter."""
+        report = self.last_ingestion()
+        return [
+            ChapterFile(chapter=chapter, path=self.chapter_path(chapter))
+            for chapter in (report.chapters if report else [])
         ]
 
     def clear(self) -> None:
         """Unlink what a previous ingestion filed, leaving nothing stale behind."""
-        for path in self.sections_dir.glob("*.md"):
+        for path in (*self.sections_dir.glob("*.md"), *self.chapters_dir.glob("*.md")):
             path.unlink()
         self.unrouted_path.unlink(missing_ok=True)
 
     def write(
-        self,
-        report: IngestionReport,
-        routed: dict[SectionAddress, list[ReaderSubmission]],
-        unroutable: list[Unroutable],
+        self, report: IngestionReport, split: SortedSubmissions
     ) -> IngestionReport:
-        """File the routed set, the unrouted remainder, the index, and the report.
+        """File the addressed set, the remainder, the index, and the report.
 
-        A section with no substantive submission gets no file — an empty one
+        The whole export is filed here, every chapter of it, because one
+        ingestion serves every chapter run of a book and a run selects its own
+        chapter when it reads.
+
+        An address with no substantive submission gets no file — an empty one
         would read to a stage as "the readers said nothing here", which is a
         different claim from "nobody wrote in about this".
 
@@ -721,26 +851,41 @@ class ReaderFeedbackTree(BaseModel):
         """
         self.clear()
         self.sections_dir.mkdir(parents=True, exist_ok=True)
+        self.chapters_dir.mkdir(parents=True, exist_ok=True)
+        sections = split.by_address()
+        chapters = split.by_chapter()
 
         def filed() -> Iterator[AddressedFile]:
             """Each addressed section, written out under its ordinal path."""
-            for address in sorted(routed, key=lambda seen: seen.key):
+            for address in sorted(sections, key=lambda seen: seen.key):
                 path = self.section_path(address)
                 path.write_text(
-                    render_section_file(address, routed[address]), encoding="utf-8"
+                    render_section_file(address, sections[address]), encoding="utf-8"
                 )
                 yield AddressedFile(address=address, path=path)
 
+        def chaptered() -> Iterator[ChapterFile]:
+            """Each chapter readers wrote about whole, under its own ordinal."""
+            for chapter in sorted(chapters):
+                path = self.chapter_path(chapter)
+                path.write_text(
+                    render_chapter_file(chapter, chapters[chapter]), encoding="utf-8"
+                )
+                yield ChapterFile(chapter=chapter, path=path)
+
         written = list(filed())
-        if unroutable:
+        written_chapters = list(chaptered())
+        if split.unroutable:
             self.unrouted_path.write_text(
-                render_unrouted_file(unroutable), encoding="utf-8"
+                render_unrouted_file(split.unroutable), encoding="utf-8"
             )
 
         report.addresses = [entry.address for entry in written]
+        report.chapters = [entry.chapter for entry in written_chapters]
         report.filed = True
         self.index_path.write_text(
-            render_index_file(report, written, self.unrouted_path), encoding="utf-8"
+            render_index_file(report, written, written_chapters, self.unrouted_path),
+            encoding="utf-8",
         )
         self.report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
         return report
@@ -753,10 +898,11 @@ def ingest_reader_feedback(
     rule: SubstantiveRule | None = None,
     suffixes: Sequence[str] = EXPORT_SUFFIXES,
 ) -> IngestionReport:
-    """Read every export ``source`` names and file it one section per file.
+    """Read every export ``source`` names and file it one address per file.
 
-    Substantive submissions are routed by the ordinal path they name; the ones
-    that name no section land in the unrouted file, counted rather than
+    Substantive submissions are routed by the ordinal path they name: a
+    section where they name one, the chapter alone where they name only that,
+    and the unrouted file where they name neither — counted rather than
     dropped. Bare votes are counted and left out — a stage revising prose has
     nothing to do with an up-arrow, and hundreds of them would bury the
     handful that say something.
@@ -784,8 +930,9 @@ def ingest_reader_feedback(
         sources=[str(path) for path in files],
         skipped=[str(path) for path in scan.skipped],
         read=len(submissions) + len(malformed),
-        substantive=len(split.routed) + len(split.unroutable),
+        substantive=len(split.routed) + len(split.chaptered) + len(split.unroutable),
         votes=split.votes,
+        chapter_level=len(split.chaptered),
         unrouted=len(split.unroutable),
         malformed=malformed,
     )
@@ -797,7 +944,7 @@ def ingest_reader_feedback(
             tree.root,
         )
         return report
-    return tree.write(report, by_address(split.routed), split.unroutable)
+    return tree.write(report, split)
 
 
 class SectionFeedbackFile(BaseModel):
@@ -813,21 +960,54 @@ class ReaderFeedback(BaseModel):
     Built once per stage from the notes tree and the plan in hand, so every
     stage reaches a section's file through the same declared mapping instead
     of matching titles against text.
+
+    The tree holds the whole export, every chapter of it. Selecting this run's
+    chapter is this type's job, and it is the only way in: every path handed
+    out is derived from the run's own chapter, so a run has no way to name a
+    sibling chapter's file and no writer is ever handed another chapter's
+    readers.
     """
 
     tree: ReaderFeedbackTree
     addresses: SectionAddresses = Field(default_factory=SectionAddresses)
+    chapter: int | None = Field(
+        default=None,
+        description=(
+            "Which chapter of the book this run is writing, where it knows. "
+            "The one thing every address handed out is selected by"
+        ),
+    )
 
     @classmethod
     def for_plan(cls, reader_dir: Path, plan: ArticlePlan | None) -> Self:
         """Read what is on disk, addressed against ``plan`` where there is one.
 
-        The plan stage runs before any plan exists; it reads the index and the
-        unrouted file, which need no mapping.
+        The chapter is the plan's own, read off the address book rather than
+        off the placement directly, so a plan that names its chapter only in
+        its section titles is placed by them exactly as its sections are.
+        """
+        addresses = SectionAddresses.for_plan(plan) if plan else SectionAddresses()
+        return cls(
+            tree=ReaderFeedbackTree(root=reader_dir),
+            addresses=addresses,
+            chapter=addresses.chapter,
+        )
+
+    @classmethod
+    def for_placement(
+        cls, reader_dir: Path, placement: ChapterPlacement | None
+    ) -> Self:
+        """Read what is on disk before a plan exists, by the launched placement.
+
+        The plan stage runs before any plan does. A run launched as a chapter
+        of a book still knows which chapter it is, so it reaches that
+        chapter's files by ordinal; a run launched without a placement knows
+        nothing to select by and reads the index and the unrouted file, which
+        need no mapping.
         """
         return cls(
             tree=ReaderFeedbackTree(root=reader_dir),
-            addresses=SectionAddresses.for_plan(plan) if plan else SectionAddresses(),
+            chapter=placement.chapter if placement is not None else None,
         )
 
     def index(self) -> Path | None:
@@ -835,37 +1015,63 @@ class ReaderFeedback(BaseModel):
         return self.tree.index_path if self.tree.ingested() else None
 
     def unrouted(self) -> Path | None:
-        """Feedback that named no section, where any was filed."""
+        """Feedback that named no ordinal at all, where any was filed.
+
+        The one file no chapter owns, and so the one every run may read: a
+        submission that named neither a chapter nor a section carries no
+        chapter identity there is any way to leak.
+        """
         path = self.tree.unrouted_path
         return path if path.exists() else None
+
+    def for_chapter(self) -> Path | None:
+        """This chapter's own file — readers writing about it whole.
+
+        Nothing where the run is not one chapter: the file is addressed by
+        chapter ordinal, and a run whose plan spans chapters or names none has
+        no address to read.
+        """
+        if self.chapter is None:
+            return None
+        path = self.tree.chapter_path(self.chapter)
+        return path if path.exists() else None
+
+    def chapter_sections(self) -> list[AddressedFile]:
+        """Every section file filed under this run's chapter, by its ordinal.
+
+        What a stage reads when it has a chapter but no section titles to
+        match against yet. A run that is not one chapter matches nothing here
+        without needing a guard — a filed address always carries a chapter, so
+        it can never equal the nothing an unplaced run holds.
+        """
+        return [
+            filed
+            for filed in self.tree.addressed_files()
+            if filed.address.chapter == self.chapter
+        ]
 
     def for_section(self, title: str) -> Path | None:
         """The file for one plan section, where readers wrote about it.
 
-        A section the plan places by chapter and ordinal names a file
-        outright. A section placed by position alone — the plan says which
-        ordinal, not which chapter — takes the file filed under that ordinal,
-        and nothing at all when several chapters have one. A section the plan
-        does not place gets nothing.
+        Resolved by the whole address — the chapter the plan places the
+        section in, and the section's own ordinal — so a run reaches its own
+        chapter's readers and no others. A section the plan places in no
+        chapter gets nothing, and so does a section the plan does not place:
+        an export spans chapters, every section ordinal in it belongs to
+        several of them, and an ordinal on its own picks one of those chapters
+        at random.
 
         Every "nothing" here is deliberate: handing a writer another
         section's readers is worse than handing them none, and the stage still
         has the index and the unrouted file either way.
         """
         entry = self.addresses.entry_for(title)
-        if entry is None:
+        if entry is None or entry.chapter is None:
             return None
-        if entry.chapter is not None:
-            path = self.tree.section_path(
-                SectionAddress(chapter=entry.chapter, section=entry.section)
-            )
-            return path if path.exists() else None
-        candidates = [
-            filed
-            for filed in self.tree.addressed_files()
-            if filed.address.section == entry.section
-        ]
-        return candidates[0].path if len(candidates) == 1 else None
+        path = self.tree.section_path(
+            SectionAddress(chapter=entry.chapter, section=entry.section)
+        )
+        return path if path.exists() else None
 
     def sections(self) -> list[SectionFeedbackFile]:
         """Every plan section that has a file, in the plan's own order."""

@@ -918,6 +918,38 @@ class BookRecord(BaseModel):
         )
         return found[0] if len(found) == 1 else None
 
+    def keyed(self, key: str) -> ChapterEntry | None:
+        """The outlined chapter one key names, however either side spells it.
+
+        The one match, because two questions are asked of it — where a
+        reference lands, and whether its target has been written — and a book
+        whose two answers disagreed about which chapter a key names would
+        report a link as broken while sending readers somewhere else.
+        """
+        wanted = comparable_key(key)
+        outlined = self.outline.chapters if self.outline is not None else []
+        return next(
+            (held for held in outlined if comparable_key(held.key) == wanted), None
+        )
+
+    def written(self, key: str) -> ChapterRecord | None:
+        """What the chapter one key names wrote down, where it has been written.
+
+        The other half of :meth:`address`, and what keeps an unfinished book
+        from reading as a broken one: chapter three points at chapter seven
+        before anyone has written chapter seven, and that reference resolving
+        to nothing is the plan working rather than a fault. Only a reference
+        whose target is on file was ever expected to resolve, so this is what a
+        reader of the two answers together asks second.
+
+        A key no layout declared answers None whether or not some chapter of
+        this book happens to carry that title: until the book stage names it,
+        nothing has given the key an ordinal, which is exactly the state
+        :func:`~inkwell.agent.book_links.pointing` tells a writer to expect.
+        """
+        entry = self.keyed(key)
+        return None if entry is None else self.chapter(entry.ordinal)
+
     def address(self, target: BookTarget) -> BookAddress | None:
         """Where ``target`` sits in this book, once something has numbered it.
 
@@ -942,11 +974,7 @@ class BookRecord(BaseModel):
         over prefix: the outline assigned that ordinal and the prefix only
         remembers where the section once sat.
         """
-        wanted = comparable_key(target.chapter)
-        outlined = self.outline.chapters if self.outline is not None else []
-        entry = next(
-            (held for held in outlined if comparable_key(held.key) == wanted), None
-        )
+        entry = self.keyed(target.chapter)
         if entry is None:
             return None
         if not target.section:

@@ -19,6 +19,7 @@ from inkwell.agent.format_checks import (
     BoldEmphasis,
     DeclaredCheck,
     DraftWords,
+    FormatCheck,
     FormulaicOpenings,
     JudgedRow,
     LinkingPredicates,
@@ -1602,13 +1603,19 @@ def format_spec(target_format: str) -> OutputFormatSpec | None:
 
 
 def format_checks_for(
-    target_format: str, declared: Sequence[DeclaredCheck] = ()
-) -> list[DeclaredCheck]:
+    target_format: str, declared: Sequence[FormatCheck] = ()
+) -> list[FormatCheck]:
     """Every row a draft in this format is measured against.
 
-    The format's own declared rows, plus any a custom-format run declared at
-    runtime through the tool. A format that declares none returns none, which
-    is a valid format with an empty report.
+    The format's own declared rows, plus any this run declared at runtime — a
+    custom format's, through the tool, and any row that follows what the run
+    *is* rather than what format it writes in. A format that declares none
+    returns none, which is a valid format with an empty report.
+
+    Taken and returned as the base row rather than as the union a format
+    declares in, because a row declared at runtime need not be one a format
+    description could have named: nothing here reads a row's kind, so widening
+    the type is all it takes for a new one to travel.
     """
     spec = format_spec(target_format)
     return [*(spec.checks if spec else []), *declared]
@@ -1639,7 +1646,7 @@ always beats the same content forced into a bolded, segmented template."""
 
 
 def get_format_guidance(
-    target_format: str, declared: Sequence[DeclaredCheck] = ()
+    target_format: str, declared: Sequence[FormatCheck] = ()
 ) -> str:
     """Return structural guidance for a target format, or empty string.
 

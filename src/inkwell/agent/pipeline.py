@@ -130,9 +130,10 @@ from inkwell.agent.stages import (
     get_format_guidance,
 )
 from inkwell.agent.format_checks import (
-    DeclaredCheck,
+    FormatCheck,
     Judge,
     QueryJudge,
+    UnresolvedReferences,
     run_format_checks,
 )
 from inkwell.agent.segmenter import reader
@@ -1277,14 +1278,31 @@ def build_format_check_server(notes: PipelineNotes) -> ToolServers:
     )
 
 
-def declared_format_checks(notes: PipelineNotes) -> list[DeclaredCheck]:
-    """The rows this run declared for its format, none if it declared none.
+def declared_format_checks(notes: PipelineNotes) -> list[FormatCheck]:
+    """The rows this run declares beyond the ones its format names in Python.
 
-    Read from the artifact rather than passed down the stage chain, so a row
-    the planner declared reaches the writer and the rewriter alike — including
-    across a resume, where the earlier stage is not in this process.
+    Read from artifacts rather than passed down the stage chain, so a row
+    reaches the writer and the rewriter alike — including across a resume,
+    where the stage that would have declared it is not in this process.
+
+    Two sources, both of them about this run rather than about its format. A
+    custom format declares its own rows through the tool, and they arrive from
+    the file that tool wrote. A run writing a chapter of a book gets the row
+    that reports references the book cannot place, because whether a reference
+    can go unresolved follows the book identity on the plan and not the format
+    the chapter is written in — a second book-shaped format needs no entry
+    here, and the formats that can hold no chapters never see the row at all.
     """
-    return load_declared_checks(format_checks_path(notes))
+    declared: list[FormatCheck] = list(load_declared_checks(format_checks_path(notes)))
+    plan = notes.load_artifact("plan", ArticlePlan)
+    placement = plan.placement if plan is not None else None
+    if placement is not None:
+        declared.append(
+            UnresolvedReferences(
+                record=book_store().load(placement.book), placement=placement
+            )
+        )
+    return declared
 
 
 async def add_format_check_report(

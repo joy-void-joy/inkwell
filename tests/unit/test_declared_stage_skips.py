@@ -26,19 +26,19 @@ def test_every_other_stage_survives_a_skip() -> None:
     """A skip removes what it names and nothing near it."""
     kept = stages_when(["voice"])
 
-    assert kept == ["preprocess", *[s for s in DISPLAY_STAGES if s != "voice"]]
+    assert kept == [s for s in DISPLAY_STAGES if s != "voice"]
 
 
 def test_declaring_none_runs_the_whole_backbone() -> None:
     """The default has to be unchanged, or adopting the seam moves every run."""
-    assert stages_when([]) == ["preprocess", *DISPLAY_STAGES]
+    assert stages_when([]) == DISPLAY_STAGES
 
 
 def test_skips_compose_with_a_light_run() -> None:
     """Light already trims the backbone; a skip narrows what light left."""
     kept = stages_when(["plan"], light=True)
 
-    assert kept == ["preprocess", *[s for s in LIGHT_STAGES if s != "plan"]]
+    assert kept == [s for s in LIGHT_STAGES if s != "plan"]
 
 
 def test_a_skip_naming_no_stage_is_refused() -> None:

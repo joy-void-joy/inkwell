@@ -50,13 +50,13 @@ def make_runner(
 def test_full_run_uses_the_whole_backbone(tmp_path: Path) -> None:
     r = make_runner(tmp_path)
     assert r.light is False
-    assert r.stages_for_run() == ["preprocess", *DISPLAY_STAGES]
+    assert r.stages_for_run() == DISPLAY_STAGES
 
 
 def test_light_run_trims_to_the_light_backbone(tmp_path: Path) -> None:
     r = make_runner(tmp_path, light=True)
     assert r.light is True
-    assert r.stages_for_run() == ["preprocess", *LIGHT_STAGES]
+    assert r.stages_for_run() == LIGHT_STAGES
 
 
 def test_light_skips_the_heavy_stages_but_keeps_the_spine(tmp_path: Path) -> None:
@@ -78,7 +78,7 @@ def test_light_skips_the_heavy_stages_but_keeps_the_spine(tmp_path: Path) -> Non
 def test_linkedin_format_implies_light(tmp_path: Path) -> None:
     r = make_runner(tmp_path, target_format="linkedin")
     assert r.light is True
-    assert r.stages_for_run() == ["preprocess", *LIGHT_STAGES]
+    assert r.stages_for_run() == LIGHT_STAGES
 
 
 type LaunchArgument = (
@@ -175,7 +175,7 @@ class TestLightReachesThePipelineThroughTheRenderedPath:
         # The format's implication is the runner's rather than the flag's, so
         # the trimmed backbone is what proves the format arrived.
         runner = make_runner(tmp_path, target_format=pipeline_call.target_format)
-        assert runner.stages_for_run() == ["preprocess", *LIGHT_STAGES]
+        assert runner.stages_for_run() == LIGHT_STAGES
 
 
 def test_resume_recovers_light_from_the_plan_format(tmp_path: Path) -> None:
@@ -194,4 +194,4 @@ def test_resume_recovers_light_from_the_plan_format(tmp_path: Path) -> None:
         source_quotes=[],
     )
     assert r.light is True
-    assert r.stages_for_run() == ["preprocess", *LIGHT_STAGES]
+    assert r.stages_for_run() == LIGHT_STAGES

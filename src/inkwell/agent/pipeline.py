@@ -254,8 +254,8 @@ DISPLAY_STAGES = [
 ]
 """Ordered author-facing pipeline backbone, shared by the resume loop, the
 Overview tab, and the terminal stage counter so all three agree on which
-stage is which and how many there are. ``preprocess`` is an internal
-pre-stage and is prepended where the runner needs it."""
+stage is which and how many there are. Each entry names a ``stage_<name>``
+method on the runner, which is what dispatches the sequence."""
 
 CHECKPOINT_STAGES = [s for s in DISPLAY_STAGES if s != "resolve"]
 """Backbone stages that persist a resumable snapshot — the valid targets for
@@ -3401,7 +3401,10 @@ class PipelineRunner:
         return self.explicit_light or self.effective_format == "linkedin"
 
     def stages_for_run(self) -> list[str]:
-        """The backbone stages this run executes, with ``preprocess`` prepended.
+        """The backbone stages this run executes, in order.
+
+        Every entry names a ``stage_<name>`` method, because this is what the
+        fresh run and the resume loop both dispatch through.
 
         Light runs trim the heavy stages to LIGHT_STAGES; the fresh run and the
         resume loop both read the sequence here so they stay in lockstep.
@@ -3412,8 +3415,7 @@ class PipelineRunner:
         either stage learned to recognise one.
         """
         backbone = LIGHT_STAGES if self.light else DISPLAY_STAGES
-        kept = [stage for stage in backbone if stage not in self.skipped_stages]
-        return ["preprocess", *kept]
+        return [stage for stage in backbone if stage not in self.skipped_stages]
 
     def ensure_notes(self) -> PipelineNotes:
         """Return notes, creating a temp dir if needed."""
@@ -3875,7 +3877,7 @@ class PipelineRunner:
         try:
             stages = self.stages_for_run()
             last_idx = stages.index(snapshot.stage) if snapshot.stage in stages else -1
-            remaining = [s for s in stages[last_idx + 1 :] if s != "preprocess"]
+            remaining = stages[last_idx + 1 :]
             if "write" not in remaining and self.write_stage_produced_nothing():
                 remaining = stages[stages.index("write") :]
 

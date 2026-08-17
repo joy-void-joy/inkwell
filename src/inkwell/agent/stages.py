@@ -19,18 +19,15 @@ from inkwell.agent.format_checks import (
     BoldEmphasis,
     DeclaredCheck,
     DraftWords,
-    FormulaicOpenings,
+    FormatCheck,
     JudgedRow,
-    LinkingPredicates,
-    MarkdownArtifacts,
     ParagraphLengthVariance,
     ParagraphSentences,
-    ParticipialTails,
-    PunctuationDensity,
     SectionLength,
-    SentenceLengthVariance,
+    TerminologyDrift,
     render_declared_rules,
 )
+from inkwell.agent.voice_tells import BANNED_VOCABULARY_PROSE, VOICE_TELL_CHECKS
 
 READER_FEEDBACK_NOTE = """\
 ## Reader feedback
@@ -295,10 +292,11 @@ specific:
 document. Every section file listed exists and is non-empty — read and \
 include all of them; never declare a section missing or to-be-written.
 - **Enforce the glossary.** Call lookup_terms to read the shared \
-glossary. Where a section names something — a term, symbol, or \
-abbreviation — differently from the glossary's canonical entry, \
-substitute the canonical term. This is mechanical: change the word, not \
-the sentence around it.
+glossary — the conventions, what the sections coined, and, for a chapter \
+of a book, what the other chapters already named. Where a section names \
+something — a term, symbol, or abbreviation — differently from the \
+glossary's canonical entry, substitute the canonical term. This is \
+mechanical: change the word, not the sentence around it.
 - **Stitch the seams.** At each section boundary, write or adjust ONLY \
 the handoff so the join doesn't read as a seam — the last sentence of \
 one section should set up the first of the next. Touch the boundary \
@@ -584,6 +582,49 @@ mind, the honest answer is one_sided=False.
 
 Default to False when you are unsure. This check is advisory and a false \
 alarm costs the author a note about nothing."""
+
+
+BOOK_PLANNER_SYSTEM = """\
+You lay out a book. Not one chapter of it — the whole spine: which \
+chapters it has, in what order they are read, and what each one needs \
+from the others.
+
+Build the layout using your tools:
+
+1. Call set_book_title with what the book is called
+2. Call add_chapter for each chapter, in reading order, with a stable \
+key, its title, and the one line it argues
+3. Call add_cross_reference for each thing one chapter needs from \
+another — the term it must use, the result it rests on, the case it \
+argues against
+
+## Keys and ordinals
+
+You give each chapter a **key**: a lowercase hyphenated slug that names \
+the chapter itself rather than its place ("measurement-and-scaling", not \
+"chapter-four"). The key is how a later layout recognises a chapter it \
+has seen before, so spell it the same way every time you lay this book \
+out, and never recycle one for a different chapter.
+
+You do **not** number chapters. Ordinals are assigned for you and held \
+fixed: a chapter that already has one keeps it wherever you move it, an \
+inserted chapter takes a number the book has never used, and a dropped \
+chapter's number is retired rather than passed on. Readers have already \
+seen the published numbers, so a chapter's ordinal is its identity — the \
+order you declare is the reading order, and that is the thing you own.
+
+## Cross-references are the point
+
+A book is not a pile of articles. What makes it one is that chapter nine \
+can say "the calibration curve from chapter four" and mean it. Declare \
+those links: which chapter establishes each load-bearing term, result, \
+or claim, and which chapters spend it later. Name the subject exactly as \
+the establishing chapter will name it — a link whose subject is vague \
+buys nothing when the chapter that depends on it is written months \
+later, by a run that can read only what you wrote down.
+
+Be complete about the book and terse about each chapter: one line of \
+thesis is enough. The chapter's own planning stage does the rest."""
 
 
 PLANNER_SYSTEM = """\
@@ -1118,7 +1159,7 @@ Structure as a conversation between 2-3 speakers with distinct \
 perspectives. Each speaker should have a recognizable voice. \
 Distribute arguments naturally across speakers. Vary turn length."""
 
-TEXTBOOK_GUIDANCE = """\
+TEXTBOOK_GUIDANCE = f"""\
 ## Format: Textbook
 
 This piece teaches. The reader is capable but does not yet know the \
@@ -1155,15 +1196,17 @@ say where the missing piece arrives.
 
 ### Vocabulary to avoid
 
-The register is plain and specific. The following are the tells of prose \
-that is filling space rather than teaching, and they are banned outright: \
-"it's worth noting", "it is important to note", "in many ways", "this is \
-crucial", "delve into", "dive deep", "unpack", "shed light on", "navigate \
-the complexities", "tapestry", "realm", "landscape" as a metaphor, \
-"testament to", "beacon of", "multifaceted", "myriad", "plethora", \
-"paradigm", "holistic", "seamless", "cutting-edge", "ever-evolving", \
-"in today's world", "at the end of the day", "that being said", "in \
-conclusion", "plays a vital role", "serves as a", "stands as a".
+The register is plain and specific. These are the tells of prose that is \
+filling space rather than teaching, and the finished draft is re-read against \
+exactly this list:
+
+{BANNED_VOCABULARY_PROSE}
+
+A word here is banned in the sense that makes it a tell, not in every sense: \
+"rich" is fine about a dataset and a tell about a tapestry. Where one of these \
+is genuinely the precise word — a direct quote, the actual name of a thing — \
+use it, and expect the check to surface the sentence so a reader can see that \
+it was.
 
 Prefer the specific word to the impressive one. "Robust" almost always \
 means something more precise — say that instead.
@@ -1177,6 +1220,11 @@ template rather than thought.
 - **Vary sentence and paragraph length.** Prose where every sentence runs \
 the same length has no rhythm and is exhausting to read, however correct \
 each sentence is. Some sentences are four words.
+- **Repeat the word.** A teaching text names one thing one way. Calling the \
+researcher a scientist, then an academic, then an expert costs the reader a \
+lookup on every rename and buys nothing but the absence of repetition.
+- **Count before you list.** Three is the number machine prose reaches for \
+when it has stopped counting. If there are two reasons, give two.
 - **No summary paragraph that only repeats.** A closing paragraph earns its \
 place by saying what follows from the argument, not by listing it again.
 
@@ -1187,7 +1235,12 @@ build to the claim, and do not hedge a claim you are about to support.
 - **Write what things do, not what they are.** Prefer a verb that acts to a \
 linking verb that describes: "attention costs O(n²)" over "attention is \
 expensive in its scaling", and never the inflated forms of the same move — \
-"serves as", "stands as", "holds the distinction of being", "constitutes".
+"serves as", "stands as", "holds the distinction of being", "constitutes". \
+The same goes for the longer word that means exactly the plain one: "use", \
+not "utilize"; "has", not "boasts"; "help", not "facilitate".
+- **Name who said it.** "Studies show", "experts suggest", and "research \
+indicates" hand a claim to nobody. Name the study, or state the evidence and \
+say what it is. A claim you cannot source is cut, not hedged.
 - **No performed enthusiasm.** "Fascinatingly", "remarkably", "it is \
 striking that" tell the reader how to feel instead of giving them the \
 reason to feel it.
@@ -1201,11 +1254,12 @@ as a substitute for deciding how two clauses relate.
 gerund — "…, underscoring the point", "…, highlighting the tension", "…, \
 making it clear that". The construction adds a clause that asserts nothing \
 and appears in machine prose far more than in anybody's writing.
-- **Semicolons are rationed too.** A semicolon nearly always marks two \
-sentences that were afraid to separate. Write the two sentences.
-- **Parentheses are rationed.** A parenthetical is a decision deferred: \
-either the aside matters, in which case it earns a sentence, or it does not, \
-in which case cut it. Reserve them for a genuine citation or unit.
+- **Semicolons and parentheses are normal punctuation.** Machine prose \
+avoids both and reaches for an em dash instead, which is half of why the em \
+dash is rationed above. Use a semicolon where two clauses belong in one \
+sentence; use parentheses (where a thought is related but subordinate). \
+Neither is rationed here — the draft is measured for how often it uses each, \
+and the number is reported back rather than held against it.
 - **No markdown left showing.** Bold, headings, links, and code spans either \
 render or they are noise the reader has to parse. A stray `**`, a heading \
 whose hashes have no space after them, a half-written link — none of these \
@@ -1245,44 +1299,6 @@ class OutputFormatSpec(BaseModel):
     )
 
 
-LLM_VOCABULARY = [
-    "it's worth noting",
-    "it is worth noting",
-    "it is important to note",
-    "in many ways",
-    "this is crucial",
-    "delve into",
-    "dive deep",
-    "unpack",
-    "shed light on",
-    "navigate the complexities",
-    "tapestry",
-    "realm",
-    "testament to",
-    "beacon of",
-    "multifaceted",
-    "myriad",
-    "plethora",
-    "paradigm",
-    "holistic",
-    "seamless",
-    "cutting-edge",
-    "ever-evolving",
-    "in today's world",
-    "at the end of the day",
-    "that being said",
-    "in conclusion",
-    "plays a vital role",
-    "serves as a",
-    "stands as a",
-    "not only",
-    "moreover",
-    "furthermore",
-]
-"""The vocabulary the textbook guidance bans outright. The default for that
-format's row, which takes an override: which phrases read as filler is a
-judgement about register, and a house with different tells declares its own."""
-
 TEXTBOOK_CHECKS: list[DeclaredCheck] = [
     BoldedSummaries(
         name="bolded summaries",
@@ -1290,70 +1306,12 @@ TEXTBOOK_CHECKS: list[DeclaredCheck] = [
         "claim, so a reader who reads only the bold gets the whole argument.",
         share_floor=1.0,
     ),
-    BannedVocabulary(
-        name="llm vocabulary",
-        rule="None of the banned filler phrases appear — prefer the specific "
-        "word to the impressive one.",
-        phrases=LLM_VOCABULARY,
-    ),
-    PunctuationDensity(
-        name="em-dash density",
-        rule="Em dashes are rationed to a genuine break in thought, one or two "
-        "a section.",
-        marks=["—"],
-        per_thousand_ceiling=3.0,
-    ),
-    PunctuationDensity(
-        name="semicolon density",
-        rule="A semicolon nearly always marks two sentences afraid to "
-        "separate — write the two sentences.",
-        marks=[";"],
-        per_thousand_ceiling=1.0,
-    ),
-    PunctuationDensity(
-        name="parenthesis density",
-        rule="A parenthetical is a decision deferred: either the aside earns a "
-        "sentence or it is cut.",
-        marks=["("],
-        per_thousand_ceiling=4.0,
-    ),
-    MarkdownArtifacts(
-        name="markdown artifacts",
-        rule="No markdown left showing — every marker either renders or is cut.",
-    ),
     BoldEmphasis(
         name="bold emphasis",
         rule="Bold carries the paragraph-opening summary and nothing else; no "
         "emphasis inside the body of a paragraph.",
         per_thousand_ceiling=0.0,
         exempt_paragraph_summaries=True,
-    ),
-    FormulaicOpenings(
-        name="paragraph openings",
-        rule="No run of paragraphs opens the same way.",
-        repeat_ceiling=1,
-    ),
-    SentenceLengthVariance(
-        name="sentence rhythm",
-        rule="Sentence lengths vary; some sentences are four words.",
-        spread_floor=5.0,
-    ),
-    ParagraphLengthVariance(
-        name="paragraph rhythm",
-        rule="Paragraph lengths vary rather than coming out uniform.",
-        spread_floor=15.0,
-    ),
-    LinkingPredicates(
-        name="inflated copulas",
-        rule="Write what things do, not what they are, and never reach for the "
-        "inflated stand-ins for `is` — `serves as`, `stands as`, `holds the "
-        "distinction of being`.",
-        share_ceiling=0.05,
-    ),
-    ParticipialTails(
-        name="participial tails",
-        rule="No sentence ends on a comma and a gerund.",
-        share_ceiling=0.05,
     ),
     JudgedRow(
         name="teachable concreteness",
@@ -1372,7 +1330,15 @@ TEXTBOOK_CHECKS: list[DeclaredCheck] = [
         "symbol, or abbreviation used before it is defined, and every passage "
         "that relies on something the draft establishes only later.",
     ),
+    *VOICE_TELL_CHECKS,
 ]
+"""What teaching asks for, then what the house voice asks for anywhere.
+
+Only the first four rows are the textbook's own — the bolded spine a reader
+follows alone, and the two questions a count cannot answer. Everything after
+them is the voice guidance, drawn from one declaration rather than restated
+here, which is what lets a second format adopt the same tells by splicing in
+the same list."""
 
 ACADEMIC_CHECKS: list[DeclaredCheck] = [
     JudgedRow(
@@ -1483,6 +1449,25 @@ DIALOG_CHECKS: list[DeclaredCheck] = [
     ),
 ]
 
+EVERY_FORMAT_CHECKS: list[DeclaredCheck] = [
+    TerminologyDrift(
+        name="terminology drift",
+        rule="Call each thing what the shared glossary already calls it. This "
+        "row reads the glossary and reports a passage that reaches for a name "
+        "an entry recorded as one it rejected; it cannot see a synonym nobody "
+        "wrote down, so a quiet row means no recorded rival name was used "
+        "rather than that the piece is terminologically consistent.",
+    ),
+]
+"""The rows every format is measured by, whatever format it is.
+
+Terminology consistency is a fact about the piece rather than a convention of
+any one format, so this is declared once rather than restated in each format's
+list — and a format that declares nothing of its own still carries it. Nothing
+here fires for a piece that belongs to no book: what these rows measure against
+is the glossary the book kept, and a run without one reports having measured
+nothing."""
+
 OUTPUT_FORMATS: list[OutputFormatSpec] = [
     OutputFormatSpec(
         key="academic",
@@ -1559,16 +1544,22 @@ def format_spec(target_format: str) -> OutputFormatSpec | None:
 
 
 def format_checks_for(
-    target_format: str, declared: Sequence[DeclaredCheck] = ()
-) -> list[DeclaredCheck]:
+    target_format: str, declared: Sequence[FormatCheck] = ()
+) -> list[FormatCheck]:
     """Every row a draft in this format is measured against.
 
-    The format's own declared rows, plus any a custom-format run declared at
-    runtime through the tool. A format that declares none returns none, which
-    is a valid format with an empty report.
+    Widening: the rows every format carries, then this format's own, then any
+    a custom-format run declared at runtime through the tool. A format that
+    declares none of its own is still measured by the first group, which is
+    why an unknown format returns rows rather than nothing.
+
+    Taken and returned as the base row rather than as the union a format
+    declares in, because a row declared at runtime need not be one a format
+    description could have named: nothing here reads a row's kind, so widening
+    the type is all it takes for a new one to travel.
     """
     spec = format_spec(target_format)
-    return [*(spec.checks if spec else []), *declared]
+    return [*EVERY_FORMAT_CHECKS, *(spec.checks if spec else []), *declared]
 
 
 def declares_own_checks(target_format: str) -> bool:
@@ -1596,7 +1587,7 @@ always beats the same content forced into a bolded, segmented template."""
 
 
 def get_format_guidance(
-    target_format: str, declared: Sequence[DeclaredCheck] = ()
+    target_format: str, declared: Sequence[FormatCheck] = ()
 ) -> str:
     """Return structural guidance for a target format, or empty string.
 

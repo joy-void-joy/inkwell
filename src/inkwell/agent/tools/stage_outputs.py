@@ -21,7 +21,15 @@ from lup.mcp import LupMcpTool, ToolError, ToolResponse, mcp_response
 from lup.telemetry.metrics import collector as metrics_collector
 from lup.types import JsonObject
 
+from inkwell.agent.book import BookLayout, ProposedChapter, ProposedReference
 from inkwell.agent.format_checks import DeclaredCheck
+from inkwell.agent.glossary import (
+    DefineTermResult,
+    GlossaryScope,
+    GlossaryView,
+    define_term_in_glossary,
+    read_glossary,
+)
 from inkwell.agent.models import (
     Assumption,
     AssumptionsList,
@@ -285,6 +293,132 @@ def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
             ),
             AddSourceQuoteInput,
             handle_quote,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Book layout collector + tools
+# ---------------------------------------------------------------------------
+
+
+class SetBookTitleInput(BaseModel):
+    title: str = Field(description="What the book is called")
+
+
+class AddChapterInput(BaseModel):
+    chapter: ProposedChapter = Field(
+        description=(
+            "The chapter to append to the reading order. Its `key` is a stable "
+            "slug naming the chapter itself, not its position — spell it the "
+            "same way every time this book is laid out, so the chapter keeps "
+            "the ordinal it was already given. Ordinals are assigned for you."
+        )
+    )
+
+
+class AddCrossReferenceInput(BaseModel):
+    reference: ProposedReference = Field(
+        description=(
+            "What one chapter needs from another, by the two chapters' keys. "
+            "Add both chapters before the reference that links them."
+        )
+    )
+
+
+class BookCollector:
+    """Accumulates the book layout, persisting after each call.
+
+    The same shape as :class:`PlanCollector` and for the same reason: a stage
+    that died halfway leaves a readable prefix rather than nothing. Ordinals are
+    absent throughout — this holds what the stage proposed, and
+    :meth:`~inkwell.agent.book.BookOutline.relaid` is what turns keys into
+    numbers against what the book has already handed out.
+    """
+
+    def __init__(self, output_path: Path) -> None:
+        self.output_path = output_path
+        self.layout = BookLayout()
+
+    def save(self) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text(
+            self.layout.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+    def keyed(self, key: str) -> bool:
+        """Whether a chapter under this key has been added yet."""
+        return any(held.key == key for held in self.layout.chapters)
+
+
+def make_book_tools(collector: BookCollector) -> list[LupMcpTool]:
+    """Create MCP tools for laying a book's chapters and links out.
+
+    Each tool refuses what the outline could not later resolve — a key used
+    twice, a reference to a chapter nobody declared — so the stage is told
+    where it went wrong while it can still fix it, rather than having the link
+    dropped silently when the layout is numbered.
+    """
+
+    async def handle_title(inp: SetBookTitleInput) -> ToolOk:
+        collector.layout.title = inp.title
+        collector.save()
+        return ToolOk()
+
+    async def handle_chapter(inp: AddChapterInput) -> ToolOk:
+        if collector.keyed(inp.chapter.key):
+            raise ToolError(
+                f"This book already has a chapter keyed {inp.chapter.key!r}. A "
+                "key names one chapter, so give this one a key of its own."
+            )
+        collector.layout.chapters.append(inp.chapter)
+        collector.save()
+        return ToolOk()
+
+    async def handle_reference(inp: AddCrossReferenceInput) -> ToolOk:
+        missing = [
+            key
+            for key in (inp.reference.from_key, inp.reference.to_key)
+            if not collector.keyed(key)
+        ]
+        if missing:
+            raise ToolError(
+                f"No chapter of this book is keyed {', '.join(missing)}. Add "
+                "the chapters with add_chapter first, then link them."
+            )
+        collector.layout.references.append(inp.reference)
+        collector.save()
+        return ToolOk()
+
+    return [
+        build_stage_tool(
+            "set_book_title",
+            "Set what the book is called. Call this once, before adding chapters.",
+            SetBookTitleInput,
+            handle_title,
+        ),
+        build_stage_tool(
+            "add_chapter",
+            (
+                "Append a chapter to the book's reading order. Call once per "
+                "chapter, in the order a reader meets them. You supply the "
+                "key, title, and one-line thesis; the ordinal is assigned for "
+                "you and held fixed across layouts."
+            ),
+            AddChapterInput,
+            handle_chapter,
+        ),
+        build_stage_tool(
+            "add_cross_reference",
+            (
+                "Record what one chapter needs from another — the term, "
+                "result, or claim it carries across, and which way the "
+                "dependency runs. This is what a chapter written months later, "
+                "on its own, reads to know what it may lean on and what it "
+                "owes the chapters after it."
+            ),
+            AddCrossReferenceInput,
+            handle_reference,
         ),
     ]
 
@@ -915,29 +1049,9 @@ def make_note_tool(notes_collector: list[AuthorNote], stage: str) -> LupMcpTool:
 
 
 # ---------------------------------------------------------------------------
-# Shared glossary (cross-writer term ledger)
+# Shared glossary — the tools a writer reaches the ledger in agent/glossary.py
+# through; a caller that only reads what the piece has named goes there direct
 # ---------------------------------------------------------------------------
-
-
-class GlossaryEntry(BaseModel):
-    """One shared term: a name, symbol, or abbreviation and the single meaning
-    every section must use for it."""
-
-    term: str = Field(description="The term, name, symbol, or abbreviation")
-    meaning: str = Field(description="Its canonical meaning/usage for this piece")
-
-
-class DefineTermResult(BaseModel):
-    """Result of define_term — the canonical entry the caller should conform to."""
-
-    term: str
-    meaning: str
-    already_defined: bool = Field(
-        description=(
-            "True when a sibling writer already defined this term; the returned "
-            "meaning is the canonical one — conform to it rather than your own."
-        )
-    )
 
 
 class DefineTermInput(BaseModel):
@@ -945,6 +1059,15 @@ class DefineTermInput(BaseModel):
         description="The term, name, symbol, or abbreviation you are introducing"
     )
     meaning: str = Field(description="Its definition — how every section should use it")
+    aliases: list[str] = Field(
+        default=[],
+        description=(
+            "The other names for this same thing that you weighed and are not "
+            "using — the rival phrasings, spellings, and abbreviations. Naming "
+            "them here is what lets a later chapter reaching for one be handed "
+            "this term instead of quietly renaming it"
+        ),
+    )
 
 
 class LookupTermsInput(BaseModel):
@@ -957,75 +1080,29 @@ class LookupTermsInput(BaseModel):
     )
 
 
-class GlossaryView(BaseModel):
-    """The shared glossary: what the plan seeded, and what writers coined."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    conventions: list[str] = Field(
-        default_factory=list,
-        description="Plan-level conventions seeded before writing",
-    )
-    terms: list[GlossaryEntry] = Field(
-        default_factory=list,
-        description="Terms coined by section writers so far",
-    )
-
-
-def load_glossary(path: Path) -> GlossaryView:
-    """Read the shared glossary file, empty when nothing has been written yet."""
-    if not path.exists():
-        return GlossaryView()
-    return GlossaryView.model_validate_json(path.read_text(encoding="utf-8"))
-
-
-def write_glossary(path: Path, glossary: GlossaryView) -> None:
-    """Persist the shared glossary file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(glossary.model_dump_json(indent=2), encoding="utf-8")
-
-
-def seed_glossary(path: Path, conventions: list[str]) -> None:
-    """Seed the glossary with the plan's conventions, preserving coined terms."""
-    write_glossary(
-        path,
-        GlossaryView(conventions=conventions, terms=load_glossary(path).terms),
-    )
-
-
-def define_term_in_glossary(path: Path, term: str, meaning: str) -> DefineTermResult:
-    """Register a term unless a sibling already defined it — first definition wins."""
-    glossary = load_glossary(path)
-    for entry in glossary.terms:
-        if entry.term.casefold() == term.casefold():
-            return DefineTermResult(
-                term=entry.term, meaning=entry.meaning, already_defined=True
-            )
-    write_glossary(
-        path,
-        GlossaryView(
-            conventions=glossary.conventions,
-            terms=[*glossary.terms, GlossaryEntry(term=term, meaning=meaning)],
-        ),
-    )
-    return DefineTermResult(term=term, meaning=meaning, already_defined=False)
-
-
-def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
-    """MCP tools for the shared cross-writer glossary.
+def make_glossary_tools(scope: GlossaryScope) -> list[LupMcpTool]:
+    """MCP tools for the shared glossary.
 
     Parallel section writers share only the filesystem, so both tools read the
-    glossary file fresh on every call. A term, once defined, is never
-    overwritten — the first definition wins and later writers are handed it,
-    which keeps independently-written sections from coining rival names for the
-    same thing.
+    glossary fresh on every call, and neither handler awaits between reading
+    and writing — siblings run on one event loop, so a read-modify-write that
+    never yields is the whole of the guarantee among them. Chapter runs share
+    no loop, and there the guarantee is the partition: each writes only its own
+    chapter's file, atomically.
+
+    A term, once defined, is never overwritten — the first definition wins and
+    later writers are handed it, whether the first was a sibling section this
+    afternoon or a chapter of the same book written last month. That holds for
+    the names an entry records as rejected too, so a writer who says which
+    rival phrasings they are not using binds the later chapters that would
+    otherwise reach for one.
     """
 
     async def handle_define(inp: DefineTermInput) -> DefineTermResult:
-        return define_term_in_glossary(glossary_path, inp.term, inp.meaning)
+        return define_term_in_glossary(scope, inp.term, inp.meaning, inp.aliases)
 
     async def handle_lookup(inp: LookupTermsInput) -> GlossaryView:
-        glossary = load_glossary(glossary_path)
+        glossary = read_glossary(scope)
         if not inp.contains:
             return glossary
         needle = inp.contains.casefold()
@@ -1041,8 +1118,11 @@ def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
                 "Register a term, name, symbol, or abbreviation in the shared "
                 "glossary so the section writers working in parallel use it the "
                 "same way. Call this the moment you coin anything the plan's "
-                "conventions don't already cover. If a sibling already defined "
-                "the term, the tool returns their canonical meaning instead of "
+                "conventions don't already cover, and list under 'aliases' the "
+                "rival names you considered and rejected. If the term is "
+                "already defined — by a sibling section, or by another chapter "
+                "of this book, under this name or under one it recorded as "
+                "rejected — the tool returns that canonical meaning instead of "
                 "overwriting it — adopt it so the assembled piece stays "
                 "consistent."
             ),
@@ -1052,11 +1132,11 @@ def make_glossary_tools(glossary_path: Path) -> list[LupMcpTool]:
         build_stage_tool(
             "lookup_terms",
             (
-                "Read the shared glossary: the plan's conventions plus every "
-                "term sibling writers have coined so far. Call this before "
-                "naming a key concept or introducing notation, so you reuse an "
-                "existing term instead of inventing a rival one for the same "
-                "thing."
+                "Read the shared glossary: this chapter's conventions plus "
+                "every term coined so far — by sibling writers, and by the "
+                "other chapters of this book. Call this before naming a key "
+                "concept or introducing notation, so you reuse an existing term "
+                "instead of inventing a rival one for the same thing."
             ),
             LookupTermsInput,
             handle_lookup,

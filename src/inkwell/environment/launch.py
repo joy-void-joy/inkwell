@@ -95,6 +95,7 @@ async def run_declared_session(
             resume_from_stage=entry_point.resume_from(values),
             restart_from_stage=entry_point.restart_from(values),
             target_format=TARGET_FORMAT.read(values),
+            assignment=entry_point.assignment(values),
             existing_doc_id=EXISTING_DOC_ID.read(values),
             session_id=session_id,
             listener=listener,

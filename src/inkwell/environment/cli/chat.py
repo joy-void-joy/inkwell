@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 STAGE_LABELS: StringMap = {
     "extract": "📄 Extracting source material",
     "voice": "🎙️ Analyzing author's voice",
+    "book": "📚 Laying out the book",
     "plan": "🗺️ Planning article structure",
     "assumptions": "❓ Surfacing questions for author",
     "research": "🔍 Researching claims",

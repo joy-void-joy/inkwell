@@ -38,6 +38,13 @@ def write(
             help="Suggested format (the agent may override): academic, lesswrong, textbook, blog, twitter, dialog, memo, newsletter, linkedin, custom:<description>",
         ),
     ] = "auto",
+    chapter: Annotated[
+        str | None,
+        typer.Option(
+            "--chapter",
+            help="Which chapter of which book this run writes, so it reads what the book's other chapters recorded and files its own record beside them. Leave it unset for a standalone piece, which belongs to no book. Spelled book:chapter, as in 'atlas:4', or bare 'atlas' to let the book's own record say which chapter this is.",
+        ),
+    ] = None,
     existing_doc_id: Annotated[
         str | None,
         typer.Option(
@@ -50,7 +57,7 @@ def write(
         str | None,
         typer.Option(
             "--stop-after",
-            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
+            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, book, plan, research, assumptions, refine, write, merge, review, rewrite, format",
         ),
     ] = None,
     light: Annotated[
@@ -117,6 +124,7 @@ def write(
             "sources": sources,
             "refs": refs,
             "target_format": target_format,
+            "chapter": chapter,
             "existing_doc_id": existing_doc_id,
             "stop_after": stop_after,
             "light": light,
@@ -144,6 +152,13 @@ def run(
             help="Suggested format (the agent may override): academic, lesswrong, textbook, blog, twitter, dialog, memo, newsletter, linkedin, custom:<description>",
         ),
     ] = "auto",
+    chapter: Annotated[
+        str | None,
+        typer.Option(
+            "--chapter",
+            help="Which chapter of which book this run writes, so it reads what the book's other chapters recorded and files its own record beside them. Leave it unset for a standalone piece, which belongs to no book. Spelled book:chapter, as in 'atlas:4', or bare 'atlas' to let the book's own record say which chapter this is.",
+        ),
+    ] = None,
     existing_doc_id: Annotated[
         str | None,
         typer.Option(
@@ -156,7 +171,7 @@ def run(
         str | None,
         typer.Option(
             "--stop-after",
-            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
+            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, book, plan, research, assumptions, refine, write, merge, review, rewrite, format",
         ),
     ] = None,
     light: Annotated[
@@ -219,6 +234,7 @@ def run(
         {
             "task": task,
             "target_format": target_format,
+            "chapter": chapter,
             "existing_doc_id": existing_doc_id,
             "stop_after": stop_after,
             "light": light,
@@ -254,6 +270,13 @@ def revise(
             help="Suggested format (the agent may override): academic, lesswrong, textbook, blog, twitter, dialog, memo, newsletter, linkedin, custom:<description>",
         ),
     ] = "auto",
+    chapter: Annotated[
+        str | None,
+        typer.Option(
+            "--chapter",
+            help="Which chapter of which book this run writes, so it reads what the book's other chapters recorded and files its own record beside them. Leave it unset for a standalone piece, which belongs to no book. Spelled book:chapter, as in 'atlas:4', or bare 'atlas' to let the book's own record say which chapter this is.",
+        ),
+    ] = None,
     existing_doc_id: Annotated[
         str | None,
         typer.Option(
@@ -266,7 +289,7 @@ def revise(
         str | None,
         typer.Option(
             "--stop-after",
-            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
+            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, book, plan, research, assumptions, refine, write, merge, review, rewrite, format",
         ),
     ] = None,
     light: Annotated[
@@ -323,6 +346,7 @@ def revise(
 
     Examples:
         inkwell revise draft.md
+        inkwell revise chapter4.md --chapter atlas:4   # one chapter of a book
         inkwell revise "https://docs.google.com/document/d/abc123/edit"
     """
     from inkwell.environment.cli.chat import run_entry_point
@@ -331,6 +355,130 @@ def revise(
         "revise",
         {
             "draft": draft,
+            "refs": refs,
+            "target_format": target_format,
+            "chapter": chapter,
+            "existing_doc_id": existing_doc_id,
+            "stop_after": stop_after,
+            "light": light,
+            "session_id": session_id,
+            "verbose": verbose,
+            "model": model,
+            "writer_mode": writer_mode,
+            "stage_models": stage_models,
+        },
+    )
+
+
+def chapter(
+    chapter: Annotated[
+        str,
+        typer.Argument(
+            help="Which chapter of which book to write, on its own — the book's recorded order and cross-references are read rather than laid out again. Spelled book:chapter, as in 'atlas:4', or bare 'atlas' to let the book's own record say which chapter this is.",
+        ),
+    ],
+    sources: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Source materials: Claude share links, URLs, file paths, or freeform text",
+        ),
+    ] = None,
+    refs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--ref",
+            "-r",
+            help="Supplementary reference URLs or file paths",
+        ),
+    ] = None,
+    target_format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            "-f",
+            help="Suggested format (the agent may override): academic, lesswrong, textbook, blog, twitter, dialog, memo, newsletter, linkedin, custom:<description>",
+        ),
+    ] = "auto",
+    existing_doc_id: Annotated[
+        str | None,
+        typer.Option(
+            "--doc",
+            "-d",
+            help="Google Doc URL or id to write into, instead of creating a new document",
+        ),
+    ] = None,
+    stop_after: Annotated[
+        str | None,
+        typer.Option(
+            "--stop-after",
+            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, book, plan, research, assumptions, refine, write, merge, review, rewrite, format",
+        ),
+    ] = None,
+    light: Annotated[
+        bool,
+        typer.Option(
+            "--light",
+            help="Run the light pipeline: a single writer, fact-check-only review, and no deep research, resolve, or rewrite. Implied by the LinkedIn format.",
+        ),
+    ] = False,
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session-id",
+            "-s",
+            help="Session identifier to run under, instead of a freshly minted one",
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            "-v",
+            help="Enable verbose logging",
+        ),
+    ] = False,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Model for every stage, overriding the profile's default",
+        ),
+    ] = None,
+    writer_mode: Annotated[
+        str | None,
+        typer.Option(
+            "--writer-mode",
+            help="Draft production mode: 'parallel' (one writer per section, then merge) or 'single' (one writer drafts the whole piece)",
+        ),
+    ] = None,
+    stage_models: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--stage-model",
+            help="Per-stage model override, as stage=model; repeat the option per stage",
+        ),
+    ] = None,
+) -> None:
+    """Write one chapter of a book, without laying the book out again.
+
+    The book's recorded order and its cross-references are read rather than
+    re-derived, so a chapter written on its own cannot renumber the book around it
+    or invent an order the other chapters never agreed to. Name the ordinal to place
+    the chapter yourself; name the book alone and its own record says which chapter
+    carries this title. A book with no record yet is not an error — the chapter is
+    appended and the run says so.
+
+    Examples:
+        inkwell chapter atlas:4 chapter4.md
+        inkwell chapter atlas notes.md   # the book's record says which chapter
+    """
+    from inkwell.environment.cli.chat import run_entry_point
+
+    run_entry_point(
+        "chapter",
+        {
+            "chapter": chapter,
+            "sources": sources,
             "refs": refs,
             "target_format": target_format,
             "existing_doc_id": existing_doc_id,
@@ -357,14 +505,14 @@ def resume(
         typer.Option(
             "--from",
             "-f",
-            help="Pick up after this stage instead of where the run stopped. Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
+            help="Pick up after this stage instead of where the run stopped. Stages: extract, voice, book, plan, research, assumptions, refine, write, merge, review, rewrite, format",
         ),
     ] = None,
     stop_after: Annotated[
         str | None,
         typer.Option(
             "--stop-after",
-            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
+            help="Pause once this stage finishes and exit cleanly — review and comment in the Doc, then resume the session to continue. Stages: extract, voice, book, plan, research, assumptions, refine, write, merge, review, rewrite, format",
         ),
     ] = None,
     verbose: Annotated[
@@ -435,7 +583,7 @@ def restart(
         typer.Option(
             "--from",
             "-f",
-            help="Re-run this stage and everything after it from scratch with fresh agents, discarding their prior output. Stages: extract, voice, plan, research, assumptions, refine, write, merge, review, rewrite, format",
+            help="Re-run this stage and everything after it from scratch with fresh agents, discarding their prior output. Stages: extract, voice, book, plan, research, assumptions, refine, write, merge, review, rewrite, format",
         ),
     ],
     verbose: Annotated[
@@ -497,5 +645,6 @@ def register(app: typer.Typer) -> None:
     app.command("write")(write)
     app.command("run")(run)
     app.command("revise")(revise)
+    app.command("chapter")(chapter)
     app.command("resume")(resume)
     app.command("restart")(restart)

@@ -3,6 +3,11 @@
 Parses markdown using markdown_it, builds a flat text string with tracked
 formatting ranges, and emits insertText + style update requests that can
 be passed directly to documents().batchUpdate().
+
+This is also where a reference into the book the run is writing becomes a link
+to a published page, because it is the only place the destination a writer
+wrote is read back off the parser rather than out of a sentence — see
+:mod:`inkwell.agent.book_links`.
 """
 
 from typing import TypedDict
@@ -10,6 +15,8 @@ from typing import TypedDict
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 from pydantic import BaseModel, Field
+
+from inkwell.agent.book_links import BookReferences
 
 
 def utf16_len(text: str) -> int:
@@ -238,8 +245,14 @@ def walk_inline(
     bold_spans: list[BoldSpan],
     italic_spans: list[ItalicSpan],
     link_spans: list[LinkSpan],
+    references: BookReferences,
 ) -> int:
     """Walk inline token children, appending text and tracking format spans.
+
+    A link's destination is settled here rather than taken as written, because
+    this is where the parser hands one over: ``references`` answers each with
+    the URL it points at, and a reference into the book that nothing has
+    numbered yet answers with a marker for the prose instead of a link.
 
     Returns the new offset after all children have been processed.
     """
@@ -247,7 +260,8 @@ def walk_inline(
     bold_start: int | None = None
     italic_start: int | None = None
     link_start: int | None = None
-    link_url: str = ""
+    link_from: int = 0
+    link_href: str = ""
 
     for child in children:
         match child.type:
@@ -274,19 +288,32 @@ def walk_inline(
                     italic_start = None
             case "link_open":
                 link_start = pos
+                link_from = len(text_parts)
                 href = child.attrGet("href")
-                link_url = str(href) if href is not None else ""
+                link_href = str(href) if href is not None else ""
             case "link_close":
                 if link_start is not None:
-                    link_spans.append(LinkSpan(start=link_start, end=pos, url=link_url))
+                    destination = references.destination(
+                        link_href, "".join(text_parts[link_from:])
+                    )
+                    if destination.url:
+                        link_spans.append(
+                            LinkSpan(start=link_start, end=pos, url=destination.url)
+                        )
+                    if destination.marker:
+                        text_parts.append(destination.marker)
+                        pos += utf16_len(destination.marker)
                     link_start = None
-                    link_url = ""
+                    link_href = ""
 
     return pos
 
 
 def markdown_to_requests(
-    markdown: str, tab_id: str | None = None, start_index: int = 1
+    markdown: str,
+    tab_id: str | None = None,
+    start_index: int = 1,
+    references: BookReferences | None = None,
 ) -> list[DocsRequest]:
     """Convert markdown to Google Docs BatchUpdate requests.
 
@@ -300,7 +327,13 @@ def markdown_to_requests(
             references include it.
         start_index: Document index where content is inserted (default 1,
             the start of an empty document body).
+        references: The book each ``book:`` link is resolved against, which
+            also collects the ones it could not place — read it back after the
+            call to find out what the document says is still unresolved.
+            Absent, nothing resolves, which is what a document belonging to no
+            book wants.
     """
+    resolved = references if references is not None else BookReferences()
     md = MarkdownIt()
     tokens = md.parse(markdown)
 
@@ -348,6 +381,7 @@ def markdown_to_requests(
                         bold_spans,
                         italic_spans,
                         link_spans,
+                        resolved,
                     )
 
             case "bullet_list_open":

@@ -18,6 +18,7 @@ from lup.runtime.usage import CostAccumulator
 from lup.types import JsonObject, JsonValue, StringMap
 from lup.workspace.history import SessionResult
 
+from inkwell.agent.book import BookOutline, ChapterPlacement
 from inkwell.agent.provenance import SourceProvenance, Venue
 
 
@@ -70,6 +71,16 @@ class ArticlePlan(BaseModel):
     target_format: str = Field(
         description="Output format: 'academic', 'lesswrong', 'twitter', 'blog', 'dialog', 'memo', or 'custom:<description>'. Choose based on what best fits the content."
     )
+    placement: ChapterPlacement | None = Field(
+        default=None,
+        description=(
+            "Which chapter of which book this plan is, absent for a standalone "
+            "piece. Absent means bookless rather than a book of one chapter: a "
+            "piece is only part of a book where the run that produced it was "
+            "launched as one, so nothing is silently promoted into a book it "
+            "was never placed in"
+        ),
+    )
     sections: list[SectionPlan] = Field(description="Ordered list of planned sections")
     research_questions: list[ResearchQuestion] = Field(
         description="Questions the researcher should investigate"
@@ -103,10 +114,13 @@ class ArticlePlan(BaseModel):
     conventions: list[str] = Field(
         default_factory=list,
         description=(
-            "Shared conventions every section must follow: recurring terms "
-            "and what they mean, names for key concepts, notational or "
-            "formatting choices. The channel that keeps independently "
-            "written sections consistent."
+            "Shared conventions every section of this piece must follow: "
+            "recurring terms and what they mean, names for key concepts, "
+            "notational or formatting choices. The channel that keeps "
+            "independently written sections consistent. These are this plan's "
+            "instructions to its own writers — a chapter of a book seeds its "
+            "own rather than inheriting a sibling chapter's, while the terms "
+            "writers coin are shared across the whole book."
         ),
     )
     voice_notes: str = Field(
@@ -583,6 +597,14 @@ class PipelineSnapshot(BaseModel):
     )
     voice_file_paths: list[str] = Field(
         default_factory=list, description="Voice analysis artifact paths"
+    )
+    outline: BookOutline | None = Field(
+        default=None,
+        description=(
+            "The book's order and cross-references as the book stage left "
+            "them, absent for a standalone run and for one whose book was laid "
+            "out by an earlier run rather than this one"
+        ),
     )
     plan: ArticlePlan | None = Field(default=None)
     research: ResearchCompilation | None = Field(default=None)

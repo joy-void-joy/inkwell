@@ -243,6 +243,7 @@ export const STAGE_LABELS: Record<string, string> = {
   preprocess: "Classify",
   extract: "Extract",
   voice: "Voice",
+  book: "Book",
   plan: "Plan",
   research: "Research",
   assumptions: "Questions",

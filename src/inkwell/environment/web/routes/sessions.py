@@ -16,6 +16,7 @@ from inkwell.environment.entrypoints import (
 )
 from inkwell.environment.web.models import (
     ActionAccepted,
+    ChapterSessionRequest,
     CreateSessionRequest,
     FormatOption,
     GeneratingPrompt,
@@ -202,6 +203,11 @@ async def run_session_from_task(req: RunSessionRequest) -> SessionLaunched:
 @router.post("/revise", status_code=201)
 async def revise_session(req: ReviseSessionRequest) -> SessionLaunched:
     return await launch_fresh("revise", req.model_dump(mode="json"))
+
+
+@router.post("/chapter", status_code=201)
+async def chapter_session(req: ChapterSessionRequest) -> SessionLaunched:
+    return await launch_fresh("chapter", req.model_dump(mode="json"))
 
 
 @router.get("")

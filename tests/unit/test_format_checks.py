@@ -1,14 +1,34 @@
 # claude: ignore
 """Tests for the checks a format declares beside its guidance."""
 
+from collections.abc import Sequence
 from pathlib import Path
+from typing import NoReturn
 
+import pytest
+
+from inkwell.agent import config as config_mod
+from inkwell.agent import format_checks
+from inkwell.agent.book import (
+    BookLayout,
+    BookOutline,
+    BookRecord,
+    BookStore,
+    ChapterEntry,
+    ChapterPlacement,
+    ChapterRecord,
+    CrossReference,
+    ProposedChapter,
+)
+from inkwell.agent.book_links import BookReferences
 from inkwell.agent.format_checks import (
+    ADVISORY_PREAMBLE,
     BannedVocabulary,
     BlockLength,
     BoldedSummaries,
     BoldEmphasis,
     CheckRow,
+    ContractionRate,
     DraftWords,
     FormatCheck,
     FormulaicOpenings,
@@ -20,13 +40,34 @@ from inkwell.agent.format_checks import (
     ParagraphSentences,
     ParticipialTails,
     PunctuationDensity,
+    QuestionRate,
+    RuleOfThree,
     SectionLength,
     SentenceLengthVariance,
+    SentenceOpeners,
+    ShortSentences,
+    SynonymCycling,
+    SynonymSet,
+    TerminologyDrift,
+    UnresolvedReferences,
+    VagueAttribution,
     Verdict,
     render_declared_rules,
     run_format_checks,
 )
+from inkwell.agent.glossary import (
+    BookGlossary,
+    ChapterGlossary,
+    GlossaryEntry,
+    GlossaryScope,
+    RunGlossary,
+    write_chapter_glossary,
+)
+from inkwell.agent.models import ArticlePlan, SectionPlan
+from inkwell.agent.notes import PipelineNotes
+from inkwell.agent.pipeline import declared_format_checks
 from inkwell.agent.segmenter import reader
+from inkwell.agent.stages import format_checks_for, get_format_guidance
 
 
 class StubJudge(Judge):
@@ -45,7 +86,10 @@ HELD = Verdict(holds=True, measured="nothing to report")
 
 
 async def run_row(
-    check: FormatCheck, draft: str, judge: Judge | None = None
+    check: FormatCheck,
+    draft: str,
+    judge: Judge | None = None,
+    glossary: GlossaryScope | None = None,
 ) -> CheckRow:
     """One declared row's verdict on one draft."""
     report = await run_format_checks(
@@ -55,6 +99,7 @@ async def run_row(
         draft_path=Path("draft.md"),
         judge=judge or StubJudge(HELD),
         reader=reader(),
+        glossary=glossary,
     )
     return report.rows[0]
 
@@ -331,6 +376,219 @@ class TestParticipialTails:
         assert not result.fired
 
 
+class TestSynonymCycling:
+    row = SynonymCycling(name="cycling", rule="Say the word again.")
+
+    async def test_fires_when_a_paragraph_renames_one_thing(self) -> None:
+        draft = (
+            "The researcher examined the data. The scientist then consulted "
+            "with colleagues. The academic published her findings."
+        )
+        result = await run_row(self.row, draft)
+        assert result.fired
+        assert result.findings
+
+    async def test_passes_when_the_word_is_repeated(self) -> None:
+        """What the guidance actually asks for must never read as the tell."""
+        draft = (
+            "The researcher examined the data. The researcher consulted "
+            "colleagues. The researcher published her findings."
+        )
+        result = await run_row(self.row, draft)
+        assert not result.fired
+
+    async def test_a_plural_is_the_same_term(self) -> None:
+        draft = "The researcher led it. The researchers agreed. The researcher won."
+        assert not (await run_row(self.row, draft)).fired
+
+    async def test_two_terms_is_variation_and_not_a_cycle(self) -> None:
+        draft = "The researcher examined the data. The scientist agreed with her."
+        assert not (await run_row(self.row, draft)).fired
+
+    async def test_the_families_are_overridable(self) -> None:
+        row = self.row.model_copy(
+            update={
+                "families": [SynonymSet(terms=[["carrot"], ["root"], ["vegetable"]])]
+            }
+        )
+        assert not (
+            await run_row(row, "The scientist met the academic and expert.")
+        ).fired
+        assert (
+            await run_row(row, "The carrot is a root, and the vegetable sells.")
+        ).fired
+
+    async def test_cycling_across_paragraphs_is_not_the_tell(self) -> None:
+        """Renaming is what a reader notices inside one paragraph."""
+        draft = "The researcher won.\n\nThe scientist agreed.\n\nThe academic left."
+        assert not (await run_row(self.row, draft)).fired
+
+
+class TestRuleOfThree:
+    row = RuleOfThree(name="threes", rule="Count first.", share_ceiling=0.0)
+
+    async def test_fires_on_three_adjectives(self) -> None:
+        result = await run_row(
+            self.row, "The program was innovative, transformative, and groundbreaking."
+        )
+        assert result.fired
+        assert result.findings
+
+    async def test_fires_on_three_short_phrases(self) -> None:
+        result = await run_row(self.row, "Models scale, costs grow, and gains shrink.")
+        assert result.fired
+
+    async def test_passes_on_a_pair(self) -> None:
+        result = await run_row(self.row, "The program was innovative and useful.")
+        assert not result.fired
+
+    async def test_passes_on_a_list_of_four(self) -> None:
+        """The tell is three, so four is the content deciding the number."""
+        result = await run_row(self.row, "It runs on Linux, macOS, Windows, and BSD.")
+        assert not result.fired
+
+    async def test_two_coordinated_clauses_are_not_a_list(self) -> None:
+        result = await run_row(
+            self.row, "The model failed the benchmark, and the baseline won outright."
+        )
+        assert not result.fired
+
+    async def test_a_triple_the_content_fixed_at_three_does_not_fire(self) -> None:
+        """A default above zero, so one genuine triple is not a finding.
+
+        A neuron really does have three parts. The row is about the habit of
+        reaching for three, which only a draft doing it repeatedly shows.
+        """
+        row = RuleOfThree(name="threes", rule="Count first.")
+        draft = (
+            "A neuron has a body, an axon, and dendrites. That is anatomy, not "
+            "rhetoric. Every other sentence here makes one point. Models scale "
+            "with data. Costs grow with depth. Gains shrink at the margin. The "
+            "trend has held for a decade. Nothing about it is guaranteed to "
+            "continue. Measure it again next year. Then decide what to build. "
+            "The anatomy is worth knowing first. A body holds the machinery. "
+            "An axon carries the signal out. Dendrites take the signal in. "
+            "None of that is a rhetorical choice."
+        )
+        result = await run_row(row, draft)
+        assert not result.fired, "one true triple in a draft is not the habit"
+
+    async def test_the_item_cap_is_overridable(self) -> None:
+        row = self.row.model_copy(update={"item_words": 4})
+        draft = (
+            "The model failed the benchmark, the baseline won outright, and "
+            "the gap held firm."
+        )
+        assert not (await run_row(self.row, draft)).fired
+        assert (await run_row(row, draft)).fired
+
+
+class TestVagueAttribution:
+    row = VagueAttribution(name="attribution", rule="Name who said it.")
+
+    async def test_fires_on_an_unnamed_appeal(self) -> None:
+        result = await run_row(self.row, "Studies show that the effect persists.")
+        assert result.fired
+        assert result.findings
+
+    async def test_passes_when_the_sentence_names_a_source(self) -> None:
+        result = await run_row(
+            self.row, "Researchers at DeepMind found that the effect persists."
+        )
+        assert not result.fired
+
+    async def test_passes_on_prose_with_no_appeal(self) -> None:
+        result = await run_row(self.row, "The effect persists across every run.")
+        assert not result.fired
+
+    async def test_the_blessed_hedge_is_not_an_appeal(self) -> None:
+        """The guidance lists `the evidence suggests` among the good moves."""
+        result = await run_row(self.row, "The evidence suggests the effect persists.")
+        assert not result.fired
+
+    async def test_the_ceiling_is_overridable(self) -> None:
+        tolerant = self.row.model_copy(update={"ceiling": 1})
+        result = await run_row(tolerant, "Studies show that the effect persists.")
+        assert not result.fired
+
+
+class TestMeasurementRows:
+    """Rows that report a number and reach no verdict, for what the guidance
+    asks for rather than against."""
+
+    async def test_contractions_are_counted_when_present(self) -> None:
+        row = ContractionRate(name="contractions", rule="Contract.")
+        result = await run_row(row, "It's the cost that grows. Don't ignore it.")
+        assert "2/2" in result.measured
+        assert result.measurement
+        assert not result.fired
+
+    async def test_contractions_read_zero_on_formal_prose(self) -> None:
+        row = ContractionRate(name="contractions", rule="Contract.")
+        result = await run_row(row, "It is the cost that grows. Do not ignore it.")
+        assert "0/2" in result.measured
+        assert not result.fired
+
+    async def test_a_possessive_is_not_a_contraction(self) -> None:
+        row = ContractionRate(name="contractions", rule="Contract.")
+        result = await run_row(row, "The model's weights are frozen.")
+        assert "0/1" in result.measured
+
+    async def test_conjunction_openings_are_counted(self) -> None:
+        row = SentenceOpeners(name="openings", rule="And is fine.")
+        assert (
+            "1/2"
+            in (
+                await run_row(row, "The cost grows. But the cache absorbs it.")
+            ).measured
+        )
+        assert (
+            "0/2"
+            in (await run_row(row, "The cost grows. The cache absorbs it.")).measured
+        )
+
+    async def test_questions_are_counted(self) -> None:
+        row = QuestionRate(name="questions", rule="Ask.")
+        assert (
+            "1/2"
+            in (
+                await run_row(row, "Why does it scale? The cache absorbs the cost.")
+            ).measured
+        )
+        assert "0/1" in (await run_row(row, "The cache absorbs the cost.")).measured
+
+    async def test_short_sentences_are_counted(self) -> None:
+        row = ShortSentences(name="short", rule="Fragments welcome.", word_ceiling=3)
+        assert (
+            "1/2"
+            in (
+                await run_row(row, "It broke. The whole evaluation suite came apart.")
+            ).measured
+        )
+        assert (
+            "0/1"
+            in (await run_row(row, "The whole evaluation suite came apart.")).measured
+        )
+
+    async def test_no_measurement_row_ever_fires(self) -> None:
+        """A measurement holds nothing against a draft, whatever it counts."""
+        rows: list[FormatCheck] = [
+            ContractionRate(name="contractions", rule="Contract."),
+            SentenceOpeners(name="openings", rule="And is fine."),
+            QuestionRate(name="questions", rule="Ask."),
+            ShortSentences(name="short", rule="Fragments welcome."),
+            PunctuationDensity(name="semicolons", rule="Use them.", marks=[";"]),
+        ]
+        formal = "It is the case that the cost of the whole evaluation suite grows."
+        casual = "Don't. But why? It broke; badly."
+        for row in rows:
+            for draft in (formal, casual):
+                result = await run_row(row, draft)
+                assert not result.fired
+                assert result.measurement
+                assert result.state == "measured"
+
+
 class TestBoldedSummaries:
     async def test_fires_below_the_floor(self) -> None:
         row = BoldedSummaries(name="bold", rule="Bold each claim.", share_floor=1.0)
@@ -421,6 +679,114 @@ class TestSectionLength:
         assert not result.fired
 
 
+class TestTerminologyDrift:
+    """A name the book settled, and a draft reaching for one it rejected."""
+
+    row = TerminologyDrift(
+        name="terminology drift", rule="Call each thing what the glossary calls it."
+    )
+
+    def book(self, root: Path, *entries: GlossaryEntry) -> BookGlossary:
+        """Chapter two of a book whose first chapter settled these names."""
+        store = BookStore(root=root)
+        first = BookGlossary(
+            store=store, placement=ChapterPlacement(book="textbook", chapter=1)
+        )
+        write_chapter_glossary(first.own(), ChapterGlossary(terms=list(entries)))
+        return BookGlossary(
+            store=store, placement=ChapterPlacement(book="textbook", chapter=2)
+        )
+
+    SETTLED = GlossaryEntry(
+        term="inner alignment",
+        meaning="the mesa-objective gap",
+        aliases=["goal misgeneralization"],
+    )
+
+    async def test_fires_naming_the_term_the_draft_should_have_used(
+        self, tmp_path: Path
+    ) -> None:
+        result = await run_row(
+            self.row,
+            "This chapter returns to goal misgeneralization.",
+            glossary=self.book(tmp_path, self.SETTLED),
+        )
+        assert result.fired
+        assert "inner alignment" in result.findings[0]
+        assert "goal misgeneralization" in result.findings[0]
+
+    async def test_holds_when_the_draft_keeps_the_settled_name(
+        self, tmp_path: Path
+    ) -> None:
+        result = await run_row(
+            self.row,
+            "This chapter returns to inner alignment.",
+            glossary=self.book(tmp_path, self.SETTLED),
+        )
+        assert not result.fired
+
+    async def test_matches_words_rather_than_substrings(self, tmp_path: Path) -> None:
+        """A rejected name inside a longer word is not that name."""
+        result = await run_row(
+            self.row,
+            "The chapter is about goals, misgeneralizing from one case.",
+            glossary=self.book(tmp_path, self.SETTLED),
+        )
+        assert not result.fired
+
+    async def test_an_undeclared_synonym_is_invisible_to_it(
+        self, tmp_path: Path
+    ) -> None:
+        """What the mechanical row cannot see, and what its rule has to say."""
+        result = await run_row(
+            self.row,
+            "This chapter returns to objective misgeneralisation.",
+            glossary=self.book(tmp_path, self.SETTLED),
+        )
+        assert not result.fired
+
+    async def test_an_entry_listing_its_own_term_rejected_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """Or the canonical name would be reported as a rename of itself."""
+        echoed = GlossaryEntry(
+            term="inner alignment",
+            meaning="the mesa-objective gap",
+            aliases=["Inner Alignment"],
+        )
+        result = await run_row(
+            self.row,
+            "This chapter returns to inner alignment.",
+            glossary=self.book(tmp_path, echoed),
+        )
+        assert not result.fired
+        assert "0 rival name(s)" in result.measured
+
+    async def test_a_book_with_no_terms_yet_counts_none(self, tmp_path: Path) -> None:
+        result = await run_row(
+            self.row,
+            "A first chapter, naming nothing yet.",
+            glossary=self.book(tmp_path),
+        )
+        assert not result.fired
+        assert "0 term(s) on file" in result.measured
+
+    async def test_measures_nothing_without_a_book(self, tmp_path: Path) -> None:
+        """A piece in no book is not quietly reported as consistent."""
+        result = await run_row(
+            self.row,
+            "A standalone article that names things.",
+            glossary=RunGlossary(path=tmp_path / "glossary.json"),
+        )
+        assert not result.fired
+        assert "nothing was measured" in result.measured
+
+    async def test_measures_nothing_when_no_glossary_is_composed(self) -> None:
+        result = await run_row(self.row, "A draft checked with no glossary to hand.")
+        assert not result.fired
+        assert "nothing was measured" in result.measured
+
+
 class TestJudgedRow:
     row = JudgedRow(
         name="teachable concreteness",
@@ -456,6 +822,341 @@ class TestJudgedRow:
         assert judge.asked == [self.row.question]
 
 
+FOUNDATIONS = ChapterEntry(key="foundations", ordinal=1, title="Foundations")
+"""Chapter one: laid out, numbered, and written, so it is expected to resolve."""
+
+MEASUREMENT = ChapterEntry(key="measurement", ordinal=2, title="Measurement")
+"""The chapter under check — the one whose draft the row is measured off."""
+
+CONSEQUENCES = ChapterEntry(key="consequences", ordinal=3, title="Consequences")
+"""Laid out and numbered, but nobody has written it: the forward reference."""
+
+DROPPED = ChapterEntry(key="dropped", ordinal=4, title="Dropped")
+"""Written, then dropped from the reading order, holding its ordinal."""
+
+WROTE_FOUNDATIONS = ChapterRecord(
+    placement=ChapterPlacement(book="textbook", chapter=1),
+    title="Foundations",
+    sections=["1.1 The calibration curve", "1.2 The error budget"],
+)
+"""What chapter one recorded — the sections a reference into it may name."""
+
+WROTE_MEASUREMENT = ChapterRecord(
+    placement=ChapterPlacement(book="textbook", chapter=2),
+    title="Measurement",
+    sections=["2.1 What we measure", "2.2 How we measure it"],
+)
+"""What the chapter under check recorded, which places its own passages."""
+
+WROTE_DROPPED = ChapterRecord(
+    placement=ChapterPlacement(book="textbook", chapter=4), title="Dropped"
+)
+"""A chapter that was written before the reading order let it go."""
+
+
+def book(
+    *,
+    written: Sequence[ChapterRecord] = (WROTE_FOUNDATIONS, WROTE_MEASUREMENT),
+    chapters: Sequence[ChapterEntry] = (FOUNDATIONS, MEASUREMENT, CONSEQUENCES),
+    retired: Sequence[ChapterEntry] = (),
+) -> BookRecord:
+    """A book laid out in three chapters, with what it has written on file."""
+    return BookRecord(
+        book="textbook",
+        outline=BookOutline(
+            book="textbook", chapters=list(chapters), retired=list(retired)
+        ),
+        chapters=list(written),
+    )
+
+
+def dropping_a_written_chapter(
+    written: Sequence[ChapterRecord] = (
+        WROTE_FOUNDATIONS,
+        WROTE_MEASUREMENT,
+        WROTE_DROPPED,
+    ),
+) -> BookRecord:
+    """The book after a layout that drops a written chapter from the order.
+
+    Laid out through `relaid` rather than assembled by hand, because the whole
+    question the book scope turns on is whether the state it reads is one the
+    book stage can actually produce. `relaid` is the only writer of an
+    outline, and it is what moves a dropped chapter into `retired` — while
+    discarding, into a log, every cross-reference that named it.
+    """
+    before = BookRecord(
+        book="textbook",
+        outline=BookOutline(
+            book="textbook",
+            chapters=[FOUNDATIONS, MEASUREMENT, CONSEQUENCES, DROPPED],
+            cross_references=[
+                CrossReference(
+                    from_chapter=1,
+                    to_chapter=4,
+                    relation="depends_on",
+                    subject="the error budget",
+                )
+            ],
+        ),
+        chapters=list(written),
+    )
+    relaid = before.relaid(
+        BookLayout(
+            chapters=[
+                ProposedChapter(key=held.key, title=held.title)
+                for held in (FOUNDATIONS, MEASUREMENT, CONSEQUENCES)
+            ]
+        )
+    )
+    return before.model_copy(update={"outline": relaid})
+
+
+def book_row(record: BookRecord, listed_ceiling: int = 20) -> UnresolvedReferences:
+    """The row as a run writing chapter two of that book declares it."""
+    return UnresolvedReferences(
+        record=record,
+        placement=ChapterPlacement(book="textbook", chapter=2),
+        listed_ceiling=listed_ceiling,
+    )
+
+
+PLACED = "## 2.1 What we measure\n\n"
+"""A heading the chapter's own record places, so a finding carries a section."""
+
+
+class TestUnresolvedReferences:
+    async def test_fires_on_a_reference_a_written_chapter_did_not_place(self) -> None:
+        """The target chapter is written, so the reference was expected to land."""
+        draft = (
+            f"{PLACED}We lean on [the budget](book:foundations/the-budget) "
+            f"throughout this section."
+        )
+        result = await run_row(book_row(book()), draft)
+        assert result.fired
+        assert len(result.findings) == 1
+
+    async def test_a_book_where_everything_resolves_does_not_fire(self) -> None:
+        """Every reference names a section its target chapter actually records."""
+        draft = (
+            f"{PLACED}Established in [the error budget]"
+            f"(book:foundations/the-error-budget), and in "
+            f"[foundations](book:foundations) at large."
+        )
+        result = await run_row(book_row(book()), draft)
+        assert not result.fired
+        assert result.findings == []
+
+    async def test_a_forward_reference_to_an_unwritten_chapter_does_not_fire(
+        self,
+    ) -> None:
+        """Chapter three is numbered and nobody has written it — that is the plan."""
+        draft = (
+            f"{PLACED}We return to this in "
+            f"[the consequences](book:consequences/the-cost)."
+        )
+        result = await run_row(book_row(book()), draft)
+        assert not result.fired
+        assert "1 forward reference(s)" in result.measured
+
+    async def test_a_key_no_layout_declared_does_not_fire(self) -> None:
+        """Until the book stage names a key, nothing has numbered its chapter."""
+        draft = f"{PLACED}Coming later in [the appendix](book:appendix)."
+        result = await run_row(book_row(book()), draft)
+        assert not result.fired
+
+    async def test_a_finding_names_the_public_path_and_the_passage(self) -> None:
+        """Actionable by whoever publishes: which page, and what it says."""
+        draft = (
+            f"{PLACED}We lean on [the budget](book:foundations/the-budget) "
+            f"throughout this section."
+        )
+        result = await run_row(book_row(book()), draft)
+        assert result.findings == [
+            "/chapters/02/01 — “the budget” points at "
+            "book:foundations/the-budget, and foundations is written at "
+            "/chapters/01 but records no section “the-budget”. "
+            "In: We lean on the budget throughout this section."
+        ]
+
+    async def test_an_unplaced_passage_is_named_by_its_chapter(self) -> None:
+        """Prose before any heading has no section page of its own."""
+        draft = "We lean on [the budget](book:foundations/the-budget) already."
+        result = await run_row(book_row(book()), draft)
+        assert result.findings[0].startswith("/chapters/02 ")
+
+    async def test_a_written_then_retired_target_is_a_finding(self) -> None:
+        """It was written, so it was expected to resolve — and now it cannot.
+
+        The reference ships into the delivered document as a marker, which is
+        exactly the link this row exists to report.
+        """
+        draft = f"{PLACED}Settled back in [the dropped one](book:dropped)."
+        result = await run_row(book_row(dropping_a_written_chapter()), draft)
+        assert result.fired
+        assert result.findings[0] == (
+            "/chapters/02/01 — “the dropped one” points at book:dropped, and "
+            "dropped is written at /chapters/04 but is no longer in the "
+            "reading order. In: Settled back in the dropped one."
+        )
+
+    async def test_a_retired_chapter_nobody_wrote_is_not_a_finding(self) -> None:
+        """Dropped before anyone wrote it: nothing was ever expected to resolve."""
+        record = dropping_a_written_chapter(
+            written=[WROTE_FOUNDATIONS, WROTE_MEASUREMENT]
+        )
+        draft = f"{PLACED}Settled back in [the dropped one](book:dropped)."
+        result = await run_row(book_row(record), draft)
+        assert not result.fired
+
+    async def test_the_book_scope_fires_where_the_chapter_resolves(self) -> None:
+        """A chapter that places everything it names still reports the book's own.
+
+        The state is one `relaid` produced, so this exercises what a run can
+        reach rather than an outline assembled to suit the assertion.
+        """
+        record = dropping_a_written_chapter()
+        outline = record.outline
+        assert outline is not None
+        assert [held.key for held in outline.retired] == ["dropped"]
+        assert outline.cross_references == []
+        result = await run_row(book_row(record), f"{PLACED}Nothing points anywhere.")
+        assert result.fired
+        assert result.findings == [
+            "/chapters/04 — “Dropped” is written and the reading order no "
+            "longer holds it, so every reference to book:dropped breaks "
+            "wherever it was written, in this chapter or in one already "
+            "delivered"
+        ]
+
+    async def test_the_book_scope_spares_a_chapter_nobody_wrote(self) -> None:
+        """A chapter retired before it was written left no page to break."""
+        record = dropping_a_written_chapter(
+            written=[WROTE_FOUNDATIONS, WROTE_MEASUREMENT]
+        )
+        result = await run_row(book_row(record), f"{PLACED}Nothing points anywhere.")
+        assert not result.fired
+
+    async def test_both_scopes_are_reported_even_at_zero(self) -> None:
+        """The measured line says what each scope found, so silence is legible."""
+        result = await run_row(book_row(book()), f"{PLACED}Nothing points anywhere.")
+        assert "this chapter:" in result.measured
+        assert "this book:" in result.measured
+
+    async def test_a_bounded_list_says_what_it_left_out(self) -> None:
+        """A list cut short would otherwise read as the rest resolving."""
+        pointing = " ".join(
+            f"[budget {n}](book:foundations/the-budget-{n})." for n in range(5)
+        )
+        result = await run_row(book_row(book(), listed_ceiling=2), PLACED + pointing)
+        assert len(result.findings) == 3
+        assert "3 more not listed" in result.findings[-1]
+        assert "5 broken reference(s) in all" in result.findings[-1]
+
+    async def test_the_rule_states_it_reports_a_link_fact(self) -> None:
+        """Not a voice judgement, and claiming no authority to stop anything."""
+        rendered = render_declared_rules([book_row(book())])
+        assert "link fact" in rendered
+        assert "stops nothing" in rendered
+
+    async def test_a_fired_row_reports_under_the_advisory_preamble(self) -> None:
+        """Nothing a caller could read as a refusal — a line in a report."""
+        draft = f"{PLACED}Leaning on [the budget](book:foundations/the-budget)."
+        report = await run_format_checks(
+            draft,
+            [book_row(book())],
+            format_key="textbook",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+        )
+        assert report.fired
+        assert ADVISORY_PREAMBLE in report.render()
+
+    async def test_a_failure_to_measure_is_dropped_rather_than_raised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One row that cannot be read must not take the whole report down."""
+
+        def broken(markdown: str, references: BookReferences) -> NoReturn:
+            raise RuntimeError("the walk fell over")
+
+        monkeypatch.setattr(format_checks, "markdown_to_requests", broken)
+        report = await run_format_checks(
+            f"{PLACED}Leaning on [the budget](book:foundations/the-budget).",
+            [book_row(book())],
+            format_key="textbook",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+        )
+        assert not report.rows[0].fired
+        assert "could not be read" in report.rows[0].measured
+
+
+class TestDeclaringTheRow:
+    """Where the row comes from: the book on the plan, not the format."""
+
+    @pytest.fixture
+    def notes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PipelineNotes:
+        """A run's notes, with the book store pointed at the same temp root."""
+        monkeypatch.setattr(config_mod.settings, "books_path", str(tmp_path / "books"))
+        return PipelineNotes(tmp_path / "run")
+
+    def plan(self, placement: ChapterPlacement | None) -> ArticlePlan:
+        """A plan that either is a chapter of a book or is standalone."""
+        return ArticlePlan(
+            title="Measurement",
+            thesis="What we measure decides what we see",
+            target_format="blog",
+            placement=placement,
+            sections=[
+                SectionPlan(title="2.1 What we measure", summary="", key_points=[])
+            ],
+            research_questions=[],
+            source_quotes=[],
+            author_direction="",
+            voice_notes="",
+        )
+
+    def test_a_chapter_run_declares_the_row(self, notes: PipelineNotes) -> None:
+        """The plan carries a book identity, so references can go unresolved."""
+        notes.save_artifact(
+            "plan", self.plan(ChapterPlacement(book="textbook", chapter=2))
+        )
+        assert [c.name for c in declared_format_checks(notes)] == ["book references"]
+
+    def test_a_standalone_piece_declares_nothing(self, notes: PipelineNotes) -> None:
+        """A bookless piece has no chapters to point at, so no row to be silent."""
+        notes.save_artifact("plan", self.plan(None))
+        assert declared_format_checks(notes) == []
+
+    def test_the_row_travels_in_any_format(self, notes: PipelineNotes) -> None:
+        """The row follows the book identity, so no format declaration names it."""
+        notes.save_artifact(
+            "plan", self.plan(ChapterPlacement(book="textbook", chapter=2))
+        )
+        declared = declared_format_checks(notes)
+        for target_format in ("twitter", "memo", "textbook"):
+            assert "book references" in [
+                c.name for c in format_checks_for(target_format, declared)
+            ]
+
+    def test_the_row_survives_a_resume(self, notes: PipelineNotes) -> None:
+        """Read off the artifacts, so a stage not in this process still declares it.
+
+        The rewriter reads what the planner wrote from disk and nowhere else,
+        which is what a resumed run has: files, and no earlier stage to ask.
+        """
+        notes.save_artifact(
+            "plan", self.plan(ChapterPlacement(book="textbook", chapter=2))
+        )
+        resumed = PipelineNotes(notes.base_dir)
+        assert "link fact" in get_format_guidance(
+            "twitter", declared_format_checks(resumed)
+        )
+
+
 class TestDeclaredRulesRendering:
     def test_renders_each_rule_for_the_writer(self) -> None:
         rendered = render_declared_rules(
@@ -466,3 +1167,34 @@ class TestDeclaredRulesRendering:
 
     def test_no_rows_renders_nothing(self) -> None:
         assert render_declared_rules([]) == ""
+
+
+class TestReportRendering:
+    async def test_a_measurement_prints_a_number_and_no_verdict(self) -> None:
+        """`ok` would claim a judgement the row never reached."""
+        report = await run_format_checks(
+            "The cost grows. But it's bounded.",
+            [
+                ContractionRate(name="contractions", rule="Contract."),
+                BannedVocabulary(name="banned", rule="No filler.", phrases=["myriad"]),
+            ],
+            format_key="test",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+        )
+        rendered = report.render()
+        assert "contractions: measured — 1/2 sentence(s) contract (50%)" in rendered
+        assert "banned: ok —" in rendered
+        assert "0/1 rows fired (advisory), 1 measured" in rendered
+
+    async def test_the_preamble_explains_what_a_measurement_is(self) -> None:
+        report = await run_format_checks(
+            "A draft.",
+            [ContractionRate(name="contractions", rule="Contract.")],
+            format_key="test",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+        )
+        assert "reached no verdict" in report.render()

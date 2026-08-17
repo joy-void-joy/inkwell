@@ -20,12 +20,7 @@ from functools import cache
 from syntok.segmenter import split
 from syntok.tokenizer import Token, Tokenizer
 
-from inkwell.agent.prose import ProseReader, Segmenter, Sentence
-
-
-def carries_a_word(value: str) -> bool:
-    """Whether a token carries a word rather than punctuation alone."""
-    return any(character.isalnum() for character in value)
+from inkwell.agent.prose import ProseReader, Segmenter, Sentence, carries_a_word
 
 
 class SyntokSegmenter(Segmenter):
@@ -47,13 +42,20 @@ class SyntokSegmenter(Segmenter):
         ]
 
     def describe(self, tokens: list[Token]) -> Sentence:
-        """One segmented sentence as the token runs a declared row reads."""
-        words = [token.value.lower() for token in tokens if carries_a_word(token.value)]
+        """One segmented sentence as the token runs a declared row reads.
+
+        The capitalized words are taken past the first one, because every
+        sentence capitalizes its opening and only the rest of them name
+        something.
+        """
+        written = [token.value for token in tokens if carries_a_word(token.value)]
+        words = [word.lower() for word in written]
         return Sentence(
             text=Tokenizer.to_text(tokens).strip(),
             tokens=[token.value.lower() for token in tokens],
             words=words,
             opening=" ".join(words[:2]),
+            names=[word for word in written[1:] if word[:1].isupper()],
         )
 
     def words(self, text: str) -> list[str]:

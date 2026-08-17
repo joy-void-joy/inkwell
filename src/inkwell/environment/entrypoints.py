@@ -38,6 +38,7 @@ from pydantic.fields import FieldInfo
 
 from lup.types import StringMap
 
+from inkwell.agent.book import ChapterAssignment
 from inkwell.agent.config import PIPELINE_STAGES, PipelineStage
 from inkwell.agent.stages import OUTPUT_FORMATS
 
@@ -107,6 +108,35 @@ def document_id(value: str) -> str:
         ),
         "",
     )
+
+
+def chapter_assignment(value: str, what: str) -> ChapterAssignment:
+    """``value`` read as ``book`` or ``book:chapter``, or a ``ValueError``.
+
+    ``book:chapter`` is the URL scheme grammar — a name, a colon, the rest — so
+    it is read with that parser rather than cut apart by hand, and a book id
+    carrying hyphens reads the same way ``atlas:4`` does. A bare ``atlas`` is a
+    book with the ordinal left open, which the book's own record answers; only
+    a colon says the author settled it themselves. What each half may be is the
+    assignment's own rule, checked by constructing one: a surface refuses
+    ``atlas:0`` and a book id that could name another directory where the author
+    typed it, rather than once the run is already under way. ``what`` is the
+    parameter asking, so the error names it.
+    """
+    read = urlparse(value)
+    if not read.scheme:
+        if read.path.isdecimal():
+            raise ValueError(
+                f"{what} takes a book, spelled book:chapter where you also mean "
+                f"to say which — {value!r} is a chapter with no book to sit in"
+            )
+        return ChapterAssignment(book=read.path)
+    if not read.path.isdecimal():
+        raise ValueError(
+            f"{what} takes a chapter number after the colon, not {read.path!r} — "
+            f"'atlas:4', or bare 'atlas' to let the book's record say which"
+        )
+    return ChapterAssignment(book=read.scheme, chapter=int(read.path))
 
 
 def checkpoint_stage(value: str, what: str) -> str:
@@ -374,6 +404,63 @@ class StageParameter(OptionalTextParameter):
         if not isinstance(raw, str):
             raise ValueError(f"{self.name} takes a stage name")
         return checkpoint_stage(raw, self.name)
+
+
+class AssignmentParameter(EntryPointParameter):
+    """Which book a run writes, and which chapter of it where the author said.
+
+    One value rather than two, because half of it is not an assignment: a
+    chapter with no book is nothing a run can be launched with, and a surface
+    able to collect one without the other would have to say what that means
+    somewhere else. The other half is genuinely optional — ``atlas`` leaves the
+    ordinal to the book's own record — which is why this reads back an
+    assignment rather than a placement. Text on the wire, so every surface
+    renders it with the control it already has — the option, the request field,
+    and the browser's own text box — and it is read back here, once, rather
+    than by each of them.
+
+    A kind of its own rather than a text parameter with a rule bolted on: this
+    is what its own ``read`` returning an assignment means, and inheriting one
+    that returns text would leave every caller narrowing the string again.
+    """
+
+    @property
+    def annotation(self) -> FieldAnnotation:
+        """Text a run either supplies or, where it may, leaves unsaid."""
+        return str if self.required else str | None
+
+    @property
+    def help_text(self) -> str:
+        return (
+            f"{self.help} Spelled book:chapter, as in 'atlas:4', or bare "
+            f"'atlas' to let the book's own record say which chapter this is."
+        )
+
+    @property
+    def cli_annotation(self) -> str:
+        return "str" if self.cli_required else "str | None"
+
+    @property
+    def cli_default(self) -> str:
+        return "" if self.cli_required else "None"
+
+    def coerce(self, raw: SuppliedValue) -> SuppliedValue:
+        if not isinstance(raw, str):
+            raise ValueError(f"{self.name} takes a book, or a book and a chapter")
+        if not raw:
+            return ""
+        return chapter_assignment(raw, self.name).spelled()
+
+    def read(self, values: "EntryPointValues") -> ChapterAssignment | None:
+        """Which book this run writes a chapter of, or None where it writes none.
+
+        None is a standalone piece, not a book of one chapter: a run says which
+        book it belongs to or belongs to none.
+        """
+        raw = self.raw(values)
+        if not isinstance(raw, str) or not raw:
+            return None
+        return chapter_assignment(raw, self.name)
 
 
 class FlagParameter(EntryPointParameter):
@@ -653,6 +740,16 @@ class EntryPoint(BaseModel):
         """The source material this entry point hands the pipeline."""
         return []
 
+    def assignment(self, values: "EntryPointValues") -> ChapterAssignment | None:
+        """Which book this entry point's runs write a chapter of, where any does.
+
+        Answered by the entry point rather than read off one declared parameter,
+        because a run whose whole subject is one chapter spells it as its leading
+        argument while every other entry point spells it as an option — and the
+        launch path should not have to know which of those it is looking at.
+        """
+        return None
+
     def resumed_session(self, values: "EntryPointValues") -> str | None:
         """The saved session this entry point continues, or None for a fresh run."""
         return None
@@ -744,6 +841,9 @@ class FreshEntryPoint(EntryPoint):
     def starts_a_session(self) -> bool:
         return True
 
+    def assignment(self, values: EntryPointValues) -> ChapterAssignment | None:
+        return CHAPTER.read(values)
+
     def material(self, values: EntryPointValues) -> list[str]:
         """The material the author supplied, before the standing instruction."""
         return []
@@ -814,6 +914,30 @@ TARGET_FORMAT = TextParameter(
     flags=["--format", "-f"],
     surfaces=SurfacePlan(form="bespoke"),
 )
+
+CHAPTER = AssignmentParameter(
+    name="chapter",
+    label="Chapter of a book",
+    help="Which chapter of which book this run writes, so it reads what the "
+    "book's other chapters recorded and files its own record beside them. "
+    "Leave it unset for a standalone piece, which belongs to no book.",
+    flags=["--chapter"],
+)
+
+CHAPTER_WRITTEN = AssignmentParameter(
+    name="chapter",
+    label="Chapter of a book",
+    help="Which chapter of which book to write, on its own — the book's "
+    "recorded order and cross-references are read rather than laid out again.",
+    required=True,
+    surfaces=SurfacePlan(cli="argument"),
+)
+"""The same value the option carries, spelled as the subject of its command.
+
+Sent under the same declared name, so one launch path reads either — what
+differs is that a command whose whole purpose is one chapter insists on it and
+puts it first, rather than accepting a run that named no book at all.
+"""
 
 EXISTING_DOC_ID = DocumentParameter(
     name="existing_doc_id",
@@ -959,6 +1083,23 @@ class ReviseEntryPoint(FreshEntryPoint):
         return [DRAFT.read(values)]
 
 
+class ChapterEntryPoint(FreshEntryPoint):
+    """Writes one chapter of a book, against the order the book already holds.
+
+    The book it belongs to is its leading argument rather than an option: a run
+    that named no book would be this command with nothing left of it.
+    """
+
+    def assignment(self, values: EntryPointValues) -> ChapterAssignment | None:
+        return CHAPTER_WRITTEN.read(values)
+
+    def material(self, values: EntryPointValues) -> list[str]:
+        return SOURCES.read(values)
+
+    def with_material(self, values: EntryPointValues, text: str) -> EntryPointValues:
+        return values.replacing(SOURCES, [text])
+
+
 class ResumeEntryPoint(ContinuedEntryPoint):
     """Continues a saved session, picking an interrupted agent up mid-task."""
 
@@ -1011,6 +1152,7 @@ Examples:
         SOURCES,
         REFS,
         TARGET_FORMAT,
+        CHAPTER,
         EXISTING_DOC_ID,
         STOP_AFTER,
         LIGHT,
@@ -1032,6 +1174,7 @@ Examples:
     parameters=[
         TASK,
         TARGET_FORMAT,
+        CHAPTER,
         EXISTING_DOC_ID,
         STOP_AFTER,
         LIGHT,
@@ -1052,6 +1195,7 @@ voice or its argument.
 
 Examples:
     inkwell revise draft.md
+    inkwell revise chapter4.md --chapter atlas:4   # one chapter of a book
     inkwell revise "https://docs.google.com/document/d/abc123/edit\"""",
     standing_instruction=REVISE_INSTRUCTION,
     # lup: solved: revise skips no stage yet. Its concern asks for extraction
@@ -1069,6 +1213,7 @@ Examples:
         DRAFT,
         REFS,
         TARGET_FORMAT,
+        CHAPTER,
         EXISTING_DOC_ID,
         STOP_AFTER,
         LIGHT,
@@ -1076,6 +1221,35 @@ Examples:
         VERBOSE,
         *CONFIGURATION_PARAMETERS,
     ],
+)
+
+CHAPTER_ALONE = ChapterEntryPoint(
+    name="chapter",
+    summary="Write one chapter of a book, without laying the book out again.",
+    detail="""\
+The book's recorded order and its cross-references are read rather than
+re-derived, so a chapter written on its own cannot renumber the book around it
+or invent an order the other chapters never agreed to. Name the ordinal to place
+the chapter yourself; name the book alone and its own record says which chapter
+carries this title. A book with no record yet is not an error — the chapter is
+appended and the run says so.
+
+Examples:
+    inkwell chapter atlas:4 chapter4.md
+    inkwell chapter atlas notes.md   # the book's record says which chapter""",
+    parameters=[
+        CHAPTER_WRITTEN,
+        SOURCES,
+        REFS,
+        TARGET_FORMAT,
+        EXISTING_DOC_ID,
+        STOP_AFTER,
+        LIGHT,
+        SESSION_ID,
+        VERBOSE,
+        *CONFIGURATION_PARAMETERS,
+    ],
+    skipped_stages=["book"],
 )
 
 RESUME = ResumeEntryPoint(
@@ -1116,7 +1290,7 @@ Examples:
     ],
 )
 
-ENTRY_POINTS: list[EntryPoint] = [WRITE, RUN, REVISE, RESUME, RESTART]
+ENTRY_POINTS: list[EntryPoint] = [WRITE, RUN, REVISE, CHAPTER_ALONE, RESUME, RESTART]
 """Every way a writing session starts. The one list all three surfaces read."""
 
 

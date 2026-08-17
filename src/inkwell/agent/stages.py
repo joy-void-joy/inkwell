@@ -295,10 +295,11 @@ specific:
 document. Every section file listed exists and is non-empty — read and \
 include all of them; never declare a section missing or to-be-written.
 - **Enforce the glossary.** Call lookup_terms to read the shared \
-glossary. Where a section names something — a term, symbol, or \
-abbreviation — differently from the glossary's canonical entry, \
-substitute the canonical term. This is mechanical: change the word, not \
-the sentence around it.
+glossary — the conventions, what the sections coined, and, for a chapter \
+of a book, what the other chapters already named. Where a section names \
+something — a term, symbol, or abbreviation — differently from the \
+glossary's canonical entry, substitute the canonical term. This is \
+mechanical: change the word, not the sentence around it.
 - **Stitch the seams.** At each section boundary, write or adjust ONLY \
 the handoff so the join doesn't read as a seam — the last sentence of \
 one section should set up the first of the next. Touch the boundary \

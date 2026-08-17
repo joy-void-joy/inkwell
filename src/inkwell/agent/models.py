@@ -114,10 +114,13 @@ class ArticlePlan(BaseModel):
     conventions: list[str] = Field(
         default_factory=list,
         description=(
-            "Shared conventions every section must follow: recurring terms "
-            "and what they mean, names for key concepts, notational or "
-            "formatting choices. The channel that keeps independently "
-            "written sections consistent."
+            "Shared conventions every section of this piece must follow: "
+            "recurring terms and what they mean, names for key concepts, "
+            "notational or formatting choices. The channel that keeps "
+            "independently written sections consistent. These are this plan's "
+            "instructions to its own writers — a chapter of a book seeds its "
+            "own rather than inheriting a sibling chapter's, while the terms "
+            "writers coin are shared across the whole book."
         ),
     )
     voice_notes: str = Field(

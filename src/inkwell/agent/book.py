@@ -27,10 +27,18 @@ or none, never a half-written one. Two runs of the *same* chapter do land on
 one path; there the rename decides, and the later record replaces the earlier
 one whole rather than blending with it.
 
+The glossary partitions the same way and for the same reason — see
+:class:`~inkwell.agent.tools.stage_outputs.BookGlossary`, which coins into the
+file :meth:`BookStore.glossary_dir` names for its own chapter and reads every
+chapter's.
+
     books/
     └── ai-safety-textbook/
-        ├── 001.json     # one file per chapter, written by that chapter's run
-        └── 003.json
+        ├── 001.json         # one file per chapter, written by that chapter's run
+        ├── 003.json
+        └── glossary/
+            ├── 001.json     # what chapter 1 seeded and what it coined
+            └── 003.json
 """
 
 import logging
@@ -168,14 +176,41 @@ class BookStore(BaseModel, frozen=True):
         """Where one book's chapter records sit."""
         return self.root / book
 
+    def chapter_file(self, placement: ChapterPlacement) -> str:
+        """What a chapter's file is named, zero-padded so a listing sorts.
+
+        Named once because the record and the glossary partition the same way,
+        and a padding spelled at each of them can be spelled differently.
+        """
+        return f"{placement.chapter:03d}.json"
+
     def chapter_path(self, placement: ChapterPlacement) -> Path:
-        """The one file a chapter run writes, zero-padded so a listing sorts.
+        """The one file a chapter run writes.
 
         Derived from the placement and nothing else, which is what makes the
         single-writer-per-chapter guarantee structural: a run holding its own
         placement cannot address a sibling chapter's file.
         """
-        return self.book_dir(placement.book) / f"{placement.chapter:03d}.json"
+        return self.book_dir(placement.book) / self.chapter_file(placement)
+
+    def glossary_path(self, placement: ChapterPlacement) -> Path:
+        """The one glossary file a chapter run coins into.
+
+        Derived from the placement for the same reason :meth:`chapter_path` is:
+        a run cannot name the file another chapter coins into, so two chapter
+        runs of one book need no lock between them.
+        """
+        return self.glossary_dir(placement.book) / self.chapter_file(placement)
+
+    def glossary_dir(self, book: str) -> Path:
+        """Where one book's per-chapter glossary files sit.
+
+        A directory of its own rather than a second file beside each chapter
+        record, so :meth:`load` goes on reading every ``*.json`` in the book
+        directory as a chapter record and nothing has to tell the two apart by
+        name.
+        """
+        return self.book_dir(book) / "glossary"
 
     def load(self, book: str) -> BookRecord:
         """Every chapter of one book, empty where nothing has been written yet.

@@ -179,7 +179,7 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
             title=hit.title or None,
             url=hit.url or None,
             snippet=hit.text[:SNIPPET_LENGTH] or None,
-            highlights=[h[:SNIPPET_LENGTH] for h in hit.highlights[:3]] or None,
+            highlights=list(hit.highlights) or None,
             published_date=hit.published_at(),
             score=hit.score,
             full_text_path=stored(hit),

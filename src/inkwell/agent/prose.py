@@ -20,6 +20,16 @@ MARKDOWN = MarkdownIt()
 business rather than a '#' prefix somebody strips by hand."""
 
 
+def carries_a_word(value: str) -> bool:
+    """Whether a token carries a word rather than punctuation alone.
+
+    The one definition of what counts as a word, so the segmenter filling
+    `Sentence.words` and a row counting the words of a fragment cannot come to
+    disagree about whether a comma is one.
+    """
+    return any(character.isalnum() for character in value)
+
+
 def strong_runs(inline: Token) -> list[str]:
     """The text of every bold run in a block, in document order.
 
@@ -160,6 +170,12 @@ class Sentence(BaseModel):
     opening: str = Field(
         description="The first two words, lowered and joined — the shape that "
         "repeats when paragraph openings turn formulaic"
+    )
+    names: list[str] = Field(
+        default=[],
+        description="The words capitalized past the sentence's first, in the "
+        "case the author wrote them — what a row asking whether a claim names "
+        "anybody reads, since a capital anywhere but the opening is a name",
     )
 
     @property

@@ -19,18 +19,13 @@ from inkwell.agent.format_checks import (
     BoldEmphasis,
     DeclaredCheck,
     DraftWords,
-    FormulaicOpenings,
     JudgedRow,
-    LinkingPredicates,
-    MarkdownArtifacts,
     ParagraphLengthVariance,
     ParagraphSentences,
-    ParticipialTails,
-    PunctuationDensity,
     SectionLength,
-    SentenceLengthVariance,
     render_declared_rules,
 )
+from inkwell.agent.voice_tells import BANNED_VOCABULARY_PROSE, VOICE_TELL_CHECKS
 
 READER_FEEDBACK_NOTE = """\
 ## Reader feedback
@@ -1118,7 +1113,7 @@ Structure as a conversation between 2-3 speakers with distinct \
 perspectives. Each speaker should have a recognizable voice. \
 Distribute arguments naturally across speakers. Vary turn length."""
 
-TEXTBOOK_GUIDANCE = """\
+TEXTBOOK_GUIDANCE = f"""\
 ## Format: Textbook
 
 This piece teaches. The reader is capable but does not yet know the \
@@ -1155,15 +1150,17 @@ say where the missing piece arrives.
 
 ### Vocabulary to avoid
 
-The register is plain and specific. The following are the tells of prose \
-that is filling space rather than teaching, and they are banned outright: \
-"it's worth noting", "it is important to note", "in many ways", "this is \
-crucial", "delve into", "dive deep", "unpack", "shed light on", "navigate \
-the complexities", "tapestry", "realm", "landscape" as a metaphor, \
-"testament to", "beacon of", "multifaceted", "myriad", "plethora", \
-"paradigm", "holistic", "seamless", "cutting-edge", "ever-evolving", \
-"in today's world", "at the end of the day", "that being said", "in \
-conclusion", "plays a vital role", "serves as a", "stands as a".
+The register is plain and specific. These are the tells of prose that is \
+filling space rather than teaching, and the finished draft is re-read against \
+exactly this list:
+
+{BANNED_VOCABULARY_PROSE}
+
+A word here is banned in the sense that makes it a tell, not in every sense: \
+"rich" is fine about a dataset and a tell about a tapestry. Where one of these \
+is genuinely the precise word — a direct quote, the actual name of a thing — \
+use it, and expect the check to surface the sentence so a reader can see that \
+it was.
 
 Prefer the specific word to the impressive one. "Robust" almost always \
 means something more precise — say that instead.
@@ -1177,6 +1174,11 @@ template rather than thought.
 - **Vary sentence and paragraph length.** Prose where every sentence runs \
 the same length has no rhythm and is exhausting to read, however correct \
 each sentence is. Some sentences are four words.
+- **Repeat the word.** A teaching text names one thing one way. Calling the \
+researcher a scientist, then an academic, then an expert costs the reader a \
+lookup on every rename and buys nothing but the absence of repetition.
+- **Count before you list.** Three is the number machine prose reaches for \
+when it has stopped counting. If there are two reasons, give two.
 - **No summary paragraph that only repeats.** A closing paragraph earns its \
 place by saying what follows from the argument, not by listing it again.
 
@@ -1187,7 +1189,12 @@ build to the claim, and do not hedge a claim you are about to support.
 - **Write what things do, not what they are.** Prefer a verb that acts to a \
 linking verb that describes: "attention costs O(n²)" over "attention is \
 expensive in its scaling", and never the inflated forms of the same move — \
-"serves as", "stands as", "holds the distinction of being", "constitutes".
+"serves as", "stands as", "holds the distinction of being", "constitutes". \
+The same goes for the longer word that means exactly the plain one: "use", \
+not "utilize"; "has", not "boasts"; "help", not "facilitate".
+- **Name who said it.** "Studies show", "experts suggest", and "research \
+indicates" hand a claim to nobody. Name the study, or state the evidence and \
+say what it is. A claim you cannot source is cut, not hedged.
 - **No performed enthusiasm.** "Fascinatingly", "remarkably", "it is \
 striking that" tell the reader how to feel instead of giving them the \
 reason to feel it.
@@ -1201,11 +1208,12 @@ as a substitute for deciding how two clauses relate.
 gerund — "…, underscoring the point", "…, highlighting the tension", "…, \
 making it clear that". The construction adds a clause that asserts nothing \
 and appears in machine prose far more than in anybody's writing.
-- **Semicolons are rationed too.** A semicolon nearly always marks two \
-sentences that were afraid to separate. Write the two sentences.
-- **Parentheses are rationed.** A parenthetical is a decision deferred: \
-either the aside matters, in which case it earns a sentence, or it does not, \
-in which case cut it. Reserve them for a genuine citation or unit.
+- **Semicolons and parentheses are normal punctuation.** Machine prose \
+avoids both and reaches for an em dash instead, which is half of why the em \
+dash is rationed above. Use a semicolon where two clauses belong in one \
+sentence; use parentheses (where a thought is related but subordinate). \
+Neither is rationed here — the draft is measured for how often it uses each, \
+and the number is reported back rather than held against it.
 - **No markdown left showing.** Bold, headings, links, and code spans either \
 render or they are noise the reader has to parse. A stray `**`, a heading \
 whose hashes have no space after them, a half-written link — none of these \
@@ -1245,44 +1253,6 @@ class OutputFormatSpec(BaseModel):
     )
 
 
-LLM_VOCABULARY = [
-    "it's worth noting",
-    "it is worth noting",
-    "it is important to note",
-    "in many ways",
-    "this is crucial",
-    "delve into",
-    "dive deep",
-    "unpack",
-    "shed light on",
-    "navigate the complexities",
-    "tapestry",
-    "realm",
-    "testament to",
-    "beacon of",
-    "multifaceted",
-    "myriad",
-    "plethora",
-    "paradigm",
-    "holistic",
-    "seamless",
-    "cutting-edge",
-    "ever-evolving",
-    "in today's world",
-    "at the end of the day",
-    "that being said",
-    "in conclusion",
-    "plays a vital role",
-    "serves as a",
-    "stands as a",
-    "not only",
-    "moreover",
-    "furthermore",
-]
-"""The vocabulary the textbook guidance bans outright. The default for that
-format's row, which takes an override: which phrases read as filler is a
-judgement about register, and a house with different tells declares its own."""
-
 TEXTBOOK_CHECKS: list[DeclaredCheck] = [
     BoldedSummaries(
         name="bolded summaries",
@@ -1290,70 +1260,12 @@ TEXTBOOK_CHECKS: list[DeclaredCheck] = [
         "claim, so a reader who reads only the bold gets the whole argument.",
         share_floor=1.0,
     ),
-    BannedVocabulary(
-        name="llm vocabulary",
-        rule="None of the banned filler phrases appear — prefer the specific "
-        "word to the impressive one.",
-        phrases=LLM_VOCABULARY,
-    ),
-    PunctuationDensity(
-        name="em-dash density",
-        rule="Em dashes are rationed to a genuine break in thought, one or two "
-        "a section.",
-        marks=["—"],
-        per_thousand_ceiling=3.0,
-    ),
-    PunctuationDensity(
-        name="semicolon density",
-        rule="A semicolon nearly always marks two sentences afraid to "
-        "separate — write the two sentences.",
-        marks=[";"],
-        per_thousand_ceiling=1.0,
-    ),
-    PunctuationDensity(
-        name="parenthesis density",
-        rule="A parenthetical is a decision deferred: either the aside earns a "
-        "sentence or it is cut.",
-        marks=["("],
-        per_thousand_ceiling=4.0,
-    ),
-    MarkdownArtifacts(
-        name="markdown artifacts",
-        rule="No markdown left showing — every marker either renders or is cut.",
-    ),
     BoldEmphasis(
         name="bold emphasis",
         rule="Bold carries the paragraph-opening summary and nothing else; no "
         "emphasis inside the body of a paragraph.",
         per_thousand_ceiling=0.0,
         exempt_paragraph_summaries=True,
-    ),
-    FormulaicOpenings(
-        name="paragraph openings",
-        rule="No run of paragraphs opens the same way.",
-        repeat_ceiling=1,
-    ),
-    SentenceLengthVariance(
-        name="sentence rhythm",
-        rule="Sentence lengths vary; some sentences are four words.",
-        spread_floor=5.0,
-    ),
-    ParagraphLengthVariance(
-        name="paragraph rhythm",
-        rule="Paragraph lengths vary rather than coming out uniform.",
-        spread_floor=15.0,
-    ),
-    LinkingPredicates(
-        name="inflated copulas",
-        rule="Write what things do, not what they are, and never reach for the "
-        "inflated stand-ins for `is` — `serves as`, `stands as`, `holds the "
-        "distinction of being`.",
-        share_ceiling=0.05,
-    ),
-    ParticipialTails(
-        name="participial tails",
-        rule="No sentence ends on a comma and a gerund.",
-        share_ceiling=0.05,
     ),
     JudgedRow(
         name="teachable concreteness",
@@ -1372,7 +1284,15 @@ TEXTBOOK_CHECKS: list[DeclaredCheck] = [
         "symbol, or abbreviation used before it is defined, and every passage "
         "that relies on something the draft establishes only later.",
     ),
+    *VOICE_TELL_CHECKS,
 ]
+"""What teaching asks for, then what the house voice asks for anywhere.
+
+Only the first four rows are the textbook's own — the bolded spine a reader
+follows alone, and the two questions a count cannot answer. Everything after
+them is the voice guidance, drawn from one declaration rather than restated
+here, which is what lets a second format adopt the same tells by splicing in
+the same list."""
 
 ACADEMIC_CHECKS: list[DeclaredCheck] = [
     JudgedRow(

@@ -9,6 +9,7 @@ from inkwell.agent.format_checks import (
     BoldedSummaries,
     BoldEmphasis,
     CheckRow,
+    ContractionRate,
     DraftWords,
     FormatCheck,
     FormulaicOpenings,
@@ -20,8 +21,15 @@ from inkwell.agent.format_checks import (
     ParagraphSentences,
     ParticipialTails,
     PunctuationDensity,
+    QuestionRate,
+    RuleOfThree,
     SectionLength,
     SentenceLengthVariance,
+    SentenceOpeners,
+    ShortSentences,
+    SynonymCycling,
+    SynonymSet,
+    VagueAttribution,
     Verdict,
     render_declared_rules,
     run_format_checks,
@@ -331,6 +339,219 @@ class TestParticipialTails:
         assert not result.fired
 
 
+class TestSynonymCycling:
+    row = SynonymCycling(name="cycling", rule="Say the word again.")
+
+    async def test_fires_when_a_paragraph_renames_one_thing(self) -> None:
+        draft = (
+            "The researcher examined the data. The scientist then consulted "
+            "with colleagues. The academic published her findings."
+        )
+        result = await run_row(self.row, draft)
+        assert result.fired
+        assert result.findings
+
+    async def test_passes_when_the_word_is_repeated(self) -> None:
+        """What the guidance actually asks for must never read as the tell."""
+        draft = (
+            "The researcher examined the data. The researcher consulted "
+            "colleagues. The researcher published her findings."
+        )
+        result = await run_row(self.row, draft)
+        assert not result.fired
+
+    async def test_a_plural_is_the_same_term(self) -> None:
+        draft = "The researcher led it. The researchers agreed. The researcher won."
+        assert not (await run_row(self.row, draft)).fired
+
+    async def test_two_terms_is_variation_and_not_a_cycle(self) -> None:
+        draft = "The researcher examined the data. The scientist agreed with her."
+        assert not (await run_row(self.row, draft)).fired
+
+    async def test_the_families_are_overridable(self) -> None:
+        row = self.row.model_copy(
+            update={
+                "families": [SynonymSet(terms=[["carrot"], ["root"], ["vegetable"]])]
+            }
+        )
+        assert not (
+            await run_row(row, "The scientist met the academic and expert.")
+        ).fired
+        assert (
+            await run_row(row, "The carrot is a root, and the vegetable sells.")
+        ).fired
+
+    async def test_cycling_across_paragraphs_is_not_the_tell(self) -> None:
+        """Renaming is what a reader notices inside one paragraph."""
+        draft = "The researcher won.\n\nThe scientist agreed.\n\nThe academic left."
+        assert not (await run_row(self.row, draft)).fired
+
+
+class TestRuleOfThree:
+    row = RuleOfThree(name="threes", rule="Count first.", share_ceiling=0.0)
+
+    async def test_fires_on_three_adjectives(self) -> None:
+        result = await run_row(
+            self.row, "The program was innovative, transformative, and groundbreaking."
+        )
+        assert result.fired
+        assert result.findings
+
+    async def test_fires_on_three_short_phrases(self) -> None:
+        result = await run_row(self.row, "Models scale, costs grow, and gains shrink.")
+        assert result.fired
+
+    async def test_passes_on_a_pair(self) -> None:
+        result = await run_row(self.row, "The program was innovative and useful.")
+        assert not result.fired
+
+    async def test_passes_on_a_list_of_four(self) -> None:
+        """The tell is three, so four is the content deciding the number."""
+        result = await run_row(self.row, "It runs on Linux, macOS, Windows, and BSD.")
+        assert not result.fired
+
+    async def test_two_coordinated_clauses_are_not_a_list(self) -> None:
+        result = await run_row(
+            self.row, "The model failed the benchmark, and the baseline won outright."
+        )
+        assert not result.fired
+
+    async def test_a_triple_the_content_fixed_at_three_does_not_fire(self) -> None:
+        """A default above zero, so one genuine triple is not a finding.
+
+        A neuron really does have three parts. The row is about the habit of
+        reaching for three, which only a draft doing it repeatedly shows.
+        """
+        row = RuleOfThree(name="threes", rule="Count first.")
+        draft = (
+            "A neuron has a body, an axon, and dendrites. That is anatomy, not "
+            "rhetoric. Every other sentence here makes one point. Models scale "
+            "with data. Costs grow with depth. Gains shrink at the margin. The "
+            "trend has held for a decade. Nothing about it is guaranteed to "
+            "continue. Measure it again next year. Then decide what to build. "
+            "The anatomy is worth knowing first. A body holds the machinery. "
+            "An axon carries the signal out. Dendrites take the signal in. "
+            "None of that is a rhetorical choice."
+        )
+        result = await run_row(row, draft)
+        assert not result.fired, "one true triple in a draft is not the habit"
+
+    async def test_the_item_cap_is_overridable(self) -> None:
+        row = self.row.model_copy(update={"item_words": 4})
+        draft = (
+            "The model failed the benchmark, the baseline won outright, and "
+            "the gap held firm."
+        )
+        assert not (await run_row(self.row, draft)).fired
+        assert (await run_row(row, draft)).fired
+
+
+class TestVagueAttribution:
+    row = VagueAttribution(name="attribution", rule="Name who said it.")
+
+    async def test_fires_on_an_unnamed_appeal(self) -> None:
+        result = await run_row(self.row, "Studies show that the effect persists.")
+        assert result.fired
+        assert result.findings
+
+    async def test_passes_when_the_sentence_names_a_source(self) -> None:
+        result = await run_row(
+            self.row, "Researchers at DeepMind found that the effect persists."
+        )
+        assert not result.fired
+
+    async def test_passes_on_prose_with_no_appeal(self) -> None:
+        result = await run_row(self.row, "The effect persists across every run.")
+        assert not result.fired
+
+    async def test_the_blessed_hedge_is_not_an_appeal(self) -> None:
+        """The guidance lists `the evidence suggests` among the good moves."""
+        result = await run_row(self.row, "The evidence suggests the effect persists.")
+        assert not result.fired
+
+    async def test_the_ceiling_is_overridable(self) -> None:
+        tolerant = self.row.model_copy(update={"ceiling": 1})
+        result = await run_row(tolerant, "Studies show that the effect persists.")
+        assert not result.fired
+
+
+class TestMeasurementRows:
+    """Rows that report a number and reach no verdict, for what the guidance
+    asks for rather than against."""
+
+    async def test_contractions_are_counted_when_present(self) -> None:
+        row = ContractionRate(name="contractions", rule="Contract.")
+        result = await run_row(row, "It's the cost that grows. Don't ignore it.")
+        assert "2/2" in result.measured
+        assert result.measurement
+        assert not result.fired
+
+    async def test_contractions_read_zero_on_formal_prose(self) -> None:
+        row = ContractionRate(name="contractions", rule="Contract.")
+        result = await run_row(row, "It is the cost that grows. Do not ignore it.")
+        assert "0/2" in result.measured
+        assert not result.fired
+
+    async def test_a_possessive_is_not_a_contraction(self) -> None:
+        row = ContractionRate(name="contractions", rule="Contract.")
+        result = await run_row(row, "The model's weights are frozen.")
+        assert "0/1" in result.measured
+
+    async def test_conjunction_openings_are_counted(self) -> None:
+        row = SentenceOpeners(name="openings", rule="And is fine.")
+        assert (
+            "1/2"
+            in (
+                await run_row(row, "The cost grows. But the cache absorbs it.")
+            ).measured
+        )
+        assert (
+            "0/2"
+            in (await run_row(row, "The cost grows. The cache absorbs it.")).measured
+        )
+
+    async def test_questions_are_counted(self) -> None:
+        row = QuestionRate(name="questions", rule="Ask.")
+        assert (
+            "1/2"
+            in (
+                await run_row(row, "Why does it scale? The cache absorbs the cost.")
+            ).measured
+        )
+        assert "0/1" in (await run_row(row, "The cache absorbs the cost.")).measured
+
+    async def test_short_sentences_are_counted(self) -> None:
+        row = ShortSentences(name="short", rule="Fragments welcome.", word_ceiling=3)
+        assert (
+            "1/2"
+            in (
+                await run_row(row, "It broke. The whole evaluation suite came apart.")
+            ).measured
+        )
+        assert (
+            "0/1"
+            in (await run_row(row, "The whole evaluation suite came apart.")).measured
+        )
+
+    async def test_no_measurement_row_ever_fires(self) -> None:
+        """A measurement holds nothing against a draft, whatever it counts."""
+        rows: list[FormatCheck] = [
+            ContractionRate(name="contractions", rule="Contract."),
+            SentenceOpeners(name="openings", rule="And is fine."),
+            QuestionRate(name="questions", rule="Ask."),
+            ShortSentences(name="short", rule="Fragments welcome."),
+            PunctuationDensity(name="semicolons", rule="Use them.", marks=[";"]),
+        ]
+        formal = "It is the case that the cost of the whole evaluation suite grows."
+        casual = "Don't. But why? It broke; badly."
+        for row in rows:
+            for draft in (formal, casual):
+                result = await run_row(row, draft)
+                assert not result.fired
+                assert result.measurement
+                assert result.state == "measured"
+
+
 class TestBoldedSummaries:
     async def test_fires_below_the_floor(self) -> None:
         row = BoldedSummaries(name="bold", rule="Bold each claim.", share_floor=1.0)
@@ -466,3 +687,34 @@ class TestDeclaredRulesRendering:
 
     def test_no_rows_renders_nothing(self) -> None:
         assert render_declared_rules([]) == ""
+
+
+class TestReportRendering:
+    async def test_a_measurement_prints_a_number_and_no_verdict(self) -> None:
+        """`ok` would claim a judgement the row never reached."""
+        report = await run_format_checks(
+            "The cost grows. But it's bounded.",
+            [
+                ContractionRate(name="contractions", rule="Contract."),
+                BannedVocabulary(name="banned", rule="No filler.", phrases=["myriad"]),
+            ],
+            format_key="test",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+        )
+        rendered = report.render()
+        assert "contractions: measured — 1/2 sentence(s) contract (50%)" in rendered
+        assert "banned: ok —" in rendered
+        assert "0/1 rows fired (advisory), 1 measured" in rendered
+
+    async def test_the_preamble_explains_what_a_measurement_is(self) -> None:
+        report = await run_format_checks(
+            "A draft.",
+            [ContractionRate(name="contractions", rule="Contract.")],
+            format_key="test",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+        )
+        assert "reached no verdict" in report.render()

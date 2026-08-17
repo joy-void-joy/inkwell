@@ -17,9 +17,19 @@ from lup.mcp import LupMcpTool, response_text
 
 from inkwell.agent import config as config_mod
 from inkwell.agent.book import BookStore, ChapterPlacement
+from inkwell.agent.content import ContentManifest
+from inkwell.agent.format_checks import (
+    ADVISORY_PREAMBLE,
+    CheckRow,
+    DraftCheckReport,
+    run_format_checks,
+)
+from inkwell.agent.models import ArticlePlan
 from inkwell.agent.notes import PipelineNotes
-from inkwell.agent.pipeline import PipelineRunner
-from inkwell.agent.tools.stage_outputs import (
+from inkwell.agent.pipeline import PipelineRunner, add_format_check_report
+from inkwell.agent.segmenter import reader
+from inkwell.agent.stages import format_checks_for
+from inkwell.agent.glossary import (
     BookGlossary,
     ChapterGlossary,
     GlossaryEntry,
@@ -27,11 +37,12 @@ from inkwell.agent.tools.stage_outputs import (
     RunGlossary,
     define_term_in_glossary,
     load_chapter_glossary,
-    make_glossary_tools,
     read_glossary,
     seed_glossary,
     write_chapter_glossary,
 )
+from inkwell.agent.tools.stage_outputs import make_glossary_tools
+from tests.unit.test_format_checks import HELD, StubJudge
 
 RUN = "/sessions/first/pipeline_notes"
 """The run that writes a chapter the first time."""
@@ -58,6 +69,21 @@ def chapter(store: BookStore, ordinal: int) -> BookGlossary:
 def terms(scope: GlossaryScope) -> list[str]:
     """Every term the scope reads, in the order it reads them."""
     return [entry.term for entry in read_glossary(scope).terms]
+
+
+def plan_for(placement: ChapterPlacement | None) -> ArticlePlan:
+    """The plan a stage reads its placement back off, and nothing else."""
+    return ArticlePlan(
+        title="A chapter",
+        thesis="Something follows from something else.",
+        target_format="textbook",
+        placement=placement,
+        sections=[],
+        research_questions=[],
+        source_quotes=[],
+        author_direction="",
+        voice_notes="",
+    )
 
 
 def make_runner(
@@ -374,3 +400,140 @@ class TestWhatTheStagesAreHanded:
             response_text(await lookup_tool(runner.glossary_scope).handler({}))
         )
         assert view["terms"] == []
+
+
+DRIFTED = (
+    "The thread from earlier picks back up. Goal misgeneralization is what "
+    "happens when a learned objective holds on the training distribution and "
+    "nowhere else. The rest of this chapter works through two cases."
+)
+"""A chapter two draft that renames what chapter one settled."""
+
+
+def settled_in_chapter_one(store: BookStore) -> None:
+    """Chapter one defines a term, and records the name it turned down."""
+    first = chapter(store, 1)
+    seed_glossary(first, RUN, [])
+    define_term_in_glossary(
+        first,
+        "inner alignment",
+        "the mesa-objective gap",
+        ["goal misgeneralization"],
+    )
+
+
+def drift_row(report: DraftCheckReport) -> CheckRow:
+    """The row every format carries, out of a whole format's report."""
+    return next(row for row in report.rows if row.name == "terminology drift")
+
+
+class TestTerminologyDriftAcrossChapters:
+    """What one chapter named, and what a later chapter calls it instead.
+
+    The drift first-definition-wins cannot reach: chapter two writes the
+    rejected name into its prose, whether or not it ever called define_term,
+    and no run but this one is in a position to notice.
+    """
+
+    async def test_the_row_fires_naming_the_canonical_term(
+        self, store: BookStore
+    ) -> None:
+        settled_in_chapter_one(store)
+        second = chapter(store, 2)
+        seed_glossary(second, RERUN, [])
+
+        report = await run_format_checks(
+            DRIFTED,
+            format_checks_for("textbook"),
+            format_key="textbook",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+            glossary=second,
+        )
+        row = drift_row(report)
+        assert row.fired
+        assert "inner alignment" in row.findings[0]
+        assert "goal misgeneralization" in row.findings[0]
+
+    async def test_a_chapter_that_never_coined_anything_is_still_measured(
+        self, store: BookStore
+    ) -> None:
+        """The row reads the book, not this chapter's own coinages."""
+        settled_in_chapter_one(store)
+        report = await run_format_checks(
+            DRIFTED,
+            format_checks_for("textbook"),
+            format_key="textbook",
+            draft_path=Path("draft.md"),
+            judge=StubJudge(HELD),
+            reader=reader(),
+            glossary=chapter(store, 2),
+        )
+        assert drift_row(report).fired
+
+    def test_a_chapter_coining_the_rejected_name_is_handed_the_canonical_one(
+        self, store: BookStore
+    ) -> None:
+        """A rename that goes through the tool never reaches the book at all."""
+        settled_in_chapter_one(store)
+        second = chapter(store, 2)
+        seed_glossary(second, RERUN, [])
+        renamed = define_term_in_glossary(
+            second, "Goal Misgeneralization", "the same failure, renamed"
+        )
+        assert renamed.already_defined is True
+        assert renamed.term == "inner alignment"
+        assert terms(second) == ["inner alignment"]
+
+    async def test_the_rewrite_stage_reads_the_row_for_a_chapter_run(
+        self, tmp_path: Path, store: BookStore
+    ) -> None:
+        """The scope reaches the check off the plan on disk, so a chapter run
+        measures its book rather than reporting an empty one."""
+        settled_in_chapter_one(store)
+        notes = PipelineNotes(tmp_path / "n")
+        notes.save_artifact(
+            "plan", plan_for(ChapterPlacement(book="textbook", chapter=2))
+        )
+        draft_path = notes.artifacts_dir / "draft.md"
+        draft_path.write_text(DRIFTED, encoding="utf-8")
+
+        manifest = ContentManifest()
+        await add_format_check_report(
+            manifest,
+            notes,
+            DRIFTED,
+            draft_path,
+            target_format="textbook",
+            judge=StubJudge(HELD),
+        )
+        listed = next(ref for ref in manifest.refs if ref.label == "Format checks")
+        rendered = Path(listed.path).read_text(encoding="utf-8")
+        assert "terminology drift: 1 finding(s) (advisory)" in rendered
+        assert "this book calls it “inner alignment”" in rendered
+        assert ADVISORY_PREAMBLE in rendered
+
+    async def test_a_bookless_run_reports_having_measured_nothing(
+        self, tmp_path: Path, store: BookStore
+    ) -> None:
+        """Not firing and not passing either — a piece in no book has no canon."""
+        settled_in_chapter_one(store)
+        notes = PipelineNotes(tmp_path / "n")
+        notes.save_artifact("plan", plan_for(None))
+        draft_path = notes.artifacts_dir / "draft.md"
+        draft_path.write_text(DRIFTED, encoding="utf-8")
+
+        manifest = ContentManifest()
+        await add_format_check_report(
+            manifest,
+            notes,
+            DRIFTED,
+            draft_path,
+            target_format="textbook",
+            judge=StubJudge(HELD),
+        )
+        listed = next(ref for ref in manifest.refs if ref.label == "Format checks")
+        rendered = Path(listed.path).read_text(encoding="utf-8")
+        assert "terminology drift: ok — no book glossary" in rendered
+        assert "inner alignment" not in rendered

@@ -27,6 +27,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from inkwell.agent.config import PipelineStage, stage_model
+from inkwell.agent.glossary import GlossaryScope, GlossaryView
 from inkwell.agent.prose import Paragraph, Prose, ProseReader, Sentence, spread
 
 ADVISORY_PREAMBLE = """\
@@ -99,17 +100,24 @@ class Judge(ABC):
 class DraftUnderCheck:
     """The draft a row is checked against, and what a row may spend on it.
 
-    Composes the segmenter and the reviewer seams so a row reads parsed prose
-    and asks for a verdict without holding either engine itself.
+    Composes the segmenter, the reviewer, and the shared glossary so a row
+    reads parsed prose, asks for a verdict, and asks what the book has already
+    named without holding any of those engines itself.
     """
 
     def __init__(
-        self, prose: Prose, draft_path: Path, judge: Judge, reader: ProseReader
+        self,
+        prose: Prose,
+        draft_path: Path,
+        judge: Judge,
+        reader: ProseReader,
+        glossary: GlossaryScope | None = None,
     ) -> None:
         self.prose = prose
         self.draft_path = draft_path
         self.judge = judge
         self.reader = reader
+        self.glossary = glossary
 
     def phrase(self, text: str) -> list[str]:
         """A declared phrase as the words it is matched by.
@@ -122,6 +130,17 @@ class DraftUnderCheck:
     async def decide(self, question: str) -> Verdict:
         """A reviewer's verdict on something counting cannot decide."""
         return await self.judge.rule(question, self.draft_path)
+
+    def canon(self) -> GlossaryView | None:
+        """What this run's book has already named, and nothing where it has none.
+
+        Read through the accessor the glossary tools read through, so what a
+        row measures a draft against is the same reading `lookup_terms` hands
+        the writer rather than a second reading of that file layout. A run
+        belonging to no book answers None, which a row reports as having
+        measured nothing.
+        """
+        return self.glossary.canon() if self.glossary else None
 
 
 def contains(words: list[str], phrase: list[str]) -> bool:
@@ -650,6 +669,54 @@ class SectionLength(FormatCheck):
         )
 
 
+class TerminologyDrift(FormatCheck):
+    """A name the book has settled, appearing in this draft under a rival one.
+
+    The book glossary is what makes this knowable at all: a term chapter one
+    defined is on file when chapter nine runs, months later and in another
+    process. First-definition-wins keeps two chapters from defining one term
+    twice, and cannot keep a later chapter from calling that thing something
+    else — least of all a chapter that never called `define_term` and so never
+    met the mechanism.
+
+    Mechanical, because what it matches is written down: the rival names each
+    entry recorded as ones it rejected. A synonym nobody wrote down is
+    invisible here, which is why the rule this row declares says so — a quiet
+    row means no *recorded* rival name was used, not that the draft is
+    terminologically consistent. Reading the canon off the draft rather than
+    off a field of this class is what leaves that gap to a judged sibling: a
+    row that asks a reviewer which passages rename a concept in words the
+    glossary never anticipated is another class here, reading the same
+    `canon`, and no change to this one.
+    """
+
+    kind: Literal["terminology-drift"] = "terminology-drift"
+
+    async def run(self, draft: DraftUnderCheck) -> CheckRow:
+        canon = draft.canon()
+        if canon is None:
+            return self.result(
+                "no book glossary — this piece belongs to no book, so nothing "
+                "was measured",
+                fired=False,
+            )
+        renamed = [
+            f"“{alias}” — {sentence.text} — this book calls it “{entry.term}”"
+            for sentence in draft.prose.sentences
+            for entry in canon.terms
+            for alias in entry.rejected()
+            if contains(sentence.words, draft.phrase(alias))
+        ]
+        rivals = sum(len(entry.rejected()) for entry in canon.terms)
+        return self.result(
+            f"{len(renamed)} passage(s) name something this book settled "
+            f"otherwise, across {len(canon.terms)} term(s) on file and the "
+            f"{rivals} rival name(s) they record",
+            fired=bool(renamed),
+            findings=renamed,
+        )
+
+
 class JudgedRow(FormatCheck):
     """A row that spends a reviewer on what counting cannot decide.
 
@@ -686,6 +753,7 @@ DeclaredCheck = Annotated[
     | BlockLength
     | DraftWords
     | SectionLength
+    | TerminologyDrift
     | JudgedRow,
     Field(discriminator="kind"),
 ]
@@ -743,18 +811,23 @@ async def run_format_checks(
     draft_path: Path,
     judge: Judge,
     reader: ProseReader,
+    glossary: GlossaryScope | None = None,
 ) -> DraftCheckReport:
     """Every declared row's verdict on one draft.
 
     Advisory by construction rather than by convention: a fired row becomes a
     line in the returned report, and there is no return value, exception, or
     flag by which a row can refuse a draft. No stage can come to depend on one.
+
+    A caller with no glossary to hand leaves it out, and the rows that measure
+    a draft against what the piece has named report having measured nothing.
     """
     draft = DraftUnderCheck(
         prose=reader.read(content),
         draft_path=draft_path,
         judge=judge,
         reader=reader,
+        glossary=glossary,
     )
     rows = await asyncio.gather(*(check.run(draft) for check in checks))
     return DraftCheckReport(format_key=format_key, rows=list(rows))

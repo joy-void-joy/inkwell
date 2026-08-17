@@ -10,12 +10,14 @@ from inkwell.agent.format_checks import (
     BoldedSummaries,
     BoldEmphasis,
     JudgedRow,
+    TerminologyDrift,
     run_format_checks,
 )
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import add_format_check_report, format_checks_path
 from inkwell.agent.segmenter import reader
 from inkwell.agent.stages import (
+    EVERY_FORMAT_CHECKS,
     OUTPUT_FORMATS,
     FORMAT_KEYS,
     format_checks_for,
@@ -128,9 +130,36 @@ class TestFormatsWithoutRows:
         assert report.rows == []
         assert report.fired == []
 
-    def test_unknown_format_declares_nothing(self) -> None:
-        assert format_checks_for("auto") == []
-        assert get_format_guidance("auto") == ""
+    def test_unknown_format_declares_none_of_its_own(self) -> None:
+        """A format nobody declared contributes no rows, and still carries the
+        rows every format carries — terminology is not a format's convention."""
+        assert format_checks_for("auto") == EVERY_FORMAT_CHECKS
+        assert "Format:" not in get_format_guidance("auto")
+        assert "terminology drift" in get_format_guidance("auto")
+
+
+class TestRowsEveryFormatCarries:
+    """Terminology is a fact about the piece, not a convention of one format."""
+
+    row = next(c for c in EVERY_FORMAT_CHECKS if isinstance(c, TerminologyDrift))
+
+    @pytest.mark.parametrize("key", [spec.key for spec in OUTPUT_FORMATS])
+    def test_every_format_is_measured_by_it(self, key: str) -> None:
+        assert self.row in format_checks_for(key)
+
+    @pytest.mark.parametrize("key", ["textbook", "newsletter", "auto"])
+    def test_the_writer_reads_the_rule_the_draft_is_measured_by(self, key: str) -> None:
+        """Including a format that declares nothing else, which had no block."""
+        assert self.row.rule in get_format_guidance(key)
+
+    def test_the_rule_states_what_the_row_cannot_see(self) -> None:
+        """A mechanical row's silence must not read as an all-clear."""
+        assert "cannot see" in self.row.rule
+        assert "synonym" in self.row.rule
+
+    def test_it_is_mechanical(self) -> None:
+        """No reviewer is spent per draft; a judged sibling would be its own row."""
+        assert self.row.kind != "judged"
 
 
 class TestExistingFormatsGotRows:

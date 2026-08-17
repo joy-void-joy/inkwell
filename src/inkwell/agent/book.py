@@ -28,8 +28,8 @@ one path; there the rename decides, and the later record replaces the earlier
 one whole rather than blending with it.
 
 The glossary partitions the same way and for the same reason — see
-:class:`~inkwell.agent.tools.stage_outputs.BookGlossary`, which coins into the
-file :meth:`BookStore.glossary_dir` names for its own chapter and reads every
+:class:`~inkwell.agent.glossary.BookGlossary`, which coins into the file
+:meth:`BookStore.glossary_dir` names for its own chapter and reads every
 chapter's.
 
     books/

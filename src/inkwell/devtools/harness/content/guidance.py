@@ -296,6 +296,14 @@ Even for open-ended questions, attach concrete options plus a free-form one. Str
 
 **When in doubt, ask.**
 
+### Reporting a Finding
+
+Report at the level the question was asked. A finding is the one thing an investigation establishes, and the steps that led to it are not the finding — reconstructing the whole progression buries the answer rather than supporting it.
+
+**Separate the subject's fault from the environment's.** Most steps in a hard diagnosis turn out to be local misconfiguration. Saying so in one clause is worth more than a section each, and a report that does not separate them misattributes cause: an issue titled after the error message rather than the defect is simply wrong, however carefully the evidence was gathered.
+
+Detail earns its place when the reader needs it to act, and nowhere else.
+
 ### Slash Commands & Skills
 
 **After every command invocation**, reflect on how it was actually used vs. documented:

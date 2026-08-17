@@ -25,6 +25,7 @@ from lup.telemetry.trace import TraceLogger
 
 from inkwell.agent.config import stage_model
 from inkwell.agent.stages import EXTRACTOR_PROMPT
+from inkwell.pdf import reads_by_page
 
 logger = logging.getLogger(__name__)
 
@@ -124,23 +125,35 @@ def read_source_content(entry: ExtractedSource) -> str:
 
     Inline-prose sources carry their content in ``raw_input`` when the agent
     wrote no file. Returns an empty string when nothing is readable, signalling
-    the caller to fall back to deterministic extraction for that source.
+    the caller to fall back to deterministic extraction for that source. Bytes
+    that are not text answer the same way: what encoding a source file turned
+    out to be in is a fact about that one source, never a reason to end the run.
     """
     if entry.local_path:
         path = Path(entry.local_path)
         if path.is_file():
-            return path.read_text(encoding="utf-8")
+            try:
+                return path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                logger.warning("Unreadable source file %s", path, exc_info=True)
+                return ""
     if entry.origin == "inline":
         return entry.raw_input
     return ""
 
 
 class AssembledSources(BaseModel):
-    """What a manifest yields: the blocks to read, and what could not be read."""
+    """What a manifest yields: the blocks to read, the documents to navigate,
+    and what could not be read at all."""
 
     blocks: list[str] = Field(
         default_factory=list,
         description="Per-source sections ready to join into the conversation",
+    )
+    documents: list[str] = Field(
+        default_factory=list,
+        description="Paths to documents read a page-window at a time rather "
+        "than inlined — for the caller to hand to the source registry",
     )
     unrecovered: list[str] = Field(
         default_factory=list,
@@ -149,11 +162,16 @@ class AssembledSources(BaseModel):
 
 
 def assemble_sources(manifest: ExtractionManifest) -> AssembledSources:
-    """Turn a manifest into verbatim source blocks plus an unrecovered list.
+    """Sort a manifest's entries into text to inline, documents, and gaps.
 
     A block is one ``--- Source: ... ---`` / ``--- Reference: ... ---``
     section; an entry whose content could not be read is unrecovered instead,
     for the caller to deterministically re-extract.
+
+    A PDF is neither: it is read a page-window at a time by a reader holding
+    ``Read``, so it reaches the pipeline as a registered document and is never
+    inlined. Calling it unrecovered instead would send the caller back to the
+    network to re-fetch a document already sitting on disk.
 
     Style references are skipped: their voice feeds the voice stage through a
     separate channel, never the content blob.
@@ -167,13 +185,19 @@ def assemble_sources(manifest: ExtractionManifest) -> AssembledSources:
         label = "Source" if entry.role == "source" else "Reference"
         return f"--- {label}: {entry.raw_input} ---\n\n{text}"
 
-    read = [
-        (entry, source_block(entry))
-        for entry in manifest.sources
-        if entry.role != "style_reference"
-    ]
+    def navigable_document(entry: ExtractedSource) -> Path | None:
+        """The document this entry points at, when it is one to read by page."""
+        if not entry.local_path:
+            return None
+        path = Path(entry.local_path)
+        return path if path.is_file() and reads_by_page(path) else None
+
+    considered = [e for e in manifest.sources if e.role != "style_reference"]
+    sorted_out = [(e, navigable_document(e)) for e in considered]
+    read = [(e, source_block(e)) for e, doc in sorted_out if doc is None]
     return AssembledSources(
         blocks=[block for _, block in read if block],
+        documents=[str(doc) for _, doc in sorted_out if doc is not None],
         unrecovered=[entry.raw_input for entry, block in read if not block],
     )
 

@@ -4438,7 +4438,7 @@ class PipelineRunner:
 
         registry_candidates = [
             s for s in self.sources if Path(s).expanduser().is_file()
-        ]
+        ] + assembled.documents
         if conversation.strip():
             registry_candidates.append(str(output_path))
         registered = await build_source_registry_async(

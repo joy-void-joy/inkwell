@@ -16,7 +16,7 @@ runtime that provides it.
 
 import posixpath
 
-from .rows import PathRoleName, PathRoleRow
+from .rows import PathRoleKind, PathRoleName, PathRoleRow
 
 
 def is_session_scratch_target(word: str) -> bool:
@@ -34,6 +34,33 @@ def is_session_scratch_target(word: str) -> bool:
     return "$" not in word and posixpath.normpath(word).startswith("/tmp/claude-")
 
 
+def normalized_path(path: str) -> str:
+    """Normalize one portable path without resolving against the filesystem."""
+    return posixpath.normpath(path.replace("\\", "/"))
+
+
+def root_matches(path: str, value: str, kind: PathRoleKind) -> bool:
+    """Whether one path sits under a declared directory, however it is declared.
+
+    The one answer both declaration tables need. A protected-path rule and a
+    role row ask this of the same two shapes, and asking it in one place is
+    what keeps a directory from meaning one thing to the gate that protects it
+    and another to the gate that says what it is for.
+
+    ``contains_part`` matches the directory wherever it sits, and excludes the
+    system temporary directory, which is a different tree that happens to share
+    the name. Wrapping both sides in separators is what makes a segment match a
+    segment: ``tmpfoo`` holds the characters and is not the directory.
+    """
+    portable = normalized_path(path)
+    expected = normalized_path(value)
+    if kind == "contains_part":
+        return f"/{expected}/" in f"/{portable}/" and not portable.startswith(
+            f"/{expected}"
+        )
+    return portable == expected or portable.startswith(expected + "/")
+
+
 def path_role(path: str, rows: list[PathRoleRow]) -> PathRoleName:
     """Classify a repository-relative path by the role its root declares.
 
@@ -42,6 +69,10 @@ def path_role(path: str, rows: list[PathRoleRow]) -> PathRoleName:
     inside a root that points beyond it is not settleable without a syscall
     and stays a known limit; it is narrow, because a role only ever relaxes
     verbs acting on paths already inside the root and never grants execution.
+
+    How far each declaration reaches is the row's own, through
+    :func:`root_matches`: a root anchored at the repository top, or a
+    directory recognized wherever it sits.
 
     The session scratchpad answers first, because it is the one scratch root
     that is absolute — reaching the declared roots below would mean passing
@@ -55,7 +86,7 @@ def path_role(path: str, rows: list[PathRoleRow]) -> PathRoleName:
     if normalized.startswith(("/", "../")) or normalized == "..":
         return "production"
     for row in rows:
-        root = posixpath.normpath(row["root"])
-        if normalized == root or normalized.startswith(root + "/"):
+        kind = row["kind"] if "kind" in row else "subtree"
+        if root_matches(normalized, row["root"], kind):
             return row["role"]
     return "production"

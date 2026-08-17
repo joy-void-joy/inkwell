@@ -11,8 +11,8 @@ from collections.abc import Callable, Iterator
 from typing import TypedDict
 
 from .decision import KernelDecision
-from .roles import path_role
-from .rows import AntiPatternRow, PathRoleRow, PathRuleRow
+from .roles import normalized_path, path_role, root_matches
+from .rows import AcceptanceGuardRow, AntiPatternRow, PathRoleRow, PathRuleRow
 
 MARKER_RE = re.compile(r"(#|//)\s*lup\s*:", re.IGNORECASE)
 # A review note is any marker whose keyword is not `ignore`, which is the
@@ -1269,13 +1269,13 @@ def antipattern_decision(
     return None
 
 
-def normalized_path(path: str) -> str:
-    """Normalize one portable path without resolving against the filesystem."""
-    return posixpath.normpath(path.replace("\\", "/"))
-
-
 def path_rule_matches(path: str, path_exists: bool, row: PathRuleRow) -> bool:
-    """Evaluate one primitive protected-path rule."""
+    """Evaluate one primitive protected-path rule.
+
+    The two directory shapes are :func:`root_matches`, which the role table
+    reads through as well, so a rule protecting a tree and a role classifying
+    the same tree cannot come to disagree about which paths are in it.
+    """
     kind = row["kind"]
     value = row["value"]
     portable = normalized_path(path)
@@ -1285,17 +1285,13 @@ def path_rule_matches(path: str, path_exists: bool, row: PathRuleRow) -> bool:
         case "exact":
             return portable == expected
         case "subtree":
-            return portable == expected or portable.startswith(expected + "/")
+            return root_matches(path, value, "subtree")
         case "name_prefix":
             return posixpath.basename(portable).startswith(value)
         case "new_subtree":
-            return (
-                portable == expected or portable.startswith(expected + "/")
-            ) and not path_exists
+            return root_matches(path, value, "subtree") and not path_exists
         case "contains_part":
-            return value in parts and not (
-                portable == f"/{value}" or portable.startswith(f"/{value}/")
-            )
+            return root_matches(path, value, "contains_part")
         case "new_devtools":
             return (
                 any(
@@ -1308,6 +1304,55 @@ def path_rule_matches(path: str, path_exists: bool, row: PathRuleRow) -> bool:
             )
         case _:
             raise ValueError(f"invalid path rule kind {kind!r}")
+
+
+PACKAGE_MARKER_FILES = ("__init__.py",)
+"""Files whose name is their whole content, when they carry nothing else.
+
+The full-write gate exists because creating a file asks a reviewer to read all
+of it. A package marker is the case where there is nothing to read: the name
+declares a package, and the conventions here say an internal one holds its
+docstring and nothing more. A project that marks its packages differently
+passes its own names.
+"""
+
+
+def documentation_only(source: str) -> bool:
+    """Whether a Python source states nothing beyond what it is.
+
+    An empty file and a lone docstring both qualify. Anything else — an
+    import, an assignment, a re-export — is content somebody has to read, so
+    the file stops being a marker and is judged as the new module it is.
+    Source that does not parse is not a marker either: what it says is exactly
+    what could not be established.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    match tree.body:
+        case [] | [ast.Expr(value=ast.Constant(value=str()))]:
+            return True
+    return False
+
+
+def acceptance_guard_decision(
+    guard: AcceptanceGuardRow, autonomous: bool
+) -> KernelDecision:
+    """Judge one edit to a test-role path against the declared guard.
+
+    This is the one gate where an autonomous identity is held to *more* than
+    an ordinary session rather than less, and the inversion is the point
+    rather than an oversight. Everywhere else, autonomy means the caller
+    reviews its own edits, so a question it would only answer itself is
+    dropped. Here the caller's whole contract is to satisfy these tests, so
+    it is the one caller for whom editing them is never the right move —
+    a human weighing whether a test encodes the wrong behaviour is exactly
+    who the ordinary ask reaches, and exactly who an implementer is not.
+    """
+    if autonomous:
+        return KernelDecision("deny", guard["autonomous_reason"])
+    return KernelDecision("ask", guard["ask_reason"])
 
 
 # lup: Editing `.claude/` or `.codex/` should be auto-deny here, carrying the
@@ -1336,6 +1381,8 @@ def decide_edit(
     autonomous: bool = False,
     allowances: list[str] | None = None,
     python_source: bool = False,
+    acceptance_guard: AcceptanceGuardRow | None = None,
+    marker_files: tuple[str, ...] = PACKAGE_MARKER_FILES,
 ) -> KernelDecision:
     """Apply anti-pattern, path, marker, full-write, deletion, and size gates.
 
@@ -1354,6 +1401,12 @@ def decide_edit(
     :func:`refined_exempt_lines`, without which a rule broader than the defect
     it names holds its own suppression in place forever.
 
+    ``acceptance_guard`` is the one gate that answers before the relaxations
+    below rather than through them, because it asks whether the file may be
+    edited at all. Undeclared, a project judges its tests by the same
+    lattice as anything else, which is what every project did before the
+    guard existed.
+
     Each gate reaches as far as its own reason. Anti-patterns, the size gate
     and the full-write gate are all about how production code reads and how
     much of it a reviewer can hold at once, so all three stop at production;
@@ -1361,12 +1414,21 @@ def decide_edit(
     where nothing persists to be read. A full write only ever asks about
     creating a file — an overwrite carries its predecessor as ``before`` —
     and creating one where the conventions do not reach costs a reviewer
-    nothing, which pure deletion already assumed everywhere.
+    nothing, which pure deletion already assumed everywhere. ``marker_files``
+    is the other end of that same reasoning: a file whose content is nothing
+    but its own docstring costs a reviewer nothing either, wherever it sits.
     """
     granted = allowances or []
     previous = before or ""
     updated = after or ""
     role = path_role(path, path_roles or [])
+    # Whether this file may be edited at all is prior to how the edit reads,
+    # so the guard answers ahead of every gate below — including pure
+    # deletion, which would otherwise allow removing the test outright, and
+    # the protected-path rules, whose autonomous release must not survive a
+    # refusal aimed at exactly that caller.
+    if role == "test" and acceptance_guard is not None:
+        return acceptance_guard_decision(acceptance_guard, autonomous)
     # The conventions describe how production code should read. A test's
     # subject is production's behaviour, and scratch is disposable, so
     # neither is judged against them.
@@ -1400,6 +1462,8 @@ def decide_edit(
     if before is None and role == "production":
         if autonomous:
             return KernelDecision("allow", "reviewed autonomous full write")
+        if posixpath.basename(path) in marker_files and documentation_only(updated):
+            return KernelDecision("allow", "a package marker states nothing to review")
         return KernelDecision("ask", "full-file writes require approval")
     if after is None or after == "":
         return KernelDecision("allow", "pure deletion")

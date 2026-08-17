@@ -42,6 +42,23 @@ defer, which hands the sandbox status over with the rest of the decision.
 Confinement wins a join, so one segment that must stay inside keeps the whole
 line inside. A runtime with no per-call sandbox renders the plain effect.
 
+`uv run <target>` is parsed rather than matched against that table, so its
+targets carry the same three answers on a table of their own: each declares
+its effect, its placement, and its reason. Blessing is the default and the
+common case, and a project that means to stop a target — one that spends
+money, runs for an hour, or publishes something — says so there. Leaving it
+off is not the same answer: an undeclared target reaches no judgment, which
+denies unsandboxed and defers under the boundary, where the policy has
+stated nothing and the runtime's own permissions decide.
+
+A target may also carry subcommands, because a toolchain reached through
+`uv run` is one target and many commands — a devtools CLI that mostly reads
+a repository may have one verb beneath it that opens a paid agent session,
+and without this the choice is blessing that verb or refusing the toolchain.
+The shape and the walk are the command table's own, so a target with verbs
+is judged exactly as the command spelled directly would be, with the
+target's own effect as the default beneath them.
+
 Both axes cascade down a table's nesting, and absence means one thing
 everywhere: a subcommand or operation omitting `effect` or `sandbox` inherits
 the level above it, and one stating either overrides what it inherited in
@@ -52,7 +69,8 @@ silent allow, and the fallback beneath every table denies.
 `$(...)` classifies recursively — the inner command joins the batch and its
 opaque result rides only argument-safe commands; command position, deep
 nesting, and backticks stay conservative. File writes (redirection, `rm`)
-auto-allow only into repo `tmp/` and the scratchpad (`$TMPDIR`,
+auto-allow only into a repo `tmp/` — the one at the top or any a package
+opened beside itself — and the scratchpad (`$TMPDIR`,
 `/tmp/claude-*`; reassigning `TMPDIR` asks); discards and fd dups strip;
 heredoc-fed writes deny toward Edit/tmp scripts. Loops, conditionals, case
 arms, subshells, and brace groups classify recursively over frozen bindings —
@@ -84,8 +102,26 @@ three or fewer auto-allows. Imports, comments, whitespace, blank lines,
 docstrings, string literals, type annotations, and TypedDict/BaseModel bodies
 are not real lines. Pure deletions and single-line `replace_all` renames
 auto-allow outright; a multi-line `replace_all` falls through to the size
-gate, and a full-file write never auto-allows. The anti-pattern audit runs
+gate, and a full-file write asks for everything but a package marker — an
+`__init__.py` arriving empty or holding nothing but its docstring, where the
+question the gate exists to raise has no content to answer it. One carrying
+anything else is the module it became, and asks. The anti-pattern audit runs
 before any auto-allow, so keeping an edit small cannot outrun it.
+
+A project that declares an **acceptance guard** adds one gate ahead of all
+of those, over every root it gave the `test` role. An ordinary session is
+asked before it edits a test, because a test that encodes the wrong
+behaviour has to be fixable by someone who can weigh that; a session
+declared autonomous is refused, because for it these tests are the
+specification it is implementing against, and rewriting a specification to
+match an implementation is the failure the guard exists to catch. It answers
+before the gates below rather than through them — including pure deletion,
+which would otherwise wave through removing the test outright, and the
+protected-path rules, whose autonomous release must not survive a refusal
+aimed at exactly that caller. This is the one place autonomy costs a caller
+more rather than less. Declaring no guard leaves tests judged by the
+ordinary lattice, which is right for a project that does not implement
+against fixed acceptance tests.
 
 The
 resolver's worker receives only its declared autonomous edit exceptions;

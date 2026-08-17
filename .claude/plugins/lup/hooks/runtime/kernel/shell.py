@@ -75,6 +75,7 @@ class ShellContext(TypedDict):
     directory_targets: list[str]
     recoverable_target_limit: int
     runner_targets: list[RunnerTargetRow]
+    target_tables: list[ShellRuleRow]
 
 
 def shell_context(
@@ -89,6 +90,7 @@ def shell_context(
     directory_targets: list[str] | None = None,
     recoverable_target_limit: int = 5,
     runner_targets: list[RunnerTargetRow] | None = None,
+    target_tables: list[ShellRuleRow] | None = None,
 ) -> ShellContext:
     """Bundle one classification's declarations, normalizing absent lists.
 
@@ -108,6 +110,7 @@ def shell_context(
         directory_targets=directory_targets or [],
         recoverable_target_limit=recoverable_target_limit,
         runner_targets=runner_targets or [],
+        target_tables=target_tables or [],
     )
 
 
@@ -245,7 +248,7 @@ def decide_shell_segment(segment: list[str], context: ShellContext) -> KernelDec
             return KernelDecision("deny", "inline code is not allowed")
         return unjudged("uvx command is not classified")
     if executable == "uv" and len(words) > 1:
-        return decide_uv(words, context["runner_targets"])
+        return decide_uv(words, context["runner_targets"], context["target_tables"])
     return decide_command_rows(words, context["rows"])
 
 
@@ -771,6 +774,7 @@ def classify_shell(
     directory_targets: list[str] | None = None,
     recoverable_target_limit: int = 5,
     runner_targets: list[RunnerTargetRow] | None = None,
+    target_tables: list[ShellRuleRow] | None = None,
 ) -> KernelDecision:
     """Conservatively classify every segment in one shell command."""
     segments = parse_shell_words(
@@ -790,6 +794,7 @@ def classify_shell(
         directory_targets,
         recoverable_target_limit,
         runner_targets,
+        target_tables,
     )
     decisions = decide_segment_list(segments, context)
     placement = joined_placement(decisions)
@@ -864,6 +869,7 @@ def decide_shell(
     directory_targets: list[str] | None = None,
     recoverable_target_limit: int = 5,
     runner_targets: list[RunnerTargetRow] | None = None,
+    target_tables: list[ShellRuleRow] | None = None,
     escapable: bool = False,
 ) -> KernelDecision:
     """Classify one command, honoring an escalation marker and hinting denies.
@@ -927,6 +933,7 @@ def decide_shell(
             directory_targets=directory_targets,
             recoverable_target_limit=recoverable_target_limit,
             runner_targets=runner_targets,
+            target_tables=target_tables,
         )
         if inner.effect == "allow":
             return inner
@@ -947,5 +954,6 @@ def decide_shell(
             directory_targets=directory_targets,
             recoverable_target_limit=recoverable_target_limit,
             runner_targets=runner_targets,
+            target_tables=target_tables,
         )
     )

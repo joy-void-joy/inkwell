@@ -4,6 +4,7 @@
 """Generated application-owned policy data."""
 
 from kernel.rows import (
+    AcceptanceGuardRow,
     AntiPatternRow,
     PathRoleRow,
     PathRuleRow,
@@ -1576,12 +1577,16 @@ PATH_ROLES: list[PathRoleRow] = [
     {
         "root": "tests",
         "role": "test",
+        "kind": "subtree",
     },
     {
         "root": "tmp",
         "role": "scratch",
+        "kind": "subtree",
     },
 ]
+
+ACCEPTANCE_GUARD: AcceptanceGuardRow | None = None
 
 SHELL_RULES: list[ShellRuleRow] = [
     {
@@ -6903,24 +6908,36 @@ RUNNER_TARGETS: list[RunnerTargetRow] = [
     {
         "name": "pyright",
         "sandbox": "ambient",
+        "effect": "allow",
+        "reason": "",
     },
     {
         "name": "pytest",
         "sandbox": "ambient",
+        "effect": "allow",
+        "reason": "",
     },
     {
         "name": "ruff",
         "sandbox": "ambient",
+        "effect": "allow",
+        "reason": "",
     },
     {
         "name": "lup-devtools",
         "sandbox": "outside",
+        "effect": "allow",
+        "reason": "",
     },
     {
         "name": "inkwell",
         "sandbox": "outside",
+        "effect": "allow",
+        "reason": "",
     },
 ]
+
+RUNNER_TARGET_TABLES: list[ShellRuleRow] = []
 
 SANDBOX_EXCLUDED_COMMANDS: list[str] = []
 

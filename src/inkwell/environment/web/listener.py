@@ -93,7 +93,7 @@ class WebListener(PipelineListener):
         await self.broadcast(
             BlockEvent(
                 block_type=block_type,
-                content=content[:2000],
+                content=content,
                 prefix=prefix,
             )
         )

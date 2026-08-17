@@ -63,8 +63,8 @@ def summarize_source(value: str) -> str:
     if path.is_file():
         return f"file:{path} ({path.stat().st_size} B)"
     if stripped.startswith(("http://", "https://")):
-        return f"url:{stripped[:80]}"
-    return f"text[{len(stripped)}]:{stripped[:60]!r}"
+        return f"url:{stripped}"
+    return f"text[{len(stripped)}]:{stripped!r}"
 
 
 @formats_router.get("/formats")

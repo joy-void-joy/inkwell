@@ -311,8 +311,8 @@ def summarize_inputs(inputs: list[str]) -> str:
         if Path(stripped).is_file():
             return f"[file] {Path(stripped).name}"
         if stripped.startswith(("http://", "https://")):
-            return f"[url] {stripped[:60]}"
-        return f"[text {len(stripped)}ch] {stripped[:50]!r}"
+            return f"[url] {stripped}"
+        return f"[text {len(stripped)}ch] {stripped!r}"
 
     parts = [describe(value) for value in inputs]
     return "; ".join(parts) if parts else "(none)"
@@ -3964,7 +3964,7 @@ class PipelineRunner:
             self.known_tabs = {t.title: t.tab_id for t in existing}
         else:
             created = await do_create_doc(
-                f"Inkwell — {', '.join(s[:30] for s in self.sources)[:60]}",
+                f"Inkwell — {', '.join(self.sources)}",
                 share_with=current_settings().author_email,
                 session_state=self.state,
             )
@@ -3989,7 +3989,7 @@ class PipelineRunner:
                 self.overview_tab_id,
                 (
                     f"# Writing Pipeline\n\n"
-                    f"**Sources:** {', '.join(self.sources)[:120]}\n\n"
+                    f"**Sources:** {', '.join(self.sources)}\n\n"
                     f"**Stage:** starting\n\n"
                     f"*Comment on any tab to give feedback. "
                     f"Edit directly to override agent decisions.*"
@@ -4152,9 +4152,7 @@ class PipelineRunner:
         if classified.impact == "revert_suggested":
             logger.info("Suggesting revert for accidental edit on '%s'", edit.tab)
             async with gdoc_nonfatal("post revert suggestion"):
-                snippet = (
-                    edit.original_snippet[:500] if edit.original_snippet else edit.diff
-                )
+                snippet = edit.original_snippet or edit.diff
                 await do_insert_comment(
                     self.doc_id,
                     (
@@ -4163,9 +4161,7 @@ class PipelineRunner:
                         f"Original text:\n{snippet}\n\n"
                         f"(Reply 'yes' to keep the edit, or 'no' / ignore to revert.)"
                     ),
-                    anchor_text=edit.original_snippet[:200]
-                    if edit.original_snippet
-                    else None,
+                    anchor_text=edit.original_snippet or None,
                     session_state=self.state,
                 )
             return
@@ -5780,7 +5776,7 @@ class PipelineRunner:
                 "sync" if from_sync and not batch else "revise",
                 "Syncing feedback"
                 if from_sync and not batch
-                else f"Revising: {' | '.join(batch)[:60]}",
+                else f"Revising: {' | '.join(batch)}",
             )
             self.state.set_stage("revising")
 

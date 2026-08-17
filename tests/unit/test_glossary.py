@@ -91,7 +91,9 @@ def make_runner(
 ) -> PipelineRunner:
     """A runner far enough along to say where its writers' glossary lives."""
     return PipelineRunner(
-        sources=["x"], notes=PipelineNotes(tmp_path / "n"), placement=placement
+        sources=["x"],
+        notes=PipelineNotes(tmp_path / "n"),
+        assignment=placement.assigned() if placement is not None else None,
     )
 
 

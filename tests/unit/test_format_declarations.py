@@ -309,7 +309,9 @@ class TestSharedVoiceDeclaration:
         assert declared[-len(VOICE_TELL_CHECKS) :] == VOICE_TELL_CHECKS
 
     def test_only_the_teaching_rows_are_the_textbook_s_own(self) -> None:
-        own = format_checks_for("textbook")[: -len(VOICE_TELL_CHECKS)]
+        own = format_checks_for("textbook")[
+            len(EVERY_FORMAT_CHECKS) : -len(VOICE_TELL_CHECKS)
+        ]
         assert [check.name for check in own] == [
             "bolded summaries",
             "bold emphasis",

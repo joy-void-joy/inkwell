@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from inkwell.agent.config import active_profile, settings
+from inkwell.pdf import reads_by_page
 from lup.workspace.content_safety import SavedContent, save_content
 from lup.mcp import ToolError, lup_tool
 from lup.types import EnvVars, JsonValue, StringMap
@@ -551,7 +552,7 @@ async def do_extract_file(file_path_str: str) -> ExtractFileOutput:
 
     suffix = file_path.suffix.lower()
 
-    if suffix == ".pdf":
+    if reads_by_page(file_path):
         pdf_note = (
             f"[PDF file: {file_path.name}. Use the Read tool with "
             f'file_path="{file_path}" and pages="1-20" to read content. '

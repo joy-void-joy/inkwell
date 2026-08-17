@@ -1,12 +1,16 @@
 """What can be read off a PDF without reading text out of it.
 
 A page count is structure, not content: poppler reports it from the page
-tree, so a scanned document answers the same as a born-digital one. That is
-the whole of what belongs here — pulling the *text* out is what returns an
-empty string from an image-only page, and an empty string reads as a document
-that does not say the thing rather than as an extraction that failed. Both the
-corpus and the source registry need the count and neither needs the text, so
-the one operation lives here instead of once in each.
+tree, so a scanned document answers the same as a born-digital one. Pulling
+the *text* out is what returns an empty string from an image-only page, and an
+empty string reads as a document that does not say the thing rather than as an
+extraction that failed — so that is the one thing this module will not do.
+
+What it does instead is answer, once, the two questions every surface holding
+a source file asks: how many pages, and is this read by page at all. Both the
+corpus and the source registry need the count; the extract stage, the registry,
+and the local-file extractor each need the sort. Answered here, they cannot
+drift into disagreeing about which files a page-window reader owns.
 """
 
 import logging
@@ -16,6 +20,17 @@ from pathlib import Path
 import sh
 
 logger = logging.getLogger(__name__)
+
+
+def reads_by_page(path: Path) -> bool:
+    """Whether a source file is navigated a page window at a time.
+
+    A PDF is: the source registry describes it, a reader holding ``Read``
+    answers questions from it, and no stage inlines it as text. Everything that
+    sorts source files turns on this one question, so a document the registry
+    owns can never also reach a stage as bare source material.
+    """
+    return path.suffix.lower() == ".pdf"
 
 
 def page_count(pdf_path: Path) -> int:

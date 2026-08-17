@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field, computed_field
 from inkwell.agent.config import stage_model
 from inkwell.agent.client import query, result_text
 from inkwell.agent.provenance import Acquisition
-from inkwell.pdf import page_count
+from inkwell.pdf import page_count, reads_by_page
 from lup.runtime.usage import CostAccumulator
 from lup.mcp import LupMcpTool, ToolError, lup_tool
 from lup.telemetry.trace import TraceLogger
@@ -86,7 +86,7 @@ def build_source_registry(
             path = sources_dir / original.name
             if path.resolve() != original.resolve():
                 shutil.copy2(original, path)
-            is_pdf = path.suffix.lower() == ".pdf"
+            is_pdf = reads_by_page(path)
             yield SourceDocument(
                 label=path.stem,
                 path=str(path.resolve()),

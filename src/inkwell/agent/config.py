@@ -136,6 +136,7 @@ type PipelineStage = Literal[
     "preprocess",
     "extract",
     "voice",
+    "book",
     "plan",
     "assumptions",
     "research",

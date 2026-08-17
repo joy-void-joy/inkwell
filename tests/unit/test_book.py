@@ -17,6 +17,7 @@ from inkwell.agent import config as config_mod
 from inkwell.agent.book import (
     BookRecord,
     BookStore,
+    ChapterAssignment,
     ChapterPlacement,
     ChapterRecord,
 )
@@ -42,7 +43,7 @@ from inkwell.agent.reader_feedback import (
     ingest_reader_feedback,
 )
 from inkwell.agent.session import WritingSessionState
-from inkwell.environment.entrypoints import EntryPointValues
+from inkwell.environment.entrypoints import EntryPointValues, SuppliedValues
 from inkwell.environment.launch import run_declared_session
 
 EXPORT = Path(__file__).parent / "data" / "formspree_export_sample.json"
@@ -55,7 +56,7 @@ type LaunchArgument = (
     | bool
     | list[str]
     | None
-    | ChapterPlacement
+    | ChapterAssignment
     | PipelineListener
     | SessionTrace
     | WritingSessionState
@@ -66,9 +67,9 @@ one of the run's collaborators."""
 
 
 class PlacedLaunch(BaseModel):
-    """Where the launch path told the pipeline this run sits."""
+    """Which book the launch path told the pipeline this run writes."""
 
-    placement: ChapterPlacement | None = None
+    assignment: ChapterAssignment | None = None
 
 
 def plan_for(chapter: int | None, *titles: str) -> ArticlePlan:
@@ -132,7 +133,7 @@ async def capture_plan_task(
         notes.save_artifact("plan", plan_for(None, *titles))
 
     monkeypatch.setattr("inkwell.agent.pipeline.query", capture)
-    await plan_article(notes, placement=placement)
+    await plan_article(notes, assignment=placement.assigned() if placement else None)
     return tasks
 
 
@@ -169,6 +170,32 @@ async def run_refine_stage(
 
     monkeypatch.setattr("inkwell.agent.pipeline.query", refine)
     return await refine_plan(notes)
+
+
+async def launch_capturing(
+    monkeypatch: pytest.MonkeyPatch, entry_point: str, supplied: SuppliedValues
+) -> PlacedLaunch:
+    """Launch one entry point against a session that records only its book.
+
+    The launch path is what turns whatever a surface collected into what the
+    pipeline is handed, so it is the thing under test — everything past it is
+    replaced.
+    """
+    launched = PlacedLaunch()
+
+    async def record(
+        *, assignment: ChapterAssignment | None = None, **rest: LaunchArgument
+    ) -> AgentSessionResult:
+        launched.assignment = assignment
+        return AgentSessionResult(
+            session_id="test", timestamp="", output=WritingOutput(title="")
+        )
+
+    monkeypatch.setattr(launch_module, "run_session", record)
+    await run_declared_session(
+        EntryPointValues.declared(entry_point, supplied), session_id="test"
+    )
+    return launched
 
 
 class TestIdentityOnThePlan:
@@ -423,12 +450,19 @@ class TestARunThatIsResumed:
         assert runner.placement == CHAPTER_3
 
     def test_what_the_launch_declared_outranks_the_snapshot(self) -> None:
-        runner = PipelineRunner(sources=["dummy"], placement=CHAPTER_3)
+        runner = PipelineRunner(sources=["dummy"], assignment=CHAPTER_3.assigned())
         runner.snapshot.plan = plan_for(9)
         assert runner.placement == CHAPTER_3
 
     def test_a_run_with_neither_is_placed_nowhere(self) -> None:
         assert PipelineRunner(sources=["dummy"]).placement is None
+
+    def test_a_resumed_run_stays_in_its_book_when_the_launch_named_none(self) -> None:
+        """The assignment is what the book stages read, so it has to survive a
+        resume the same way the placement does."""
+        runner = PipelineRunner(sources=["dummy"])
+        runner.snapshot.plan = plan_for(3)
+        assert runner.assignment == ChapterAssignment(book="textbook", chapter=3)
 
 
 class TestReviseOneChapterOfABook:
@@ -438,24 +472,10 @@ class TestReviseOneChapterOfABook:
     async def test_a_placement_reaches_the_pipeline_from_the_launch_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        launched = PlacedLaunch()
-
-        async def record(
-            *, placement: ChapterPlacement | None = None, **rest: LaunchArgument
-        ) -> AgentSessionResult:
-            launched.placement = placement
-            return AgentSessionResult(
-                session_id="test", timestamp="", output=WritingOutput(title="")
-            )
-
-        monkeypatch.setattr(launch_module, "run_session", record)
-        await run_declared_session(
-            EntryPointValues.declared(
-                "revise", {"draft": "chapter4.md", "chapter": "atlas:4"}
-            ),
-            session_id="test",
+        launched = await launch_capturing(
+            monkeypatch, "revise", {"draft": "chapter4.md", "chapter": "atlas:4"}
         )
-        assert launched.placement == ChapterPlacement(book="atlas", chapter=4)
+        assert launched.assignment == ChapterAssignment(book="atlas", chapter=4)
 
     async def test_a_revised_chapter_hands_its_writers_their_readers(
         self, notes: PipelineNotes, store: BookStore, monkeypatch: pytest.MonkeyPatch

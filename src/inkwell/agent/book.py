@@ -13,6 +13,20 @@ SourceProvenance` composes onto a research source. A standalone article holds
 none: it is genuinely bookless rather than a book of one chapter, so every
 per-run path stays exactly what it was and the book path is additive.
 
+Beside the per-chapter records sits the book's **outline** — its reading order,
+the ordinal each chapter holds, and the cross-references between them. That is
+what the book stage owns and what every later run reads: a chapter run that had
+to re-derive the order from its own source material would renumber the book
+from whichever chapter happened to run last.
+
+**An ordinal is an identity, not a position.** Once a chapter has been assigned
+one it keeps it, whatever the reading order becomes: an inserted chapter takes
+an ordinal the book has never used, and a chapter dropped from the order keeps
+its own in :attr:`BookOutline.retired` so nothing is ever handed out twice.
+Renumbering would be cheap here and ruinous outside — the reader-feedback export
+is keyed by chapter and section ordinals readers have already seen published, so
+shifting them re-addresses every row that was already filed.
+
 The record lives outside any session, beside the research corpus and for the
 same reason — a session's notes die with the run, and a book assembled one
 chapter per run would have nothing left to read.
@@ -21,14 +35,16 @@ chapter per run would have nothing left to read.
 chapter. Two chapter runs of one book therefore never write the same path, and
 that partition — not a lock — is the guarantee: :meth:`BookStore.chapter_path`
 derives the file from the record's own placement, so a run has no way to name
-another chapter's file. Each write is an atomic temp-and-rename through
-``publish_atomic``, so a reader assembling the book sees whole chapter records
-or none, never a half-written one. Two runs of the *same* chapter do land on
-one path; there the rename decides, and the later record replaces the earlier
-one whole rather than blending with it.
+another chapter's file. The outline is one more single-writer file: the book
+stage lays it out and a chapter run only ever reads it. Each write is an atomic
+temp-and-rename through ``publish_atomic``, so a reader assembling the book sees
+whole records or none, never a half-written one. Two runs of the *same* chapter
+do land on one path; there the rename decides, and the later record replaces the
+earlier one whole rather than blending with it.
 
     books/
     └── ai-safety-textbook/
+        ├── outline.json # the book's order and cross-references, from the book stage
         ├── 001.json     # one file per chapter, written by that chapter's run
         └── 003.json
 """
@@ -37,6 +53,7 @@ import logging
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -53,6 +70,17 @@ chapter nine reaches chapter one's record, and narrow enough that no book name
 can walk out of the store's root. What the book is *called* is prose, and lives
 in the record rather than in the key.
 """
+
+
+def comparable(title: str) -> str:
+    """A title reduced to what two spellings of the same one share.
+
+    Whitespace and case are how one title gets typed differently on two days;
+    everything else is a difference that means something, so nothing further is
+    stripped. Used only to match a title against one already on record — never
+    to decide that two chapters are the same chapter.
+    """
+    return " ".join(title.split()).casefold()
 
 
 class ChapterPlacement(BaseModel, frozen=True):
@@ -75,6 +103,444 @@ class ChapterPlacement(BaseModel, frozen=True):
     def label(self) -> str:
         """Where this sits, as a reader of the book would say it."""
         return f"{self.book} chapter {self.chapter}"
+
+    def assigned(self) -> "ChapterAssignment":
+        """This placement as an assignment — both halves already settled.
+
+        What a run that already knows where it sits hands to the code that
+        takes an assignment, so a stage reading the book has one kind of value
+        to understand whether the launch named the ordinal or the record did.
+        """
+        return ChapterAssignment(book=self.book, chapter=self.chapter)
+
+
+class ChapterAssignment(BaseModel, frozen=True):
+    """Which book a run writes, and which chapter of it where the launch said.
+
+    The chapter is optional and the book is not, because only one of the two
+    halves can be answered from somewhere else: a book's own record says which
+    chapter carries a given title, and nothing anywhere says which book an
+    unattached chapter belongs to. A run therefore names its book and may leave
+    the ordinal to :meth:`BookRecord.identify`, which is what lets one chapter
+    be re-run without the book stage that would have numbered it.
+    """
+
+    book: str = Field(
+        pattern=BOOK_ID_PATTERN, description="The book this run writes a chapter of"
+    )
+    chapter: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "The chapter ordinal the launch named, absent where it left the "
+            "book's own record to say which chapter this is"
+        ),
+    )
+
+    def declared(self) -> ChapterPlacement | None:
+        """The placement the launch itself settled, where it settled one."""
+        if self.chapter is None:
+            return None
+        return ChapterPlacement(book=self.book, chapter=self.chapter)
+
+    def spelled(self) -> str:
+        """This assignment as a surface spells it: ``book`` or ``book:chapter``."""
+        return self.book if self.chapter is None else f"{self.book}:{self.chapter}"
+
+
+type IdentitySource = Literal["declared", "recorded", "appended"]
+"""How a run came to know which chapter it is.
+
+``declared``: the launch named the ordinal outright. ``recorded``: the book's
+own outline or chapter records already place this title. ``appended``: neither
+did, so the run took an ordinal the book has never used — the one case where a
+run had to assume something, and therefore the one that has to say so.
+"""
+
+
+class ChapterIdentity(BaseModel, frozen=True):
+    """Which chapter a run is, and how that was decided.
+
+    Carrying the *how* beside the placement is what lets a run state an
+    assumption instead of quietly acting on one: a chapter appended because the
+    book had nothing on record reads exactly like a declared one at the point of
+    use, and the difference only survives if it is written down here.
+    """
+
+    placement: ChapterPlacement = Field(description="Which chapter this run is")
+    source: IdentitySource = Field(description="What settled the ordinal")
+
+    def render(self) -> str:
+        """What the run knows about its own place, in the terms it decided it."""
+        where = self.placement.label()
+        match self.source:
+            case "declared":
+                return f"Writing {where}, as this run was launched."
+            case "recorded":
+                return (
+                    f"Writing {where} — the book's own record already places "
+                    f"this title there."
+                )
+            case "appended":
+                return (
+                    f"Writing {where}. Assumed: {self.placement.book} records no "
+                    f"chapter under this title and no order this one fits into, "
+                    f"so this run took the next ordinal the book has never used. "
+                    f"Relaunch with --chapter {self.placement.book}:<n> to place "
+                    f"it somewhere else, or run the book stage to lay the "
+                    f"book's order out first."
+                )
+
+
+type ChapterRelation = Literal["depends_on", "elaborates", "revisits", "contrasts"]
+"""What one chapter does to another across a cross-reference.
+
+``depends_on``: the source cannot be read without what the target established.
+``elaborates``: the source develops something the target introduced.
+``revisits``: the source returns to the target's subject with more to say.
+``contrasts``: the source sets itself against the target's case.
+"""
+
+RELATION_PHRASING: dict[ChapterRelation, str] = {
+    "depends_on": "depends on",
+    "elaborates": "elaborates",
+    "revisits": "revisits",
+    "contrasts": "contrasts with",
+}
+"""How each relation reads in a sentence a chapter's stage is shown."""
+
+
+class CrossReference(BaseModel, frozen=True):
+    """One chapter leaning on another, and what passes between them.
+
+    Two ordinals and a named relation rather than a sentence, because a later
+    stage has to *resolve* this — find the chapter it points at, check it is
+    still in the book, render it beside that chapter's title. A sentence would
+    have to be parsed back apart to do any of that, and the parse would be a
+    guess where this is a lookup.
+    """
+
+    from_chapter: int = Field(ge=1, description="Ordinal of the chapter that refers")
+    to_chapter: int = Field(ge=1, description="Ordinal of the chapter referred to")
+    relation: ChapterRelation = Field(description="What the referring chapter does")
+    subject: str = Field(
+        description=(
+            "What is carried across — the term, result, or claim the referring "
+            "chapter needs from the one it names"
+        )
+    )
+
+
+class ChapterEntry(BaseModel, frozen=True):
+    """One chapter of the book's outline: its identity, its ordinal, its subject.
+
+    ``key`` is what survives a retitling and a reordering, so it is what the
+    ordinal is held fixed against. ``ordinal`` is the identity readers and the
+    feedback export already have; where the two disagree about position, the
+    outline's order is the reading order and the ordinal is only a name.
+    """
+
+    key: str = Field(
+        pattern=BOOK_ID_PATTERN,
+        description=(
+            "Stable slug naming this chapter across layouts — what it is "
+            "called does not change when its title or its place does"
+        ),
+    )
+    ordinal: int = Field(ge=1, description="The ordinal this chapter holds, for good")
+    title: str = Field(description="The chapter's own title")
+    thesis: str = Field(default="", description="What the chapter argues, in one line")
+
+    def label(self) -> str:
+        """This chapter as a reader of the outline would name it."""
+        return f"chapter {self.ordinal} ({self.title})"
+
+
+class ResolvedReference(BaseModel, frozen=True):
+    """A cross-reference paired with the two chapters it actually names.
+
+    What "a later stage resolves it" produces: the reference on its own is two
+    numbers, and this is those numbers looked up in the outline that assigned
+    them, so a stage renders titles rather than ordinals it would have to
+    explain.
+    """
+
+    reference: CrossReference = Field(description="The recorded reference")
+    source: ChapterEntry = Field(description="The chapter that refers")
+    target: ChapterEntry = Field(description="The chapter referred to")
+
+    def render(self) -> str:
+        """This reference as a sentence, built from the parts rather than stored."""
+        relation = RELATION_PHRASING[self.reference.relation]
+        return (
+            f"{self.source.label()} {relation} {self.target.label()}: "
+            f"{self.reference.subject}"
+        )
+
+
+class ProposedChapter(BaseModel, frozen=True):
+    """One chapter as a layout proposes it, before any ordinal is assigned.
+
+    Deliberately without an ordinal: numbering is the outline's to do, because
+    only the outline knows which ordinals the book has already handed out and
+    must never hand out again.
+    """
+
+    key: str = Field(pattern=BOOK_ID_PATTERN, description="Stable slug for the chapter")
+    title: str = Field(description="The chapter's title")
+    thesis: str = Field(default="", description="What the chapter argues, in one line")
+
+
+class ProposedReference(BaseModel, frozen=True):
+    """One cross-reference as a layout proposes it, by chapter key."""
+
+    from_key: str = Field(description="Key of the chapter that refers")
+    to_key: str = Field(description="Key of the chapter referred to")
+    relation: ChapterRelation = Field(description="What the referring chapter does")
+    subject: str = Field(description="What the referring chapter needs from the other")
+
+
+class BookLayout(BaseModel):
+    """A book as the book stage laid it out, before ordinals are assigned.
+
+    Keys throughout rather than ordinals, so the stage that lays a book out
+    never has to know — or guess — which numbers are already spoken for.
+    """
+
+    title: str = Field(default="", description="What the book is called")
+    chapters: list[ProposedChapter] = Field(
+        default=[], description="The chapters, in reading order"
+    )
+    references: list[ProposedReference] = Field(
+        default=[], description="What each chapter needs from the others"
+    )
+
+
+class BookOutline(BaseModel):
+    """A book's reading order, its assigned ordinals, and its cross-references.
+
+    The one thing above the chapters: written by the book stage, read by every
+    chapter run. ``chapters`` is the order to read in and ``retired`` is the set
+    of ordinals that were assigned and are no longer read — kept so that an
+    ordinal is never handed to a second chapter, which is what makes it an
+    identity rather than a position.
+    """
+
+    book: str = Field(pattern=BOOK_ID_PATTERN, description="Which book this outlines")
+    title: str = Field(default="", description="What the book is called")
+    chapters: list[ChapterEntry] = Field(
+        default=[], description="The book's chapters, in reading order"
+    )
+    retired: list[ChapterEntry] = Field(
+        default=[],
+        description=(
+            "Chapters dropped from the reading order, holding their ordinals so "
+            "nothing is ever renumbered onto one a reader already saw"
+        ),
+    )
+    cross_references: list[CrossReference] = Field(
+        default=[], description="What each chapter needs from the others"
+    )
+
+    def every(self) -> list[ChapterEntry]:
+        """Every chapter this book has ever assigned an ordinal to."""
+        return [*self.chapters, *self.retired]
+
+    def entry(self, ordinal: int) -> ChapterEntry | None:
+        """The chapter holding one ordinal, where the reading order still has it."""
+        return next((held for held in self.chapters if held.ordinal == ordinal), None)
+
+    def next_ordinal(self) -> int:
+        """An ordinal this book has never assigned, retirements included."""
+        return max((held.ordinal for held in self.every()), default=0) + 1
+
+    def resolved(self) -> list[ResolvedReference]:
+        """Every cross-reference looked up in the order that assigned it.
+
+        A reference whose endpoints are no longer both in the reading order is
+        reported and left out: it points at a chapter nobody reads, so a stage
+        shown it would be asked to honor a link into a gap.
+        """
+
+        def looked_up() -> Iterator[ResolvedReference]:
+            """Each reference paired with the two chapters it names."""
+            for reference in self.cross_references:
+                source = self.entry(reference.from_chapter)
+                target = self.entry(reference.to_chapter)
+                if source is None or target is None:
+                    logger.warning(
+                        "Cross-reference %d -> %d in %s names a chapter the "
+                        "reading order no longer holds",
+                        reference.from_chapter,
+                        reference.to_chapter,
+                        self.book,
+                    )
+                    continue
+                yield ResolvedReference(
+                    reference=reference, source=source, target=target
+                )
+
+        return list(looked_up())
+
+    def references_from(self, ordinal: int) -> list[ResolvedReference]:
+        """What one chapter is expected to lean on."""
+        return [r for r in self.resolved() if r.reference.from_chapter == ordinal]
+
+    def references_to(self, ordinal: int) -> list[ResolvedReference]:
+        """What the other chapters expect from this one."""
+        return [r for r in self.resolved() if r.reference.to_chapter == ordinal]
+
+    def laid_out(self) -> "BookLayout":
+        """This outline in the vocabulary a layout speaks: keys, not ordinals.
+
+        What the book stage is shown of the book it is laying out again — the
+        same shape it writes, so the keys it reads back are the keys it can
+        spell. A key kept is an ordinal kept, since the key is what
+        :meth:`relaid` holds a chapter's number against, and a stage shown only
+        titles would have to invent one and renumber the chapter it named.
+        """
+        key_of = {entry.ordinal: entry.key for entry in self.chapters}
+        return BookLayout(
+            title=self.title,
+            chapters=[
+                ProposedChapter(key=held.key, title=held.title, thesis=held.thesis)
+                for held in self.chapters
+            ],
+            references=[
+                ProposedReference(
+                    from_key=key_of[reference.from_chapter],
+                    to_key=key_of[reference.to_chapter],
+                    relation=reference.relation,
+                    subject=reference.subject,
+                )
+                for reference in self.cross_references
+                if reference.from_chapter in key_of and reference.to_chapter in key_of
+            ],
+        )
+
+    def relaid(self, layout: "BookLayout", *, unused: int) -> "BookOutline":
+        """This book laid out again as ``layout`` proposes, ordinals held fixed.
+
+        A chapter already on record keeps the ordinal it has, whatever its new
+        place in the reading order; a chapter this outline has never seen takes
+        one the book has never used; and a chapter the layout dropped moves to
+        ``retired`` still holding its own. So a run of the book stage can
+        reorder, retitle, insert, and drop without re-addressing a single
+        chapter a reader has already been given a number for.
+
+        ``unused`` is the first ordinal the *book* has never handed out, which
+        the caller states because an outline cannot know it: a chapter run that
+        appended itself without a layout holds an ordinal on file and nowhere
+        here, and numbering from this outline alone would hand it out twice.
+        """
+        held = {entry.key: entry.ordinal for entry in self.every()}
+
+        def numbered() -> Iterator[ChapterEntry]:
+            """Each proposed chapter, keeping its ordinal or taking a fresh one."""
+            nonlocal unused
+            for proposed in layout.chapters:
+                if proposed.key in held:
+                    ordinal = held[proposed.key]
+                else:
+                    ordinal = unused
+                    unused += 1
+                yield ChapterEntry(
+                    key=proposed.key,
+                    ordinal=ordinal,
+                    title=proposed.title,
+                    thesis=proposed.thesis,
+                )
+
+        chapters = list(numbered())
+        ordinal_of = {entry.key: entry.ordinal for entry in chapters}
+
+        def carried() -> Iterator[CrossReference]:
+            """Each proposed reference as ordinals, where both ends are chapters."""
+            for reference in layout.references:
+                if reference.from_key not in ordinal_of:
+                    logger.warning(
+                        "Cross-reference from %r names no chapter of this layout",
+                        reference.from_key,
+                    )
+                    continue
+                if reference.to_key not in ordinal_of:
+                    logger.warning(
+                        "Cross-reference to %r names no chapter of this layout",
+                        reference.to_key,
+                    )
+                    continue
+                yield CrossReference(
+                    from_chapter=ordinal_of[reference.from_key],
+                    to_chapter=ordinal_of[reference.to_key],
+                    relation=reference.relation,
+                    subject=reference.subject,
+                )
+
+        return BookOutline(
+            book=self.book,
+            title=layout.title or self.title,
+            chapters=chapters,
+            retired=sorted(
+                (entry for entry in self.every() if entry.key not in ordinal_of),
+                key=lambda entry: entry.ordinal,
+            ),
+            cross_references=list(carried()),
+        )
+
+    def render(self, placement: ChapterPlacement | None = None) -> str:
+        """The book's order and its cross-references, as a chapter run reads it.
+
+        With a ``placement``, the cross-references are narrowed to that
+        chapter's own — what it must lean on and what later chapters will expect
+        of it — because those are the ones its writers have to honor.
+        """
+
+        def lines() -> Iterator[str]:
+            """The order, what is retired from it, then the references."""
+            named = f" — {self.title}" if self.title else ""
+            yield (
+                f"## The book's recorded order{named}\n\n"
+                f"A chapter's ordinal is its identity and is never reassigned, "
+                f"so read the sequence below rather than the numbers:\n"
+                + "\n".join(
+                    f"- {held.label()}" + (f": {held.thesis}" if held.thesis else "")
+                    for held in self.chapters
+                )
+            )
+            if self.retired:
+                yield (
+                    "Ordinals held back so nothing reuses them: "
+                    + ", ".join(held.label() for held in self.retired)
+                )
+            yield from self.reference_lines(placement)
+
+        return "\n\n".join(lines())
+
+    def reference_lines(self, placement: ChapterPlacement | None) -> Iterator[str]:
+        """The cross-reference sections, narrowed to one chapter where given."""
+        if placement is None:
+            resolved = self.resolved()
+            if resolved:
+                yield "## Cross-references between chapters\n\n" + "\n".join(
+                    f"- {r.render()}" for r in resolved
+                )
+            return
+        leans_on = self.references_from(placement.chapter)
+        if leans_on:
+            yield (
+                "## What this chapter is expected to lean on\n\n"
+                "Use these — the terms and results they name were settled "
+                "elsewhere in this book, so do not re-argue or rename them:\n"
+                + "\n".join(f"- {r.render()}" for r in leans_on)
+            )
+        leaned_on = self.references_to(placement.chapter)
+        if leaned_on:
+            yield (
+                "## What later chapters expect from this one\n\n"
+                "Establish these here, under these names, or the chapters "
+                "that point at them will have nothing to find:\n"
+                + "\n".join(f"- {r.render()}" for r in leaned_on)
+            )
 
 
 class ChapterRecord(BaseModel):
@@ -110,14 +576,24 @@ class ChapterRecord(BaseModel):
 
 
 class BookRecord(BaseModel):
-    """Every chapter record one book holds, read as one.
+    """Everything one book holds, read as one: its outline and its chapters.
 
-    A book nobody has written to yet reads as this with no chapters rather than
-    as a missing file every caller has to test for, so the first chapter of a
-    book runs against the same code path as the ninth.
+    A book nobody has written to yet reads as this with no outline and no
+    chapters rather than as a missing file every caller has to test for, so the
+    first chapter of a book runs against the same code path as the ninth. An
+    absent outline is not an empty one: it says the book stage has never laid
+    this book out, which is exactly what a run appending a chapter has to know
+    it is assuming.
     """
 
     book: str = Field(pattern=BOOK_ID_PATTERN, description="Which book this is")
+    outline: BookOutline | None = Field(
+        default=None,
+        description=(
+            "The book's reading order, ordinals, and cross-references, absent "
+            "until the book stage has laid the book out"
+        ),
+    )
     chapters: list[ChapterRecord] = Field(
         default=[], description="Chapter records on file, in chapter order"
     )
@@ -135,23 +611,112 @@ class BookRecord(BaseModel):
         output back as though a sibling had written it. Matched on the whole
         placement rather than on the ordinal, so a placement in another book
         drops nothing here instead of dropping this book's chapter of the same
-        number.
+        number. The outline is kept whole: it is the book's order rather than
+        this chapter's output, and a run that dropped its own row from it would
+        be reading a book with a hole where it sits.
         """
         return BookRecord(
             book=self.book,
+            outline=self.outline,
             chapters=[held for held in self.chapters if held.placement != placement],
         )
 
-    def render(self) -> str:
-        """The book so far, as a chapter run reads it."""
-        header = (
-            f"# {self.book} — the book so far\n\n"
-            f"{len(self.chapters)} chapter(s) on record, written by earlier runs. "
-            f"Read them as what this book has already claimed and already named: "
-            f"keep their terms, and do not re-argue what they settled.\n"
+    def next_ordinal(self) -> int:
+        """An ordinal this book has never used, in its outline or on file."""
+        outlined = self.outline.next_ordinal() if self.outline is not None else 1
+        written = max((held.placement.chapter for held in self.chapters), default=0) + 1
+        return max(outlined, written)
+
+    def relaid(self, layout: BookLayout) -> BookOutline:
+        """This book laid out as ``layout`` proposes, against every ordinal used.
+
+        The book stage's own write. It goes through the record rather than
+        through the outline because the record is what knows the whole of what
+        has been handed out — the outline's chapters, what it retired, and the
+        chapters a lone run appended with no outline to append to.
+        """
+        outline = (
+            self.outline if self.outline is not None else BookOutline(book=self.book)
         )
-        body = "\n\n".join(held.render() for held in self.chapters)
-        return f"{header}\n{body}\n"
+        return outline.relaid(layout, unused=self.next_ordinal())
+
+    def ordinal_titled(self, title: str) -> int | None:
+        """The ordinal this book records under ``title``, where exactly one does.
+
+        Exactly one, because the point of a lookup is to find a decision
+        somebody already made. Two chapters answering to one title is not a
+        decision, and picking either would misplace a whole chapter — so the
+        answer is that the record does not say, and the caller assumes openly
+        instead.
+        """
+        wanted = comparable(title)
+        if not wanted:
+            return None
+        outlined = self.outline.chapters if self.outline is not None else []
+        found = sorted(
+            dict.fromkeys(
+                [held.ordinal for held in outlined if comparable(held.title) == wanted]
+                + [
+                    held.placement.chapter
+                    for held in self.chapters
+                    if comparable(held.title) == wanted
+                ]
+            )
+        )
+        return found[0] if len(found) == 1 else None
+
+    def identify(self, assignment: ChapterAssignment, title: str) -> ChapterIdentity:
+        """Which chapter of this book a run writing ``title`` is.
+
+        The launch wins where it said: an explicit ordinal is a decision the
+        author made, and a title match is at best a decision they made earlier
+        and at worst a coincidence, so the lookup never overrules one. Where the
+        launch left it open the book's own record answers, and where the record
+        is silent the run appends — saying so, since an unstated append is
+        exactly the invented order this is meant to avoid.
+        """
+        declared = assignment.declared()
+        if declared is not None:
+            return ChapterIdentity(placement=declared, source="declared")
+        recorded = self.ordinal_titled(title)
+        if recorded is not None:
+            return ChapterIdentity(
+                placement=ChapterPlacement(book=self.book, chapter=recorded),
+                source="recorded",
+            )
+        return ChapterIdentity(
+            placement=ChapterPlacement(book=self.book, chapter=self.next_ordinal()),
+            source="appended",
+        )
+
+    def render(self, placement: ChapterPlacement | None = None) -> str:
+        """The book so far, as a chapter run reads it.
+
+        With a ``placement`` the cross-reference sections are that chapter's
+        own; without one the whole book's are rendered, which is what a run that
+        does not yet know which chapter it is has to read.
+        """
+
+        def lines() -> Iterator[str]:
+            """The header, the recorded order, then each chapter on file."""
+            yield (
+                f"# {self.book} — the book so far\n\n"
+                f"{len(self.chapters)} chapter(s) on record, written by earlier "
+                f"runs. Read them as what this book has already claimed and "
+                f"already named: keep their terms, and do not re-argue what "
+                f"they settled."
+            )
+            if self.outline is None:
+                yield (
+                    "This book has no recorded order yet — no book stage has "
+                    "laid it out, so nothing here says which chapter follows "
+                    "which, or what any chapter owes another."
+                )
+            else:
+                yield self.outline.render(placement)
+            yield from (held.render() for held in self.chapters)
+
+        return "\n\n".join(lines()) + "\n"
 
 
 class BookStore(BaseModel, frozen=True):
@@ -165,8 +730,12 @@ class BookStore(BaseModel, frozen=True):
     root: Path
 
     def book_dir(self, book: str) -> Path:
-        """Where one book's chapter records sit."""
+        """Where one book's outline and chapter records sit."""
         return self.root / book
+
+    def outline_path(self, book: str) -> Path:
+        """The one file the book stage writes: this book's order."""
+        return self.book_dir(book) / "outline.json"
 
     def chapter_path(self, placement: ChapterPlacement) -> Path:
         """The one file a chapter run writes, zero-padded so a listing sorts.
@@ -177,8 +746,24 @@ class BookStore(BaseModel, frozen=True):
         """
         return self.book_dir(placement.book) / f"{placement.chapter:03d}.json"
 
+    def load_outline(self, book: str) -> BookOutline | None:
+        """This book's recorded order, or None where no book stage has laid one.
+
+        An unreadable outline reads as none rather than taking the book down: a
+        chapter run states what it assumed and carries on, and the next run of
+        the book stage rewrites the file.
+        """
+        path = self.outline_path(book)
+        if not path.is_file():
+            return None
+        try:
+            return BookOutline.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValidationError, OSError):
+            logger.warning("Unreadable book outline at %s", path)
+            return None
+
     def load(self, book: str) -> BookRecord:
-        """Every chapter of one book, empty where nothing has been written yet.
+        """Everything one book holds, empty where nothing has been written yet.
 
         Constructing the empty record first is what checks the identity, so no
         unvalidated name reaches a path. A chapter file that no longer parses is
@@ -189,10 +774,13 @@ class BookStore(BaseModel, frozen=True):
         directory = self.book_dir(empty.book)
         if not directory.is_dir():
             return empty
+        outline = self.outline_path(empty.book)
 
         def held() -> Iterator[ChapterRecord]:
             """Each chapter file under this book that still parses as one."""
             for path in sorted(directory.glob("*.json")):
+                if path == outline:
+                    continue
                 try:
                     yield ChapterRecord.model_validate_json(
                         path.read_text(encoding="utf-8")
@@ -202,22 +790,34 @@ class BookStore(BaseModel, frozen=True):
 
         return BookRecord(
             book=empty.book,
+            outline=self.load_outline(empty.book),
             chapters=sorted(held(), key=lambda record: record.placement.chapter),
         )
 
     def publish(self, record: ChapterRecord) -> Path:
         """Write one chapter's record, replacing whatever that chapter had.
 
-        The only writer. A run publishes its own chapter and no other, and the
-        write is atomic, so a concurrent run of another chapter is unaffected
-        and a concurrent reader of the book sees this record whole or not yet.
+        A run publishes its own chapter and no other, and the write is atomic,
+        so a concurrent run of another chapter is unaffected and a concurrent
+        reader of the book sees this record whole or not yet.
         """
         path = self.chapter_path(record.placement)
         publish_atomic(path, record)
         return path
 
+    def publish_outline(self, outline: BookOutline) -> Path:
+        """Write the book's order, replacing whatever order it had.
+
+        The book stage's write and nobody else's: a chapter run reads this file
+        and appends to the book by publishing its own chapter record, so the
+        single-writer partition holds here the way it holds per chapter.
+        """
+        path = self.outline_path(outline.book)
+        publish_atomic(path, outline)
+        return path
+
     def books(self) -> tuple[str, ...]:
-        """Every book the store holds a chapter record for."""
+        """Every book the store holds a chapter record or an outline for."""
         if not self.root.is_dir():
             return ()
         return tuple(

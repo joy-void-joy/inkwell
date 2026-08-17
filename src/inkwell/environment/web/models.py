@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
 from inkwell.agent.config import PipelineStage
 from inkwell.environment.entrypoints import (
+    CHAPTER_ALONE,
     RESTART,
     RESUME,
     REVISE,
@@ -64,6 +65,10 @@ class RunSessionRequest(request_model(RUN)):
 
 class ReviseSessionRequest(request_model(REVISE)):
     """Starts a revise session from an existing draft."""
+
+
+class ChapterSessionRequest(request_model(CHAPTER_ALONE)):
+    """Starts one chapter of a book, against the order the book already has."""
 
 
 class ModelOptions(BaseModel):

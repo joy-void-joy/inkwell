@@ -201,7 +201,7 @@ async def fred_search(params: FredSearchInput) -> FredSearchOutput:
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.get(url, params=query_params)
         if resp.status_code >= 400:
-            raise ToolError(f"FRED API error {resp.status_code}: {resp.text[:200]}")
+            raise ToolError(f"FRED API error {resp.status_code}: {resp.text}")
         page = WireSeriesPage.model_validate(resp.json())
 
     results = [series.described() for series in page.seriess]

@@ -137,11 +137,10 @@ def checkpoint_before(session_id: str, redo_stage: str) -> str | None:
     """
     from lup.workspace.paths import sessions_dir
 
-    backbone = ["preprocess", *DISPLAY_STAGES]
-    if redo_stage not in backbone:
+    if redo_stage not in DISPLAY_STAGES:
         return None
     base = sessions_dir() / session_id / "pipeline_notes"
-    for stage in reversed(backbone[: backbone.index(redo_stage)]):
+    for stage in reversed(DISPLAY_STAGES[: DISPLAY_STAGES.index(redo_stage)]):
         if (base / f"snapshot_{stage}.json").exists():
             return stage
     return None

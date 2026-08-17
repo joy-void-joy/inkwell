@@ -14,9 +14,11 @@ repo-relative declaration could reach it, and its spelling is fixed by the
 runtime that provides it.
 """
 
+import fnmatch
 import posixpath
+from pathlib import PurePosixPath
 
-from .rows import PathRoleName, PathRoleRow
+from .rows import PathRoleKind, PathRoleName, PathRoleRow
 
 
 def is_session_scratch_target(word: str) -> bool:
@@ -34,14 +36,87 @@ def is_session_scratch_target(word: str) -> bool:
     return "$" not in word and posixpath.normpath(word).startswith("/tmp/claude-")
 
 
+def role_pattern_covers(pattern: str, path: str) -> bool:
+    """Whether a declared role pattern reaches a repository-relative path.
+
+    A role names a tree rather than a file, so the pattern is matched against
+    the path's leading segments and covers everything below what it names:
+    ``tmp`` reaches ``tmp/run/log``, and ``**/__pycache__`` reaches both the
+    directory itself and ``src/a/__pycache__/m.pyc``.
+
+    Matching is per segment, so a wildcard cannot cross a ``/`` and silently
+    widen a pattern past the directory it names; ``**`` is the one spelling
+    that spans segments, standing for any run of them including none. That
+    distinction is the whole safety argument for declaring a role by pattern
+    at all — ``**/__pycache__`` names every cache directory and nothing else,
+    where a substring test would also have claimed ``notes/__pycache__.bak``.
+
+    A literal root carrying glob metacharacters — a directory actually named
+    ``run[1]`` — reads as a pattern under this. Nothing in the declarations is
+    spelled that way, and a root that ever is escapes the class as ``run[[]1]``.
+    """
+
+    def covers(pattern: tuple[str, ...], segments: tuple[str, ...]) -> bool:
+        """Whether the pattern matches a leading run of the path's segments."""
+        if not pattern:
+            return True
+        head, rest = pattern[0], pattern[1:]
+        if head == "**":
+            return any(
+                covers(rest, segments[index:]) for index in range(len(segments) + 1)
+            )
+        if not segments:
+            return False
+        return fnmatch.fnmatchcase(segments[0], head) and covers(rest, segments[1:])
+
+    return covers(PurePosixPath(pattern).parts, PurePosixPath(path).parts)
+
+
+def normalized_path(path: str) -> str:
+    """Normalize one portable path without resolving against the filesystem."""
+    return posixpath.normpath(path.replace("\\", "/"))
+
+
+def root_matches(path: str, value: str, kind: PathRoleKind) -> bool:
+    """Whether one path sits under a declared directory, however it is declared.
+
+    The one answer both declaration tables need. A protected-path rule and a
+    role row ask this of the same two shapes, and asking it in one place is
+    what keeps a directory from meaning one thing to the gate that protects it
+    and another to the gate that says what it is for.
+
+    ``contains_part`` matches the directory wherever it sits, and excludes the
+    system temporary directory, which is a different tree that happens to share
+    the name. Wrapping both sides in separators is what makes a segment match a
+    segment: ``tmpfoo`` holds the characters and is not the directory.
+    """
+    portable = normalized_path(path)
+    expected = normalized_path(value)
+    if kind == "contains_part":
+        return f"/{expected}/" in f"/{portable}/" and not portable.startswith(
+            f"/{expected}"
+        )
+    return portable == expected or portable.startswith(expected + "/")
+
+
 def path_role(path: str, rows: list[PathRoleRow]) -> PathRoleName:
     """Classify a repository-relative path by the role its root declares.
+
+    A root is a pattern, so a tree scattered through the repository rather
+    than gathered under one prefix — every ``__pycache__``, every ``.bak`` —
+    is declarable as what it is. Disposability stays something a project
+    states: nothing is scratch for merely being untracked, which is what
+    keeps an ignored ``.env.local`` or trace directory production.
 
     Resolution is lexical, so it needs no filesystem call and ``..`` cannot
     climb out of a declared root into a role it was never given. A symlink
     inside a root that points beyond it is not settleable without a syscall
     and stays a known limit; it is narrow, because a role only ever relaxes
     verbs acting on paths already inside the root and never grants execution.
+
+    How far each declaration reaches is the row's own, through
+    :func:`role_pattern_covers`: a bare root is anchored at the repository
+    top, and a leading ``**/`` recognizes the directory wherever it sits.
 
     The session scratchpad answers first, because it is the one scratch root
     that is absolute — reaching the declared roots below would mean passing
@@ -55,7 +130,6 @@ def path_role(path: str, rows: list[PathRoleRow]) -> PathRoleName:
     if normalized.startswith(("/", "../")) or normalized == "..":
         return "production"
     for row in rows:
-        root = posixpath.normpath(row["root"])
-        if normalized == root or normalized.startswith(root + "/"):
+        if role_pattern_covers(row["root"], normalized):
             return row["role"]
     return "production"

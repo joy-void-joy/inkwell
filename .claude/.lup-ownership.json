@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generator_version": "0.2.0",
-  "source_digest": "d76f017c1c44a3ede12e36506d4ecbbe8d6b36cd537267d1bc6ba6b0105f9171",
+  "source_digest": "37225912eb9b44d92345683fbc72b6ec1acc4533e5a374c3c9891def96d4fdf8",
   "target_requirements": [
     "claude-code"
   ],
@@ -149,7 +149,7 @@
     {
       "path": ".claude/plugins/lup/commands/hooks.md",
       "category": "generated",
-      "sha256": "98fe1dfa782b2d0b26ce9a08c298748e1194d39821d764964cc1cecd47f89dde",
+      "sha256": "cd2936d05cc5b7b3be7d6fbe304cba9b624dfc17cee6535c9682fb10fc554293",
       "semantic_id": "skill.hooks",
       "executable": false
     },
@@ -226,7 +226,7 @@
     {
       "path": ".claude/plugins/lup/commands/resolve.md",
       "category": "generated",
-      "sha256": "e13f38ffcf159b9fafe0c6d5fa201b48366c57aa9ebe983536ad405e1920a837",
+      "sha256": "f58ce44416aa1b199fd252fe3b391c5c5e4a46e07dc11a57e5d6270662ca559e",
       "semantic_id": "skill.resolve",
       "executable": false
     },
@@ -266,23 +266,30 @@
       "executable": false
     },
     {
+      "path": ".claude/plugins/lup/hooks/runtime/kernel/archives.py",
+      "category": "generated",
+      "sha256": "7f1381e8ac0bc8062d8ca2c31ffca5cf54fe97c2af67e4312cad32e705760796",
+      "semantic_id": "hooks.inkwell-policy",
+      "executable": false
+    },
+    {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/commands.py",
       "category": "generated",
-      "sha256": "83f76c3a6e9ec1d8131c2824d13d498c4be18f9fd1ab2329f24e14dccad6becb",
+      "sha256": "410c2daced2b08751a020c9f962ae7279ac69141ba99d48bc6b2d6366c34440e",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/decision.py",
       "category": "generated",
-      "sha256": "93a9905181cb04949edaded1fa2757b09ebe46a3e6eff88e6d0b88262b6b53b4",
+      "sha256": "bb6275442a206f6aa3b0203d72671b11e49a22caeda19df997d9e55466f19616",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/edit.py",
       "category": "generated",
-      "sha256": "1239a98fd60a569dc355fe45d68118db0acacdd3f7e6e2dae3fff209f4055384",
+      "sha256": "5446cba74afae5cce2e1876a5e380c20ed718e03cf5d532d7bf6fd9487f79bd3",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -296,28 +303,28 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/lex.py",
       "category": "generated",
-      "sha256": "8c8fb274d53488c5612627c380f8c33cd3b82f0c1d3734e9214921103eda2270",
+      "sha256": "c4d219287e476031d8fd76f515a94e721af36ea8dc12d0a032d619d197338ea3",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/roles.py",
       "category": "generated",
-      "sha256": "8779c9edb5e0b86ed1f29854922b29afbd61db5f1dd9c9f4e141988a03a3cdfa",
+      "sha256": "a77889d9383ce88917ec475d74bb1f16aa0aff829a83cf27e565884cd762b8df",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/rows.py",
       "category": "generated",
-      "sha256": "75f95ce9c6bd61fe130a86dd8ae986a8bfb86670445f3d4b22dee56a8ba3f86e",
+      "sha256": "8dadad553376d9f8c15308c9baa98e34181c1c97ea6661a495cf76d4e1109c5c",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/shell.py",
       "category": "generated",
-      "sha256": "311f849aa74f9f677197ccc4f471e702e109f0ed931535f121a7bfa361daa9db",
+      "sha256": "ab11a66fc650ef178e22863dcdd0d5becb71d8bf99b8ad4927fb86008b01aff4",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -331,21 +338,21 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/words.py",
       "category": "generated",
-      "sha256": "adfe08e2a0c2323d982a569e054e3473d36fbcca513734fa0b307054a426fa94",
+      "sha256": "4e49b678351fdefb362776e8dd5948d13dd1a748253f53d146d851448348b94c",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
     {
       "path": ".claude/plugins/lup/hooks/runtime/policy_data.py",
       "category": "generated",
-      "sha256": "3e5e065c5a271bde80f2a4cf2b412ad8ef74055b03f4abf16fdd9d16788422b8",
+      "sha256": "a646037d15dfa70d9753da595325eb43aad7b5a4b44237fabe1bc4dfa2caa0c3",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
     {
       "path": ".claude/plugins/lup/hooks/scripts/policy.py",
       "category": "generated",
-      "sha256": "b4184869bde14d012edc55f6b15c22038d3f002da48e8471820e7e6295cf1d53",
+      "sha256": "c0c78db452c00b12498d9f77fd429b06b688869a50b8ae498c30dbf65c2e836f",
       "semantic_id": "hooks.inkwell-policy",
       "executable": true
     },
@@ -373,7 +380,7 @@
     {
       "path": "docs/contributing.md",
       "category": "generated",
-      "sha256": "b07a8801196633c281697c503880e558672502f182eca28f14b51ba23b918576",
+      "sha256": "931b3240dec8fd5d8820d59120c04bb4d18114a2270cec52dac182be20efe24f",
       "semantic_id": "docs.contributing",
       "executable": false
     },
@@ -387,7 +394,7 @@
     {
       "path": "docs/harness.md",
       "category": "generated",
-      "sha256": "62ef713f95a64915f9d73c41a13daeb4ac66aced35524c3b5d35f8e6ed954793",
+      "sha256": "0f79a9006714fd7c2f081663a27e8b3a9643c8b09c56cd4a7b7eceb1b834f059",
       "semantic_id": "docs.harness",
       "executable": false
     },
@@ -401,7 +408,7 @@
     {
       "path": "docs/library.md",
       "category": "generated",
-      "sha256": "ae75e56fb488c3f093b72763611ca1ae7fc6e95e1802d769395175354b3336ce",
+      "sha256": "0e5d0594fc4ea19419627056ab6f1ae649bb2339c8d50338c8075ba69b36af33",
       "semantic_id": "docs.library",
       "executable": false
     },
@@ -429,7 +436,7 @@
     {
       "path": "docs/permissions.md",
       "category": "generated",
-      "sha256": "1b3c59e702a52581327e9e97973bb82bfb03a6302bedde7b62e41d87150c322e",
+      "sha256": "1a749b5a38e9ef08141b50513a535f1c0eddecc7be849c124f859a16cc2bff9e",
       "semantic_id": "docs.permissions",
       "executable": false
     },
@@ -443,7 +450,7 @@
     {
       "path": "docs/quality-pipeline.md",
       "category": "generated",
-      "sha256": "4c6998d6340ab4a8013bdcb4adbbed0c63c852d20adb028e1ac7fef55641a502",
+      "sha256": "e00271f11cb1f278e700f89f6160431f44b75eb23af030601aa63bc449d039fc",
       "semantic_id": "docs.quality-pipeline",
       "executable": false
     },

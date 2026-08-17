@@ -5,6 +5,7 @@
 import posixpath
 from typing import TypedDict
 
+from .archives import archive_write
 from .decision import KernelDecision, SUBSTITUTION_SENTINEL
 from .edit import path_rule_matches
 from .roles import path_role
@@ -150,9 +151,12 @@ def uv_run_words(words: list[str]) -> list[str]:
     return words[position:]
 
 
-# Every judged-ask verb that acts on paths, paired with the short flags whose
-# presence does not change what the verb does to them. A long flag or an
-# unrecognized cluster falls through to the verb's own ask.
+# Every verb that acts on paths, paired with the short flags whose presence
+# does not change what the verb does to them. A long flag or an unrecognized
+# cluster falls through to the verb's own effect. Membership is about taking
+# paths, not about asking: `mkdir` and `touch` are allowed and still listed,
+# because the refusals that read this map — a write inside a generated plugin
+# tree, above all — are owed by every verb that names a path.
 # lup: ignore[library-default] — each verb's own POSIX flags, fixed by what the utility does rather than by who is asking
 SCRATCH_VERB_FLAGS = {
     "rm": "rfv",
@@ -345,8 +349,25 @@ def refuses_generated_plugin_target(word: str) -> KernelDecision | None:
 
 
 def refuses_generated_plugin_write(words: list[str]) -> KernelDecision | None:
-    """Refuse a path verb that would write inside a generated plugin tree."""
+    """Refuse a verb that would write inside a generated plugin tree.
+
+    Every verb naming a path owes this, not only the ones the flag map
+    models: an archive unpacked over a generated tree replaces it exactly as
+    a copy would, and the regeneration that repairs it is the same one.
+    """
     executable = posixpath.basename(words[0])
+    archived = archive_write(words)
+    if archived is not None:
+        directory = archived["directory"]
+        for word in [
+            *archived["authored"],
+            *archived["consumed"],
+            *([directory] if directory is not None else []),
+        ]:
+            refused = refuses_generated_plugin_target(word)
+            if refused is not None:
+                return refused
+        return None
     if executable not in SCRATCH_VERB_FLAGS:
         return None
     verb = path_verb_operands(words)
@@ -478,6 +499,79 @@ def confined_to_recoverable_roots(
     if protected is not None:
         return protected
     return KernelDecision("allow", "confined to recoverable roots")
+
+
+def archive_lands_on_nothing(
+    words: list[str],
+    path_roles: list[PathRoleRow],
+    recoverable_targets: list[str] | None = None,
+    path_rules: list[PathRuleRow] | None = None,
+    existing_targets: list[str] | None = None,
+    empty_directories: list[str] | None = None,
+) -> KernelDecision | None:
+    """Grant an archive or compression verb that would replace nothing.
+
+    These verbs ask because they place content over whatever stands there.
+    Where nothing stands there, the ask is answering a question that has no
+    second side: unpacking into a directory that does not exist, or into one
+    holding nothing, destroys nothing, and neither does authoring an archive
+    at a path nothing occupies.
+
+    A named file is judged exactly as a delete's operand is — disposable by
+    role, restorable from Git, or not yet there — because the cost of
+    replacing it is the same cost whichever verb does the replacing. That is
+    what leaves ``gzip`` and ``rm`` agreeing about a committed, unmodified
+    file instead of one asking where the other does not.
+
+    A destination directory cannot be judged that way, because what would
+    land in it comes from the archive rather than from the command. So it is
+    judged by being empty: nothing there is nothing to replace, whatever the
+    archive turns out to hold. Everything the extraction then writes is new,
+    and a later edit to any of it passes the edit gate on its own path.
+
+    ``None`` wherever the answer is not established — an unmodelled line, an
+    expansion that names a different path at run time, a caller that resolved
+    no filesystem facts — and ``None`` leaves the verb's own ask standing.
+    """
+    write = archive_write(words)
+    if write is None:
+        return None
+    authored, consumed = write["authored"], write["consumed"]
+    directory = write["directory"]
+    named = [*authored, *consumed, *([directory] if directory is not None else [])]
+    # An extraction that named no destination unpacks where it stands, which
+    # is the repository itself — certain to be occupied, and the one place an
+    # unread archive should never land without a question.
+    if not named:
+        return None
+    if any(opaque_argument(word) or word.startswith("~") for word in named):
+        return None
+    for word in authored:
+        if path_role(word, path_roles) == "scratch":
+            continue
+        if existing_targets is not None and word not in existing_targets:
+            continue
+        if word in (recoverable_targets or []):
+            continue
+        return None
+    # A consumed path is destroyed rather than created, so being absent is
+    # not the licence it is above: it is a fact the host could not establish,
+    # and for a destructive verb an unestablished fact is a question.
+    for word in consumed:
+        if path_role(word, path_roles) == "scratch":
+            continue
+        if word in (recoverable_targets or []):
+            continue
+        return None
+    if directory is not None and path_role(directory, path_roles) != "scratch":
+        if existing_targets is None:
+            return None
+        if directory in existing_targets and directory not in (empty_directories or []):
+            return None
+    protected = protected_write_target(named, path_rules or [], True)
+    if protected is not None:
+        return protected
+    return KernelDecision("allow", "archive lands where nothing stands")
 
 
 def dangerous_env_name(name: str) -> bool:

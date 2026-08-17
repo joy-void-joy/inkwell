@@ -31,7 +31,7 @@ def test_rewinds_to_the_immediate_predecessor(session_dir):
     session_id, base = session_dir
     make_checkpoints(
         base,
-        ["preprocess", "extract", "voice", "plan", "research", "assumptions", "refine"],
+        ["extract", "voice", "plan", "research", "assumptions", "refine"],
     )
     assert checkpoint_before(session_id, "write") == "refine"
 
@@ -42,7 +42,6 @@ def test_skips_stages_that_never_checkpointed(session_dir):
     make_checkpoints(
         base,
         [
-            "preprocess",
             "extract",
             "voice",
             "plan",
@@ -60,7 +59,7 @@ def test_skips_stages_that_never_checkpointed(session_dir):
 def test_excludes_the_stage_being_redone(session_dir):
     # Redoing research must rewind to plan, not to research's own checkpoint.
     session_id, base = session_dir
-    make_checkpoints(base, ["preprocess", "extract", "voice", "plan", "research"])
+    make_checkpoints(base, ["extract", "voice", "plan", "research"])
     assert checkpoint_before(session_id, "research") == "plan"
 
 

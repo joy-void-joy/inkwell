@@ -59,7 +59,7 @@ class TestTheDraftEntersTheOrdinaryPipeline:
             sources=["draft.md"], skipped_stages=REVISE.skipped_stages
         )
 
-        assert runner.stages_for_run() == ["preprocess", *DISPLAY_STAGES]
+        assert runner.stages_for_run() == DISPLAY_STAGES
 
 
 class TestTheStandingInstructionIsData:

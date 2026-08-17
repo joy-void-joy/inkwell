@@ -30,7 +30,11 @@ def capture_request(request: SessionRequest) -> SessionFactory:
 
 RECORDING_RUNTIME = Runtime(
     name="recording",
-    login=ProviderLogin(config_home_env=CONFIG_HOME, credentials_file="creds.json"),
+    login=ProviderLogin(
+        config_home_env=CONFIG_HOME,
+        credentials_file="creds.json",
+        home_subdir="recording-home",
+    ),
     open=capture_request,
 )
 

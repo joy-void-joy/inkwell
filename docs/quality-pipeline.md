@@ -5,19 +5,27 @@
 Three layers guard the repository. Each runs at a different moment and
 catches a class of problem the others cannot.
 
-## Commit time: the drift guard
+## Commit and push time: the git guards
 
-`uv run lup-devtools dev commit-guard install` writes a git `pre-commit` hook
-whose body is one command — `uv run lup-devtools harness check all` — so a
-commit is refused while any generated artifact differs from what its source
-renders. `dev worktree create` arms it, re-running install refreshes a body
-left by an older library, `dev commit-guard status` says what a clone would
-run, and `uninstall` removes it. A `pre-commit` hook written by anything else
-is reported rather than replaced.
+`uv run lup-devtools dev git-hooks install` writes one hook per moment a
+project declares. Two come declared: a `pre-commit` hook running
+`uv run lup-devtools harness check all`, so a commit is refused while any
+generated artifact differs from what its source renders, and a `pre-push`
+hook running `uv run lup-devtools dev check`, so a branch meets the whole
+gate before it leaves the checkout rather than minutes later on a runner.
 
-That command is the same one the pipeline runs and the same drift verdict
-`dev check` reports, so the three places that can refuse stale output reach
-one computation instead of three that can disagree.
+Which hooks a project arms is its own declaration, so one that guards a
+third moment — or runs its gate under another name — says so instead of
+forking the module that writes them.
+
+`dev worktree create` arms them, re-running install refreshes a body left by
+an older library, `dev git-hooks status` says what a clone would run at each
+moment, and `uninstall` removes them. A hook written by anything else is
+reported rather than replaced.
+
+Both commands are the ones the pipeline runs, and the drift one is the same
+verdict `dev check` reports, so the places that can refuse the same work
+reach one computation instead of several that can disagree.
 
 The check reads every generated artifact every time, with no path pattern
 deciding when it applies. It costs well under a second, and the alternative
@@ -46,8 +54,9 @@ suites, the review-note report, the anti-pattern rules, the native seam
 boundaries, library placement, generated-tree drift, and the guidance budget.
 
 Unique catch: this is the authoritative gate. It binds whether or not a
-contributor armed the commit guard, and it is the only layer that runs the
-full static and unit-test bar. It never regenerates or commits.
+contributor armed the git guards, and it is what the push guard runs
+locally — so an armed checkout meets the same bar earlier rather than a
+different one. It never regenerates or commits.
 
 ## Scheduled: native nightly
 
@@ -81,7 +90,7 @@ repository does, buys a faster and more specific refusal of the one failure
 a contributor can produce without running anything; it reads the same verdict
 either way.
 
-`uv run lup-devtools dev commit-guard install` is the local half, and it is
+`uv run lup-devtools dev git-hooks install` is the local half, and it is
 the project's to arm rather than the framework's to impose: it writes into
 `.git`, which is the contributor's, not the repository's.
 

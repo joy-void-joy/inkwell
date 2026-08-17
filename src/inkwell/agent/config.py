@@ -133,7 +133,6 @@ def build_env_files() -> tuple[str, ...]:
 
 
 type PipelineStage = Literal[
-    "preprocess",
     "extract",
     "voice",
     "book",

@@ -144,11 +144,11 @@ uv run lup-devtools dev rules --check      # the generated rule reference
 ```
 
 [quality-pipeline.md](quality-pipeline.md) explains which of the three
-automated layers catches what. The short version: `dev commit-guard install`
-refuses a commit whose generated artifacts are behind their source, the
-per-push CI workflow runs that same check plus the full bar and binds whether
-or not anyone armed the hook, and the nightly lane owns everything that needs
-a real native CLI.
+automated layers catches what. The short version: `dev git-hooks install`
+refuses a commit whose generated artifacts are behind their source and a
+push whose branch fails the gate, the per-push CI workflow runs those same
+commands and binds whether or not anyone armed the hooks, and the nightly
+lane owns everything that needs a real native CLI.
 
 Two conventions catch most first-time review comments:
 

@@ -21,7 +21,7 @@ uv run lup-devtools harness check all      # read-only drift check; what CI runs
 ```
 
 `harness claude` and `harness codex` regenerate one target and launch it;
-`--generate-only` stops before launching. `dev commit-guard install` installs
+`--generate-only` stops before launching. `dev git-hooks install` installs
 the drift check as a git pre-commit hook, so omitted generated output is
 refused before the commit exists rather than minutes later in CI.
 [quality-pipeline.md](quality-pipeline.md) maps all three layers.
@@ -406,8 +406,10 @@ native hooks surface after generation.
 
 A profile names one account and the configuration home it runs under, and which
 origin holds them is the project's to choose. A project that keeps accounts of
-its own keeps one directory per name — `.lup/profiles/<name>/`, with the Claude
-home at `claude-config/` inside it — so a name resolves inside the checkout
+its own keeps one directory per name — `.lup/profiles/<name>/`, with each
+runtime's home in the subdirectory that runtime's login names (`claude-config/`
+for Claude Code, `codex-home/` for Codex) — so a name resolves inside the
+checkout
 rather than against anything under the operator's home, and `.lup` already being
 ignored is what keeps a login out of a commit. A project that keeps none falls
 back to the personal registry at `~/.lup/profiles.json`, whose names are
@@ -424,7 +426,7 @@ have answered, at the launcher as well as at the command tree.
 A directory profile's home is derived from its name, so `add --config-dir`
 pointing elsewhere is refused, and `remove` says to remove the directory rather
 than forgetting it: the directory is the profile and it holds the login. To
-point one at a home that already exists, symlink its `claude-config` at it.
+point one at a home that already exists, symlink that subdirectory at it.
 
 ### Workspace trust, and the profile it is recorded against
 

@@ -30,6 +30,10 @@ $ARGUMENTS
   shell table it declares is `content/shell_vocabulary.py`.
 - `tests/unit/test_semantic_policy.py` is the shared canonical/bundled fixture
   suite.
+- `packages/lup/src/lup/devtools/harness/content/docs/permissions.py` renders
+  `docs/permissions.md`, which describes the lattice a change here moves. It
+  is generated like every other page under `docs/`: edit the source module,
+  never the rendered file.
 
 Files beneath .claude/plugins/lup/hooks/ under Claude Code, .codex/plugins/lup/hooks/ under Codex are
 generated artifacts. Never edit them as the source of a policy change.
@@ -43,8 +47,11 @@ generated artifacts. Never edit them as the source of a policy change.
    the request did not already settle the decision, Request explicit user approval before changing policy behavior. Reason: a policy change alters what every later session may do.
 4. Edit the canonical source and add fixtures for safe, denied, approval, and
    malformed variants as applicable.
-5. Run `uv run pytest -q tests/unit/test_semantic_policy.py`.
-6. Run `uv run lup-devtools harness generate all` and
+5. Where the change moves what the lattice does, say so in the permissions
+   doc source above; a verdict that moved without its page moving leaves the
+   page describing a policy nobody runs.
+6. Run `uv run pytest -q tests/unit/test_semantic_policy.py`.
+7. Run `uv run lup-devtools harness generate all` and
    `uv run lup-devtools harness check all`.
 
 Denial must win over approval across batches and shell segments. Unsupported

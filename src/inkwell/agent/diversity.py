@@ -8,6 +8,14 @@ all — for a claim that is actually argued over, whether every source cited for
 sits on the same side, which no distribution over hosts can see. Ten domains can
 be ten voices in one camp.
 
+Not leaning on one venue is a claim about the finished thing, and where the
+finished thing is a book, one run is one chapter of it. So the distribution
+also measures the book: every citation every chapter recorded, read off the
+records those chapters left rather than their research, against ceilings of its
+own, because the same fraction is a stricter demand over nine chapters' sources
+than over one chapter's. The judged pass does not widen — a claim is argued in
+the chapter that makes it, and its citation set is whole there.
+
 So there are two checks. The distribution counts what research already recorded
 and costs nothing, so it re-runs on every draft. The judged pass spends a
 reviewer, and only on the claims :class:`ContestedSignal` marks — research's own
@@ -32,6 +40,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from inkwell.agent.book import BookCitations
 from inkwell.agent.models import (
     ArticlePlan,
     AuthorNote,
@@ -43,7 +52,25 @@ from inkwell.agent.models import (
 from inkwell.agent.provenance import SourceProvenance
 
 WHOLE_WORK = "the whole work"
-"""The scope a row carries when it is about every citation in the piece."""
+"""The scope a row carries when it is about every citation this run made.
+
+The whole of what one run writes, which for a run placed in a book is one
+chapter of it. :func:`book_scope` names the wider one.
+"""
+
+WHOLE_BOOK = "the whole book"
+"""What the scope of a row about every chapter's citations starts with."""
+
+
+def book_scope(book: str) -> str:
+    """The scope a row about a whole book names.
+
+    Distinguishable from :data:`WHOLE_WORK` on purpose, and carrying which book
+    it is: a rewrite reading the rows has to be able to tell "this chapter
+    leans" — which is its to fix — from "the book leans", which is not.
+    """
+    return f"{WHOLE_BOOK} — {book}"
+
 
 DIVERSITY_STAGE = "review:diversity"
 """The stage an author-visible diversity note is attributed to."""
@@ -70,9 +97,8 @@ class ProvenanceAxis(BaseModel):
         ),
     )
 
-    def values(self, source: ResearchSource) -> list[str]:
-        """What one cited source contributes, empty where nothing was recorded."""
-        recorded = source.provenance
+    def values(self, recorded: SourceProvenance | None) -> list[str]:
+        """What one citation contributes, empty where nothing was recorded."""
         return self.recorded_values(recorded) if recorded is not None else []
 
     def recorded_values(self, recorded: SourceProvenance) -> list[str]:
@@ -143,6 +169,22 @@ preprints is a normal shape rather than a lapse. Leaning on one domain, one
 organization, or one author is not.
 """
 
+BOOK_CITATION_AXES: list[ProvenanceAxis] = [
+    DomainAxis(share_ceiling=0.35),
+    OrganizationAxis(share_ceiling=0.35),
+    AuthorAxis(share_ceiling=0.35),
+    VenueAxis(share_ceiling=0.5),
+    YearAxis(share_ceiling=0.5),
+]
+"""The axes a whole book is measured on — the same axes, tighter ceilings.
+
+One fraction is two different demands at the two scopes. A chapter about one
+year's results citing that year is the shape of its subject; a whole book
+sitting there is the shape of its research. And spread costs less the more
+citations there are to spread over, so what one chapter may sit at, nine
+together should not.
+"""
+
 
 class ContestedSignal(BaseModel):
     """Which claims a judge is spent on, read off the record rather than guessed.
@@ -196,7 +238,15 @@ class DiversityRules(BaseModel):
 
     axes: list[ProvenanceAxis] = Field(
         default=CITATION_AXES,
-        description="The axes a citation set is measured on",
+        description="The axes one run's own citation sets are measured on",
+    )
+    book_axes: list[ProvenanceAxis] = Field(
+        default=BOOK_CITATION_AXES,
+        description=(
+            "The axes every chapter's citations together are measured on, "
+            "separate from the run's own because the same share is a "
+            "different demand over a book than over one chapter of it"
+        ),
     )
     min_citations: int = Field(
         default=3,
@@ -219,12 +269,13 @@ class CheckRow(BaseModel):
     """One advisory row: which check spoke, about what, and what it found.
 
     A row is a report, never a verdict a stage can fail on. It names its scope so
-    a rewrite can tell a section's problem from the work's, and carries an anchor
-    where there is draft text a comment could attach to.
+    a rewrite can tell a section's problem from its chapter's, and both from the
+    book's — a lean nine chapters share is not one chapter's to fix — and carries
+    an anchor where there is draft text a comment could attach to.
     """
 
     check: str = Field(description="Which check produced this row")
-    scope: str = Field(description="Section title, or the whole work")
+    scope: str = Field(description="Section title, the whole work, or a whole book")
     detail: str = Field(description="What it found, in terms a rewrite can act on")
     anchor: str = Field(
         default="",
@@ -272,7 +323,7 @@ class AxisTally(BaseModel):
     """
 
     axis: str = Field(description="Which axis this counts")
-    scope: str = Field(description="Section title, or the whole work")
+    scope: str = Field(description="Section title, the whole work, or a whole book")
     recorded: int = Field(description="Citations that carried a value on this axis")
     unrecorded: int = Field(description="Citations that carried none")
     share_ceiling: float = Field(
@@ -347,25 +398,36 @@ class AxisTally(BaseModel):
 
 
 class CitationSet(BaseModel):
-    """The citations one scope makes — a section, or the whole work.
+    """The citations one scope makes — a section, one run's whole work, a book.
+
+    Each citation is what research recorded about it, and nothing where it
+    recorded none: every axis reads a recorded field, so the provenance is the
+    whole of what a distribution can see. That is also what lets a scope be
+    assembled from records a run has already written rather than from the
+    research they were read off.
 
     A source cited by two findings counts twice: the question is how the citation
     mass distributes, and a document leaned on twice is leaned on twice.
     """
 
-    scope: str = Field(description="Section title, or the whole work")
-    sources: list[ResearchSource] = Field(description="Every citation in this scope")
+    scope: str = Field(description="Section title, the whole work, or a whole book")
+    citations: list[SourceProvenance | None] = Field(
+        description=(
+            "What research recorded about each citation in this scope, and "
+            "None for each citation it recorded nothing about"
+        )
+    )
 
     def tally(self, axis: ProvenanceAxis) -> AxisTally:
         """How these citations distribute over one axis."""
         counted = Counter(
-            value for source in self.sources for value in axis.values(source)
+            value for recorded in self.citations for value in axis.values(recorded)
         )
-        unrecorded = sum(1 for source in self.sources if not axis.values(source))
+        unrecorded = sum(1 for recorded in self.citations if not axis.values(recorded))
         return AxisTally(
             axis=axis.name,
             scope=self.scope,
-            recorded=len(self.sources) - unrecorded,
+            recorded=len(self.citations) - unrecorded,
             unrecorded=unrecorded,
             share_ceiling=axis.share_ceiling,
             shares=[
@@ -376,11 +438,13 @@ class CitationSet(BaseModel):
             ],
         )
 
-    def tallies(
-        self, rules: DiversityRules = DEFAULT_DIVERSITY_RULES
-    ) -> list[AxisTally]:
-        """How these citations distribute over every axis the rules measure."""
-        return [self.tally(axis) for axis in rules.axes]
+    def tallies(self, axes: list[ProvenanceAxis]) -> list[AxisTally]:
+        """How these citations distribute over each of these axes.
+
+        Which axes is the caller's, because it is the caller that knows what
+        scope this is: a book is measured on ceilings a chapter is not.
+        """
+        return [self.tally(axis) for axis in axes]
 
 
 class OneSidedVerdict(BaseModel):
@@ -565,22 +629,33 @@ def section_citations(
     return list(cited())
 
 
+def recorded_citations(research: ResearchCompilation) -> list[SourceProvenance | None]:
+    """What research recorded about every citation it made, in the order made.
+
+    The whole of what any distribution over this run can see, and the whole of
+    what a chapter has to leave behind for its book to be measured. ``None``
+    where nothing was recorded rather than a shorter list, so the citations
+    nobody characterized stay counted as citations.
+    """
+    return [
+        source.provenance for finding in research.findings for source in finding.sources
+    ]
+
+
 def citation_sets(
     research: ResearchCompilation,
     *,
     plan: ArticlePlan | None = None,
     drafts: dict[str, SectionDraft] | None = None,
 ) -> list[CitationSet]:
-    """The whole work's citation set, and one per planned section.
+    """This run's whole citation set, and one per planned section.
 
     The whole work is every citation every finding made, which stands on its own
-    before there is a plan to attribute them to.
+    before there is a plan to attribute them to. Where the run is one chapter of
+    a book, this is the chapter's own; the book's is :func:`book_citation_set`.
     """
     written = drafts if drafts is not None else {}
-    whole = CitationSet(
-        scope=WHOLE_WORK,
-        sources=[source for finding in research.findings for source in finding.sources],
-    )
+    whole = CitationSet(scope=WHOLE_WORK, citations=recorded_citations(research))
     if plan is None:
         return [whole]
 
@@ -588,15 +663,29 @@ def citation_sets(
         """One section's citations, with its draft where one has been written."""
         return CitationSet(
             scope=title,
-            sources=section_citations(
-                title,
-                plan,
-                research,
-                written[title] if title in written else None,
-            ),
+            citations=[
+                source.provenance
+                for source in section_citations(
+                    title,
+                    plan,
+                    research,
+                    written[title] if title in written else None,
+                )
+            ],
         )
 
     return [whole, *(for_section(section.title) for section in plan.sections)]
+
+
+def book_citation_set(book: BookCitations) -> CitationSet:
+    """Every citation every chapter of one book recorded, as one scope.
+
+    Assembled from what the chapters left behind rather than from what they
+    researched, which is what lets the widest scope cost what the narrowest
+    does. A chapter that has not run yet left no record, so it contributes
+    nothing rather than counting as a chapter that cited nothing.
+    """
+    return CitationSet(scope=book_scope(book.book), citations=book.citations())
 
 
 def distribution_report(
@@ -604,20 +693,29 @@ def distribution_report(
     *,
     plan: ArticlePlan | None = None,
     drafts: dict[str, SectionDraft] | None = None,
+    book: BookCitations | None = None,
     rules: DiversityRules = DEFAULT_DIVERSITY_RULES,
 ) -> DiversityReport:
-    """The computed half: how the citations distribute, per section and overall.
+    """The computed half: how the citations distribute, per section, run, and book.
 
     Reads only what research recorded, so it costs nothing and re-runs on every
-    draft. A scope with no citations at all is left out — there is a difference
-    between citations nobody characterized and no citations.
+    draft — the book scope reads the records its chapters left as they ran, so
+    widening the scope does not widen the cost. A run given no book measures
+    exactly its own scopes. A scope with no citations at all is left out —
+    there is a difference between citations nobody characterized and no
+    citations.
     """
-    scopes = [
-        citations
-        for citations in citation_sets(research, plan=plan, drafts=drafts)
-        if citations.sources
-    ]
-    tallies = [tally for citations in scopes for tally in citations.tallies(rules)]
+
+    def measured() -> Iterator[AxisTally]:
+        """Every tally, widest scope first, each on the axes its scope answers to."""
+        whole_book = book_citation_set(book) if book is not None else None
+        if whole_book is not None and whole_book.citations:
+            yield from whole_book.tallies(rules.book_axes)
+        for citations in citation_sets(research, plan=plan, drafts=drafts):
+            if citations.citations:
+                yield from citations.tallies(rules.axes)
+
+    tallies = list(measured())
     return DiversityReport(
         tallies=tallies,
         rows=[

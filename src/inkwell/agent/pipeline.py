@@ -50,6 +50,7 @@ from inkwell.agent.book import (
     BookLayout,
     BookOutline,
     ChapterAssignment,
+    ChapterCitations,
     ChapterIdentity,
     ChapterPlacement,
     ChapterRecord,
@@ -90,6 +91,7 @@ from inkwell.agent.diversity import (
     distribution_report,
     judged_report,
     merge_reports,
+    recorded_citations,
 )
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.reader_feedback import (
@@ -790,6 +792,24 @@ def place_in_book(
             notes, plan, identity.placement if identity is not None else None
         ),
         identity=identity,
+    )
+
+
+def record_citations(
+    placement: ChapterPlacement | None, research: ResearchCompilation
+) -> None:
+    """Leave what this chapter cited where the whole book can be measured on it.
+
+    What research recorded about each citation rather than the sources
+    themselves, written as the research lands: the book-wide distribution is
+    then a read of small records every chapter's own run already wrote, instead
+    of a re-read of every chapter's research on every draft. A standalone piece
+    is placed nowhere and records nothing, which is the whole of its book path.
+    """
+    if placement is None:
+        return
+    book_store().publish_citations(
+        ChapterCitations(placement=placement, citations=recorded_citations(research))
     )
 
 
@@ -2721,6 +2741,7 @@ async def check_citation_diversity(
     *,
     plan: ArticlePlan | None = None,
     drafts: dict[str, SectionDraft] | None = None,
+    placement: ChapterPlacement | None = None,
     rules: DiversityRules = DEFAULT_DIVERSITY_RULES,
     judge: bool = True,
     trace_logger: TraceLogger | None = None,
@@ -2733,8 +2754,18 @@ async def check_citation_diversity(
     can act on it is the one rewriting the prose. ``judge`` is what a run that
     cannot spend a reviewer turns off; the distribution still runs, because it
     costs only the counting.
+
+    A run placed in a book measures a third scope: every citation every chapter
+    of that book recorded, read off what those runs left behind. Only the
+    distribution widens — the judged pass stays where the claim it judges is.
     """
-    computed = distribution_report(research, plan=plan, drafts=drafts, rules=rules)
+    computed = distribution_report(
+        research,
+        plan=plan,
+        drafts=drafts,
+        book=book_store().citations(placement.book) if placement is not None else None,
+        rules=rules,
+    )
     claims = contested_claims(research, plan=plan, rules=rules) if judge else []
     judged = await judge_positions(
         claims, trace_logger=trace_logger, cost_accumulator=cost_accumulator
@@ -4791,6 +4822,7 @@ class PipelineRunner:
             )
         await self.post_author_notes()
         self.snapshot.research = research
+        record_citations(self.placement, research)
         self.snapshot.stage = "research"
         await self.save_snapshot()
 
@@ -5163,7 +5195,9 @@ class PipelineRunner:
         Advisory: the rows are saved for the rewrite to read, and the ones naming
         a missing side join the author notes so they reach the author's document
         as a comment. A run without research has no citations to weigh, and a
-        light run keeps the free distribution but not the judged pass.
+        light run keeps the free distribution but not the judged pass. A run
+        placed in a book is weighed against the whole book as well, which costs
+        the counting too — a light run keeps that.
         """
         research = self.snapshot.research
         if research is None:
@@ -5173,6 +5207,7 @@ class PipelineRunner:
             research,
             plan=self.snapshot.plan,
             drafts=self.snapshot.section_drafts,
+            placement=self.placement,
             judge=not self.light,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
@@ -5577,6 +5612,7 @@ class PipelineRunner:
                     trace_logger=self.trace_logger,
                     cost_accumulator=self.cost_accumulator,
                 )
+            record_citations(self.placement, self.snapshot.research)
 
         feedback_path = await self.prepare_feedback("restart")
         reader = self.reader_feedback()

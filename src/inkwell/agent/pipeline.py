@@ -699,14 +699,17 @@ def add_book_refs(
     How to point at any of it is rendered onto the end of the same file: the
     keys a writer may spell are these chapters' own, so the form and the keys
     belong in one place rather than in a prompt that could only describe them.
+    That is why a book with nothing on record is still listed where a run
+    assigned to one asks for it. The first chapter of a book is written before
+    any of the chapters it points forward at, so it is the run that most needs
+    to be told it may point at them — and both the record and the guidance
+    have a branch that says the book is empty.
     """
     if assignment is None:
         return
     declared = assignment.declared()
     record = book_store().load(assignment.book)
     visible = record if declared is None else record.besides(declared)
-    if not visible.chapters and visible.outline is None:
-        return
     path = notes.save_text_artifact(
         "book", f"{visible.render(declared)}\n\n{pointing(visible)}\n"
     )

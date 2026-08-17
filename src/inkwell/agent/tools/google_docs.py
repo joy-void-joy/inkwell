@@ -561,30 +561,30 @@ async def deliverable_requests(markdown: str, tab_id: str | None) -> list[DocsRe
     The author meets an unresolved reference twice, which is what was asked
     for: a marker in the prose, put there by the walk, and a comment raised
     here against the same words. Raised once per target for the whole session,
-    so rewriting a tab does not file the same note again.
+    so rewriting a tab does not file the same note again — but only once the
+    comment is actually filed, because the ledger outlives the run and a
+    target marked before a Drive failure would never be raised at all. One
+    call per target rather than a batch, so the ledger can wait on each.
     """
     state = get_session_state()
     record = book_store().load(state.book) if state is not None and state.book else None
     references = BookReferences(record=record)
     requests = markdown_to_requests(markdown, tab_id=tab_id, references=references)
-    if state is None or not state.doc_id or not references.unresolved:
+    if state is None or not state.doc_id:
         return requests
-
-    def unraised() -> Iterator[CommentSpec]:
-        """A comment for each target the author has not already been told of."""
-        for reference in references.unresolved:
-            spelled = reference.target.spelled()
-            if spelled in state.raised_references:
-                continue
-            state.raised_references.mark(spelled)
-            yield CommentSpec(
-                content=raised(reference.target), anchor_text=reference.text
-            )
-
-    async with gdoc_nonfatal("raise unresolved book references"):
-        await do_insert_comments_batch(
-            state.doc_id, list(unraised()), session_state=state
-        )
+    for reference in references.unresolved:
+        spelled = reference.target.spelled()
+        if spelled in state.raised_references:
+            continue
+        state.raised_references.claim([spelled])
+        async with gdoc_nonfatal(f"raise unresolved reference {spelled}"):
+            with state.raised_references.recording(spelled):
+                await do_insert_comment(
+                    state.doc_id,
+                    raised(reference.target),
+                    anchor_text=reference.text,
+                    session_state=state,
+                )
     return requests
 
 

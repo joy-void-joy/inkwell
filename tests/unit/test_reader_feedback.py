@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from inkwell.agent.book import ChapterPlacement, SectionAddress
+from inkwell.agent.book import ChapterPlacement, SectionAddress, ordinal_prefix
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.models import ArticlePlan, SectionPlan
 from inkwell.agent.notes import PipelineNotes
@@ -31,7 +31,6 @@ from inkwell.agent.reader_feedback import (
     SectionAddresses,
     SubstantiveRule,
     ingest_reader_feedback,
-    ordinal_prefix,
     read_export,
 )
 

@@ -59,8 +59,9 @@ earlier one whole rather than blending with it.
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime
+from itertools import groupby
 from pathlib import Path
 from typing import Literal
 
@@ -202,6 +203,112 @@ The two forms the reader export measures, and no third: a chapter index and a
 section of a chapter. Both answer :attr:`~ChapterAddress.path`, so a caller
 rendering a link never asks which one it is holding.
 """
+
+
+ORDINAL_CHARS = "0123456789.:-—"
+"""Digits and the separators an outline number is written with.
+
+A token carrying anything else is a word, so the title opens with prose rather
+than with an ordinal.
+"""
+
+
+def ordinal_prefix(title: str) -> SectionAddress | None:
+    """The ordinal path a section title opens with, where it opens with one.
+
+    A title carried over from an outline usually keeps its number — "1.3
+    Foundation models", "01.03 Foundation models" — and that number is the
+    section's own identity, outranking its position in the plan, which shifts
+    whenever a section is added or dropped. Read as the digit runs of the
+    opening token: exactly two of them is a chapter and a section, and any
+    other shape belongs to the prose.
+    """
+    opening = title.split()
+    if not opening:
+        return None
+    token = opening[0]
+    if any(char not in ORDINAL_CHARS for char in token):
+        return None
+    runs = ["".join(chars) for digit, chars in groupby(token, str.isdigit) if digit]
+    if len(runs) != 2:
+        return None
+    return SectionAddress(chapter=int(runs[0]), section=int(runs[1]))
+
+
+class PlacedSection(BaseModel, frozen=True):
+    """One section of a chapter, and the ordinal it holds — or that it holds none.
+
+    ``section`` absent is a real answer rather than a gap: it says this
+    section's chapter gives it no identity, so nothing may address it. Reading
+    it as a position instead is what would hand its readers to whichever
+    section really does hold that number.
+    """
+
+    title: str = Field(description="The section's title, exactly as written")
+    name: str = Field(
+        description=(
+            "That title without the ordinal it opens with — what a reference "
+            "spells when it names the section rather than its number"
+        )
+    )
+    declared: SectionAddress | None = Field(
+        default=None,
+        description="The address the title's own ordinal names, where it carries one",
+    )
+    section: int | None = Field(
+        default=None,
+        description="The ordinal this section holds, absent where nothing gives it one",
+    )
+
+    def answers(self, spelled: str) -> bool:
+        """Whether a reference spelling ``spelled`` names this section.
+
+        Either spelling of the title answers — carrying the ordinal it opens
+        with, or not — because a writer copying a numbered heading and a
+        writer naming the section are pointing at the same section.
+        """
+        wanted = comparable_key(spelled)
+        return wanted in (comparable_key(self.name), comparable_key(self.title))
+
+
+def placed_sections(titles: Sequence[str]) -> list[PlacedSection]:
+    """Which ordinal each of a chapter's section titles holds.
+
+    The one rule that decides it, because two things read the same list of
+    titles: the reader-feedback export routes a submission to a section by it,
+    and a reference in another chapter's prose resolves to a section by it.
+    Both end at a published address, so the two answering differently means a
+    reader lands on a real page the sentence did not promise.
+
+    A title that kept its number is named by that number, which is its
+    identity and outranks its place in the list — a list that shifts whenever
+    a section is added or dropped. So where *any* title in the chapter carries
+    one, the numbered titles hold the ordinals they name and the unnumbered
+    ones hold none at all: position inside a chapter whose other sections have
+    named themselves is not an identity, and an introduction sitting before
+    section 1 would otherwise be handed section 1's readers. Only where no
+    title carries a number does position decide, because there it is all there
+    is and nothing contradicts it.
+    """
+    read = [ordinal_prefix(title) for title in titles]
+    numbered = any(own is not None for own in read)
+
+    def placed() -> Iterator[PlacedSection]:
+        """Each title, with the ordinal this chapter's own spelling gives it."""
+        for position, (title, own) in enumerate(zip(titles, read), 1):
+            if own is None:
+                yield PlacedSection(
+                    title=title, name=title, section=None if numbered else position
+                )
+            else:
+                yield PlacedSection(
+                    title=title,
+                    name=" ".join(title.split()[1:]),
+                    declared=own,
+                    section=own.section,
+                )
+
+    return list(placed())
 
 
 class BookTarget(BaseModel, frozen=True):
@@ -819,9 +926,21 @@ class BookRecord(BaseModel):
         as the ordinal that layout assigned it. Nothing here assigns one — an
         ordinal is an identity and handing one out is the outline's to do — so
         a chapter this book has not laid out, a chapter dropped from the
-        reading order, and a section its chapter has not recorded all answer
-        None. The caller says so in the document rather than inventing a
-        number or renumbering the target to suit the sentence that wanted it.
+        reading order, a section its chapter has not recorded, and a section
+        its chapter gives no ordinal all answer None. The caller says so in the
+        document rather than inventing a number or renumbering the target to
+        suit the sentence that wanted it.
+
+        Which ordinal a recorded section holds is :func:`placed_sections`'s to
+        say and not restated here, because the reader-feedback export routes
+        by the same answer off the same titles: a section named beside
+        numbered ones holds no ordinal, so a reference to it goes unresolved
+        rather than resolving onto whichever section really holds that number.
+
+        The chapter is the outline's, not the one a section title happens to
+        open with, on the same grounds the plan's placement outranks a carried
+        over prefix: the outline assigned that ordinal and the prefix only
+        remembers where the section once sat.
         """
         wanted = comparable_key(target.chapter)
         outlined = self.outline.chapters if self.outline is not None else []
@@ -833,17 +952,14 @@ class BookRecord(BaseModel):
         if not target.section:
             return ChapterAddress(chapter=entry.ordinal)
         held = self.chapter(entry.ordinal)
-        titled = comparable_key(target.section)
-        ordinal = next(
-            (
-                position
-                for position, section in enumerate(
-                    held.sections if held is not None else [], 1
-                )
-                if comparable_key(section) == titled
-            ),
-            None,
-        )
+
+        def named() -> Iterator[int]:
+            """The ordinal of each recorded section this reference could name."""
+            for placed in placed_sections(held.sections if held is not None else []):
+                if placed.section is not None and placed.answers(target.section):
+                    yield placed.section
+
+        ordinal = next(named(), None)
         if ordinal is None:
             return None
         return SectionAddress(chapter=entry.ordinal, section=ordinal)

@@ -45,7 +45,7 @@ from pydantic import (
 
 from lup.types import JsonObject, JsonValue
 
-from inkwell.agent.book import SectionAddress
+from inkwell.agent.book import SectionAddress, placed_sections
 from inkwell.agent.models import ArticlePlan
 
 logger = logging.getLogger(__name__)
@@ -58,11 +58,6 @@ property of reader feedback, so it is a default every entry point takes as an
 argument — a form that also exports CSV needs a caller's override, not a fork.
 Whatever a scan passes over is counted and named, so a dropped file that this
 reader cannot read says so instead of reading as an empty inbox."""
-
-ORDINAL_CHARS = "0123456789.:-—"
-"""Digits and the separators an outline number is written with. A token
-carrying anything else is a word, so the title opens with prose rather than
-with an ordinal."""
 
 UNADDRESSED = "no section ordinal — chapter-level feedback, or an incomplete row"
 """Why a substantive submission ends up unrouted rather than on a section."""
@@ -108,28 +103,6 @@ class SubstantiveRule(BaseModel):
             if prose.field in self.prose_fields
             and len(prose.text.strip()) >= self.min_length
         ]
-
-
-def ordinal_prefix(title: str) -> SectionAddress | None:
-    """The ordinal path a section title opens with, where it opens with one.
-
-    A title carried over from an outline usually keeps its number — "1.3
-    Foundation models", "01.03 Foundation models" — and that number is the
-    section's own identity, outranking its position in the plan, which shifts
-    whenever a section is added or dropped. Read as the digit runs of the
-    opening token: exactly two of them is a chapter and a section, and any
-    other shape belongs to the prose.
-    """
-    opening = title.split()
-    if not opening:
-        return None
-    token = opening[0]
-    if any(char not in ORDINAL_CHARS for char in token):
-        return None
-    runs = ["".join(chars) for digit, chars in groupby(token, str.isdigit) if digit]
-    if len(runs) != 2:
-        return None
-    return SectionAddress(chapter=int(runs[0]), section=int(runs[1]))
 
 
 class PlanSectionAddress(BaseModel):
@@ -193,29 +166,28 @@ class SectionAddresses(BaseModel):
         reading its position as an ordinal would hand that writer section
         1.1's readers. Unplaced is the honest answer, and the stage still has
         the index and the unrouted file.
+
+        Which ordinal each title holds is :func:`~inkwell.agent.book.
+        placed_sections`, not a rule spelled out again here: a cross-reference
+        resolves to a section off the same titles, and the two deciding
+        separately is how they come to disagree about a published address. All
+        that is left here is the chapter, which is the plan's own business.
         """
         placed = plan.placement.chapter if plan.placement is not None else None
-        titled = [ordinal_prefix(section.title) for section in plan.sections]
-        if any(own is not None for own in titled):
-            return cls(
-                entries=[
-                    PlanSectionAddress(
-                        title=section.title,
-                        section=own.section,
-                        chapter=placed if placed is not None else own.chapter,
-                    )
-                    for section, own in zip(plan.sections, titled)
-                    if own is not None
-                ]
-            )
-        return cls(
-            entries=[
-                PlanSectionAddress(
-                    title=section.title, section=position, chapter=placed
+
+        def addressed() -> Iterator[PlanSectionAddress]:
+            """Each section the chapter's own spelling gives an ordinal to."""
+            for section in placed_sections([held.title for held in plan.sections]):
+                if section.section is None:
+                    continue
+                own = section.declared.chapter if section.declared is not None else None
+                yield PlanSectionAddress(
+                    title=section.title,
+                    section=section.section,
+                    chapter=placed if placed is not None else own,
                 )
-                for position, section in enumerate(plan.sections, 1)
-            ]
-        )
+
+        return cls(entries=list(addressed()))
 
     def entry_for(self, title: str) -> PlanSectionAddress | None:
         """Where the plan places one of its sections, by the plan's own title."""

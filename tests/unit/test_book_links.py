@@ -20,11 +20,14 @@ from inkwell.agent.book import (
     BookStore,
     BookTarget,
     ChapterAddress,
+    ChapterAssignment,
     ChapterPlacement,
     ChapterRecord,
     ProposedChapter,
     SectionAddress,
+    placed_sections,
 )
+from inkwell.agent.content import ContentManifest
 from inkwell.agent.book_links import (
     MARKER_LABEL,
     BookReferences,
@@ -32,9 +35,14 @@ from inkwell.agent.book_links import (
     pointing,
 )
 from inkwell.agent.markdown_to_docs import DocsRequest
+from inkwell.agent.models import ArticlePlan, SectionPlan
+from inkwell.agent.notes import PipelineNotes
+from inkwell.agent.pipeline import add_book_refs
+from inkwell.agent.reader_feedback import SectionAddresses
 from inkwell.agent.session import WritingSessionState
 from inkwell.agent.tools import google_docs
 from inkwell.agent.tools.google_docs import CommentSpec, deliverable_requests
+from lup.mcp import ToolError
 
 FOUNDATIONS = ProposedChapter(key="foundations", title="Foundations")
 """Chapter one: laid out, numbered, and there to be pointed at."""
@@ -56,13 +64,16 @@ def raised_comments(monkeypatch: pytest.MonkeyPatch) -> list[CommentSpec]:
     """What the write filed with the author, kept here instead of sent to Drive."""
     filed: list[CommentSpec] = []
 
-    async def file_them(
-        _doc_id: str, comments: list[CommentSpec], **_rest: object
-    ) -> list[str]:
-        filed.extend(comments)
-        return [str(index) for index, _ in enumerate(comments)]
+    async def file_one(
+        _doc_id: str,
+        content: str,
+        anchor_text: str | None = None,
+        **_rest: object,
+    ) -> str:
+        filed.append(CommentSpec(content=content, anchor_text=anchor_text))
+        return str(len(filed))
 
-    monkeypatch.setattr(google_docs, "do_insert_comments_batch", file_them)
+    monkeypatch.setattr(google_docs, "do_insert_comment", file_one)
     return filed
 
 
@@ -81,6 +92,22 @@ def lay_out(store: BookStore, *chapters: ProposedChapter) -> None:
     """Give each chapter an ordinal, the way the book stage does."""
     store.publish_outline(
         store.load("textbook").relaid(BookLayout(chapters=list(chapters)))
+    )
+
+
+def record_sections(store: BookStore, *titles: str) -> None:
+    """File chapter one of the book with these section titles, as a run does.
+
+    Verbatim from the plan, which is what ``record_placement`` publishes, so
+    the titles a reference is resolved against are the ones a writer wrote.
+    """
+    lay_out(store, FOUNDATIONS)
+    store.publish(
+        ChapterRecord(
+            placement=ChapterPlacement(book="textbook", chapter=1),
+            title="Foundations",
+            sections=list(titles),
+        )
     )
 
 
@@ -219,6 +246,30 @@ class TestAnUnresolvedReferenceSurvivesTheWrite:
 
         assert len(raised_comments) == 1
 
+    async def test_a_target_drive_refused_is_raised_at_the_next_write(
+        self,
+        store: BookStore,
+        session: WritingSessionState,
+        raised_comments: list[CommentSpec],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The ledger outlives the run, so marking a target before its comment
+        is filed would lose that target for good on one transient failure."""
+        markdown = "Taken up in [the error budget](book:consequences)."
+        recorder = google_docs.do_insert_comment
+
+        async def refuse(*_args: object, **_rest: object) -> str:
+            raise ToolError("Drive is unreachable")
+
+        monkeypatch.setattr(google_docs, "do_insert_comment", refuse)
+        assert f"[{MARKER_LABEL}: consequences]" in written(await write_once(markdown))
+        assert raised_comments == []
+
+        monkeypatch.setattr(google_docs, "do_insert_comment", recorder)
+        await write_once(markdown)
+
+        assert len(raised_comments) == 1
+
     async def test_a_piece_belonging_to_no_book_resolves_nothing_and_still_writes(
         self, store: BookStore, session: WritingSessionState
     ) -> None:
@@ -267,18 +318,62 @@ class TestReconciliationAtTheDeliverableWrite:
     async def test_a_section_resolves_to_the_section_page(
         self, store: BookStore, session: WritingSessionState
     ) -> None:
-        lay_out(store, FOUNDATIONS)
-        store.publish(
-            ChapterRecord(
-                placement=ChapterPlacement(book="textbook", chapter=1),
-                title="Foundations",
-                sections=["Why it holds", "The Calibration Curve"],
-            )
-        )
+        """A chapter whose sections named none of their own numbers: position
+        is all there is, and nothing contradicts it."""
+        record_sections(store, "Why it holds", "The Calibration Curve")
 
         requests = await write_once(
             "[the curve](book:foundations/the-calibration-curve)"
         )
+
+        assert linked(requests) == ["/chapters/01/02"]
+
+    async def test_a_numbered_section_resolves_to_the_number_it_declares(
+        self, store: BookStore, session: WritingSessionState
+    ) -> None:
+        """A title that kept its number is named by that number, whatever its
+        place in the list — the list shifts, the number is the identity."""
+        record_sections(store, "1.4 Why it holds", "1.7 The Calibration Curve")
+
+        requests = await write_once(
+            "[the curve](book:foundations/the-calibration-curve)"
+        )
+
+        assert linked(requests) == ["/chapters/01/07"]
+
+    async def test_a_reference_may_spell_the_number_the_title_carries(
+        self, store: BookStore, session: WritingSessionState
+    ) -> None:
+        """A writer copying the heading and one naming the section are pointing
+        at the same section, so both spellings answer."""
+        record_sections(store, "1.4 Why it holds", "1.7 The Calibration Curve")
+
+        requests = await write_once(
+            "[the curve](book:foundations/1-7-the-calibration-curve)"
+        )
+
+        assert linked(requests) == ["/chapters/01/07"]
+
+    async def test_an_unnumbered_section_beside_numbered_ones_resolves_to_nothing(
+        self, store: BookStore, session: WritingSessionState
+    ) -> None:
+        """The introduction of such a chapter sits before section 1, not at it.
+        Reading its position as an ordinal would hand it section 1's page —
+        a real page the sentence did not promise, with nothing saying so."""
+        record_sections(store, "Introduction", "1.1 Foundations", "1.2 The Curve")
+
+        requests = await write_once("[the opening](book:foundations/introduction)")
+
+        assert linked(requests) == []
+        assert f"[{MARKER_LABEL}: foundations/introduction]" in written(requests)
+
+    async def test_its_numbered_neighbours_still_resolve(
+        self, store: BookStore, session: WritingSessionState
+    ) -> None:
+        """The unnumbered one holding no ordinal does not cost the others theirs."""
+        record_sections(store, "Introduction", "1.1 Foundations", "1.2 The Curve")
+
+        requests = await write_once("[the curve](book:foundations/the-curve)")
 
         assert linked(requests) == ["/chapters/01/02"]
 
@@ -351,6 +446,18 @@ class TestWhatTheWriterIsShown:
     def test_it_says_a_book_with_no_order_has_declared_no_keys(self) -> None:
         assert "declared no keys yet" in pointing(BookRecord(book="textbook"))
 
+    def test_the_first_chapter_of_an_empty_book_is_shown_it_too(
+        self, store: BookStore, tmp_path: Path
+    ) -> None:
+        """That run is written before every chapter it could point at, so it is
+        the one that most needs telling that pointing forward is allowed."""
+        notes = PipelineNotes(tmp_path / "notes")
+
+        add_book_refs(ContentManifest(), notes, ChapterAssignment(book="textbook"))
+
+        shown = notes.text_artifact_path("book").read_text(encoding="utf-8")
+        assert "declared no keys yet" in shown
+
     def test_it_says_what_becomes_of_a_key_no_chapter_answers(
         self, store: BookStore
     ) -> None:
@@ -359,6 +466,45 @@ class TestWhatTheWriterIsShown:
         lay_out(store, FOUNDATIONS)
 
         assert MARKER_LABEL in pointing(store.load("textbook"))
+
+
+CHAPTER_SHAPES = [
+    ["Why it holds", "The Calibration Curve"],
+    ["1.4 Why it holds", "1.7 The Calibration Curve"],
+    ["Introduction", "1.1 Foundations", "1.2 The Curve", "Where next"],
+]
+"""The three ways a chapter's section titles come out: none numbered, all
+numbered, and numbered ones beside titles that named nothing."""
+
+
+class TestBothConsumersReadOneDeclaration:
+    """A published address has two callers, and they must not disagree.
+
+    The reader-feedback export routes a submission to a section off these
+    titles and a cross-reference resolves to a section off the same ones. Two
+    rules deciding separately is how a reference comes to point at the page a
+    filed submission is keyed to under a different name.
+    """
+
+    @pytest.mark.parametrize("titles", CHAPTER_SHAPES)
+    def test_a_section_holds_one_ordinal_whoever_asks(self, titles: list[str]) -> None:
+        plan = ArticlePlan(
+            title="Foundations",
+            thesis="Everything rests here",
+            target_format="blog",
+            sections=[
+                SectionPlan(title=title, summary="", key_points=[]) for title in titles
+            ],
+            research_questions=[],
+            source_quotes=[],
+            author_direction="",
+            voice_notes="",
+        )
+        routed = SectionAddresses.for_plan(plan)
+
+        for placed in placed_sections(titles):
+            entry = routed.entry_for(placed.title)
+            assert (entry.section if entry is not None else None) == placed.section
 
 
 class TestTheResolverOnItsOwn:

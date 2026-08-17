@@ -13,6 +13,7 @@ run for real. Only the embedder is a fixture — it is the seam, which is the
 point of having one.
 """
 
+import importlib
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,7 @@ from inkwell.corpus.retrieval import (
     search_corpus,
 )
 from inkwell.corpus.semantics import (
+    MODEL2VEC_MODULE,
     CorpusEmbedder,
     DocumentVector,
     LocalEmbedder,
@@ -635,17 +637,27 @@ def saved_static_model(directory: Path, words: tuple[str, ...]) -> Path:
     than pulled from the hub: what wants exercising is that this project calls
     the library the way the library expects, and a download would test the
     network instead.
+
+    The library and its tokenizer are reached by name for the reason
+    `static_encoder` gives: the extra is optional, and a checkout without it
+    has to read exactly as one with it does. A static import would make the
+    type checker demand a library the extra never promised to install, and
+    `dev check` would fail in the state a fresh clone is in — the one state
+    the test below is written to be skipped in.
     """
     import numpy
-    from model2vec import StaticModel
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import Whitespace
+
+    model2vec = importlib.import_module(MODEL2VEC_MODULE)
+    tokenizers = importlib.import_module("tokenizers")
+    word_level = importlib.import_module("tokenizers.models").WordLevel
+    whitespace = importlib.import_module("tokenizers.pre_tokenizers").Whitespace
 
     vocabulary = {word: index for index, word in enumerate((UNKNOWN_TOKEN, *words))}
-    tokenizer = Tokenizer(WordLevel(vocab=vocabulary, unk_token=UNKNOWN_TOKEN))
-    tokenizer.pre_tokenizer = Whitespace()
-    StaticModel(
+    tokenizer = tokenizers.Tokenizer(
+        word_level(vocab=vocabulary, unk_token=UNKNOWN_TOKEN)
+    )
+    tokenizer.pre_tokenizer = whitespace()
+    model2vec.StaticModel(
         vectors=numpy.eye(len(vocabulary), dtype=numpy.float32), tokenizer=tokenizer
     ).save_pretrained(directory)
     return directory

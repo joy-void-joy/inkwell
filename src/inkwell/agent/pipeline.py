@@ -146,6 +146,7 @@ from inkwell.agent.glossary import (
 )
 from inkwell.agent.segmenter import reader
 from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
+from inkwell.pdf import reads_by_page
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import (
     EXTRACT_TOOLS as EXTRACT_MCP_TOOLS,
@@ -569,6 +570,23 @@ def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
                 "refs — cheaper than re-reading the document"
             ),
         )
+
+
+def inlinable_source_files(source_dir: Path) -> list[str]:
+    """Every file in the sources directory a stage can read as text.
+
+    A page-window document is left out. The registry copies each one it owns
+    into this same directory and describes it there with its page count and how
+    to consult it, so a glob that returned it too would hand the document to a
+    stage twice — once described, once as bare "additional source material".
+    Excluding it by kind holds on a resumed run, where the copy is already
+    sitting in the directory before the glob runs.
+    """
+    return [
+        str(path)
+        for path in sorted(source_dir.glob("*"))
+        if path.is_file() and not reads_by_page(path)
+    ]
 
 
 def render_source_lines(notes: PipelineNotes) -> str:
@@ -4434,7 +4452,7 @@ class PipelineRunner:
         self.snapshot.style_ref_samples = style.prose
         self.snapshot.runtime_style_refs = style.labels
 
-        all_source_paths = [str(p) for p in sorted(source_dir.glob("*")) if p.is_file()]
+        all_source_paths = inlinable_source_files(source_dir)
 
         registry_candidates = [
             s for s in self.sources if Path(s).expanduser().is_file()

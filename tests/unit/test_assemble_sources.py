@@ -17,6 +17,7 @@ from inkwell.agent.extract_agent import (
     assemble_sources,
     read_source_content,
 )
+from inkwell.agent.pipeline import inlinable_source_files
 from inkwell.pdf import reads_by_page
 
 PDF_HEADER = b"%PDF-1.7\r\n%\xb5\xb5\xb5\xb5\r\n1 0 obj\r\n"
@@ -206,3 +207,31 @@ class TestAssembleSources:
         assert len(assembled.blocks) == 1
         assert assembled.documents == [str(pdf)]
         assert assembled.unrecovered == ["https://example.com/dead"]
+
+
+class TestInlinableSourceFiles:
+    """What a stage may read as text, once the registry has had its say."""
+
+    def test_a_registered_document_is_never_listed_as_source_material(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression: the registry copies its documents into this very
+        directory, so a resumed run globs them back out again."""
+        (tmp_path / "conversation.md").write_text("blocks\n", encoding="utf-8")
+        pdf_at(tmp_path, "Channel-File-291.pdf")
+        assert inlinable_source_files(tmp_path) == [
+            str(tmp_path / "conversation.md"),
+        ]
+
+    def test_text_files_come_back_sorted(self, tmp_path: Path) -> None:
+        for name in ("draft.md", "conversation.md", "notes.txt"):
+            (tmp_path / name).write_text("x\n", encoding="utf-8")
+        assert inlinable_source_files(tmp_path) == [
+            str(tmp_path / "conversation.md"),
+            str(tmp_path / "draft.md"),
+            str(tmp_path / "notes.txt"),
+        ]
+
+    def test_directories_are_not_files(self, tmp_path: Path) -> None:
+        (tmp_path / "nested").mkdir()
+        assert inlinable_source_files(tmp_path) == []

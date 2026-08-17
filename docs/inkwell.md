@@ -19,6 +19,7 @@ src/inkwell/
 │   ├── provenance.py       # Venue, evidential role, and acquisition records
 │   ├── book.py             # Which chapter of which book, and the record it outlives
 │   ├── book_links.py       # A chapter pointing at the book, resolved at the write
+│   ├── glossary.py         # The shared term ledger, per run and across a book
 │   ├── diversity.py        # Citation distribution and position-diversity checks
 │   ├── prompts.py          # System prompt for the writing agent
 │   ├── stages.py           # Stage prompts and tool lists, per pipeline stage
@@ -124,7 +125,9 @@ declaration: `get_format_guidance` renders the rows into what the writer reads,
 and the rewrite stage measures the same rows off the finished draft, so a rule
 the writer was given and a rule the draft was checked by cannot drift apart.
 Adding a row to a format is a constructor call in that format's list; adding a
-*kind* of row is one class in `agent/format_checks.py`.
+*kind* of row is one class in `agent/format_checks.py`. A row every format
+carries — terminology held to what the shared glossary already settled — is one
+entry in `EVERY_FORMAT_CHECKS` rather than a copy in each format's list.
 
 Two tiers, one row shape. **Mechanical** rows are data — a threshold and the
 guidance sentence they measure — and read the draft structurally through

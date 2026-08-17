@@ -30,6 +30,7 @@ from inkwell.agent.format_checks import (
     PunctuationDensity,
     SectionLength,
     SentenceLengthVariance,
+    TerminologyDrift,
     render_declared_rules,
 )
 
@@ -296,10 +297,11 @@ specific:
 document. Every section file listed exists and is non-empty — read and \
 include all of them; never declare a section missing or to-be-written.
 - **Enforce the glossary.** Call lookup_terms to read the shared \
-glossary. Where a section names something — a term, symbol, or \
-abbreviation — differently from the glossary's canonical entry, \
-substitute the canonical term. This is mechanical: change the word, not \
-the sentence around it.
+glossary — the conventions, what the sections coined, and, for a chapter \
+of a book, what the other chapters already named. Where a section names \
+something — a term, symbol, or abbreviation — differently from the \
+glossary's canonical entry, substitute the canonical term. This is \
+mechanical: change the word, not the sentence around it.
 - **Stitch the seams.** At each section boundary, write or adjust ONLY \
 the handoff so the join doesn't read as a seam — the last sentence of \
 one section should set up the first of the next. Touch the boundary \
@@ -1527,6 +1529,25 @@ DIALOG_CHECKS: list[DeclaredCheck] = [
     ),
 ]
 
+EVERY_FORMAT_CHECKS: list[DeclaredCheck] = [
+    TerminologyDrift(
+        name="terminology drift",
+        rule="Call each thing what the shared glossary already calls it. This "
+        "row reads the glossary and reports a passage that reaches for a name "
+        "an entry recorded as one it rejected; it cannot see a synonym nobody "
+        "wrote down, so a quiet row means no recorded rival name was used "
+        "rather than that the piece is terminologically consistent.",
+    ),
+]
+"""The rows every format is measured by, whatever format it is.
+
+Terminology consistency is a fact about the piece rather than a convention of
+any one format, so this is declared once rather than restated in each format's
+list — and a format that declares nothing of its own still carries it. Nothing
+here fires for a piece that belongs to no book: what these rows measure against
+is the glossary the book kept, and a run without one reports having measured
+nothing."""
+
 OUTPUT_FORMATS: list[OutputFormatSpec] = [
     OutputFormatSpec(
         key="academic",
@@ -1607,10 +1628,12 @@ def format_checks_for(
 ) -> list[FormatCheck]:
     """Every row a draft in this format is measured against.
 
-    The format's own declared rows, plus any this run declared at runtime — a
-    custom format's, through the tool, and any row that follows what the run
-    *is* rather than what format it writes in. A format that declares none
-    returns none, which is a valid format with an empty report.
+    Widening: the rows every format carries, then this format's own, then any
+    a custom-format run declared at runtime through the tool — a custom
+    format's, and any row that follows what the run *is* rather than what
+    format it writes in. A format that declares none of its own is still
+    measured by the first group, which is why an unknown format returns rows
+    rather than nothing.
 
     Taken and returned as the base row rather than as the union a format
     declares in, because a row declared at runtime need not be one a format
@@ -1618,7 +1641,7 @@ def format_checks_for(
     the type is all it takes for a new one to travel.
     """
     spec = format_spec(target_format)
-    return [*(spec.checks if spec else []), *declared]
+    return [*EVERY_FORMAT_CHECKS, *(spec.checks if spec else []), *declared]
 
 
 def declares_own_checks(target_format: str) -> bool:

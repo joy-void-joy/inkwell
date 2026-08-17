@@ -40,10 +40,20 @@ from inkwell.agent.format_checks import (
     PunctuationDensity,
     SectionLength,
     SentenceLengthVariance,
+    TerminologyDrift,
     UnresolvedReferences,
     Verdict,
     render_declared_rules,
     run_format_checks,
+)
+from inkwell.agent.book import BookStore, ChapterPlacement
+from inkwell.agent.glossary import (
+    BookGlossary,
+    ChapterGlossary,
+    GlossaryEntry,
+    GlossaryScope,
+    RunGlossary,
+    write_chapter_glossary,
 )
 from inkwell.agent.models import ArticlePlan, SectionPlan
 from inkwell.agent.notes import PipelineNotes
@@ -68,7 +78,10 @@ HELD = Verdict(holds=True, measured="nothing to report")
 
 
 async def run_row(
-    check: FormatCheck, draft: str, judge: Judge | None = None
+    check: FormatCheck,
+    draft: str,
+    judge: Judge | None = None,
+    glossary: GlossaryScope | None = None,
 ) -> CheckRow:
     """One declared row's verdict on one draft."""
     report = await run_format_checks(
@@ -78,6 +91,7 @@ async def run_row(
         draft_path=Path("draft.md"),
         judge=judge or StubJudge(HELD),
         reader=reader(),
+        glossary=glossary,
     )
     return report.rows[0]
 
@@ -442,6 +456,114 @@ class TestSectionLength:
         draft = "## Heading\n\nA short section."
         result = await run_row(self.row, draft)
         assert not result.fired
+
+
+class TestTerminologyDrift:
+    """A name the book settled, and a draft reaching for one it rejected."""
+
+    row = TerminologyDrift(
+        name="terminology drift", rule="Call each thing what the glossary calls it."
+    )
+
+    def book(self, root: Path, *entries: GlossaryEntry) -> BookGlossary:
+        """Chapter two of a book whose first chapter settled these names."""
+        store = BookStore(root=root)
+        first = BookGlossary(
+            store=store, placement=ChapterPlacement(book="textbook", chapter=1)
+        )
+        write_chapter_glossary(first.own(), ChapterGlossary(terms=list(entries)))
+        return BookGlossary(
+            store=store, placement=ChapterPlacement(book="textbook", chapter=2)
+        )
+
+    SETTLED = GlossaryEntry(
+        term="inner alignment",
+        meaning="the mesa-objective gap",
+        aliases=["goal misgeneralization"],
+    )
+
+    async def test_fires_naming_the_term_the_draft_should_have_used(
+        self, tmp_path: Path
+    ) -> None:
+        result = await run_row(
+            self.row,
+            "This chapter returns to goal misgeneralization.",
+            glossary=self.book(tmp_path, self.SETTLED),
+        )
+        assert result.fired
+        assert "inner alignment" in result.findings[0]
+        assert "goal misgeneralization" in result.findings[0]
+
+    async def test_holds_when_the_draft_keeps_the_settled_name(
+        self, tmp_path: Path
+    ) -> None:
+        result = await run_row(
+            self.row,
+            "This chapter returns to inner alignment.",
+            glossary=self.book(tmp_path, self.SETTLED),
+        )
+        assert not result.fired
+
+    async def test_matches_words_rather_than_substrings(self, tmp_path: Path) -> None:
+        """A rejected name inside a longer word is not that name."""
+        result = await run_row(
+            self.row,
+            "The chapter is about goals, misgeneralizing from one case.",
+            glossary=self.book(tmp_path, self.SETTLED),
+        )
+        assert not result.fired
+
+    async def test_an_undeclared_synonym_is_invisible_to_it(
+        self, tmp_path: Path
+    ) -> None:
+        """What the mechanical row cannot see, and what its rule has to say."""
+        result = await run_row(
+            self.row,
+            "This chapter returns to objective misgeneralisation.",
+            glossary=self.book(tmp_path, self.SETTLED),
+        )
+        assert not result.fired
+
+    async def test_an_entry_listing_its_own_term_rejected_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """Or the canonical name would be reported as a rename of itself."""
+        echoed = GlossaryEntry(
+            term="inner alignment",
+            meaning="the mesa-objective gap",
+            aliases=["Inner Alignment"],
+        )
+        result = await run_row(
+            self.row,
+            "This chapter returns to inner alignment.",
+            glossary=self.book(tmp_path, echoed),
+        )
+        assert not result.fired
+        assert "0 rival name(s)" in result.measured
+
+    async def test_a_book_with_no_terms_yet_counts_none(self, tmp_path: Path) -> None:
+        result = await run_row(
+            self.row,
+            "A first chapter, naming nothing yet.",
+            glossary=self.book(tmp_path),
+        )
+        assert not result.fired
+        assert "0 term(s) on file" in result.measured
+
+    async def test_measures_nothing_without_a_book(self, tmp_path: Path) -> None:
+        """A piece in no book is not quietly reported as consistent."""
+        result = await run_row(
+            self.row,
+            "A standalone article that names things.",
+            glossary=RunGlossary(path=tmp_path / "glossary.json"),
+        )
+        assert not result.fired
+        assert "nothing was measured" in result.measured
+
+    async def test_measures_nothing_when_no_glossary_is_composed(self) -> None:
+        result = await run_row(self.row, "A draft checked with no glossary to hand.")
+        assert not result.fired
+        assert "nothing was measured" in result.measured
 
 
 class TestJudgedRow:

@@ -116,9 +116,10 @@ class TestConsolidateFindingsCoverage:
 
 
 class TestFormatGuidancePrecedence:
-    def test_empty_for_auto_and_unknown(self) -> None:
-        assert get_format_guidance("auto") == ""
-        assert get_format_guidance("nonexistent") == ""
+    def test_no_format_prose_for_auto_and_unknown(self) -> None:
+        """Nothing but the rows every format carries, which have no format prose."""
+        for key in ("auto", "nonexistent"):
+            assert "Format:" not in get_format_guidance(key)
 
     def test_guidance_defers_to_voice(self) -> None:
         assert "voice outranks" in get_format_guidance("memo").lower()

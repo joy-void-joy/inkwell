@@ -355,7 +355,7 @@ def cache_clear(
         typer.Option("--yes", "-y", help="Skip confirmation"),
     ] = False,
 ) -> None:
-    """Clear cached voice analyses and URL fetches.
+    """Clear cached voice analyses and fetched URLs.
 
     By default clears everything. Use --voice or --urls to target
     a specific cache.
@@ -363,33 +363,29 @@ def cache_clear(
     Examples:
         inkwell cache clear           # clear all caches
         inkwell cache clear --voice   # clear voice analyses only
-        inkwell cache clear --urls    # clear URL fetch cache only
+        inkwell cache clear --urls    # clear fetched payloads only
     """
     import shutil
 
+    from lup.workspace.fetch_cache import resolve_state
+
     from inkwell.agent.config import settings
-
-    style_root = Path(settings.style_corpus_path)
-    cache_root = style_root / ".cache"
-
-    if not cache_root.exists():
-        typer.echo("No caches found.")
-        return
 
     clear_all = not voice and not urls
 
-    voice_dir = cache_root / "voice"
-    url_cache_files = list(cache_root.glob("*.txt"))
+    voice_dir = Path(settings.style_corpus_path) / ".cache" / "voice"
+    fetched = resolve_state()
+    held = fetched.entries()
 
     def chosen() -> Iterator[CacheTarget]:
         """Each cache the flags asked for, where there is one to clear."""
         if (clear_all or voice) and voice_dir.exists():
             count = sum(1 for entry in voice_dir.rglob("*") if entry.is_file())
             yield CacheTarget(label=f"voice analyses ({count} files)", path=voice_dir)
-        if (clear_all or urls) and url_cache_files:
+        if (clear_all or urls) and held:
             yield CacheTarget(
-                label=f"URL fetch cache ({len(url_cache_files)} files)",
-                path=cache_root,
+                label=f"fetched payloads ({len(held)} entries)",
+                path=fetched.directory,
             )
 
     targets = list(chosen())
@@ -404,9 +400,8 @@ def cache_clear(
         typer.confirm("Delete these caches?", abort=True)
 
     for target in targets:
-        if target.path == cache_root:
-            for cached in url_cache_files:
-                cached.unlink()
+        if target.path == fetched.directory:
+            fetched.clear()
         else:
             shutil.rmtree(target.path, ignore_errors=True)
 
@@ -416,17 +411,13 @@ def cache_clear(
 @cache_app.command("status")
 def cache_status() -> None:
     """Show cache sizes and file counts."""
+    from collections import Counter
+
+    from lup.workspace.fetch_cache import resolve_state
+
     from inkwell.agent.config import settings
 
-    style_root = Path(settings.style_corpus_path)
-    cache_root = style_root / ".cache"
-
-    if not cache_root.exists():
-        typer.echo("No caches found.")
-        return
-
-    voice_dir = cache_root / "voice"
-    url_files = list(cache_root.glob("*.txt"))
+    voice_dir = Path(settings.style_corpus_path) / ".cache" / "voice"
 
     if voice_dir.exists():
         analyses = list(voice_dir.glob("*.md"))
@@ -443,7 +434,10 @@ def cache_status() -> None:
     else:
         typer.echo("Voice cache:  empty")
 
-    typer.echo(f"URL cache:    {len(url_files)} fetched URLs")
+    held = resolve_state().entries()
+    typer.echo(f"Fetch cache:  {len(held)} payloads")
+    for namespace, count in sorted(Counter(e.namespace for e in held).items()):
+        typer.echo(f"  {namespace}: {count}")
 
 
 if __name__ == "__main__":

@@ -34,7 +34,8 @@ from inkwell.corpus.discovery import (
     feed_entries,
     source_id_for,
 )
-from inkwell.corpus.fetch import DocumentFetcher, HttpPageReader
+from inkwell.corpus.fetch import DocumentFetcher, FetchRefused, HttpPageReader
+from inkwell.corpus.prune import prune_source
 from inkwell.corpus.ingest import IngestReport, ingest_source, ingest_with
 from inkwell.corpus.quality import DEFAULT_RULES, ThinRule, assess
 from inkwell.corpus.registry import (
@@ -331,13 +332,18 @@ def test_dropped_sources_are_recorded_with_a_reason() -> None:
 def test_a_source_needing_a_browser_says_so() -> None:
     """The playwright path is chosen by declaration, not guessed per page.
 
-    Only the two that genuinely render client-side. A source refusing a plain
-    fetcher is not on this list and should not be: BleepingComputer looked
-    like one for months and turned out to be refusing the user agent, which a
-    browser does not fix — headless Chrome scores as a pretender too.
+    Only the sources that genuinely render client-side. Refusing a plain
+    fetcher is not by itself grounds to be on this list: BleepingComputer
+    looked like one for months and turned out to be refusing the user agent,
+    which a browser does not fix — headless Chrome scores as a pretender too.
+
+    OpenAI earns its place on the rendering half rather than the refusal half.
+    Eighteen ``deploymentsafety`` section URLs extracted byte-identical text,
+    which is one shell rendering every section client-side, and that is what a
+    browser answers. Its 403 may well be the BleepingComputer story again.
     """
     browser_bound = [entry for entry in DECLARED_SOURCES if entry.needs_browser]
-    assert {entry.key for entry in browser_bound} == {"deepmind", "xai"}
+    assert {entry.key for entry in browser_bound} == {"deepmind", "xai", "openai"}
 
 
 def declared_union_bases() -> list[type[BaseModel]]:
@@ -1767,3 +1773,187 @@ class TestFeedAvenue:
         found = await self.read(avenue, ATOM_FEED)
 
         assert found[0].slug == "openai-hugging-face"
+
+
+# ── A block page is never a document, whichever connection reached it ─────────
+
+
+CHALLENGE_HTML = (
+    b"<html><head><title>Just a moment...</title></head><body>"
+    b"<h1>Verify you are human</h1><p>Enable JavaScript and cookies to continue"
+    b"</p></body></html>"
+)
+
+
+async def test_a_challenge_page_the_browser_reaches_is_refused_not_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A browser has no status code to raise, so the block page is the only tell.
+
+    What a host turns a browser away with is a page, served with a 200 and a
+    body that extracts perfectly well — which is exactly how a refusal would
+    come to be stored as though it were the document.
+    """
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        return CHALLENGE_HTML
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+    url = f"{FIXTURE_HOST}/research/one"
+
+    async with httpx.AsyncClient(transport=refusing_transport()) as client:
+        with pytest.raises(FetchRefused, match="anti-bot"):
+            await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+
+async def test_a_challenge_page_a_render_reaches_is_refused_not_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same for the thin-body escalation, which is the other way in."""
+
+    async def render(url: str, *, profile: str | None = None) -> str:
+        return CHALLENGE_HTML.decode()
+
+    monkeypatch.setattr("inkwell.corpus.fetch.rendered_html", render)
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+    url = f"{FIXTURE_HOST}/research/one"
+    thin = httpx.MockTransport(lambda request: httpx.Response(200, text="<p>x</p>"))
+
+    async with httpx.AsyncClient(transport=thin) as client:
+        with pytest.raises(FetchRefused, match="anti-bot"):
+            await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+
+# ── One page at several URLs enters the corpus once ──────────────────────────
+
+
+async def test_one_page_served_at_two_urls_is_stored_once(tmp_path: Path) -> None:
+    """A section-per-URL app would otherwise enter once per section.
+
+    The count is the point as much as the storage is: eighteen copies of one
+    page reported as eighteen stored documents is a corpus that looks fuller
+    than it is, and nothing downstream can tell the difference.
+    """
+    declaration = fixture_declaration()
+    shell = article_html("The One Page")
+    pages = (
+        FixturePage(url=SITEMAP, body=sitemap_xml(("/research/one", "/research/two"))),
+        FixturePage(url=f"{FIXTURE_HOST}/research/one", body=shell),
+        FixturePage(url=f"{FIXTURE_HOST}/research/two", body=shell),
+    )
+    store = CorpusStore(root=tmp_path)
+    async with client_for(pages) as client:
+        report = await ingest_source(declaration, store, DocumentFetcher(client=client))
+
+    assert report.stored == 1
+    assert report.duplicate == 1
+    shard = store.load(declaration)
+    assert len(shard.documents) == 1
+    assert len(shard.aliases) == 1
+    assert shard.aliases[0].holder == shard.documents[0].slug
+    assert shard.aliases[0].slug != shard.documents[0].slug
+
+
+async def test_a_settled_alias_is_not_fetched_again(tmp_path: Path) -> None:
+    """Reached and decided, so a re-run costs nothing to reach the same answer."""
+    declaration = fixture_declaration()
+    shell = article_html("The One Page")
+    pages = (
+        FixturePage(url=SITEMAP, body=sitemap_xml(("/research/one", "/research/two"))),
+        FixturePage(url=f"{FIXTURE_HOST}/research/one", body=shell),
+        FixturePage(url=f"{FIXTURE_HOST}/research/two", body=shell),
+    )
+    store = CorpusStore(root=tmp_path)
+    async with client_for(pages) as client:
+        await ingest_source(declaration, store, DocumentFetcher(client=client))
+        again = await ingest_source(declaration, store, DocumentFetcher(client=client))
+
+    assert (again.stored, again.duplicate, again.unchanged) == (0, 0, 0)
+    settled = store.load(declaration)
+    assert len(settled.documents) == 1
+    assert len(settled.aliases) == 1
+
+
+# ── Repairing a corpus built before anything was watching ────────────────────
+
+
+def doubled_shard(tmp_path: Path) -> CorpusStore:
+    """A source holding one page under three slugs, and one document of its own."""
+    store = CorpusStore(root=tmp_path)
+    declaration = fixture_declaration()
+    shard = store.load(declaration)
+    for slug, digest, stamp in (
+        ("second", "shared", "2026-01-02T00:00:00Z"),
+        ("first", "shared", "2026-01-01T00:00:00Z"),
+        ("third", "shared", "2026-01-03T00:00:00Z"),
+        ("its-own", "distinct", "2026-01-01T00:00:00Z"),
+    ):
+        shard.record_document(
+            StoredDocument(
+                slug=slug,
+                url=f"{FIXTURE_HOST}/research/{slug}",
+                filename=store.store_markdown("fixture", slug, f"body of {slug}"),
+                content_sha256=digest,
+                fetched_at=stamp,
+            )
+        )
+    store.save(shard)
+    return store
+
+
+def test_a_dry_prune_reports_what_it_would_do_and_touches_nothing(
+    tmp_path: Path,
+) -> None:
+    """The point of a destructive command is being able to see it first."""
+    store = doubled_shard(tmp_path)
+
+    report = prune_source("fixture", store, dry_run=True)
+
+    assert (report.documents, report.collapsed, report.dropped) == (4, 2, 0)
+    assert len(store.load(fixture_declaration()).documents) == 4
+    assert (tmp_path / "fixture" / "third.md").is_file()
+
+
+def test_pruning_keeps_the_copy_that_arrived_first(tmp_path: Path) -> None:
+    """Deterministic, so pruning the same corpus twice decides the same way."""
+    store = doubled_shard(tmp_path)
+
+    prune_source("fixture", store)
+
+    shard = store.load(fixture_declaration())
+    assert {one.slug for one in shard.documents} == {"first", "its-own"}
+    assert {alias.slug for alias in shard.aliases} == {"second", "third"}
+    assert {alias.holder for alias in shard.aliases} == {"first"}
+    assert not (tmp_path / "fixture" / "third.md").exists()
+    assert (tmp_path / "fixture" / "first.md").is_file()
+
+
+def test_a_dropped_document_leaves_no_alias_behind_it(tmp_path: Path) -> None:
+    """A wrong document is refetched, and an alias is what would prevent that.
+
+    An alias tells the next sweep this URL was reached and decided. That is
+    right for a copy and exactly wrong for chrome extracted where the body
+    never rendered, which is why dropping is a separate operation rather than
+    a flag on collapsing.
+    """
+    store = doubled_shard(tmp_path)
+
+    report = prune_source("fixture", store, drop=("first", "second", "third"))
+
+    assert (report.collapsed, report.dropped) == (0, 3)
+    shard = store.load(fixture_declaration())
+    assert {one.slug for one in shard.documents} == {"its-own"}
+    assert shard.aliases == []
+
+
+def test_a_drop_naming_nothing_says_so_rather_than_passing_quietly(
+    tmp_path: Path,
+) -> None:
+    """A typo in a destructive command must not read as a clean run."""
+    store = doubled_shard(tmp_path)
+
+    report = prune_source("fixture", store, drop=("no-such-slug",))
+
+    assert report.missing == ("no-such-slug",)
+    assert "no such slug: no-such-slug" in report.summary()

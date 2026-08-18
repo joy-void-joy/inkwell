@@ -377,13 +377,18 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
                 apex="openai.com",
             ),
         ),
+        needs_browser=True,
         notes=(
             "Swept across three domains: the main site, the deployment-safety "
             "site, and the help centre. The published surface is large, so the "
             "first sweep was taken as a deliberate act rather than inherited "
             "from a sync of everything — it is the primary account of the July "
             "2026 Hugging Face intrusion, which is what settled it. PDFs on "
-            "cdn.openai.com still need seeds once someone enumerates them."
+            "cdn.openai.com still need seeds once someone enumerates them. "
+            "openai.com refuses a plain client with a 403, and the "
+            "deployment-safety site renders each section client-side from one "
+            "shell, so both ways of being out of reach apply here and the "
+            "browser path is what answers either."
         ),
     ),
     SourceDeclaration(

@@ -742,6 +742,89 @@ async def test_a_refused_feed_is_reached_too_so_the_source_enumerates(
     assert [item.url for item in found] == ["https://fixture.test/research/one/"]
 
 
+# ── A source that moved is reported, not mistaken for a quiet one ────────────
+
+
+WEBFLOW_PAGE = b"<!DOCTYPE html><html><head><title>Apollo</title></head></html>"
+"""What a moved sitemap actually serves: the site's own page, not a 404."""
+
+
+class TestAnAvenueThatEnumeratesNothingSaysSo:
+    """Apollo left WordPress for Webflow, its per-type sitemaps became ordinary
+    web pages, and those parse to no locations. The run said `0 listed, 0
+    failed` — which reads as a source that publishes nothing, and it sat broken
+    through a whole sweep looking exactly like one."""
+
+    async def test_a_sitemap_serving_a_web_page_is_a_recorded_failure(self) -> None:
+        avenue = SitemapAvenue(category="science", sitemap=SITEMAP)
+        reader = FixtureReader((FixturePage(url=SITEMAP, body=WEBFLOW_PAGE),))
+
+        found = await discover_avenues((avenue,), PageCache(reader=reader))
+
+        assert found.items == ()
+        assert len(found.failures) == 1
+        assert "moved" in found.failures[0].error
+
+    async def test_a_category_that_moved_names_the_prefix_that_found_nothing(
+        self,
+    ) -> None:
+        """A live sitemap and an empty category is a different repair from a
+        dead sitemap, so it is a different message."""
+        avenue = SitemapAvenue(category="products", sitemap=SITEMAP)
+        reader = FixtureReader(
+            (FixturePage(url=SITEMAP, body=sitemap_xml(("/science/one",))),)
+        )
+
+        found = await discover_avenues((avenue,), PageCache(reader=reader))
+
+        assert len(found.failures) == 1
+        assert "/products/" in found.failures[0].error
+
+    async def test_one_avenue_going_empty_costs_only_itself(self) -> None:
+        """Four avenues share Apollo's one sitemap; a category disappearing
+        must not take the three that are still there."""
+        pages = (FixturePage(url=SITEMAP, body=sitemap_xml(("/science/one",))),)
+        found = await discover_avenues(
+            (
+                SitemapAvenue(category="science", sitemap=SITEMAP),
+                SitemapAvenue(category="products", sitemap=SITEMAP),
+            ),
+            PageCache(reader=FixtureReader(pages)),
+        )
+
+        assert [item.slug for item in found.items] == ["one"]
+        assert len(found.failures) == 1
+
+    async def test_a_sweep_tolerates_one_empty_domain(self) -> None:
+        """Whether zero is a failure is the avenue's question: a multi-domain
+        sweep carries on past a domain that names nothing."""
+        live = "https://fixture.test/sitemap.xml"
+        dead = "https://gone.test/sitemap.xml"
+        avenue = SweepAvenue(
+            domains=("https://fixture.test", "https://gone.test"),
+            apex="fixture.test",
+        )
+        reader = FixtureReader(
+            (
+                FixturePage(url=live, body=sitemap_xml(("/research/one",))),
+                FixturePage(url=dead, body=WEBFLOW_PAGE),
+            )
+        )
+
+        found = await discover_avenues((avenue,), PageCache(reader=reader))
+
+        assert found.failures == ()
+        assert [item.url for item in found.items] == [f"{FIXTURE_HOST}/research/one"]
+
+    async def test_a_sweep_where_every_domain_is_empty_is_a_failure(self) -> None:
+        avenue = SweepAvenue(domains=("https://fixture.test",), apex="fixture.test")
+        reader = FixtureReader((FixturePage(url=SITEMAP, body=WEBFLOW_PAGE),))
+
+        found = await discover_avenues((avenue,), PageCache(reader=reader))
+
+        assert len(found.failures) == 1
+
+
 # ── A sweep says where it has got to while it is still going ─────────────────
 
 

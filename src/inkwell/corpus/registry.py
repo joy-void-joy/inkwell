@@ -140,6 +140,15 @@ class DroppedSource(BaseModel):
 ANTHROPIC_CDN = "www-cdn.anthropic.com"
 """Where Anthropic serves the system-card PDFs its own sitemap never lists."""
 
+APOLLO_SITEMAP = "https://www.apolloresearch.ai/sitemap.xml"
+"""The one sitemap Apollo publishes, which every one of its avenues walks.
+
+Named once because four avenues share it: Webflow emits a single sitemap for
+the whole site, so what separates science from governance is the path prefix
+rather than the file, and four copies of this URL would be four places to
+correct the next time the site moves.
+"""
+
 
 AI_HEADLINE_TERMS: tuple[str, ...] = (
     "ai ",
@@ -232,27 +241,17 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         authority="lab_publication",
         hosts=("apolloresearch.ai",),
         avenues=(
-            SitemapAvenue(
-                category="science",
-                sitemap="https://www.apolloresearch.ai/science-sitemap.xml",
-            ),
-            SitemapAvenue(
-                category="governance",
-                sitemap="https://www.apolloresearch.ai/governance-sitemap.xml",
-            ),
-            SitemapAvenue(
-                category="blog",
-                sitemap="https://www.apolloresearch.ai/post-sitemap.xml",
-            ),
-            SitemapAvenue(
-                category="products",
-                sitemap="https://www.apolloresearch.ai/products-sitemap.xml",
-            ),
+            SitemapAvenue(category="science", sitemap=APOLLO_SITEMAP),
+            SitemapAvenue(category="governance", sitemap=APOLLO_SITEMAP),
+            SitemapAvenue(category="blog", sitemap=APOLLO_SITEMAP),
+            SitemapAvenue(category="monitoring", sitemap=APOLLO_SITEMAP),
         ),
         notes=(
-            "WordPress with Yoast, so each content type has its own sitemap. The "
-            "page and taxonomy sitemaps are left out on purpose: static pages and "
-            "tag archives carry no document of their own."
+            "Webflow, which publishes one sitemap for the whole site rather "
+            "than one per content type, so every avenue walks the same file and "
+            "the category is the path prefix that separates them. Press, team, "
+            "and testimonials are left out on purpose: they carry announcements "
+            "and profiles rather than documents of Apollo's own."
         ),
     ),
     SourceDeclaration(
@@ -415,8 +414,9 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         avenues=(SweepAvenue(domains=("https://mistral.ai",), apex="mistral.ai"),),
         active=False,
         notes=(
-            "Inactive pending recon. Governance documents live on a separate CMS "
-            "host and render client-side, so they will arrive as seeds."
+            "Inactive pending recon. Governance documents live on "
+            "legal.cms.mistral.ai and render client-side, so they will arrive "
+            "as seeds rather than through the sweep."
         ),
     ),
     SourceDeclaration(
@@ -494,8 +494,9 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         ),
         active=False,
         notes=(
-            "Inactive pending recon: the organization publishes across several "
-            "domains and which one is canonical is not settled."
+            "Inactive pending recon: moonshot.ai, moonshot.cn, and kimi.com all "
+            "carry the organization's writing and which is canonical is not "
+            "settled. Recon is deciding that, not finding a sitemap."
         ),
     ),
     SourceDeclaration(
@@ -509,7 +510,8 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         active=False,
         notes=(
             "Inactive pending recon: as with Moonshot, the canonical publishing "
-            "domain is not settled."
+            "domain is not settled — z.ai, zhipuai.cn, and bigmodel.cn are the "
+            "three it is between."
         ),
     ),
     SourceDeclaration(

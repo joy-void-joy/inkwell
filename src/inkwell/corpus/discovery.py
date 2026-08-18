@@ -543,12 +543,33 @@ class SitemapAvenue(Avenue):
         return self.sitemap
 
     async def discover(self, pages: PageCache) -> list[DiscoveredItem]:
+        """Every document this sitemap lists under the category's prefix.
+
+        Both kinds of nothing are failures here, and they are different
+        failures worth telling apart. A sitemap naming no location at all was
+        not a sitemap — a moved one answers with the site's own page, which
+        parses to nothing. A sitemap naming plenty and none of them under this
+        prefix is a category that moved, and the message says which prefix
+        found nothing so the declaration can be corrected rather than guessed at.
+        """
         prefix = self.prefix()
-        return [
+        locations = await sitemap_locations(pages, self.sitemap)
+        if not locations:
+            raise AvenueEmpty(
+                f"{self.sitemap} named no location — it has moved, or what it "
+                "serves is no longer a sitemap"
+            )
+        found = [
             DiscoveredItem(category=self.category, slug=slug, url=url)
-            for url in await sitemap_locations(pages, self.sitemap)
+            for url in locations
             if (slug := url_slug(url, prefix))
         ]
+        if not found:
+            raise AvenueEmpty(
+                f"{self.sitemap} named {len(locations)} location(s), none of "
+                f"them under {prefix!r}"
+            )
+        return found
 
 
 class ListingAvenue(Avenue):
@@ -920,10 +941,36 @@ class SweepAvenue(Avenue):
             key = normalize_url(url)
             if key not in found:
                 found[key] = self.item_for(url, apex)
+        if not found:
+            raise AvenueEmpty(
+                f"none of {', '.join(self.domains)} named a document — every "
+                "sitemap was empty, unreadable, or filtered away entirely"
+            )
         return list(found.values())
 
 
 # ── Running discovery for a source ────────────────────────────────────────────
+
+
+class AvenueEmpty(Exception):
+    """An avenue that was reached and turned out to enumerate nothing.
+
+    Its own failure because it is the one a run reports as success. A source
+    that is down fails loudly and lands in the failures; a source that *moved*
+    answers every request and names no document, so the run says "0 listed, 0
+    failed" — which reads as a source that publishes nothing rather than as a
+    declaration pointing somewhere that is no longer there.
+
+    Apollo is the case this was written for: it left WordPress for Webflow, the
+    per-type sitemaps it used to publish became ordinary web pages, and those
+    parse to no locations at all. It sat broken through a whole sweep looking
+    exactly like a quiet source.
+
+    Raised by the avenue rather than by the sitemap walk, because whether zero
+    is a failure is the avenue's question: one sitemap naming nothing is a dead
+    declaration, while one domain of a multi-domain sweep naming nothing is
+    ordinary and the sweep carries on to the others.
+    """
 
 
 class AvenueFailure(BaseModel):

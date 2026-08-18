@@ -40,7 +40,7 @@ from inkwell.manuscript.mailbox import (
     question_id,
 )
 from inkwell.manuscript.reconcile import reconcile
-from inkwell.manuscript.runner import PartOutcome, run_part
+from inkwell.manuscript.runner import PartOutcome, TurnEnding, run_part
 from inkwell.manuscript.state import NodeVerdict, WorkState
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript
@@ -74,7 +74,7 @@ class PartResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     key: str = Field(description="The part")
-    outcome: str = Field(description="What happened to it")
+    outcome: TurnEnding = Field(description="How its turn ended")
     detail: str = Field(default="", description="What it said, where it said anything")
 
 
@@ -112,7 +112,7 @@ class PassReport(BaseModel):
         """Whether the work came to rest in this pass."""
         return self.remaining == 0
 
-    def counted(self, outcome: str) -> int:
+    def counted(self, outcome: TurnEnding) -> int:
         """How many parts this pass left in one condition."""
         return sum(1 for held in self.results if held.outcome == outcome)
 
@@ -170,30 +170,35 @@ def recording(
     manuscript: Manuscript,
     work: str,
 ) -> Recorded:
-    """What one part's turn did to the work, in the four ways it can end."""
-    match outcome:
-        case BaseException():
-            logger.exception("Running %s raised", verdict.key, exc_info=outcome)
-            return Recorded(
-                state=state.declared(verdict.key, "failed", str(outcome)),
-                result=PartResult(
-                    key=verdict.key, outcome="failed", detail=str(outcome)
-                ),
-            )
-        case PartOutcome(questions=(_, *_)):
+    """What one part's turn did to the work, in the four ways it can end.
+
+    A raised turn is narrowed first because an exception is not an outcome at
+    all — nothing came back to ask. The three real endings are asked of the
+    outcome rather than worked out from its fields here, so a fourth way to
+    end is one literal and one arm instead of a condition this function got
+    wrong.
+    """
+    if isinstance(outcome, BaseException):
+        logger.exception("Running %s raised", verdict.key, exc_info=outcome)
+        return Recorded(
+            state=state.declared(verdict.key, "failed", str(outcome)),
+            result=PartResult(key=verdict.key, outcome="failed", detail=str(outcome)),
+        )
+    match outcome.ended():
+        case "parked":
             reason = parked_by(mailbox, manuscript, outcome, work)
             return Recorded(
                 state=state.declared(verdict.key, "parked", reason),
                 result=PartResult(key=verdict.key, outcome="parked", detail=reason),
             )
-        case PartOutcome() if not outcome.succeeded():
+        case "failed":
             return Recorded(
                 state=state.declared(verdict.key, "failed", outcome.failure),
                 result=PartResult(
                     key=verdict.key, outcome="failed", detail=outcome.failure
                 ),
             )
-        case _:
+        case "rewritten":
             moved = state.changed(outcome.key, outcome.changes)
             return Recorded(
                 state=moved.built(

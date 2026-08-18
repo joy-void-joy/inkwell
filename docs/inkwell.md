@@ -50,6 +50,20 @@ src/inkwell/
 │   ├── semantics.py        # The optional vector layer, and the seam that computes it
 │   ├── fetch.py            # Reaching a document, escalating to a browser where declared
 │   └── ingest.py           # A run: enumerate, fetch what is new, tag, store, report
+├── manuscript/             # A work of many parts, built incrementally rather than written once
+│   ├── tree.py             # The tree a work is, and the key each part keeps across imports
+│   ├── ingest.py           # Reading an mkdocs work: declared order, then headings below the files
+│   ├── vocabulary.py       # The terms a work's own authors declared, and which parts use them
+│   ├── links.py            # The parts one part points at, read out of its prose
+│   ├── facts.py            # What a run read, what it changed, and the ledger between them
+│   ├── state.py            # Declared standings and build stamps — dirtiness is derived, never stored
+│   ├── graph.py            # The dependency pass, and adopting a work as already built
+│   ├── splice.py           # Replacing one part's span, leaving its siblings byte-identical
+│   ├── store.py            # A work's records, outliving every run and outside its own repository
+│   ├── runner.py           # One part through the pipeline and back into its file
+│   ├── mailbox.py          # What a part could not settle, escalated up the tree
+│   ├── reconcile.py        # Reading a wave's rewrites against each other — the link step
+│   └── loop.py             # Passes until nothing is outstanding
 ├── devtools/               # Development CLI, exposed as `lup-devtools`
 │   ├── main.py             # Root Typer app composing the sub-apps
 │   ├── harness/            # Typed harness declarations — this tree's source
@@ -175,6 +189,63 @@ carries the difference as data rather than the code carrying a special case:
 `BoldedSummaries` states the textbook floor and the memo ceiling, and
 `BoldEmphasis` takes the exemption that lets bold be navigation in a format
 whose convention asks for it while staying overuse everywhere else.
+
+## A work of many parts
+
+The pipeline writes one piece. A textbook is a tree of them — the AI Safety
+Atlas is nine chapters of seven-or-so section files, each holding several
+subsections, and the subsection is the unit anybody revises: 201 leaf parts.
+Running the pipeline over all of them costs thousands of dollars, and running
+it over all of them *again* whenever one changes is what makes a continuous
+loop unaffordable rather than merely expensive.
+
+So the loop is **an incremental build system whose compile step is the writing
+pipeline**. Parts are targets, what a part leans on is its dependencies,
+feedback dirties a target, reconciliation is the link step. That framing
+answers what re-runs, in what order, what is cached, and when it is done.
+
+**Dirtiness is derived, never stored.** A part is out of date when somebody
+asked for it, when its text moved under it, or when the ledger holds a change
+it consumed and has not seen — every one asked afresh against a *build stamp*
+recording what the last run was built from. What is persisted is only what
+nothing can recompute: a declared standing (`requested`, `running`, `parked`,
+`failed`) and the stamp. A build system that persists dirtiness eventually
+believes something clean is dirty, or worse.
+
+**Propagation keys on what changed, not on who changed.** A run publishes the
+dependencies it moved; a part is reached only where what it consumed and what
+moved intersect. That is why a pass settles: a rewrite that redefines nothing
+reaches nothing however many parts sit downstream, and two chapters that
+depend on each other come to rest because the cycle carries change facts
+rather than nodes.
+
+**The graph is dense before any run**, because a work usually declares one.
+The Atlas ships 239 `*[Term]: meaning` entries in
+`docs/includes/abbreviations.md` that mkdocs substitutes book-wide, so a part
+depends on a term exactly when its prose contains it as a word — the work's
+own semantics read back, not inferred. Markdown links would have given
+nothing: the Atlas has no cross-links, every non-http target being an image.
+
+**Adoption is what makes it affordable.** A work nothing has built is a work
+where every part is out of date. `manuscript import` stamps each part as built
+from the text it already holds — `make -t`, and the same argument — so the
+first useful pass rewrites what somebody asked about rather than the book. The
+full pass stays available and stays expensive; it stops being the entry fee.
+
+**A rewrite splices.** One part's span is replaced and its siblings stay
+byte-identical, because a model asked to reassemble the file re-emits prose
+nobody asked it to touch. Over 201 parts revised repeatedly that is the
+difference between converging on the author's book and walking away from it.
+
+**Parked is not failed.** A run that cannot settle something asks, its part
+parks, and nothing retries it until somebody answers — through the CLI or the
+work's tree in the web surface. A failed part stays failed with what it said,
+because one that quietly returned to idle would be picked up next pass and
+fail identically forever.
+
+State lives in inkwell's own store beside the corpus and the book records,
+never in the work's repository: that tree belongs to whoever writes the book,
+and state left there would not survive a fresh clone.
 
 ## Test principles
 

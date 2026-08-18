@@ -1231,17 +1231,6 @@ Examples:
     inkwell revise "https://docs.google.com/document/d/abc123/edit\"""",
     standing_instruction=REVISE_INSTRUCTION,
     material_role="revision_target",
-    # lup: solved: revise skips no stage yet. Its concern asks for extraction
-    # and planning-from-scratch to be skipped, but a draft may be a Doc, a
-    # URL, or a file — `stage_extract` is what turns those into text — and
-    # `stage_research` raises without a plan, so skipping both leaves a run
-    # that cannot complete. What a revision should do instead of planning
-    # afresh is the open question; the standing instruction already tells the
-    # planner to keep the author's structure.
-    # Settled: revise skips nothing, and the standing instruction is what
-    # makes it a revision — it reaches the planner through the ordinary
-    # source path, telling it to keep the author's structure and to question
-    # the draft's own claims for currency.
     parameters=[
         DRAFT,
         REFS,

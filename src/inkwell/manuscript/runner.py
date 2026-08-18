@@ -28,6 +28,7 @@ to idle would be picked up again on the next pass and fail the same way.
 
 import logging
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -59,6 +60,14 @@ A file rather than the text inline, because ``revision_target`` takes sources
 the extract stage opens, and a part of a book is exactly a document.
 """
 
+type TurnEnding = Literal["rewritten", "parked", "failed"]
+"""The three ways one part's turn can end.
+
+Named rather than worked out from an outcome's fields by whoever is asking,
+so a fourth way to end costs a literal here instead of a stale condition at
+every reader.
+"""
+
 
 class PartOutcome(BaseModel):
     """What one part's run produced, before any of it is recorded.
@@ -86,9 +95,23 @@ class PartOutcome(BaseModel):
         default="", description="Why the run produced nothing, where it did"
     )
 
+    def ended(self) -> TurnEnding:
+        """How this turn ended, answered by the outcome rather than about it.
+
+        Named here because only the outcome holds what decides it, and because
+        a caller that worked it out from the fields would be a filter that
+        goes stale the moment there is a fourth way for a turn to end. The
+        order is the order of severity: a run that produced nothing failed
+        whatever else it also did, and one that asked something is parked
+        rather than finished even though it has prose.
+        """
+        if self.failure or not self.text:
+            return "failed"
+        return "parked" if self.questions else "rewritten"
+
     def succeeded(self) -> bool:
         """Whether there is prose here to put back into the work."""
-        return not self.failure and bool(self.text)
+        return self.ended() != "failed"
 
 
 def placed(manuscript: Manuscript, node: ManuscriptNode) -> str:

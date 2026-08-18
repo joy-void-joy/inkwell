@@ -31,7 +31,7 @@ from inkwell.corpus.discovery import (
     feed_entries,
     source_id_for,
 )
-from inkwell.corpus.fetch import DocumentFetcher
+from inkwell.corpus.fetch import DocumentFetcher, HttpPageReader
 from inkwell.corpus.ingest import ingest_source, ingest_with
 from inkwell.corpus.quality import DEFAULT_RULES, ThinRule, assess
 from inkwell.corpus.registry import (
@@ -268,8 +268,9 @@ def test_every_declared_source_is_named_once() -> None:
 
 def test_only_sources_whose_enumeration_is_proven_are_active() -> None:
     """The seven the ported database enumerated, plus the news desks whose
-    feeds were walked for real. BleepingComputer is declared and inactive: it
-    answers the corpus fetcher with 403 however good the declaration is."""
+    feeds were walked for real, plus the two whose first sweep was taken
+    deliberately: OpenAI, whose surface is large, and BleepingComputer, which
+    refuses a plain client and is reached over the browser's connection."""
     assert {entry.key for entry in active_declarations()} == {
         "aisi",
         "anthropic",
@@ -281,6 +282,8 @@ def test_only_sources_whose_enumeration_is_proven_are_active() -> None:
         "techcrunch",
         "cyberscoop",
         "bbc",
+        "openai",
+        "bleepingcomputer",
     }
 
 
@@ -323,8 +326,12 @@ def test_dropped_sources_are_recorded_with_a_reason() -> None:
 
 def test_a_source_needing_a_browser_says_so() -> None:
     """The playwright path is chosen by declaration, not guessed per page."""
-    js_hard = [entry for entry in DECLARED_SOURCES if entry.renders_with_javascript]
-    assert {entry.key for entry in js_hard} == {"deepmind", "xai"}
+    browser_bound = [entry for entry in DECLARED_SOURCES if entry.needs_browser]
+    assert {entry.key for entry in browser_bound} == {
+        "deepmind",
+        "xai",
+        "bleepingcomputer",
+    }
 
 
 def declared_union_bases() -> list[type[BaseModel]]:
@@ -635,6 +642,100 @@ def test_quality_is_recorded_per_document(tmp_path: Path) -> None:
     assert document is not None
     assert document.quality.fired
     assert document.quality.metrics.chars == 4
+
+
+# ── A host that refuses a plain client is reached through the browser ─────────
+
+
+def refusing_transport(status: int = 403) -> httpx.MockTransport:
+    """A transport that turns every request away, as an anti-bot host does."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="forbidden")
+
+    return httpx.MockTransport(handler)
+
+
+async def test_a_refused_document_is_reached_over_the_browsers_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 403 raises before any body exists, so the escalation cannot key on one.
+
+    This is the whole of what the thin-body path could not do: a refusal never
+    produces the short extraction that path is watching for, so a source that
+    answers a browser and refuses a client would declare the browser path and
+    never once take it.
+    """
+    reached: list[str] = []
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        reached.append(url)
+        return article_html("Reached")
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    declaration = fixture_declaration()
+    browser_bound = declaration.model_copy(update={"needs_browser": True})
+    url = f"{FIXTURE_HOST}/research/one"
+    async with httpx.AsyncClient(transport=refusing_transport()) as client:
+        document = await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+    assert reached == [url]
+    assert document.kind == "markdown"
+    assert document.rendered
+    assert "Reached" in document.text
+
+
+async def test_a_refusal_is_let_through_where_no_browser_is_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Escalation is what a source declared, never what a status code suggests.
+
+    Otherwise every genuinely dead URL in a sweep would cost a browser launch.
+    """
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        raise AssertionError(f"a browser was launched for undeclared {url}")
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    declaration = fixture_declaration()
+    async with httpx.AsyncClient(transport=refusing_transport()) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await DocumentFetcher(client=client).fetch(
+                f"{FIXTURE_HOST}/research/one", declaration
+            )
+
+
+async def test_a_refused_feed_is_reached_too_so_the_source_enumerates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source refused at its feed discovers nothing to fetch in the first place.
+
+    Bytes rather than a rendered DOM: a feed put through a browser's XML viewer
+    comes back as that viewer's HTML, which the entry parser cannot read.
+    """
+    feed = "https://fixture.test/feed/"
+    served = (
+        b'<?xml version="1.0"?>\n<rss version="2.0"><channel>'
+        b"<title>Fixture Desk</title><item>"
+        b"<title>One</title>"
+        b"<link>https://fixture.test/research/one/</link>"
+        b"</item></channel></rss>"
+    )
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        return served
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    avenue = FeedAvenue(category="security", feed=feed, apex="fixture.test")
+    declaration = fixture_declaration(avenues=(avenue,)).model_copy(
+        update={"needs_browser": True}
+    )
+    async with httpx.AsyncClient(transport=refusing_transport()) as client:
+        found = await avenue.discover(
+            PageCache(reader=HttpPageReader(client, declaration))
+        )
+
+    assert [item.url for item in found] == ["https://fixture.test/research/one/"]
 
 
 # ── Runs are observable, and one source failing costs only itself ─────────────

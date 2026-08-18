@@ -359,9 +359,8 @@ async def ingest_source(
     a moved sitemap, a host that no longer resolves — is reported as aborted so
     the run continues and an operator can see which source to look at.
     """
-    cache = (
-        pages if pages is not None else PageCache(reader=HttpPageReader(fetcher.client))
-    )
+    reader = HttpPageReader(fetcher.client, declaration, profile=fetcher.profile)
+    cache = pages if pages is not None else PageCache(reader=reader)
     ingestor = SourceIngestor(
         declaration=declaration,
         store=store,

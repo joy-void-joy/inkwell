@@ -7,11 +7,15 @@ that what lands on disk is what a reader greps. A PDF is not extracted at all:
 its bytes come back untouched, because a PDF's notation and layout are the
 document and an extraction of them is a plausible-looking wrong answer.
 
-A source that only serves content to JavaScript says so in its declaration, and
-then the fetch escalates to the profile's persistent browser context — the one
-``browser_auth`` already runs for logins, not a second browser of its own.
-Escalation is also automatic when a page that should have text comes back thin,
-since that is what a client-rendered shell looks like from here.
+A source a plain fetcher cannot read says so in its declaration, and then the
+fetch escalates to the profile's persistent browser context — the one
+``browser_auth`` already runs for logins, not a second browser of its own. Two
+things trigger it, because a source can be out of reach in two ways: a page
+that should have text comes back thin, which is what a client-rendered shell
+looks like from here, or the host refuses the fetcher outright. The refusal has
+to be caught where the status is raised rather than judged from a body, since a
+403 never produces one to judge — a source that answers a browser and refuses a
+client would otherwise declare the browser path and never reach it.
 """
 
 import logging
@@ -20,7 +24,11 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from inkwell.agent.browser_auth import rendered_html
+from inkwell.agent.browser_auth import (
+    BrowserRefused,
+    fetched_through_browser,
+    rendered_html,
+)
 from inkwell.agent.tools.research.fetch import (
     USER_AGENT,
     challenge_page_marker,
@@ -92,15 +100,33 @@ class HttpPageReader(PageReader):
     """Reads pages over HTTP for discovery, on one shared client.
 
     The seam ``PageCache`` composes in a live run. Sitemaps and listing pages
-    are ordinary GETs, so this stays deliberately plain — the interesting
-    handling belongs to documents, below.
+    are ordinary GETs, and stay that way for a source that answers one.
+
+    It carries its source's declaration for the one case that is not ordinary:
+    a host that refuses a plain client refuses it at the feed as readily as at
+    an article, and a reader with no declaration in hand would leave such a
+    source enumerating nothing to fetch. Bytes, not a rendered DOM — a feed is
+    XML that a parser is waiting for.
     """
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        declaration: SourceDeclaration,
+        *,
+        profile: str | None = None,
+    ) -> None:
         self.client = client
+        self.declaration = declaration
+        self.profile = profile
 
     async def read(self, url: str) -> bytes:
-        return (await http_get(self.client, url)).content
+        try:
+            return (await http_get(self.client, url)).content
+        except httpx.HTTPStatusError:
+            if not self.declaration.needs_browser:
+                raise
+            return await fetched_through_browser(url, profile=self.profile)
 
 
 def looks_like_pdf(response: httpx.Response) -> bool:
@@ -134,7 +160,12 @@ class DocumentFetcher(BaseModel):
         Raises ``FetchRefused`` for something reached but unusable, and lets
         transport errors through for the caller to classify.
         """
-        response = await http_get(self.client, url)
+        try:
+            response = await http_get(self.client, url)
+        except httpx.HTTPStatusError:
+            if not declaration.needs_browser:
+                raise
+            return await self.fetch_refused(url)
 
         if len(response.content) > self.max_bytes:
             raise FetchRefused(
@@ -150,7 +181,7 @@ class DocumentFetcher(BaseModel):
 
         extracted = extract_page(response.text, url=url, output_format=MARKDOWN_FORMAT)
         thin = extracted is None or len(extracted.text) < self.thin_chars
-        if thin and declaration.renders_with_javascript:
+        if thin and declaration.needs_browser:
             return await self.fetch_rendered(url)
         if extracted is None:
             raise FetchRefused(f"No article text could be extracted from {url}")
@@ -160,6 +191,33 @@ class DocumentFetcher(BaseModel):
             title=extracted.title,
             published=extracted.published,
             text=extracted.text,
+        )
+
+    async def fetch_refused(self, url: str) -> FetchedDocument:
+        """Fetch one document the plain client was turned away from.
+
+        The browser's own connection rather than its DOM: what was wrong was
+        the client, not the page, so rendering it would spend a page load to
+        arrive at the same bytes.
+        """
+        try:
+            body = await fetched_through_browser(url, profile=self.profile)
+        except BrowserRefused as refusal:
+            raise FetchRefused(str(refusal)) from refusal
+        if body[: len(PDF_MAGIC)] == PDF_MAGIC:
+            return FetchedDocument(url=url, kind="pdf", data=body, rendered=True)
+        html = body.decode("utf-8", errors="replace")
+        extracted = extract_page(html, url=url, output_format=MARKDOWN_FORMAT)
+        if extracted is None:
+            raise FetchRefused(f"No article text in what a browser reached at {url}")
+        logger.info("Reached %s over the browser's connection after a refusal", url)
+        return FetchedDocument(
+            url=url,
+            kind="markdown",
+            title=extracted.title,
+            published=extracted.published,
+            text=extracted.text,
+            rendered=True,
         )
 
     async def fetch_rendered(self, url: str) -> FetchedDocument:

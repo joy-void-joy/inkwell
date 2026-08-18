@@ -86,9 +86,10 @@ class SourceDeclaration(BaseModel):
         default=True,
         description="Whether a run sweeps this source, or only tracks that it exists",
     )
-    renders_with_javascript: bool = Field(
+    needs_browser: bool = Field(
         default=False,
-        description="Whether its pages need a real browser to produce content",
+        description="Whether its pages need a real browser to reach their content "
+        "— a client-rendered shell, or a host that refuses a plain fetcher",
     )
     quality_rules: tuple[QualityRule, ...] = Field(
         default=DEFAULT_RULES,
@@ -377,12 +378,13 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
                 apex="openai.com",
             ),
         ),
-        active=False,
         notes=(
-            "Inactive: the published surface is large enough that a first sweep "
-            "should be a deliberate act rather than a side effect of syncing "
-            "everything. The multi-domain shape is declared and proven; PDFs on "
-            "cdn.openai.com need seeds once someone enumerates them."
+            "Swept across three domains: the main site, the deployment-safety "
+            "site, and the help centre. The published surface is large, so the "
+            "first sweep was taken as a deliberate act rather than inherited "
+            "from a sync of everything — it is the primary account of the July "
+            "2026 Hugging Face intrusion, which is what settled it. PDFs on "
+            "cdn.openai.com still need seeds once someone enumerates them."
         ),
     ),
     SourceDeclaration(
@@ -396,7 +398,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
             SweepAvenue(domains=("https://deepmind.google",), apex="deepmind.google"),
         ),
         active=False,
-        renders_with_javascript=True,
+        needs_browser=True,
         notes=(
             "Inactive pending recon: the site is behind a challenge and renders "
             "client-side, so it needs the browser path, and its CDN PDFs need "
@@ -426,7 +428,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         hosts=("x.ai",),
         avenues=(SweepAvenue(domains=("https://x.ai",), apex="x.ai"),),
         active=False,
-        renders_with_javascript=True,
+        needs_browser=True,
         notes=(
             "Inactive pending recon: challenge-gated, and the documents are "
             "likely CDN PDFs a sitemap never lists."
@@ -546,15 +548,15 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
                 require_terms=AI_HEADLINE_TERMS,
             ),
         ),
-        active=False,
+        needs_browser=True,
         notes=(
             "A security desk with no AI section, so the whole feed is walked "
             "and headlines carry the topic filter. First to report the "
             "operational detail on the July 2026 Hugging Face intrusion, which "
-            "is why it is declared. Inactive: the feed reads fine in a browser "
-            "and answers the corpus fetcher with 403, so it needs the "
-            "browser-context path rather than a retry — a plain sync would "
-            "spend a request on a known refusal every time."
+            "is why it is declared. Reached through the browser context: the "
+            "feed reads fine in a browser and answers a plain fetcher with 403, "
+            "so the refusal is what the escalation is keyed on rather than a "
+            "thin body — retrying the plain path would earn the same 403."
         ),
     ),
     SourceDeclaration(

@@ -22,11 +22,13 @@ declaration looked at.
 
 import asyncio
 import logging
+from collections.abc import Coroutine
 from time import monotonic, sleep
 from typing import Annotated
 
 import typer
 from pydantic import BaseModel, ConfigDict, Field
+from tqdm import tqdm
 
 from inkwell.agent.config import corpus_root, current_settings
 from inkwell.agent.pipeline import CORPUS_BRIEFING_LIMIT, corpus_briefing
@@ -117,6 +119,13 @@ def status() -> None:
 BAR_WIDTH = 24
 """How wide a progress bar is drawn, in characters."""
 
+PROGRESS_INTERVAL = 2.0
+"""Seconds between readings of the store while a sweep runs.
+
+Short enough that the bar moves, long enough that reading every shard is a
+rounding error against fetching a document.
+"""
+
 
 class SweepProgress(BaseModel):
     """How far a sweep has got, counted off the store rather than the run.
@@ -164,6 +173,63 @@ class SweepProgress(BaseModel):
             f"({self.fraction():.0%}) · {self.started}/{self.total} sources · "
             f"{rate:.0f}/min · {elapsed:.0f}s elapsed · eta ~{self.eta(elapsed):.0f}s"
         )
+
+
+async def tracked(
+    corpus: CorpusStore, interval: float, showing: bool, until: asyncio.Event
+) -> None:
+    """Keep a bar in step with what a sweep is publishing, until told to stop.
+
+    Counted off the store rather than off the run, exactly as ``progress``
+    does — a sweep publishes each shard as it goes, so what has landed is on
+    disk and needs no channel back from the fetching. That also means this
+    reports honestly through an interrupt: the bar stops where the corpus
+    actually got to.
+
+    Stopped by an event rather than by cancellation, so ending it raises
+    nothing that has to be caught and discarded, and so the last reading is
+    taken *after* the sweep finished rather than whenever the poll last came
+    round. The cost is that this can sit up to one interval past the end,
+    which against a sweep measured in hours is not a cost.
+
+    The total moves. Enumeration keeps finding documents while fetching runs,
+    so the denominator grows and the bar can lose ground in percentage terms
+    while gaining it in documents. Better that than a fixed total that was a
+    guess.
+    """
+    with tqdm(
+        unit="doc", desc="sweeping", disable=None if showing else True, leave=True
+    ) as bar:
+
+        def drawn() -> None:
+            """One reading of the store, rendered where the watcher can see it."""
+            found = swept(corpus)
+            bar.total = found.listed or None
+            bar.n = found.stored
+            bar.set_postfix_str(f"{found.started}/{found.total} sources")
+            bar.refresh()
+
+        while not until.is_set():
+            drawn()
+            await asyncio.sleep(interval)
+        drawn()
+
+
+async def swept_with_bar(
+    corpus: CorpusStore, sweep: Coroutine[None, None, IngestReport], showing: bool
+) -> IngestReport:
+    """Run one sweep with a bar beside it, and stop the bar however it ends.
+
+    The bar is stopped in a ``finally`` so a sweep that raises still leaves
+    the terminal in one piece and still shows where the corpus got to.
+    """
+    until = asyncio.Event()
+    watching = asyncio.create_task(tracked(corpus, PROGRESS_INTERVAL, showing, until))
+    try:
+        return await sweep
+    finally:
+        until.set()
+        await watching
 
 
 def swept(corpus: CorpusStore) -> SweepProgress:
@@ -335,18 +401,35 @@ def sync(
     profile: str | None = typer.Option(
         None, "--profile", help="Profile whose browser context reaches JS-hard sources"
     ),
+    show_progress: bool = typer.Option(
+        True,
+        "--progress/--no-progress",
+        help="Draw a bar while the sweep runs; off automatically when not a terminal",
+    ),
 ) -> None:
-    """Enumerate the sources and store what the corpus does not already hold."""
+    """Enumerate the sources and store what the corpus does not already hold.
+
+    The per-source report comes at the end, because a source is only fully
+    accounted for once its run finishes. The bar comes throughout, so a sweep
+    of a dozen sources over several hours is not a silent one — it reads the
+    shards the sweep is publishing, which is the same thing ``corpus
+    progress`` reads from another terminal and works the same way here.
+    """
     keys = tuple(source or ())
+    corpus = store()
     try:
         report = asyncio.run(
-            sync_corpus(
-                store(),
-                keys=keys,
-                profile=profile,
-                concurrency=concurrency,
-                limit=limit,
-                refresh=refresh,
+            swept_with_bar(
+                corpus,
+                sync_corpus(
+                    corpus,
+                    keys=keys,
+                    profile=profile,
+                    concurrency=concurrency,
+                    limit=limit,
+                    refresh=refresh,
+                ),
+                show_progress,
             )
         )
     except UnknownSource as error:

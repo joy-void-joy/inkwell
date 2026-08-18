@@ -7,6 +7,7 @@ costs only itself. The network is faked with a fixture reader and an httpx mock
 transport, so the real extraction, hashing, and merge paths all run.
 """
 
+import asyncio
 import json
 from pathlib import Path
 from typing import get_args
@@ -16,6 +17,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from inkwell.agent.provenance import Venue
+from inkwell.devtools.corpus import swept_with_bar, tracked
 from inkwell.corpus.discovery import (
     Avenue,
     DiscoveredItem,
@@ -32,7 +34,7 @@ from inkwell.corpus.discovery import (
     source_id_for,
 )
 from inkwell.corpus.fetch import DocumentFetcher, HttpPageReader
-from inkwell.corpus.ingest import ingest_source, ingest_with
+from inkwell.corpus.ingest import IngestReport, ingest_source, ingest_with
 from inkwell.corpus.quality import DEFAULT_RULES, ThinRule, assess
 from inkwell.corpus.registry import (
     DECLARED_SOURCES,
@@ -738,6 +740,49 @@ async def test_a_refused_feed_is_reached_too_so_the_source_enumerates(
         )
 
     assert [item.url for item in found] == ["https://fixture.test/research/one/"]
+
+
+# ── A sweep says where it has got to while it is still going ─────────────────
+
+
+class TestTheBarStopsHoweverTheSweepEnds:
+    """`sync` awaits the watcher when the sweep returns, so a watcher that
+    never stops is a CLI that never exits — which is worse than no bar."""
+
+    async def test_the_sweep_result_comes_back_through_the_bar(
+        self, tmp_path: Path
+    ) -> None:
+        store = CorpusStore(root=tmp_path)
+
+        async def sweeping() -> IngestReport:
+            return IngestReport(sources=())
+
+        found = await swept_with_bar(store, sweeping(), False)
+
+        assert isinstance(found, IngestReport)
+
+    async def test_a_sweep_that_raises_still_stops_the_bar(
+        self, tmp_path: Path
+    ) -> None:
+        """Otherwise the `finally` awaits a watcher that is still looping."""
+        store = CorpusStore(root=tmp_path)
+
+        async def failing() -> IngestReport:
+            raise RuntimeError("the sweep fell over")
+
+        with pytest.raises(RuntimeError, match="fell over"):
+            await asyncio.wait_for(swept_with_bar(store, failing(), False), timeout=5)
+
+    async def test_the_watcher_takes_a_reading_after_being_told_to_stop(
+        self, tmp_path: Path
+    ) -> None:
+        """The last reading is the one that matters, and it is taken after the
+        sweep finished rather than whenever the poll last came round."""
+        store = CorpusStore(root=tmp_path)
+        until = asyncio.Event()
+        until.set()
+
+        await asyncio.wait_for(tracked(store, 0.01, False, until), timeout=5)
 
 
 # ── Runs are observable, and one source failing costs only itself ─────────────

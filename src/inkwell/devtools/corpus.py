@@ -60,7 +60,7 @@ from inkwell.corpus.semantics import (
     awaiting_judgement,
     embed_sources,
 )
-from inkwell.corpus.storage import CorpusStore
+from inkwell.corpus.storage import CorpusStore, pending_entries
 from inkwell.corpus.tagging import DEFAULT_RETAG_CONCURRENCY, retag_corpus
 
 logger = logging.getLogger(__name__)
@@ -792,3 +792,40 @@ def prune(
         if apply
         else f"\n{total} documents would change — pass --apply to do it."
     )
+
+
+@app.command("pending")
+def pending(
+    source: list[str] = typer.Argument(
+        default=None, help="Sources to report (default: every source with an index)"
+    ),
+    show: bool = typer.Option(
+        False, "--show", help="List the slugs rather than only counting them"
+    ),
+) -> None:
+    """Say what the next sweep would fetch, without fetching anything.
+
+    The question a sweep cannot be asked while it runs and is tedious to answer
+    afterwards: a document dropped for repair, a URL settled as an alias, and
+    one simply not reached yet are three different states, and only the first
+    is work the next run will actually do.
+    """
+    corpus = store()
+    keys = tuple(source or corpus.sources())
+    if not keys:
+        typer.echo("Nothing is ingested yet — run `corpus sync` first.")
+        raise typer.Exit(code=1)
+
+    width = max(len(key) for key in keys)
+    typer.echo(f"{'key':<{width}} {'pending':>8} {'held':>8} {'aliased':>8}")
+    for key in keys:
+        shard = corpus.load_by_name(key)
+        if shard is None:
+            continue
+        work = pending_entries(shard)
+        typer.echo(
+            f"{key:<{width}} {len(work):>8} {len(shard.documents):>8} "
+            f"{len(shard.aliases):>8}"
+        )
+        for entry in work if show else ():
+            typer.echo(f"    {entry.slug}")

@@ -779,6 +779,20 @@ Write the full article to the output file using the Write tool. After \
 writing, briefly summarize (1-2 sentences) what you changed in your \
 response text.
 
+## Answer for every finding
+
+Each finding in the annotated draft carries a tag. Call \
+record_disposition once for each — applied, folded into another change, \
+or rejected — with one line saying why. The rejections are the ones that \
+matter: a finding you weighed and turned down and a finding you never \
+read leave the piece in exactly the same state, so without this record \
+nobody can tell a reviewer that earned its cost from one that did not, \
+and the answer decides whether it runs again.
+
+Rejecting is a real option and this is not a request to apply \
+everything. A suggestion that fights the author's voice, or that a later \
+finding supersedes, should be rejected and said so.
+
 ## Hierarchy
 
 1. **Correctness.** Critical findings from reviewers and any \

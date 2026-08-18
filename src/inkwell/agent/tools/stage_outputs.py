@@ -34,12 +34,14 @@ from inkwell.agent.models import (
     Assumption,
     AssumptionsList,
     AuthorNote,
+    FindingDisposition,
     ResearchCompilation,
     ResearchFinding,
     ResearchQuestion,
     ResearchSource,
     ReviewFinding,
     ReviewOutput,
+    RewriteDispositions,
     SectionPlan,
     SourceQuote,
 )
@@ -934,6 +936,64 @@ def make_review_output_tools(collector: ReviewCollector) -> list[LupMcpTool]:
             ),
             RecordReviewFindingInput,
             handle_finding,
+        ),
+    ]
+
+
+class DispositionCollector:
+    """Accumulates what the rewrite decided about each review finding."""
+
+    def __init__(self, output_path: Path) -> None:
+        self.output_path = output_path
+        self.record = RewriteDispositions()
+
+    def save(self) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text(
+            self.record.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+
+class RecordDispositionInput(BaseModel):
+    tag: str = Field(
+        description="The finding's tag, exactly as the annotated draft marks it"
+    )
+    action: Literal["applied", "folded", "rejected"] = Field(
+        description=(
+            "'applied': the draft now does what the finding asked. 'folded': "
+            "handled as part of a larger change rather than on its own terms. "
+            "'rejected': deliberately not done."
+        )
+    )
+    reason: str = Field(
+        description=(
+            "One line. For 'applied', what the draft now says; for 'rejected', "
+            "why the finding does not hold."
+        )
+    )
+
+
+def make_disposition_tools(collector: DispositionCollector) -> list[LupMcpTool]:
+    """The tool the rewrite answers each review finding through."""
+
+    async def handle_disposition(inp: RecordDispositionInput) -> ToolOk:
+        collector.record.dispositions.append(FindingDisposition(**inp.model_dump()))
+        collector.save()
+        return ToolOk()
+
+    return [
+        build_stage_tool(
+            "record_disposition",
+            (
+                "Record what you did about one review finding, by its tag. Call "
+                "this for every finding in the annotated draft — including the "
+                "ones you decide against, which is the whole point: a finding "
+                "you rejected on the merits and one you never read look the "
+                "same in the finished piece. Reviewers cost real money per run, "
+                "and this record is what says whether that bought anything."
+            ),
+            RecordDispositionInput,
+            handle_disposition,
         ),
     ]
 

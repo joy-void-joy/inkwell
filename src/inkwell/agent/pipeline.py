@@ -213,6 +213,7 @@ from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 from inkwell.agent.tools.stage_outputs import (
     AssumptionsCollector,
     BookCollector,
+    DispositionCollector,
     FormatCheckCollector,
     PlanCollector,
     PlanFile,
@@ -221,6 +222,7 @@ from inkwell.agent.tools.stage_outputs import (
     load_declared_checks,
     make_assumptions_tools,
     make_book_tools,
+    make_disposition_tools,
     make_format_check_tools,
     make_glossary_tools,
     make_note_tool,
@@ -1578,9 +1580,26 @@ async def add_format_check_report(
 # ---------------------------------------------------------------------------
 
 
+def finding_tag(index: int) -> str:
+    """The handle a finding is marked with, and answered by.
+
+    Positional, so the tag a rewrite cites points at the same finding when the
+    same run is resumed. Findings have no identity of their own — a reviewer
+    records what it saw, not a key — and inventing one per finding would put
+    the burden on every reviewer to keep it unique.
+    """
+    return f"F{index + 1:02d}"
+
+
 def annotate_draft_with_findings(draft: str, findings: list[ReviewFinding]) -> str:
-    """Inject review findings inline at matching text_excerpt locations."""
+    """Inject review findings inline at matching text_excerpt locations.
+
+    Each actionable finding carries its tag into the annotation, which is what
+    the rewrite answers it by. Praise carries none: there is nothing to do
+    about it beyond not spoiling the passage.
+    """
     annotated = draft
+    tags = {id(f): finding_tag(i) for i, f in enumerate(findings)}
 
     anchorable = [
         f
@@ -1600,7 +1619,7 @@ def annotate_draft_with_findings(draft: str, findings: list[ReviewFinding]) -> s
                 annotation = f"\n[PRESERVE:{f.reviewer}] {f.issue}\n"
             else:
                 annotation = (
-                    f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}\n"
+                    f"\n[{tags[id(f)]}:{f.severity}:{f.reviewer}] {f.issue}\n"
                     f"  → {f.suggestion}\n"
                 )
             after = annotated.index(f.text_excerpt) + len(f.text_excerpt)
@@ -1617,7 +1636,8 @@ def annotate_draft_with_findings(draft: str, findings: list[ReviewFinding]) -> s
         annotated += "\n\n## Additional Review Findings\n"
         for f in remaining:
             annotated += (
-                f"- [{f.severity}:{f.reviewer}] {f.location}: {f.issue}\n"
+                f"- [{tags[id(f)]}:{f.severity}:{f.reviewer}] "
+                f"{f.location}: {f.issue}\n"
                 f"  → {f.suggestion}\n"
             )
 
@@ -3030,15 +3050,19 @@ async def rewrite_final(
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
     note_collector = author_notes if author_notes is not None else []
-    note_group = build_note_server("rewrite", note_collector)
-    note_servers, note_tool_names = note_group.servers, note_group.tool_names
+    dispositions = DispositionCollector(notes.artifact_path("dispositions"))
+    stage_tools = build_note_server("rewrite", note_collector).merged(
+        build_output_server("output", make_disposition_tools(dispositions))
+    )
     rewrite_servers = {
-        **note_servers,
+        **stage_tools.servers,
         **(source_servers or {}),
         **(compute_servers or {}),
     }
     rewrite_tools = (
-        note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
+        stage_tools.tool_names
+        + (source_tool_names_list or [])
+        + (compute_tool_names or [])
     )
     plan_path = notes.artifact_path("plan")
 
@@ -3048,14 +3072,23 @@ async def rewrite_final(
     annotated_path.write_text(annotated, encoding="utf-8")
 
     review_summary_path = notes.artifacts_dir / "review_summary.md"
-    n_critical = sum(1 for f in findings if f.severity == "critical")
-    n_suggestion = sum(1 for f in findings if f.severity == "suggestion")
-    n_total = n_critical + n_suggestion
+    actionable = [
+        (finding_tag(i), f)
+        for i, f in enumerate(findings)
+        if f.severity in ("critical", "suggestion")
+    ]
+    n_critical = sum(1 for _, f in actionable if f.severity == "critical")
+    n_suggestion = len(actionable) - n_critical
     summary_lines = [
-        "# Review Summary\n",
+        "# Review Summary\n\n",
         f"**{n_critical} critical** (mandatory), **{n_suggestion} suggestions** "
-        f"({n_total} total findings)\n",
-        "Review findings are annotated inline in the draft file.\n",
+        f"({len(actionable)} findings to answer for)\n\n",
+        "Each is annotated inline in the draft at the passage it quotes. Call "
+        "record_disposition once per tag below — every one, including the ones "
+        "you decide against.\n\n",
+    ] + [
+        f"- **{tag}** [{f.severity}:{f.reviewer}] {f.location}: {f.issue}\n"
+        for tag, f in actionable
     ]
     review_summary_path.write_text("".join(summary_lines), encoding="utf-8")
 
@@ -3124,7 +3157,10 @@ async def rewrite_final(
         f"Read the annotated draft — review findings are marked inline. "
         f"Passages marked [PRESERVE:] were praised by reviewers: protect "
         f"their quality while editing around them. "
-        f"Apply all critical findings and worthwhile suggestions. "
+        f"Apply all critical findings and worthwhile suggestions. Each is "
+        f"tagged; call record_disposition once per tag, including every one "
+        f"you decide against — a finding rejected on the merits and one never "
+        f"read produce the same draft, and only this record tells them apart. "
         f"Use list_research + read_finding to verify corrections against research findings. "
         f"{diversity_note}"
         f"If a style rules file is available, read it and enforce every "

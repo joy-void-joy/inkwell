@@ -15,7 +15,7 @@ run* took in, and a fresh fetch would answer a different one.
 import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 from pydantic import BaseModel, Field, ValidationError
@@ -30,8 +30,10 @@ from inkwell.agent.models import (
     ClassifiedComment,
     IntakeRecord,
     PipelineSnapshot,
-    ReviewOutput,
+    ReviewFinding,
+    RewriteDispositions,
 )
+from inkwell.agent.pipeline import finding_tag
 from inkwell.agent.session import CommentRecords
 
 logger = logging.getLogger(__name__)
@@ -338,6 +340,14 @@ class ReviewerYield(BaseModel):
     acted_on: int = Field(
         default=0, description="Quoted findings whose passage the final draft dropped"
     )
+    measured: Literal["recorded", "inferred"] = Field(
+        default="inferred",
+        description=(
+            "'recorded' where the rewrite left a disposition per finding and "
+            "this counts it; 'inferred' where it did not and this falls back "
+            "to whether the quoted passage survived"
+        ),
+    )
 
     @property
     def landed(self) -> str:
@@ -347,30 +357,50 @@ class ReviewerYield(BaseModel):
         return f"{round(100 * self.acted_on / self.quoted)}%"
 
 
-def reviewer_yield(artifacts: Path, final_draft: str) -> list[ReviewerYield]:
-    """Per reviewer: what it raised on this run, and what the draft did with it."""
+def quotes_absent(reviewer: str) -> bool:
+    """Whether this reviewer's excerpt is what the draft LACKS."""
+    return any(
+        artifact.quotes_absent
+        for artifact in REVIEW_ARTIFACTS
+        if artifact.reviewer == reviewer
+    )
 
-    def counted(artifact: ReviewArtifact, path: Path) -> ReviewerYield:
-        findings = ReviewOutput.model_validate_json(
-            path.read_text(encoding="utf-8")
-        ).findings
-        quoted = [f for f in findings if f.text_excerpt.strip()]
-        present = [f for f in quoted if f.text_excerpt in final_draft]
+
+def reviewer_yield(
+    findings: list[ReviewFinding], recorded: RewriteDispositions, final_draft: str
+) -> list[ReviewerYield]:
+    """Per reviewer: what reached the rewrite, and what the rewrite did with it.
+
+    Counts against the consolidated findings the rewrite was actually handed,
+    not the per-reviewer artifacts, because that is what its tags number and
+    what it answered. Where the run recorded a disposition per tag, this is the
+    rewrite's own account; where it did not, it falls back to whether the
+    quoted passage survived and says so, which is what lets runs predating the
+    record still be read.
+    """
+    answered = {entry.tag: entry.action for entry in recorded.dispositions}
+
+    def acted(index: int, finding: ReviewFinding) -> bool:
+        tag = finding_tag(index)
+        if tag in answered:
+            return answered[tag] in ("applied", "folded")
+        present = finding.text_excerpt in final_draft
+        return present if quotes_absent(finding.reviewer) else not present
+
+    def counted(reviewer: str) -> ReviewerYield:
+        mine = [(i, f) for i, f in enumerate(findings) if f.reviewer == reviewer]
+        quoted = [(i, f) for i, f in mine if f.text_excerpt.strip()]
         return ReviewerYield(
-            reviewer=artifact.reviewer,
-            raised=len(findings),
-            critical=sum(1 for f in findings if f.severity == "critical"),
+            reviewer=reviewer,
+            raised=len(mine),
+            critical=sum(1 for _, f in mine if f.severity == "critical"),
             quoted=len(quoted),
-            acted_on=(
-                len(present) if artifact.quotes_absent else len(quoted) - len(present)
-            ),
+            acted_on=sum(1 for i, f in quoted if acted(i, f)),
+            measured="recorded" if recorded.dispositions else "inferred",
         )
 
-    return [
-        counted(artifact, path)
-        for artifact in REVIEW_ARTIFACTS
-        if (path := artifacts / artifact.filename).exists()
-    ]
+    seen = list(dict.fromkeys(f.reviewer for f in findings))
+    return [counted(reviewer) for reviewer in seen]
 
 
 class SessionYield(BaseModel):
@@ -402,14 +432,31 @@ def final_draft_of(notes_dir: Path) -> str:
     return finished.content if finished else ""
 
 
+def dispositions_of(artifacts: Path) -> RewriteDispositions:
+    """What the run's rewrite recorded, empty for one that recorded nothing."""
+    path = artifacts / "dispositions.json"
+    if not path.exists():
+        return RewriteDispositions()
+    try:
+        return RewriteDispositions.model_validate_json(path.read_text(encoding="utf-8"))
+    except (ValidationError, ValueError):
+        logger.warning("Unreadable dispositions at %s", path)
+        return RewriteDispositions()
+
+
 def collect_review_yield(session: str | None) -> Iterator[SessionYield]:
     """Every reviewer's yield across the runs on disk, or one named run."""
     for session_dir in iter_session_dirs(session) if session else iter_session_dirs():
         notes_dir = pipeline_notes_dir(session_dir)
+        snapshot = notes_dir / "snapshot_rewrite.json"
         draft = final_draft_of(notes_dir)
-        if not draft:
+        if not draft or not snapshot.exists():
             continue
-        for counted in reviewer_yield(notes_dir / "artifacts", draft):
+        findings = PipelineSnapshot.model_validate_json(
+            snapshot.read_text(encoding="utf-8")
+        ).findings
+        recorded = dispositions_of(notes_dir / "artifacts")
+        for counted in reviewer_yield(findings, recorded, draft):
             yield SessionYield(session_id=session_dir.name, counted=counted)
 
 

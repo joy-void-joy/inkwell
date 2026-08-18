@@ -1,6 +1,7 @@
 """Tests for pipeline utility functions: slugify, voice refs."""
 
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -10,6 +11,8 @@ from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     academic_assembly_block,
     add_voice_refs,
+    annotate_draft_with_findings,
+    finding_tag,
     author_context_block,
     brief_block,
     consolidate_findings,
@@ -317,3 +320,52 @@ class TestCorpusBriefingReachesThePlanner:
         notes = PipelineNotes(tmp_path / "notes")
 
         assert planning_topic(notes, "textbook") == "textbook"
+
+
+class TestFindingsCarryATagToAnswerBy:
+    """The rewrite is handed ~70 findings and accounted for them in one
+    sentence. A tag is what lets it answer each one, and what lets the audit
+    read its answer instead of guessing from whether a passage survived."""
+
+    def finding(
+        self,
+        excerpt: str,
+        severity: Literal["critical", "suggestion", "praise"] = "critical",
+    ) -> ReviewFinding:
+        return ReviewFinding(
+            reviewer="factcheck",
+            severity=severity,
+            location="§1",
+            issue="wrong",
+            text_excerpt=excerpt,
+        )
+
+    def test_tags_are_positional_and_stable(self) -> None:
+        """So a resumed run's tag points at the same finding it did before."""
+        assert finding_tag(0) == "F01"
+        assert finding_tag(11) == "F12"
+
+    def test_an_anchored_finding_carries_its_tag_into_the_draft(self) -> None:
+        annotated = annotate_draft_with_findings(
+            "The claim stands here.", [self.finding("The claim stands here.")]
+        )
+
+        assert "[F01:critical:factcheck]" in annotated
+
+    def test_a_finding_that_cannot_anchor_still_carries_its_tag(self) -> None:
+        """It lands in the trailing list, and the rewrite still has to answer
+        it — an unanchorable finding is not an excused one."""
+        annotated = annotate_draft_with_findings(
+            "Some prose.", [self.finding("a passage that is not in the draft")]
+        )
+
+        assert "[F01:critical:factcheck]" in annotated
+
+    def test_praise_carries_no_tag(self) -> None:
+        """There is nothing to answer for beyond not spoiling the passage."""
+        annotated = annotate_draft_with_findings(
+            "Good line.", [self.finding("Good line.", severity="praise")]
+        )
+
+        assert "[PRESERVE:factcheck]" in annotated
+        assert "F01" not in annotated

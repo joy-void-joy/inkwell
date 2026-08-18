@@ -35,7 +35,7 @@ def test_anchors_finding_at_excerpt() -> None:
     ]
     result = annotate_draft_with_findings(draft, findings)
     assert "enacted in 2020" in result
-    assert "[FINDING:critical:narrative] Wrong year" in result
+    assert "[F01:critical:narrative] Wrong year" in result
     assert "→ Should be 2021" in result
 
 
@@ -77,7 +77,7 @@ def test_praise_findings_excluded() -> None:
         ),
     ]
     result = annotate_draft_with_findings(draft, findings)
-    assert "[FINDING:" not in result
+    assert "F01" not in result
     assert "## Additional" not in result
 
 
@@ -108,5 +108,5 @@ def test_only_first_occurrence_annotated() -> None:
         make_finding(text_excerpt="Error here", issue="Fix this"),
     ]
     result = annotate_draft_with_findings(draft, findings)
-    count = result.count("[FINDING:")
+    count = result.count("[F01:")
     assert count == 1

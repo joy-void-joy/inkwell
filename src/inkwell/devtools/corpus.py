@@ -28,7 +28,6 @@ from typing import Annotated
 
 import typer
 from pydantic import BaseModel, ConfigDict, Field
-from tqdm import tqdm
 
 from inkwell.agent.config import corpus_root, current_settings
 from inkwell.agent.pipeline import CORPUS_BRIEFING_LIMIT, corpus_briefing
@@ -153,38 +152,66 @@ class SweepProgress(BaseModel):
         filled = round(self.fraction() * BAR_WIDTH)
         return "#" * filled + "." * (BAR_WIDTH - filled)
 
-    def eta(self, elapsed: float) -> float:
+    def eta(self, elapsed: float, gained: int) -> float:
         """Seconds until the enumerated documents are all fetched.
 
-        From the rate this sweep has actually achieved, not a nominal one. It
-        is an estimate over a moving denominator — enumeration keeps finding
-        documents while fetching runs — so it moves, and a caller showing it
-        should say so rather than presenting it as a countdown.
-        """
-        if not self.stored or elapsed <= 0:
-            return 0.0
-        return (self.listed - self.stored) * elapsed / self.stored
+        From the rate this watch has actually seen, which is why it needs
+        ``gained`` rather than working from :attr:`stored`. A sweep almost
+        never starts from an empty corpus — the store already holds what every
+        earlier run left — so pacing against the total credits this run with
+        documents it did not fetch, and the first reading, taken a fraction of
+        a second in, reports a rate in the hundreds of thousands.
 
-    def render(self, elapsed: float) -> str:
-        """One line: the bar, the counts, the rate, and where it is heading."""
-        rate = self.stored * 60 / elapsed if elapsed > 0 else 0.0
+        It is an estimate over a moving denominator — enumeration keeps
+        finding documents while fetching runs — so it moves, and a caller
+        showing it should say so rather than presenting it as a countdown.
+        """
+        if gained <= 0 or elapsed <= 0:
+            return 0.0
+        return (self.listed - self.stored) * elapsed / gained
+
+    def rate(self, elapsed: float, gained: int) -> float:
+        """Documents a minute, over what this watch has actually seen land."""
+        return gained * 60 / elapsed if elapsed > 0 and gained > 0 else 0.0
+
+    def render(self, elapsed: float, gained: int = 0) -> str:
+        """One line: the bar, the counts, the rate, and where it is heading.
+
+        ``gained`` is what has landed since this watch began. A single
+        reading — the bare ``progress`` command — has watched for no time and
+        seen nothing land, so it reports no rate rather than a made-up one.
+        """
+        pace = f"{self.rate(elapsed, gained):.0f}/min · " if elapsed > 0 else ""
+        heading = (
+            f" · eta ~{self.eta(elapsed, gained):.0f}s"
+            if self.eta(elapsed, gained) > 0
+            else ""
+        )
         return (
             f"[{self.bar()}] {self.stored}/{self.listed} docs "
             f"({self.fraction():.0%}) · {self.started}/{self.total} sources · "
-            f"{rate:.0f}/min · {elapsed:.0f}s elapsed · eta ~{self.eta(elapsed):.0f}s"
+            f"{pace}{elapsed:.0f}s elapsed{heading}"
         )
 
 
 async def tracked(
     corpus: CorpusStore, interval: float, showing: bool, until: asyncio.Event
 ) -> None:
-    """Keep a bar in step with what a sweep is publishing, until told to stop.
+    """Say how far a sweep has got, in lines, until told to stop.
 
     Counted off the store rather than off the run, exactly as ``progress``
     does — a sweep publishes each shard as it goes, so what has landed is on
     disk and needs no channel back from the fetching. That also means this
-    reports honestly through an interrupt: the bar stops where the corpus
+    reports honestly through an interrupt: the last line is where the corpus
     actually got to.
+
+    A line each rather than a bar redrawing in place, and the line already
+    carries a bar. A redrawing bar needs a real terminal underneath it, and
+    silently renders *nothing* where it does not have one — a stream that is
+    piped, captured, or a pty opened with no window size, each of which is
+    indistinguishable from the display being switched off. Appending survives
+    all three, keeps its history for a sweep measured in hours, and reads the
+    same in a terminal as in the log somebody redirected it to.
 
     Stopped by an event rather than by cancellation, so ending it raises
     nothing that has to be caught and discarded, and so the last reading is
@@ -197,22 +224,32 @@ async def tracked(
     while gaining it in documents. Better that than a fixed total that was a
     guess.
     """
-    with tqdm(
-        unit="doc", desc="sweeping", disable=None if showing else True, leave=True
-    ) as bar:
+    if not showing:
+        return
+    started = monotonic()
+    opening = swept(corpus).stored
+    spoken = -1
 
-        def drawn() -> None:
-            """One reading of the store, rendered where the watcher can see it."""
-            found = swept(corpus)
-            bar.total = found.listed or None
-            bar.n = found.stored
-            bar.set_postfix_str(f"{found.started}/{found.total} sources")
-            bar.refresh()
+    def drawn() -> None:
+        """One reading of the store, said only when it has something new to say.
 
-        while not until.is_set():
-            drawn()
-            await asyncio.sleep(interval)
+        Keyed on the count rather than on the clock, so a sweep waiting on a
+        slow source is quiet instead of repeating itself, and every line that
+        does appear marks a document that actually landed.
+        """
+        nonlocal spoken
+        found = swept(corpus)
+        if found.stored == spoken:
+            return
+        spoken = found.stored
+        typer.echo(
+            found.render(monotonic() - started, found.stored - opening), err=True
+        )
+
+    while not until.is_set():
         drawn()
+        await asyncio.sleep(interval)
+    drawn()
 
 
 async def swept_with_bar(
@@ -265,14 +302,15 @@ def progress(
     """
     corpus = store()
     started = monotonic()
-    typer.echo(swept(corpus).render(0.0))
+    opening = swept(corpus)
+    typer.echo(opening.render(0.0))
     if watch <= 0:
         return
     while True:
         sleep(watch)
         elapsed = monotonic() - started
         found = swept(corpus)
-        typer.echo(found.render(elapsed), nl=True)
+        typer.echo(found.render(elapsed, found.stored - opening.stored), nl=True)
         if found.listed and found.stored >= found.listed:
             typer.echo("sweep has fetched everything enumerated")
             return
@@ -404,7 +442,8 @@ def sync(
     show_progress: bool = typer.Option(
         True,
         "--progress/--no-progress",
-        help="Draw a bar while the sweep runs; off automatically when not a terminal",
+        help="Say how far the sweep has got as it goes — a bar in a terminal, "
+        "a line per document elsewhere",
     ),
 ) -> None:
     """Enumerate the sources and store what the corpus does not already hold.

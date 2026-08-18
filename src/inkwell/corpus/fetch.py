@@ -191,7 +191,8 @@ class DocumentFetcher(BaseModel):
 
         refused_as_challenge(url, response.text)
         extracted = extract_page(response.text, url=url, output_format=MARKDOWN_FORMAT)
-        thin = extracted is None or len(extracted.text) < self.thin_chars
+        floor = declaration.thin_chars or self.thin_chars
+        thin = extracted is None or len(extracted.text) < floor
         if thin and declaration.needs_browser:
             return await self.fetch_rendered(url)
         if extracted is None:

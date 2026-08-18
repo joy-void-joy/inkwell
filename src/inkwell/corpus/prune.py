@@ -91,6 +91,11 @@ def prune_source(
     Reads and writes disk only, so this costs no fetch and no judgement. A dry
     run reports exactly what a real one would do and touches nothing, because
     the point of a destructive operation is being able to see it first.
+
+    Dropping a document releases the aliases that named it. An alias says "the
+    bytes are over there", so one whose holder has just been removed points at
+    nothing and would keep its own URL settled against a document the corpus
+    no longer has — which is exactly the URL a repair wants fetched again.
     """
     shard = store.load_by_name(source)
     if shard is None:
@@ -130,6 +135,11 @@ def prune_source(
         store.remove_document(source, document)
     gone = {one.slug for one in leaving}
     shard.documents = [one for one in shard.documents if one.slug not in gone]
+    shard.aliases = [
+        alias
+        for alias in shard.aliases
+        if alias.holder not in gone and alias.slug not in drop
+    ]
 
     store.save(shard)
     logger.info("Pruned %s\n%s", source, report.summary())

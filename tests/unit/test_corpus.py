@@ -48,6 +48,7 @@ from inkwell.corpus.registry import (
 )
 from inkwell.corpus.storage import (
     CorpusStore,
+    DiscoveredEntry,
     SourceShard,
     StoredDocument,
     merged_discovery,
@@ -1898,6 +1899,9 @@ def doubled_shard(tmp_path: Path) -> CorpusStore:
                 fetched_at=stamp,
             )
         )
+        shard.discovered.append(
+            DiscoveredEntry(slug=slug, url=f"{FIXTURE_HOST}/research/{slug}")
+        )
     store.save(shard)
     return store
 
@@ -1957,3 +1961,68 @@ def test_a_drop_naming_nothing_says_so_rather_than_passing_quietly(
 
     assert report.missing == ("no-such-slug",)
     assert "no such slug: no-such-slug" in report.summary()
+
+
+async def test_a_source_declares_how_short_its_own_shell_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell clearing the shared floor is a fact about a site, not the fetcher.
+
+    OpenAI's deployment-safety sections extract to more than the default floor
+    and are still one shell, so a source that knows its own shell says how big
+    it is rather than every source sharing one guess.
+    """
+    rendered: list[str] = []
+
+    async def render(url: str, *, profile: str | None = None) -> str:
+        rendered.append(url)
+        return article_html("The Real Section").decode()
+
+    monkeypatch.setattr("inkwell.corpus.fetch.rendered_html", render)
+    shell = f"<html><body><article><p>{'shell text. ' * 90}</p></article></body></html>"
+    url = f"{FIXTURE_HOST}/research/one"
+    serving = httpx.MockTransport(lambda request: httpx.Response(200, text=shell))
+
+    unraised = fixture_declaration().model_copy(update={"needs_browser": True})
+    async with httpx.AsyncClient(transport=serving) as client:
+        kept = await DocumentFetcher(client=client).fetch(url, unraised)
+    assert rendered == []
+    assert "shell text" in kept.text
+
+    raised = unraised.model_copy(update={"thin_chars": 5_000})
+    async with httpx.AsyncClient(transport=serving) as client:
+        reached = await DocumentFetcher(client=client).fetch(url, raised)
+    assert rendered == [url]
+    assert "The Real Section" in reached.text
+
+
+def test_openais_floor_sits_between_its_shell_and_its_shortest_article() -> None:
+    """The number is measured off the corpus, so say what it was measured against."""
+    openai = declaration_for("openai")
+    assert openai is not None
+    assert 1177 < openai.thin_chars < 2620
+
+
+def test_dropping_a_holder_releases_the_aliases_that_named_it(
+    tmp_path: Path,
+) -> None:
+    """An alias points at bytes, so removing them leaves it naming nothing.
+
+    Left standing it would keep its own URL settled against a document the
+    corpus no longer holds — and that URL is precisely what a repair wants
+    fetched again.
+    """
+    store = doubled_shard(tmp_path)
+    prune_source("fixture", store)
+    assert len(store.load(fixture_declaration()).aliases) == 2
+
+    prune_source("fixture", store, drop=("first",))
+
+    shard = store.load(fixture_declaration())
+    assert {one.slug for one in shard.documents} == {"its-own"}
+    assert shard.aliases == []
+    assert {entry.slug for entry in pending_entries(shard)} >= {
+        "first",
+        "second",
+        "third",
+    }

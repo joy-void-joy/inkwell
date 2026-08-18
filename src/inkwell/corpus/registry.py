@@ -91,6 +91,13 @@ class SourceDeclaration(BaseModel):
         description="Whether its pages need a real browser to reach their content "
         "— a client-rendered shell, or a host that refuses a plain fetcher",
     )
+    thin_chars: int = Field(
+        default=0,
+        description="How short an extraction has to be before this source's pages "
+        "are worth rendering, where the shared default reads a shell as an "
+        "article; 0 takes the default. A shell's size is a fact about a site, "
+        "so the source that has one says how big it is",
+    )
     quality_rules: tuple[QualityRule, ...] = Field(
         default=DEFAULT_RULES,
         description="The heuristic this source's captures are judged against",
@@ -378,6 +385,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
             ),
         ),
         needs_browser=True,
+        thin_chars=1500,
         notes=(
             "Swept across three domains: the main site, the deployment-safety "
             "site, and the help centre. The published surface is large, so the "
@@ -388,7 +396,11 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
             "openai.com refuses a plain client with a 403, and the "
             "deployment-safety site renders each section client-side from one "
             "shell, so both ways of being out of reach apply here and the "
-            "browser path is what answers either."
+            "browser path is what answers either. The shell clears the shared "
+            "thin floor comfortably — it extracts to 1177 characters of "
+            "introduction, where 800 is the default — so the floor is raised "
+            "to sit above it and below the 2620 of the shortest page here that "
+            "is genuinely an article."
         ),
     ),
     SourceDeclaration(

@@ -4,9 +4,10 @@ The corpus has to exist before a question does, which makes building it operator
 work rather than something a run does for itself: ``corpus sync`` is what
 populates it, out of band and on whatever schedule the author likes, and
 ``corpus retag`` is what judges what it stored — two costs, bandwidth and model
-time, kept apart so neither has to wait on the other's rate. A writing run then
-reads what is there, and tops up a single source only when it finds one thin
-mid-question.
+time, kept apart so neither has to wait on the other's rate. ``corpus embed``
+comes third where the semantic layer is wanted, and reads what the second wrote.
+A writing run then reads what is there, and tops up a single source only when it
+finds one thin mid-question.
 
 Every command prints what happened per source, because a bulk crawl is only
 maintainable if a run tells you which sources are healthy and which need a
@@ -443,8 +444,13 @@ def embed(
 
     Nothing else needs this to have been run: browsing, filtering, and every
     ordering are structural and answer with no vectors at all. What this buys
-    is the question that shares no vocabulary with the corpus, and it is worth
-    running after a sync rather than before one.
+    is the question that shares no vocabulary with the corpus.
+
+    Last of the three, after ``retag`` rather than merely after ``sync``. A
+    vector is computed from the abstract a source published or the summary a
+    judgement wrote, and a PDF has no abstract by construction — so embedding
+    a corpus nothing has judged yet skips every PDF in it, which the report
+    counts as "nothing to read".
     """
     corpus = store()
     keys = tuple(source or corpus.sources())

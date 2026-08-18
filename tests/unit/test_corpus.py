@@ -20,6 +20,7 @@ from inkwell.corpus.discovery import (
     Avenue,
     DiscoveredItem,
     DiscoveryOutcome,
+    FeedAvenue,
     ListingAvenue,
     PageCache,
     PageReader,
@@ -27,6 +28,7 @@ from inkwell.corpus.discovery import (
     SweepAvenue,
     TableAvenue,
     discover_avenues,
+    feed_entries,
     source_id_for,
 )
 from inkwell.corpus.fetch import DocumentFetcher
@@ -264,8 +266,10 @@ def test_every_declared_source_is_named_once() -> None:
     assert len(keys) == len(dict.fromkeys(keys))
 
 
-def test_the_seven_proven_sources_are_active() -> None:
-    """The sources the ported database actually enumerated are the active ones."""
+def test_only_sources_whose_enumeration_is_proven_are_active() -> None:
+    """The seven the ported database enumerated, plus the news desks whose
+    feeds were walked for real. BleepingComputer is declared and inactive: it
+    answers the corpus fetcher with 403 however good the declaration is."""
     assert {entry.key for entry in active_declarations()} == {
         "aisi",
         "anthropic",
@@ -274,6 +278,9 @@ def test_the_seven_proven_sources_are_active() -> None:
         "govai",
         "iaps",
         "metr",
+        "techcrunch",
+        "cyberscoop",
+        "bbc",
     }
 
 
@@ -340,7 +347,7 @@ def test_the_declared_unions_stay_abstract() -> None:
 
 def test_declaring_a_source_needs_no_new_module() -> None:
     """Every avenue in the registry is one of the declared avenue types."""
-    kinds = (SitemapAvenue, ListingAvenue, TableAvenue, SweepAvenue)
+    kinds = (SitemapAvenue, ListingAvenue, TableAvenue, SweepAvenue, FeedAvenue)
     for entry in DECLARED_SOURCES:
         for avenue in entry.avenues:
             assert isinstance(avenue, kinds), f"{entry.key} brought its own avenue"
@@ -1310,3 +1317,100 @@ def test_a_browse_narrows_on_a_tag_and_still_sees_the_gap() -> None:
     blind_spot = CorpusFilter(untagged_only=True).apply(everything)
     assert [entry.document.slug for entry in blind_spot] == ["two"]
     assert shard.tags() == ("organization:fixture", EVALUATIONS.tag)
+
+
+RSS_FEED = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <title>CyberScoop</title>
+  <item>
+    <title>Irregular says human oversight responsible for AI sandbox escape</title>
+    <link>https://cyberscoop.com/irregular-ai-sandbox-escape/</link>
+  </item>
+  <item>
+    <title>Details emerge on BlackFile attacks on financial companies</title>
+    <link>https://cyberscoop.com/blackfile-financial-attacks/</link>
+  </item>
+</channel></rss>"""
+
+ATOM_FEED = b"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>The Desk</title>
+  <entry>
+    <title>OpenAI agent breached Hugging Face</title>
+    <link href="https://desk.example/openai-hugging-face/"/>
+  </entry>
+  <entry>
+    <title>A story with no link</title>
+  </entry>
+</feed>"""
+
+
+class TestFeedEntries:
+    """Both syndication dialects, read without sniffing which one it is."""
+
+    def test_rss_puts_the_url_in_link_text(self) -> None:
+        entries = feed_entries(RSS_FEED)
+
+        assert len(entries) == 2
+        assert entries[0].url == "https://cyberscoop.com/irregular-ai-sandbox-escape/"
+        assert entries[0].title.startswith("Irregular says")
+
+    def test_atom_puts_the_url_in_a_link_href(self) -> None:
+        entries = feed_entries(ATOM_FEED)
+
+        assert entries[0].url == "https://desk.example/openai-hugging-face/"
+        assert entries[0].title == "OpenAI agent breached Hugging Face"
+
+    def test_an_entry_naming_no_document_is_dropped(self) -> None:
+        """It points at nothing to fetch, so it is not a discovered item."""
+        assert len(feed_entries(ATOM_FEED)) == 1
+
+
+class TestFeedAvenue:
+    """A news desk's own section, walked as the corpus's topic filter."""
+
+    async def read(self, avenue: FeedAvenue, body: bytes) -> list[DiscoveredItem]:
+        reader = FixtureReader((FixturePage(url=avenue.feed, body=body),))
+        return await avenue.discover(PageCache(reader=reader))
+
+    async def test_an_unfiltered_feed_keeps_every_entry(self) -> None:
+        """Right when the feed is already the topic — an outlet's AI section."""
+        avenue = FeedAvenue(category="ai", feed="https://cyberscoop.com/feed/")
+
+        assert len(await self.read(avenue, RSS_FEED)) == 2
+
+    async def test_required_terms_filter_before_anything_is_fetched(self) -> None:
+        """The point of filtering at enumeration: the off-topic article's URL
+        never reaches the fetcher at all."""
+        avenue = FeedAvenue(
+            category="security",
+            feed="https://cyberscoop.com/feed/",
+            require_terms=("ai ", "artificial intelligence"),
+        )
+
+        found = await self.read(avenue, RSS_FEED)
+
+        assert [item.url for item in found] == [
+            "https://cyberscoop.com/irregular-ai-sandbox-escape/"
+        ]
+
+    async def test_the_headline_carries_through_to_the_item(self) -> None:
+        avenue = FeedAvenue(category="ai", feed="https://desk.example/feed/")
+
+        found = await self.read(avenue, ATOM_FEED)
+
+        assert found[0].title == "OpenAI agent breached Hugging Face"
+
+    async def test_the_apex_is_the_articles_host_not_the_feeds(self) -> None:
+        """BBC is the case: the feed is served from feeds.bbci.co.uk while the
+        articles live on bbc.com, so an apex taken from the feed's own host
+        would label every slug after a host no article is on."""
+        avenue = FeedAvenue(
+            category="technology",
+            feed="https://feeds.desk.example/tech/rss.xml",
+            apex="desk.example",
+        )
+
+        found = await self.read(avenue, ATOM_FEED)
+
+        assert found[0].slug == "openai-hugging-face"

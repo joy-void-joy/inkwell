@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from inkwell.agent.provenance import DomainVenue, Venue
 from inkwell.corpus.discovery import (
     Avenue,
+    FeedAvenue,
     ListingAvenue,
     SitemapAvenue,
     SweepAvenue,
@@ -43,6 +44,7 @@ from inkwell.corpus.tags import (
     EVALUATIONS,
     GOVERNANCE,
     MODEL_RELEASE,
+    SECURITY,
     SYSTEM_CARD,
     TagTerm,
     TagVocabulary,
@@ -136,6 +138,39 @@ class DroppedSource(BaseModel):
 
 ANTHROPIC_CDN = "www-cdn.anthropic.com"
 """Where Anthropic serves the system-card PDFs its own sitemap never lists."""
+
+
+AI_HEADLINE_TERMS: tuple[str, ...] = (
+    "ai ",
+    " ai",
+    "a.i.",
+    "artificial intelligence",
+    "machine learning",
+    "llm",
+    "chatbot",
+    "openai",
+    "anthropic",
+    "claude",
+    "chatgpt",
+    "gemini",
+    "deepmind",
+    "hugging face",
+    "gpt-",
+    "copilot",
+    "deepfake",
+    "agentic",
+)
+"""What marks a general-desk headline as being about AI.
+
+Used only where an outlet publishes no AI section of its own and the corpus
+takes its security or technology feed instead. Padded forms for the bare
+acronym, because an unpadded "ai" matches *said*, *maintain*, and *chain*.
+
+A term list is a blunt instrument and this one is deliberately narrow: it is
+the filter that decides what is never fetched, so a miss costs one article
+while a false positive costs a fetch and a tagging pass. Where an outlet does
+maintain an AI section, that section is the filter and this is not used.
+"""
 
 
 DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
@@ -475,12 +510,106 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
             "domain is not settled."
         ),
     ),
+    SourceDeclaration(
+        key="techcrunch",
+        display_name="TechCrunch",
+        organization="TechCrunch",
+        venue="TechCrunch",
+        authority="news",
+        hosts=("techcrunch.com",),
+        avenues=(
+            FeedAvenue(
+                category="ai",
+                feed="https://techcrunch.com/category/artificial-intelligence/feed/",
+                apex="techcrunch.com",
+            ),
+        ),
+        notes=(
+            "Publishes its own AI section as a feed, so the section is the "
+            "filter and no headline matching is needed. Feed verified: "
+            "'AI News & Artificial Intelligence | TechCrunch', RSS 2.0."
+        ),
+    ),
+    SourceDeclaration(
+        key="bleepingcomputer",
+        display_name="BleepingComputer",
+        organization="BleepingComputer",
+        venue="BleepingComputer",
+        authority="news",
+        hosts=("bleepingcomputer.com",),
+        avenues=(
+            FeedAvenue(
+                category="security",
+                tags=(SECURITY,),
+                feed="https://www.bleepingcomputer.com/feed/",
+                apex="bleepingcomputer.com",
+                require_terms=AI_HEADLINE_TERMS,
+            ),
+        ),
+        active=False,
+        notes=(
+            "A security desk with no AI section, so the whole feed is walked "
+            "and headlines carry the topic filter. First to report the "
+            "operational detail on the July 2026 Hugging Face intrusion, which "
+            "is why it is declared. Inactive: the feed reads fine in a browser "
+            "and answers the corpus fetcher with 403, so it needs the "
+            "browser-context path rather than a retry — a plain sync would "
+            "spend a request on a known refusal every time."
+        ),
+    ),
+    SourceDeclaration(
+        key="cyberscoop",
+        display_name="CyberScoop",
+        organization="CyberScoop",
+        venue="CyberScoop",
+        authority="news",
+        hosts=("cyberscoop.com",),
+        avenues=(
+            FeedAvenue(
+                category="security",
+                tags=(SECURITY,),
+                feed="https://cyberscoop.com/feed/",
+                apex="cyberscoop.com",
+                require_terms=AI_HEADLINE_TERMS,
+            ),
+        ),
+        notes=(
+            "Security desk, same shape as BleepingComputer. Feed verified: "
+            "'CyberScoop', RSS 2.0."
+        ),
+    ),
+    SourceDeclaration(
+        key="bbc",
+        display_name="BBC News",
+        organization="BBC",
+        venue="BBC News",
+        authority="news",
+        hosts=("bbc.co.uk", "bbc.com"),
+        avenues=(
+            FeedAvenue(
+                category="technology",
+                feed="https://feeds.bbci.co.uk/news/technology/rss.xml",
+                apex="bbc.co.uk",
+                require_terms=AI_HEADLINE_TERMS,
+            ),
+        ),
+        notes=(
+            "The technology desk, filtered on headlines: BBC publishes an AI "
+            "topic page but no AI feed. Articles live on bbc.com while the "
+            "feed is served from feeds.bbci.co.uk, which is why the apex is "
+            "declared rather than taken from the feed's own host. Feed "
+            "verified: 'BBC News', RSS 2.0."
+        ),
+    ),
 )
-"""Every source the ported research database tracked, declared once each.
+"""Every source the corpus tracks, declared once each.
 
 The seven with per-category avenues are the ones whose enumeration was proven
-there; the nine swept lab sources were declared but never wired, and stay
-inactive with the reason in their notes rather than disappearing.
+in the ported research database; the nine swept lab sources were declared but
+never wired, and stay inactive with the reason in their notes rather than
+disappearing. The news desks are the newest group, and the only one where the
+corpus subsets a source rather than taking everything it publishes — a general
+outlet's whole output is not what a writing pipeline wants standing behind it.
 """
 
 

@@ -724,6 +724,121 @@ Deliberately short: a sweep wants everything, so when in doubt it keeps. PDFs
 are absent on purpose — a PDF is the document."""
 
 
+class FeedEntry(BaseModel):
+    """One entry of a syndication feed: where it points and what it is called."""
+
+    model_config = ConfigDict(frozen=True)
+
+    url: str
+    title: str
+
+
+def feed_entries(data: bytes) -> tuple[FeedEntry, ...]:
+    """Read a syndication feed's entries, namespace- and dialect-agnostically.
+
+    RSS puts the URL in ``<item><link>`` as text and Atom puts it in
+    ``<entry><link href=...>``, so both are read rather than the feed being
+    sniffed for which dialect it is. An entry with no resolvable URL is
+    dropped: it names no document to fetch.
+    """
+    root = xml_root(data)
+
+    def child_text(element: ElementTree.Element, name: str) -> str:
+        """The first non-empty text of a named child, empty when there is none."""
+        return next(
+            (
+                (child.text or "").strip()
+                for child in element
+                if local_name(child.tag) == name and (child.text or "").strip()
+            ),
+            "",
+        )
+
+    def entry_url(element: ElementTree.Element) -> str:
+        """The document an entry points at, by whichever dialect carries it."""
+        for child in element:
+            if local_name(child.tag) != "link":
+                continue
+            href = (
+                child.attrib["href"] if "href" in child.attrib else (child.text or "")
+            )
+            if href.strip():
+                return href.strip()
+        return ""
+
+    return tuple(
+        FeedEntry(url=url, title=child_text(element, "title"))
+        for element in root.iter()
+        if local_name(element.tag) in ("item", "entry")
+        if (url := entry_url(element))
+    )
+
+
+class FeedAvenue(Avenue):
+    """A topic feed a source publishes, walked as the source's own filter.
+
+    News outlets are the case this exists for. A sitemap or a whole-domain
+    sweep of an outlet enumerates everything it has ever published, and the
+    corpus wants one subject out of that. The outlet already maintains that
+    selection — its own AI section, as a feed — so the filter is the
+    publisher's editorial judgement applied at enumeration, and nothing off
+    the topic is ever fetched.
+
+    A feed is a window rather than an archive: it names what is recent, not
+    what exists. Incremental syncs are what accumulate the back catalogue,
+    which is why the corpus keys identity off the URL — the same article seen
+    on two runs is one document.
+    """
+
+    feed: str = Field(description="URL of the RSS or Atom feed to walk")
+    apex: str = Field(
+        default="", description="Registrable domain for cross-subdomain slugs"
+    )
+    require_terms: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Keep only entries whose title contains one of these, matched "
+            "case-insensitively. Empty keeps everything, which is right when "
+            "the feed is already the topic — an outlet's own AI section needs "
+            "no second filter, and its security section does"
+        ),
+    )
+
+    def origin(self) -> str:
+        return self.feed
+
+    def resolved_apex(self) -> str:
+        """The apex a declaration states, else the feed's own host."""
+        return self.apex or host_of(self.feed).removeprefix("www.")
+
+    def on_topic(self, title: str) -> bool:
+        """Whether an entry's title carries one of the required terms.
+
+        Titles only, which is the honest limit of filtering before fetching:
+        an article about a model that never names one in its headline is
+        missed. The alternative is fetching an outlet's whole output to judge
+        it, which is what declaring a topic feed was meant to avoid.
+        """
+        if not self.require_terms:
+            return True
+        lowered = title.lower()
+        return any(term.lower() in lowered for term in self.require_terms)
+
+    async def discover(self, pages: PageCache) -> list[DiscoveredItem]:
+        apex = self.resolved_apex()
+        found = dict[str, DiscoveredItem]()
+        for entry in feed_entries(await pages.read(self.feed)):
+            slug = source_id_for(entry.url, apex)
+            if slug not in found and self.on_topic(entry.title):
+                found[slug] = DiscoveredItem(
+                    category=self.category,
+                    slug=slug,
+                    url=entry.url,
+                    title=entry.title,
+                )
+        return [found[slug] for slug in sorted(found)]
+
+
 class SweepAvenue(Avenue):
     """Everything a source publishes across every domain it publishes on.
 

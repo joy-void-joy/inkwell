@@ -31,6 +31,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.manuscript.facts import Consumption, Dependency, consumption_of
+from inkwell.manuscript.links import links_from
 from inkwell.manuscript.splice import held_text
 from inkwell.manuscript.state import NodeVerdict, PartText, Staleness, WorkState
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
@@ -104,7 +105,12 @@ def readings(
             yield PartReading(
                 node=node,
                 text=text,
-                consumed=consumption_of(terms_used(text, declared)),
+                consumed=consumption_of(
+                    (
+                        *terms_used(text, declared),
+                        *links_from(manuscript, node, text),
+                    )
+                ),
             )
 
     return tuple(read())

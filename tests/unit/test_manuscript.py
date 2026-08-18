@@ -17,7 +17,21 @@ from inkwell.manuscript.facts import (
     ProposedChange,
     consumption_of,
 )
-from inkwell.manuscript.graph import PartReading, adopted, readings, sweep
+from inkwell.manuscript.graph import (
+    PartReading,
+    WorkSweep,
+    adopted,
+    readings,
+    sweep,
+)
+from inkwell.manuscript.loop import schedulable
+from inkwell.manuscript.mailbox import (
+    PartAnswer,
+    PartMailbox,
+    PartQuestion,
+    escalated_to,
+    question_id,
+)
 from inkwell.manuscript.ingest import (
     heading_titles,
     nav_entries,
@@ -26,6 +40,7 @@ from inkwell.manuscript.ingest import (
 )
 from inkwell.manuscript.splice import PartNotFound, held_text, spliced
 from inkwell.manuscript.state import WorkState
+from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 from inkwell.manuscript.vocabulary import (
     abbreviations_in,
@@ -554,3 +569,133 @@ class TestAdoptingAWorkIsWhatMakesTheLoopAffordable:
             leaning,
         )
         assert len(reached.dirty()) == len(leaning)
+
+
+class TestAWorkOutlivesEveryRunThatTouchedIt:
+    """State kept in inkwell's own store, never in somebody else's checkout."""
+
+    def test_a_work_round_trips_through_the_store(self, tmp_path: Path) -> None:
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        work = read_manuscript(atlas_like(tmp_path))
+        store.publish_tree("atlas", work)
+        state = adopted(WorkState(), readings(work))
+        store.publish_state("atlas", state)
+
+        again = ManuscriptStore(root=tmp_path / "manuscripts")
+        assert again.works() == ("atlas",)
+        assert again.load_tree("atlas") == work
+        assert len(again.load_state("atlas").stamps) == len(list(work.leaves()))
+
+    def test_a_work_nobody_imported_reads_as_absent(self, tmp_path: Path) -> None:
+        store = ManuscriptStore(root=tmp_path)
+
+        assert store.load_tree("nothing") is None
+        assert store.load_state("nothing") == WorkState()
+
+    def test_each_part_coins_into_a_file_only_it_can_name(self, tmp_path: Path) -> None:
+        """The partition, not a lock, is what makes concurrent parts safe."""
+        store = ManuscriptStore(root=tmp_path)
+        one = store.glossary_path("atlas", "02/03/2.3.2")
+        other = store.glossary_path("atlas", "02/03/2.3.1")
+
+        assert one != other
+        assert one.parent == other.parent
+
+
+class TestAQuestionParksItsPartRatherThanFailingIt:
+    """Parked work is sound and suspended; failed work is retried and fails
+    again. A scheduler reads the difference off the standing."""
+
+    def mailbox_at(self, root: Path) -> PartMailbox:
+        return PartMailbox(root=root)
+
+    def test_asking_the_same_thing_twice_files_one_question(
+        self, tmp_path: Path
+    ) -> None:
+        """A part re-run after a failure asks what it asked before."""
+        mailbox = self.mailbox_at(tmp_path)
+        prompt = "Should this keep the 2024 figure or take the 2026 one?"
+        for _ in range(2):
+            mailbox.ask(
+                PartQuestion(
+                    id=question_id("02/03/2.3.2", prompt),
+                    work="atlas",
+                    asker="02/03/2.3.2",
+                    prompt=prompt,
+                )
+            )
+
+        assert len(mailbox.open()) == 1
+
+    def test_an_answered_question_stops_being_open(self, tmp_path: Path) -> None:
+        mailbox = self.mailbox_at(tmp_path)
+        identifier = question_id("02/03/2.3.2", "Which figure?")
+        mailbox.ask(
+            PartQuestion(
+                id=identifier,
+                work="atlas",
+                asker="02/03/2.3.2",
+                prompt="Which figure?",
+            )
+        )
+        assert mailbox.answer(PartAnswer(id=identifier, value="the 2026 one"))
+
+        assert mailbox.open() == ()
+        settled = mailbox.settled(identifier)
+        assert settled is not None
+        assert settled.value == "the 2026 one"
+
+    def test_a_second_answer_is_refused_rather_than_overwriting(
+        self, tmp_path: Path
+    ) -> None:
+        """The part was rebuilt against the first; a revised answer would
+        leave the work built on something nobody said."""
+        mailbox = self.mailbox_at(tmp_path)
+        identifier = question_id("02/03/2.3.2", "Which figure?")
+        mailbox.ask(
+            PartQuestion(
+                id=identifier,
+                work="atlas",
+                asker="02/03/2.3.2",
+                prompt="Which figure?",
+            )
+        )
+        mailbox.answer(PartAnswer(id=identifier, value="the 2026 one"))
+
+        assert not mailbox.answer(PartAnswer(id=identifier, value="the 2024 one"))
+
+    def test_a_question_escalates_to_the_part_above_it(self, tmp_path: Path) -> None:
+        """A sibling cannot answer; the tree already knows who is above."""
+        work = read_manuscript(atlas_like(tmp_path))
+
+        assert escalated_to(work, "02/03/2.3.2") == "02/03"
+        assert escalated_to(work, "02/03") == "02"
+        assert escalated_to(work, "02") == ""
+
+
+class TestAPassLeavesHeldWorkAlone:
+    """Picking up a part another run holds duplicates it; picking up a parked
+    part re-asks what is already asked and gets no further."""
+
+    def swept(self, tmp_path: Path, state: WorkState) -> WorkSweep:
+        work = read_manuscript(atlas_like(tmp_path))
+        return sweep(state, readings(work))
+
+    def test_everything_dirty_is_schedulable_by_default(self, tmp_path: Path) -> None:
+        found = self.swept(tmp_path, WorkState())
+
+        assert len(schedulable(found, WorkState())) == len(found.dirty())
+
+    def test_a_running_part_is_not_picked_up_again(self, tmp_path: Path) -> None:
+        state = WorkState().declared("02/03/2.3.2", "running", "held")
+        found = self.swept(tmp_path, state)
+
+        assert "02/03/2.3.2" not in [held.key for held in schedulable(found, state)]
+
+    def test_a_parked_part_waits_rather_than_being_retried(
+        self, tmp_path: Path
+    ) -> None:
+        state = WorkState().declared("02/03/2.3.2", "parked", "asked a question")
+        found = self.swept(tmp_path, state)
+
+        assert "02/03/2.3.2" not in [held.key for held in schedulable(found, state)]

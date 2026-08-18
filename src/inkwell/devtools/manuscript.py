@@ -12,9 +12,17 @@ built from the text it already holds, so the first useful pass rewrites what
 somebody asked about rather than the whole book. ``status`` is the dependency
 pass — what is out of date and why. ``request`` is how an author asks for a
 part, and ``changed`` is how anything reports what it moved, which is what
-reaches the parts that were leaning on it.
+reaches the parts that were leaning on it. ``reaches`` asks the same question
+in advance: what does touching this commit me to.
+
+``run`` is the loop, and the only command here that spends anything — every
+part it picks up is a whole pipeline run, which is why it takes a limit and
+answers ``--dry-run`` first. ``questions`` and ``answer`` are the other side
+of it: a run that cannot settle something parks its part and asks, and the
+part waits, costing nothing, until somebody answers.
 """
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -30,8 +38,15 @@ from inkwell.agent.glossary import (
     write_chapter_glossary,
 )
 from inkwell.manuscript.facts import FACT_KINDS, Dependency, ProposedChange
-from inkwell.manuscript.graph import adopted, readings, sweep
+from inkwell.manuscript.graph import adopted, consumers, readings, sweep
 from inkwell.manuscript.ingest import read_manuscript
+from inkwell.manuscript.loop import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_PASSES,
+    run_loop,
+    schedulable,
+)
+from inkwell.manuscript.mailbox import PartAnswer, PartMailbox
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 from inkwell.manuscript.vocabulary import (
@@ -259,3 +274,161 @@ def changed_cmd(
     typer.echo(f"  reached {len(reached)} part(s):")
     for verdict in reached:
         typer.echo(f"    {verdict.key}")
+
+
+@app.command("run")
+def run_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    passes: Annotated[
+        int, typer.Option(help="How many passes before stopping and reporting")
+    ] = DEFAULT_PASSES,
+    limit: Annotated[
+        int, typer.Option(help="Most parts to run per pass; 0 for every one")
+    ] = 0,
+    concurrency: Annotated[
+        int, typer.Option(help="How many parts run at once")
+    ] = DEFAULT_CONCURRENCY,
+    reconcile_wave: Annotated[
+        bool,
+        typer.Option(
+            "--reconcile/--no-reconcile",
+            help="Read each wave's rewrites against each other afterwards",
+        ),
+    ] = True,
+    dry_run: Annotated[
+        bool, typer.Option(help="Say what would run without spending anything")
+    ] = False,
+) -> None:
+    """Take the work to rest: run what is out of date until nothing is.
+
+    Every part is a full pipeline run, so this spends real money in proportion
+    to how much is outstanding — which is what `--dry-run` and `--limit` are
+    for, and why the dry run is worth taking first on a work you have not run
+    against before.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    vocabulary = declared_vocabulary(store, work)
+    state = store.load_state(work)
+    outstanding = schedulable(sweep(state, readings(tree, vocabulary)), state)
+
+    if dry_run:
+        for verdict in outstanding:
+            typer.echo(verdict.render())
+        typer.echo("")
+        typer.echo(f"{len(outstanding)} part(s) would run, {passes} pass(es) at most")
+        return
+    if not outstanding:
+        typer.echo(f"{work} is settled — nothing to run")
+        return
+
+    reports = asyncio.run(
+        run_loop(
+            store,
+            work,
+            tree,
+            vocabulary=vocabulary,
+            passes=passes,
+            limit=limit,
+            concurrency=concurrency,
+            reconciling=reconcile_wave,
+        )
+    )
+    for number, report in enumerate(reports, start=1):
+        typer.echo(f"pass {number}: {report.render()}")
+        for held in report.results:
+            typer.echo(
+                f"  {held.key}: {held.outcome}{f' — {held.detail}' if held.detail else ''}"
+            )
+        for conflict in report.conflicts:
+            typer.echo(f"  reconciler: {conflict}")
+    if reports and reports[-1].settled():
+        typer.echo(f"\n{work} is settled")
+    else:
+        typer.echo(
+            f"\n{work} has work outstanding — run again, or answer what is asked"
+        )
+
+
+@app.command("questions")
+def questions_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    as_json: JSON_OPT = False,
+) -> None:
+    """What the work's parts are waiting on, and which part asked each."""
+    store = manuscript_store()
+    held_work(store, work)
+    open_questions = PartMailbox(root=store.work_dir(work)).open()
+    if as_json:
+        output_json(list(open_questions))
+        return
+    for question in open_questions:
+        addressed = question.addressed_to or work
+        typer.echo(f"{question.id}\n  {question.asker} asks {addressed}:")
+        typer.echo(f"  {question.prompt}")
+    typer.echo("")
+    typer.echo(f"{len(open_questions)} question(s) waiting")
+
+
+@app.command("answer")
+def answer_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    question: Annotated[str, typer.Argument(help="Which question, by its id")],
+    value: Annotated[str, typer.Argument(help="The answer")],
+    answered_by: Annotated[str, typer.Option(help="Who is answering")] = "",
+) -> None:
+    """Answer a parked question, which is what lets its part run again."""
+    store = manuscript_store()
+    held_work(store, work)
+    mailbox = PartMailbox(root=store.work_dir(work))
+    asked = next((held for held in mailbox.open() if held.id == question), None)
+    if asked is None:
+        typer.echo(f"No question of {work} is waiting under {question!r}", err=True)
+        raise typer.Exit(1)
+    if not mailbox.answer(
+        PartAnswer(id=question, value=value, answered_by=answered_by)
+    ):
+        typer.echo(f"{question} was already answered", err=True)
+        raise typer.Exit(1)
+    remaining = mailbox.asked_by(asked.asker)
+    state = store.load_state(work)
+    if remaining:
+        typer.echo(
+            f"{asked.asker} answered, and stays parked on "
+            f"{len(remaining)} more question(s)"
+        )
+    else:
+        store.publish_state(
+            work,
+            state.declared(asked.asker, "requested", f"answered: {value}"),
+        )
+        typer.echo(f"{asked.asker} answered and is ready to run again")
+
+
+@app.command("reaches")
+def reaches_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    subject: Annotated[str, typer.Argument(help="The term, claim, or part key")],
+    kind: Annotated[
+        str,
+        typer.Option(help=f"Which way parts depend on it: {', '.join(FACT_KINDS)}"),
+    ] = "term",
+) -> None:
+    """Which parts would go out of date if this changed.
+
+    Asked before making a change rather than after, which is the question an
+    author actually has: what does touching this definition commit me to.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    if kind not in FACT_KINDS:
+        typer.echo(
+            f"{kind!r} is no kind of dependency: {', '.join(FACT_KINDS)}", err=True
+        )
+        raise typer.Exit(1)
+    held = readings(tree, declared_vocabulary(store, work))
+    leaning = consumers(held, Dependency(kind=kind, subject=subject))
+    for node in leaning:
+        typer.echo(f"{node.key:<24} {node.title}")
+    typer.echo("")
+    typer.echo(f"{len(leaning)} part(s) lean on {kind} {subject!r}")

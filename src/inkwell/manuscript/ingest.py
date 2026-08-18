@@ -19,6 +19,7 @@ metadata put in them is theirs to decide, and a model here would be this
 project asserting a schema over somebody else's format.
 """
 
+import logging
 from itertools import takewhile
 from pathlib import Path
 
@@ -30,6 +31,8 @@ from lup.types import JsonObject, JsonValue
 
 from inkwell.corpus.discovery import slugified
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
+
+logger = logging.getLogger(__name__)
 
 MARKDOWN = MarkdownIt()
 """The parser the headings are read with, rather than matched out of lines."""
@@ -55,8 +58,15 @@ than title and would otherwise reach the tree as part of what the part is
 called.
 """
 
-ORDINAL_CHARACTERS = ".0123456789"
-"""What a heading's leading numbering is made of, and nothing else."""
+ORDINAL_SEPARATOR = "."
+"""What divides one level of a heading's numbering from the next."""
+
+COLLISION_MARK = "~"
+"""What distinguishes a key a second heading wanted and could not have.
+
+Deliberately not a character a heading's own numbering can produce, so a
+distinguished key can never be mistaken for one an author wrote.
+"""
 
 
 class PagesEntry(BaseModel):
@@ -117,9 +127,22 @@ def ordinal_of(title: str) -> str:
     "2.3.2 Cyber Risk" gives ``2.3.2``, which is what a reader calls it and
     what a cross-reference from another chapter would name it by. A trailing
     dot is dropped, so "3. Something" and "3 Something" key alike.
+
+    A level of the numbering is not always digits. The Atlas numbers its
+    appendices "1.A1.1 Surveys", "1.A1.2 Quotes", and so on, so a run of
+    digits alone stops at the first "A" and hands every subsection of an
+    appendix the same key — which loses all but one of them, since the key is
+    the identity everything else is filed under. What the numbering is made of
+    is therefore whatever a heading puts between the dots, and it is a
+    numbering at all only because it opens with a digit.
     """
-    leading = "".join(takewhile(lambda c: c in ORDINAL_CHARACTERS, title.strip()))
-    ordinal = leading.removesuffix(".")
+
+    def numbering(character: str) -> bool:
+        """Whether a character is still part of the leading numbering."""
+        return character.isalnum() or character == ORDINAL_SEPARATOR
+
+    leading = "".join(takewhile(numbering, title.strip()))
+    ordinal = leading.removesuffix(ORDINAL_SEPARATOR)
     return ordinal if ordinal[:1].isdigit() else ""
 
 
@@ -155,10 +178,38 @@ def subsections(text: str, parent_key: str, path: str) -> list[ManuscriptNode]:
     a subsection does not renumber the ones after it and lose their state. A
     file with no H2 at all is one undivided part and yields nothing — the file
     itself is then the leaf.
+
+    Two headings can still want one key: a file that numbers nothing and
+    repeats a title, or one an author numbered twice by hand. The key is the
+    identity every stamp, standing, and glossary file is addressed by, so a
+    collision does not produce a confusing tree — it produces a work with a
+    part missing, and no sign that it ever had one. So the second and later
+    claimants take a distinguished key and the collision is reported: an ugly
+    key is recoverable and a vanished subsection is not.
     """
+    # lup: ignore[dict-str-payload] — a tally keyed by whatever slugs a file yields
+    taken = dict[str, int]()
+
+    def keyed(title: str) -> str:
+        """A key for this heading that no earlier heading here has taken."""
+        slug = heading_slug(title)
+        seen = taken[slug] if slug in taken else 0
+        taken[slug] = seen + 1
+        if not seen:
+            return f"{parent_key}/{slug}"
+        logger.warning(
+            "%s: %r wants the key %r that an earlier heading took — filing it "
+            "under %r so it is not lost",
+            path,
+            title,
+            f"{parent_key}/{slug}",
+            f"{parent_key}/{slug}{COLLISION_MARK}{seen}",
+        )
+        return f"{parent_key}/{slug}{COLLISION_MARK}{seen}"
+
     return [
         ManuscriptNode(
-            key=f"{parent_key}/{heading_slug(title)}",
+            key=keyed(title),
             kind="subsection",
             title=title,
             path=path,

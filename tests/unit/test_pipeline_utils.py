@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from inkwell.agent.content import ContentManifest
-from inkwell.agent.models import ArticlePlan, ReviewFinding
+from inkwell.agent.models import ArticlePlan, ResearchCompilation, ReviewFinding
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     academic_assembly_block,
@@ -14,6 +14,7 @@ from inkwell.agent.pipeline import (
     render_brief,
     resolve_writer_mode,
     slugify,
+    suggested_additions_block,
 )
 from inkwell.agent.stages import get_format_guidance
 from inkwell.agent.tools.stage_outputs import PlanCollector, SetPlanHeaderInput
@@ -219,3 +220,54 @@ class TestAcademicAssemblyBlock:
         assert "compile_latex" in block
         assert "\\newtheorem" in block
         assert "preamble" in block.lower()
+
+
+class TestSuggestedAdditionsReachTheRefiner:
+    """The channel for material no research question asked for.
+
+    The researcher is told to file anything valuable that emerged outside the
+    original questions. `suggested_additions` had one writer and no readers, so
+    a proposal arriving only that way was collected and dropped — and it is the
+    only route for a development the source predates, which has no claim in the
+    source for a verification question to hang off.
+    """
+
+    def test_nothing_is_rendered_before_research_runs(self, tmp_path: Path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+
+        assert suggested_additions_block(notes) == ""
+
+    def test_a_run_that_suggested_nothing_renders_nothing(self, tmp_path: Path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_artifact("research", ResearchCompilation(findings=[]))
+
+        assert suggested_additions_block(notes) == ""
+
+    def test_every_suggestion_reaches_the_refiner_whole(self, tmp_path: Path) -> None:
+        """Whole, because a suggestion is an argument for a change — a trimmed
+        one reads as a topic the refiner cannot weigh."""
+        notes = PipelineNotes(tmp_path / "notes")
+        first = "An agent breached Hugging Face in July 2026; the draft predates it."
+        second = "The flash-attack term is from Staniford et al. 2002, not Fang."
+        notes.save_artifact(
+            "research",
+            ResearchCompilation(findings=[], suggested_additions=[first, second]),
+        )
+
+        block = suggested_additions_block(notes)
+
+        assert first in block
+        assert second in block
+
+    def test_the_refiner_must_answer_each_one(self, tmp_path: Path) -> None:
+        """Adopt, fold in, or reject with a reason — silence was the old
+        behaviour and is what this block exists to stop."""
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_artifact(
+            "research", ResearchCompilation(findings=[], suggested_additions=["a"])
+        )
+
+        block = suggested_additions_block(notes)
+
+        assert "reject it with a reason" in block
+        assert "Silence" in block

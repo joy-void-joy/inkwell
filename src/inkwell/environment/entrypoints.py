@@ -1140,10 +1140,18 @@ Leaving a passage alone because a reader could already look it up elsewhere is \
 the one outcome this run has no use for.
 
 Plan it as the piece it already is: its sections are the draft's sections, and \
-its research questions are the draft's own claims asked again — for every fact, \
-figure, and citation the draft rests on, ask whether it still holds and whether \
-anything has superseded it. A revision that only re-proses a stale claim has \
-failed at the thing it was for."""
+its research questions start from the draft's own claims asked again — for \
+every fact, figure, and citation the draft rests on, ask whether it still holds \
+and whether anything has superseded it. A revision that only re-proses a stale \
+claim has failed at the thing it was for.
+
+Then ask what the draft does not raise at all. A draft is fixed at the moment \
+it was written, so the gap that matters most is usually not a stale claim but a \
+missing one: the case, result, or event that arrived afterwards and that a \
+reader of this piece today would expect it to cover. Ask for those directly, by \
+subject rather than by claim, because no question derived from the draft can \
+reach them and nothing later in this pipeline can add what research never went \
+looking for."""
 """What the revise entry point always asks for, beside the draft it is given.
 
 Carrying the currency check here rather than in a stage is what keeps revise a

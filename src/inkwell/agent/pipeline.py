@@ -729,6 +729,33 @@ def add_reader_section_refs(manifest: ContentManifest, notes: PipelineNotes) -> 
     add_reader_unrouted_ref(manifest, reader)
 
 
+def suggested_additions_block(notes: PipelineNotes) -> str:
+    """What research proposed that no research question had asked for.
+
+    The researcher is told to file these, and until they were rendered here
+    nothing read them: one writer, no readers, so a proposal that arrived only
+    this way was collected and dropped. They reach the refiner because it is
+    the one stage licensed to add a section — a writer holds only its own, and
+    by the rewrite the shape is settled.
+    """
+    research_path = notes.artifact_path("research")
+    if not research_path.exists():
+        return ""
+    research = ResearchCompilation.model_validate_json(
+        research_path.read_text(encoding="utf-8")
+    )
+    if not research.suggested_additions:
+        return ""
+    items = "\n\n".join(f"- {s}" for s in research.suggested_additions)
+    return (
+        f"Research also proposed {len(research.suggested_additions)} addition(s) "
+        f"that no research question had asked for. Judge each on the merits and "
+        f"say what you did with it: adopt it as a section, fold it into one, or "
+        f"reject it with a reason. Silence is the one answer that is not "
+        f"available.\n\n{items}\n\n"
+    )
+
+
 def reader_feedback_block(manifest: ContentManifest) -> str:
     """How to weigh the reader-feedback files, where the manifest lists any.
 
@@ -1818,6 +1845,7 @@ async def refine_plan(
         f"Refine the article plan using the research findings.\n\n"
         f"{manifest.render()}\n"
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
+        f"{suggested_additions_block(notes)}"
         f"{reader_feedback_block(manifest)}"
         f"Read the plan, then build the refined plan using "
         f"set_plan_header, add_section, add_research_question, and add_source_quote."

@@ -681,6 +681,16 @@ who only stay consistent through this list), and voice notes
 be thorough, specific, and include verification questions for claims the \
 author makes. A thin research question list produces thin writing.
 
+Verification questions alone are not enough, and a list made only of them \
+has a blind spot with a shape: it can confirm every claim the source makes \
+and never learn what the source left out. So ask at least one question \
+about the SUBJECT rather than about the source — what has happened in this \
+field that a piece on it now has to account for, what the strongest recent \
+work or most-cited case is, what a well-read reader would notice missing. \
+Where the source is a draft written some time ago, that question is the \
+one carrying the most weight: nothing downstream can introduce a development \
+no question asked about.
+
 **Sections are scaffolding.** Title + summary is enough. They will be \
 restructured after research reveals what the evidence actually supports. \
 Don't over-specify key_points — 1-2 per section at most.
@@ -721,7 +731,7 @@ the source used informal numbers ("roughly 80%"), verify them but \
 keep the informal framing. Don't add parenthetical academic \
 citations (Author Year) unless the source conversation used them.
 
-## The brief is fixed
+## The brief is fixed; the source's coverage is not
 
 The author's instructions — deliverables, scope, target setting — \
 define what this piece IS. Research informs how to fulfill the brief, \
@@ -730,6 +740,17 @@ more general than the requested piece is a reason to select, not to \
 widen. If you believe the brief itself should change, propose it via \
 note_for_author and still refine the plan within the existing brief; \
 the author can widen scope, you cannot.
+
+What the source happened to cover is a different matter, and it binds \
+nothing. A subject the brief plainly includes but the source never \
+raised is yours to add — that is what "add sections that research \
+revealed as necessary" is for. The case to watch is the event or result \
+that postdates the source, or that the author simply did not know: it \
+arrives with no claim in the source to attach to, so nothing else in \
+this pipeline can introduce it. Adding it is not widening the brief. \
+Leaving a piece silent on the central thing in its own subject, because \
+the draft in front of you was silent first, is the failure this section \
+exists to stop.
 
 ## Trusting findings
 

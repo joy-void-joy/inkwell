@@ -89,6 +89,20 @@ class FetchRefused(Exception):
     """
 
 
+def refused_as_challenge(url: str, html: str) -> None:
+    """Refuse an anti-bot interstitial, wherever the HTML came from.
+
+    A status code is what catches a refusal on the plain path, and a browser
+    has none to offer: what a host turns a browser away with is a page, served
+    with a 200 and a body that extracts perfectly well. Checking here as well
+    is what stops "the browser reached it" from meaning "the browser reached
+    the block page and we stored that as the document".
+    """
+    marker = challenge_page_marker(html)
+    if marker is not None:
+        raise FetchRefused(f"{url} served an anti-bot page (matched {marker!r})")
+
+
 async def http_get(client: httpx.AsyncClient, url: str) -> httpx.Response:
     """One GET, raising for any status that is not a success."""
     response = await client.request("GET", url)
@@ -175,10 +189,7 @@ class DocumentFetcher(BaseModel):
         if looks_like_pdf(response):
             return FetchedDocument(url=url, kind="pdf", data=response.content)
 
-        marker = challenge_page_marker(response.text)
-        if marker is not None:
-            raise FetchRefused(f"{url} served an anti-bot page (matched {marker!r})")
-
+        refused_as_challenge(url, response.text)
         extracted = extract_page(response.text, url=url, output_format=MARKDOWN_FORMAT)
         thin = extracted is None or len(extracted.text) < self.thin_chars
         if thin and declaration.needs_browser:
@@ -207,6 +218,7 @@ class DocumentFetcher(BaseModel):
         if body[: len(PDF_MAGIC)] == PDF_MAGIC:
             return FetchedDocument(url=url, kind="pdf", data=body, rendered=True)
         html = body.decode("utf-8", errors="replace")
+        refused_as_challenge(url, html)
         extracted = extract_page(html, url=url, output_format=MARKDOWN_FORMAT)
         if extracted is None:
             raise FetchRefused(f"No article text in what a browser reached at {url}")
@@ -223,6 +235,7 @@ class DocumentFetcher(BaseModel):
     async def fetch_rendered(self, url: str) -> FetchedDocument:
         """Fetch one document through the profile's persistent browser context."""
         html = await rendered_html(url, profile=self.profile)
+        refused_as_challenge(url, html)
         extracted = extract_page(html, url=url, output_format=MARKDOWN_FORMAT)
         if extracted is None:
             raise FetchRefused(f"No article text after rendering {url}")

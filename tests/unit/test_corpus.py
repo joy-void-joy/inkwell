@@ -595,9 +595,7 @@ async def test_ingesting_a_pdf_never_extracts_its_text(tmp_path: Path) -> None:
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        report = await ingest_source(
-            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
-        )
+        report = await ingest_source(declaration, store, DocumentFetcher(client=client))
 
     assert report.stored == 1
     document = store.load(declaration).stored("paper")
@@ -961,7 +959,6 @@ async def test_a_run_reports_what_it_discovered_fetched_and_skipped(
             declaration,
             store,
             DocumentFetcher(client=client),
-            tagger=fixture_tagger(),
             limit=1,
         )
         assert first.discovered == 2
@@ -969,9 +966,7 @@ async def test_a_run_reports_what_it_discovered_fetched_and_skipped(
         assert first.stored == 1
         assert first.skipped == 1
 
-        second = await ingest_source(
-            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
-        )
+        second = await ingest_source(declaration, store, DocumentFetcher(client=client))
     assert second.new == 0
     assert second.stored == 1
     assert second.skipped == 0
@@ -989,14 +984,11 @@ async def test_a_stored_document_is_not_rewritten_when_it_has_not_changed(
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        await ingest_source(
-            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
-        )
+        await ingest_source(declaration, store, DocumentFetcher(client=client))
         again = await ingest_source(
             declaration,
             store,
             DocumentFetcher(client=client),
-            tagger=fixture_tagger(),
             refresh=True,
         )
     assert again.stored == 0
@@ -1013,9 +1005,7 @@ async def test_a_document_failure_is_recorded_for_the_next_run(tmp_path: Path) -
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        report = await ingest_source(
-            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
-        )
+        report = await ingest_source(declaration, store, DocumentFetcher(client=client))
 
     assert report.stored == 1
     assert report.failed == 1
@@ -1050,7 +1040,6 @@ async def test_one_unreachable_source_does_not_take_the_run_down(
             (broken, healthy),
             store,
             DocumentFetcher(client=client),
-            tagger=fixture_tagger(),
         )
 
     by_source = {entry.source: entry for entry in report.sources}
@@ -1073,7 +1062,6 @@ async def test_a_source_whose_store_cannot_be_written_is_reported_not_raised(
             declaration,
             CorpusStore(root=blocked),
             DocumentFetcher(client=client),
-            tagger=fixture_tagger(),
         )
     assert report.aborted
     assert "aborted" in report.summary()
@@ -1297,11 +1285,11 @@ def test_every_tag_a_source_declares_is_one_the_vocabulary_holds() -> None:
     assert all(vocabulary.holds(tag) for tag in declared)
 
 
-# ── Tags are assigned as a document enters, on every entry ────────────────────
+# ── A sweep stores bodies; a re-tag judges them ───────────────────────────────
 
 
 class IngestedCorpus(BaseModel):
-    """A fixture corpus that has been through one ingestion."""
+    """A fixture corpus that has been swept, and in most cases re-tagged."""
 
     declaration: SourceDeclaration
     store: CorpusStore
@@ -1315,10 +1303,10 @@ class IngestedCorpus(BaseModel):
         return found
 
 
-async def ingested_with(
-    tmp_path: Path, judge: TagJudge, *, slugs: tuple[str, ...] = ("one", "two")
+async def swept(
+    tmp_path: Path, *, slugs: tuple[str, ...] = ("one", "two")
 ) -> IngestedCorpus:
-    """Ingest a fixture source with ``judge`` doing the judging."""
+    """Sweep a fixture source, which stores bodies and judges nothing."""
     declaration = fixture_declaration()
     pages = (
         FixturePage(
@@ -1331,13 +1319,51 @@ async def ingested_with(
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        await ingest_source(
-            declaration,
-            store,
-            DocumentFetcher(client=client),
-            tagger=fixture_tagger(judge),
-        )
+        await ingest_source(declaration, store, DocumentFetcher(client=client))
     return IngestedCorpus(declaration=declaration, store=store)
+
+
+async def ingested_with(
+    tmp_path: Path, judge: TagJudge, *, slugs: tuple[str, ...] = ("one", "two")
+) -> IngestedCorpus:
+    """Sweep a fixture source, then re-tag it with ``judge`` doing the judging."""
+    ingested = await swept(tmp_path, slugs=slugs)
+    await retag_source(ingested.declaration, ingested.store, fixture_tagger(judge))
+    return ingested
+
+
+async def test_a_sweep_stores_a_document_without_judging_it(tmp_path: Path) -> None:
+    """Fetching costs bandwidth alone, so a sweep runs at the hosts' rate.
+
+    The judge here answers nothing at all: if a sweep reached one, every
+    document would come back untagged rather than merely unjudged, and the
+    ``judged`` flag below is what tells those two apart.
+    """
+    ingested = await swept(tmp_path)
+
+    documents = ingested.shard().documents
+    assert len(documents) == 2
+    assert not any(document.tags.judged for document in documents)
+    assert all(
+        document.tags.applied() == ("organization:fixture",) for document in documents
+    )
+    assert not any(document.summary for document in documents)
+
+
+async def test_a_swept_document_is_stale_until_something_judges_it(
+    tmp_path: Path,
+) -> None:
+    """A re-tag picks up what a sweep stored, with nobody passing ``--force``."""
+    ingested = await swept(tmp_path)
+
+    judge = FixtureJudge(default=(EVALUATIONS.tag,))
+    report = await retag_source(
+        ingested.declaration, ingested.store, fixture_tagger(judge)
+    )
+
+    assert report.retagged == 2
+    assert report.current == 0
+    assert {request.slug for request in judge.requests} == {"one", "two"}
 
 
 async def test_every_stored_document_carries_tags(tmp_path: Path) -> None:
@@ -1427,12 +1453,8 @@ async def test_a_pdf_gets_a_judged_summary_where_it_can_have_no_abstract(
     judge = FixtureJudge(summary="A one-page paper about evaluation harnesses.")
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        await ingest_source(
-            declaration,
-            store,
-            DocumentFetcher(client=client),
-            tagger=fixture_tagger(judge),
-        )
+        await ingest_source(declaration, store, DocumentFetcher(client=client))
+    await retag_source(declaration, store, fixture_tagger(judge))
 
     document = store.load(declaration).stored("paper")
     assert document is not None

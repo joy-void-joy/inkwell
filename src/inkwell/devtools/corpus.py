@@ -2,9 +2,11 @@
 
 The corpus has to exist before a question does, which makes building it operator
 work rather than something a run does for itself: ``corpus sync`` is what
-populates it, out of band and on whatever schedule the author likes. A writing
-run then reads what is there, and tops up a single source only when it finds one
-thin mid-question.
+populates it, out of band and on whatever schedule the author likes, and
+``corpus retag`` is what judges what it stored — two costs, bandwidth and model
+time, kept apart so neither has to wait on the other's rate. A writing run then
+reads what is there, and tops up a single source only when it finds one thin
+mid-question.
 
 Every command prints what happened per source, because a bulk crawl is only
 maintainable if a run tells you which sources are healthy and which need a
@@ -49,7 +51,7 @@ from inkwell.corpus.registry import (
 )
 from inkwell.corpus.semantics import LocalEmbedder, embed_source
 from inkwell.corpus.storage import CorpusStore
-from inkwell.corpus.tagging import retag_corpus
+from inkwell.corpus.tagging import DEFAULT_RETAG_CONCURRENCY, retag_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -393,13 +395,17 @@ def retag(
         help="Re-judge documents already tagged against this exact vocabulary",
     ),
     concurrency: int = typer.Option(
-        DEFAULT_CONCURRENCY, "--concurrency", help="Documents judged at once per source"
+        DEFAULT_RETAG_CONCURRENCY,
+        "--concurrency",
+        help="Documents judged at once per source — each one a delegated session",
     ),
 ) -> None:
     """Re-tag what is stored against the vocabulary as it now stands.
 
     Fetches nothing: a vocabulary edit costs a reading of the corpus already on
-    disk, which is what makes editing it a reasonable thing to do.
+    disk, which is what makes editing it a reasonable thing to do. This is also
+    what tags a freshly synced document for the first time, since a sweep
+    stores bodies and judges nothing.
     """
     corpus = store()
     keys = tuple(source or ())
@@ -483,7 +489,8 @@ def sync(
     concurrency: int = typer.Option(
         DEFAULT_CONCURRENCY,
         "--concurrency",
-        help="Documents fetched at once per source",
+        help="Documents fetched at once per source — raise it as far as the "
+        "hosts tolerate, since a sweep spends no model",
     ),
     profile: str | None = typer.Option(
         None, "--profile", help="Profile whose browser context reaches JS-hard sources"
@@ -496,6 +503,10 @@ def sync(
     ),
 ) -> None:
     """Enumerate the sources and store what the corpus does not already hold.
+
+    Fetching only. A document lands carrying what its declaration settles about
+    it and nothing judged, so a sweep costs bandwidth rather than model time
+    and the two can be scheduled apart — ``corpus retag`` is the second half.
 
     The per-source report comes at the end, because a source is only fully
     accounted for once its run finishes. The bar comes throughout, so a sweep
@@ -524,6 +535,8 @@ def sync(
         raise typer.BadParameter(str(error)) from error
 
     typer.echo(report.summary())
+    if report.stored():
+        typer.echo(f"\n{report.stored()} stored unjudged — `corpus retag` tags them")
     if report.failed() or any(s.avenue_failures for s in report.sources):
         typer.echo("\nrecorded for the next run to retry:")
         report_failures(report)

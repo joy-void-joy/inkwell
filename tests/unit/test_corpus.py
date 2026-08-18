@@ -54,6 +54,7 @@ from inkwell.corpus.storage import (
 )
 from inkwell.corpus.tagging import (
     DocumentTagger,
+    ModelTagJudge,
     TagJudge,
     TagJudgement,
     TagRequest,
@@ -1348,6 +1349,30 @@ async def test_a_sweep_stores_a_document_without_judging_it(tmp_path: Path) -> N
         document.tags.applied() == ("organization:fixture",) for document in documents
     )
     assert not any(document.summary for document in documents)
+
+
+async def test_a_sweep_opens_no_session_anywhere_on_its_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stronger than "the tagger is not called": nothing on the path calls one.
+
+    Refused at the client every session in this project is opened through,
+    rather than at the tagger, so this keeps holding for a model reached from
+    somewhere a later change puts one — enumeration, fetching, quality. The
+    judging pays for a model deliberately and elsewhere; a sweep pays for
+    bandwidth, and that is the property worth being unable to lose quietly.
+    """
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a sweep opened a session")
+
+    monkeypatch.setattr("inkwell.agent.client.query", refuse)
+    with pytest.raises(AssertionError, match="opened a session"):
+        await ModelTagJudge().judge(TagRequest(slug="one", title="One"))
+
+    ingested = await swept(tmp_path)
+
+    assert len(ingested.shard().documents) == 2
 
 
 async def test_a_swept_document_is_stale_until_something_judges_it(

@@ -53,6 +53,7 @@ from inkwell.corpus.registry import (
     active_declarations,
     corpus_vocabulary,
 )
+from inkwell.corpus.prune import prune_corpus
 from inkwell.corpus.semantics import (
     DEFAULT_EMBED_CONCURRENCY,
     LocalEmbedder,
@@ -736,3 +737,58 @@ def pipeline(
 
     if report.aborted_sources():
         raise typer.Exit(code=1)
+
+
+@app.command("prune")
+def prune(
+    source: list[str] = typer.Argument(
+        default=None, help="Sources to prune (default: every source with an index)"
+    ),
+    drop: list[str] = typer.Option(
+        None,
+        "--drop",
+        help="Slug to remove outright so the next sweep fetches it again; "
+        "repeatable, and scoped to the sources named",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Actually rewrite the corpus; without it this only reports",
+    ),
+) -> None:
+    """Collapse documents a source served at more than one URL.
+
+    A second copy is recognised as it arrives now, so this is for what a corpus
+    accumulated before that: the hashes are already in the index, and identical
+    bytes under two slugs is not a judgement call. The copies become aliases
+    naming the slug that keeps the bytes, so nothing about which URLs the
+    source published is lost.
+
+    ``--drop`` is the other repair and does the opposite thing on purpose. A
+    document that is wrong rather than doubled — chrome extracted where the
+    body never rendered — is removed entirely, discovered entry left standing,
+    which is the state a sweep reads as work to do.
+
+    Reports by default and rewrites only under ``--apply``, because a corpus is
+    expensive to rebuild and this is the one command here that deletes.
+    """
+    corpus = store()
+    keys = tuple(source or corpus.sources())
+    if not keys:
+        typer.echo("Nothing is ingested yet — run `corpus sync` first.")
+        raise typer.Exit(code=1)
+
+    reports = prune_corpus(keys, corpus, drop=tuple(drop or ()), dry_run=not apply)
+    for report in reports:
+        if report.changed() or report.missing:
+            typer.echo(report.summary())
+
+    total = sum(one.collapsed + one.dropped for one in reports)
+    if not total:
+        typer.echo("Nothing to prune.")
+        return
+    typer.echo(
+        f"\n{total} documents rewritten."
+        if apply
+        else f"\n{total} documents would change — pass --apply to do it."
+    )

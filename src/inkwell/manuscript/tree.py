@@ -1,11 +1,11 @@
-"""The tree a work of many parts is, and what state each part is in.
+"""The tree a work of many parts is.
 
-Structure and state are separate models on purpose. The tree is what the
+Structure only, and separate from state on purpose. The tree is what the
 source says — read again on every import, and the same every time for the same
-files. State is what this system knows about the work: which parts somebody
-asked to revise, which are mid-run, which are waiting on an answer. Held in
-one model they would be rewritten together, and re-importing a work would
-throw away everything anybody had asked of it.
+files. What this system *knows* about a work, which parts somebody asked to
+revise and what each was last built from, lives in :mod:`.state`. Held in one
+model they would be rewritten together, and re-importing a work would throw
+away everything anybody had asked of it.
 
 Identity is the path down the tree, so a node's key says where it sits without
 a lookup, and two works can never collide on one. That is what lets state be
@@ -94,59 +94,3 @@ class Manuscript(BaseModel):
     def node(self, key: str) -> ManuscriptNode | None:
         """The node under ``key``, or nothing where the work has no such part."""
         return next((node for node in self.walk() if node.key == key), None)
-
-
-type NodeStatus = Literal["clean", "dirty", "running", "parked", "failed"]
-"""Where one part stands.
-
-'dirty' is the one that drives everything: it means somebody asked for this
-part to change, or something it depends on already did. A pass is finished
-when nothing is dirty, which is what gives a loop that never ends a resting
-state that it can be at.
-"""
-
-
-class NodeState(BaseModel):
-    """What this system knows about one part, as against what the source says."""
-
-    model_config = ConfigDict(frozen=True)
-
-    key: str = Field(description="The node this is about")
-    status: NodeStatus = Field(default="clean", description="Where the part stands")
-    reason: str = Field(
-        default="",
-        description="Why it is in that state, in the words of whoever put it "
-        "there — an author's instruction, or the node whose change reached it",
-    )
-    changed_at: datetime = Field(
-        default_factory=utc_now, description="When the status last moved"
-    )
-
-
-class WorkState(BaseModel):
-    """Every part's state, kept beside the tree rather than inside it.
-
-    A part the source has but nobody has touched has no entry, and reads as
-    clean. Recording only what moved is what keeps a re-import from having an
-    opinion about state it was never told anything about.
-    """
-
-    states: list[NodeState] = Field(
-        default_factory=list, description="One entry per part that has moved"
-    )
-
-    def status(self, key: str) -> NodeStatus:
-        """Where a part stands, clean where nothing has moved it."""
-        found = next((entry for entry in self.states if entry.key == key), None)
-        return found.status if found else "clean"
-
-    def marked(self, key: str, status: NodeStatus, reason: str) -> "WorkState":
-        """This state with one part moved, replacing any entry it already had."""
-        kept = [entry for entry in self.states if entry.key != key]
-        return WorkState(
-            states=[*kept, NodeState(key=key, status=status, reason=reason)]
-        )
-
-    def pending(self) -> list[NodeState]:
-        """Every part with work outstanding, which is what a pass has left to do."""
-        return [entry for entry in self.states if entry.status != "clean"]

@@ -18,6 +18,7 @@ from pydantic_settings import (
 from lup.types import EnvVars
 
 from inkwell.agent.book import BookStore
+from inkwell.manuscript.store import ManuscriptStore
 from inkwell.agent.client import PROVIDER_LOGIN
 from inkwell.corpus.semantics import DEFAULT_LOCAL_MODEL, SemanticLayer
 from inkwell.corpus.storage import CorpusStore
@@ -92,6 +93,16 @@ run, so a record kept in the session notes tree would die with the run that
 made it and chapter nine would have nothing of chapter one left to read.
 Resolving it against the shared checkout also means every worktree reads one
 book, rather than each starting a fresh one under whichever branch it is on.
+"""
+
+MANUSCRIPTS_DIR = profile_store_root() / "manuscripts"
+"""Where an imported work's tree and state live unless configured otherwise.
+
+Beside ``books/`` and for the third instance of the same argument. A work of
+many parts is revised over months, one part per run, so what this system knows
+about it has to outlive every run that touched it. Never inside the work's own
+checkout: that repository belongs to whoever writes the book, and state left
+there would not survive a fresh clone — which is exactly when it is worth most.
 """
 
 ACTIVE_PROFILE_FILE = PROFILES_DIR / ".active"
@@ -377,6 +388,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    manuscripts_path: str = Field(
+        default=str(MANUSCRIPTS_DIR),
+        validation_alias="INKWELL_MANUSCRIPTS_PATH",
+        description=(
+            "Where imported works are recorded — one directory per work, "
+            "holding its tree, its build state, and its shared vocabulary. "
+            "Shared across sessions and worktrees, so a run against one part "
+            "reads what every earlier run of that work left."
+        ),
+    )
+
     corpus_embeddings: bool = Field(
         default=False,
         validation_alias="INKWELL_CORPUS_EMBEDDINGS",
@@ -509,6 +531,17 @@ def book_store() -> BookStore:
     first of its book or the ninth.
     """
     return BookStore(root=Path(current_settings().books_path).expanduser())
+
+
+def manuscript_store() -> ManuscriptStore:
+    """The imported-work records for the current execution context.
+
+    Resolved here rather than held by a run, for the same reason the book
+    store is: the record outlives every run that writes to it, and a part
+    reaches it identically whether it is the first of its work or the two
+    hundredth.
+    """
+    return ManuscriptStore(root=Path(current_settings().manuscripts_path).expanduser())
 
 
 def corpus_semantics(store: CorpusStore) -> SemanticLayer:

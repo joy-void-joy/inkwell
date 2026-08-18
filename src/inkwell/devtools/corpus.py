@@ -22,12 +22,15 @@ declaration looked at.
 
 import asyncio
 import logging
+import sys
 from collections.abc import Coroutine
+from shutil import get_terminal_size
 from time import monotonic, sleep
 from typing import Annotated
 
 import typer
 from pydantic import BaseModel, ConfigDict, Field
+from tqdm import tqdm
 
 from inkwell.agent.config import corpus_root, current_settings
 from inkwell.agent.pipeline import CORPUS_BRIEFING_LIMIT, corpus_briefing
@@ -125,6 +128,16 @@ Short enough that the bar moves, long enough that reading every shard is a
 rounding error against fetching a document.
 """
 
+FALLBACK_WIDTH = 80
+"""How wide to draw when the terminal will not say.
+
+Given to tqdm rather than left to it. Asked to work its own width out, tqdm
+reads the window size directly, and a terminal reporting zero — a pty opened
+without one, which is what a scripted or captured run gets — has it draw a bar
+zero characters wide. That renders as nothing at all, which is
+indistinguishable from the display being switched off.
+"""
+
 
 class SweepProgress(BaseModel):
     """How far a sweep has got, counted off the store rather than the run.
@@ -181,37 +194,61 @@ class SweepProgress(BaseModel):
         reading — the bare ``progress`` command — has watched for no time and
         seen nothing land, so it reports no rate rather than a made-up one.
         """
+        remaining = self.eta(elapsed, gained)
         pace = f"{self.rate(elapsed, gained):.0f}/min · " if elapsed > 0 else ""
-        heading = (
-            f" · eta ~{self.eta(elapsed, gained):.0f}s"
-            if self.eta(elapsed, gained) > 0
-            else ""
-        )
+        heading = f" · eta ~{tqdm.format_interval(remaining)}" if remaining > 0 else ""
         return (
             f"[{self.bar()}] {self.stored}/{self.listed} docs "
             f"({self.fraction():.0%}) · {self.started}/{self.total} sources · "
-            f"{pace}{elapsed:.0f}s elapsed{heading}"
+            f"{pace}{tqdm.format_interval(elapsed)} elapsed{heading}"
         )
+
+
+def sweep_bar(opening: SweepProgress) -> tqdm | None:
+    """A bar to draw the sweep in, or nothing where one could not be seen.
+
+    ``initial`` is what the store already held, and it is the whole reason the
+    rate and the time remaining are honest. A sweep almost never starts from an
+    empty corpus, and tqdm paces on ``n - initial``, so telling it where this
+    run began is what stops it crediting the run with every document each
+    earlier run fetched — which is how the first reading came out at nearly a
+    million a minute.
+
+    ``None`` where stderr is not a terminal. A redrawing bar needs one to
+    redraw over; piped to a file or captured by another program it is not a
+    display but a few hundred kilobytes of escape codes, and the caller says
+    the same thing in lines instead. What it must never do is what it did
+    before: decide it cannot draw, and then say nothing at all.
+    """
+    if not sys.stderr.isatty():
+        return None
+    return tqdm(
+        total=opening.listed or None,
+        initial=opening.stored,
+        unit="doc",
+        desc="sweeping",
+        leave=True,
+        ncols=get_terminal_size(fallback=(FALLBACK_WIDTH, 24)).columns
+        or FALLBACK_WIDTH,
+    )
 
 
 async def tracked(
     corpus: CorpusStore, interval: float, showing: bool, until: asyncio.Event
 ) -> None:
-    """Say how far a sweep has got, in lines, until told to stop.
+    """Say how far a sweep has got, until told to stop.
 
     Counted off the store rather than off the run, exactly as ``progress``
     does — a sweep publishes each shard as it goes, so what has landed is on
     disk and needs no channel back from the fetching. That also means this
-    reports honestly through an interrupt: the last line is where the corpus
-    actually got to.
+    reports honestly through an interrupt: what it last said is where the
+    corpus actually got to.
 
-    A line each rather than a bar redrawing in place, and the line already
-    carries a bar. A redrawing bar needs a real terminal underneath it, and
-    silently renders *nothing* where it does not have one — a stream that is
-    piped, captured, or a pty opened with no window size, each of which is
-    indistinguishable from the display being switched off. Appending survives
-    all three, keeps its history for a sweep measured in hours, and reads the
-    same in a terminal as in the log somebody redirected it to.
+    A bar in a terminal and a line everywhere else, because a redrawing bar
+    needs a terminal to redraw over and a log full of escape codes is not a
+    progress display. Both say the same numbers; only the two ways of failing
+    are gone. The bar no longer switches itself off silently, and no longer
+    draws itself zero characters wide.
 
     Stopped by an event rather than by cancellation, so ending it raises
     nothing that has to be caught and discarded, and so the last reading is
@@ -227,29 +264,41 @@ async def tracked(
     if not showing:
         return
     started = monotonic()
-    opening = swept(corpus).stored
+    opening = swept(corpus)
+    bar = sweep_bar(opening)
     spoken = -1
 
     def drawn() -> None:
-        """One reading of the store, said only when it has something new to say.
+        """One reading of the store, rendered however this run can be watched.
 
-        Keyed on the count rather than on the clock, so a sweep waiting on a
-        slow source is quiet instead of repeating itself, and every line that
-        does appear marks a document that actually landed.
+        The line is emitted only when the count moves, so a sweep waiting on a
+        slow source stays quiet instead of repeating itself and every line that
+        appears marks a document that landed. The bar redraws regardless, since
+        its elapsed time and its estimate move whether or not anything did.
         """
         nonlocal spoken
         found = swept(corpus)
-        if found.stored == spoken:
+        if bar is not None:
+            bar.total = found.listed or None
+            bar.n = found.stored
+            bar.set_postfix_str(f"{found.started}/{found.total} sources")
+            bar.refresh()
             return
-        spoken = found.stored
-        typer.echo(
-            found.render(monotonic() - started, found.stored - opening), err=True
-        )
+        if found.stored != spoken:
+            spoken = found.stored
+            typer.echo(
+                found.render(monotonic() - started, found.stored - opening.stored),
+                err=True,
+            )
 
-    while not until.is_set():
+    try:
+        while not until.is_set():
+            drawn()
+            await asyncio.sleep(interval)
         drawn()
-        await asyncio.sleep(interval)
-    drawn()
+    finally:
+        if bar is not None:
+            bar.close()
 
 
 async def swept_with_bar(

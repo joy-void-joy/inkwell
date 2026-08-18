@@ -9,6 +9,7 @@ transport, so the real extraction, hashing, and merge paths all run.
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import get_args
 
@@ -17,7 +18,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from inkwell.agent.provenance import Venue
-from inkwell.devtools.corpus import swept_with_bar, tracked
+from inkwell.devtools.corpus import SweepProgress, swept_with_bar, tracked
 from inkwell.corpus.discovery import (
     Avenue,
     DiscoveredItem,
@@ -826,6 +827,80 @@ class TestAnAvenueThatEnumeratesNothingSaysSo:
 
 
 # ── A sweep says where it has got to while it is still going ─────────────────
+
+
+class TestTheSweepIsNeverSilentAboutWhereItGot:
+    """It was, twice over, and both failures looked identical from outside:
+    tqdm switches itself off when stderr is not a terminal, and draws an empty
+    string when the terminal reports no width. Either way the sweep ran for
+    hours saying nothing, which is what the display exists to prevent."""
+
+    async def watched(self, store: CorpusStore, capfd) -> str:
+        """What a short sweep says while it runs."""
+
+        async def sweeping() -> IngestReport:
+            await asyncio.sleep(0.3)
+            return IngestReport(sources=())
+
+        await swept_with_bar(store, sweeping(), True)
+        return capfd.readouterr().err
+
+    async def test_a_terminal_gets_a_bar(
+        self, tmp_path: Path, capfd, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        said = await self.watched(CorpusStore(root=tmp_path), capfd)
+
+        assert "sweeping" in said
+
+    async def test_anything_else_gets_lines_rather_than_silence(
+        self, tmp_path: Path, capfd, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The case that was broken: piped, redirected, or captured."""
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+        said = await self.watched(CorpusStore(root=tmp_path), capfd)
+
+        assert "docs" in said
+        assert "sources" in said
+
+    async def test_asking_for_no_progress_is_the_only_way_to_get_none(
+        self, tmp_path: Path, capfd
+    ) -> None:
+        async def sweeping() -> IngestReport:
+            return IngestReport(sources=())
+
+        await swept_with_bar(CorpusStore(root=tmp_path), sweeping(), False)
+
+        assert capfd.readouterr().err == ""
+
+
+class TestThePaceIsThisRunsOwn:
+    """Rate and estimate divided the whole store by this run's elapsed time,
+    crediting the sweep with every document every earlier run had fetched. The
+    first reading came out at 995143/min."""
+
+    def held(self, stored: int) -> SweepProgress:
+        return SweepProgress(stored=stored, listed=1000, started=1, total=1)
+
+    def test_a_watch_that_has_seen_nothing_land_claims_no_rate(self) -> None:
+        assert self.held(500).rate(elapsed=10.0, gained=0) == 0.0
+
+    def test_the_rate_counts_only_what_this_watch_saw(self) -> None:
+        """Six documents in a minute is six a minute, whatever the store held
+        before it started."""
+        assert self.held(506).rate(elapsed=60.0, gained=6) == 6.0
+
+    def test_the_estimate_paces_on_what_landed_not_on_the_total(self) -> None:
+        """494 left at 6/min is a little over 82 minutes."""
+        remaining = self.held(506).eta(elapsed=60.0, gained=6)
+
+        assert 4900 < remaining < 4950
+
+    def test_a_reading_reports_time_as_hours_and_minutes(self) -> None:
+        said = self.held(506).render(elapsed=60.0, gained=6)
+
+        assert "01:00 elapsed" in said
+        assert "eta ~1:22:" in said
 
 
 class TestTheBarStopsHoweverTheSweepEnds:

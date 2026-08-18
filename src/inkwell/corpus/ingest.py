@@ -36,6 +36,7 @@ from inkwell.corpus.registry import (
 from inkwell.corpus.storage import (
     CorpusStore,
     DiscoveredEntry,
+    DocumentAlias,
     SourceShard,
     StoredDocument,
     StoreFailure,
@@ -78,10 +79,11 @@ def abstract_of(document: FetchedDocument) -> str:
     return f"{opening}…" if len(words) > ABSTRACT_WORDS else opening
 
 
-type DocumentStatus = Literal["stored", "unchanged", "failed"]
+type DocumentStatus = Literal["stored", "unchanged", "duplicate", "failed"]
 
 STORED: DocumentStatus = "stored"
 UNCHANGED: DocumentStatus = "unchanged"
+DUPLICATE: DocumentStatus = "duplicate"
 FAILED: DocumentStatus = "failed"
 
 
@@ -94,6 +96,7 @@ class DocumentOutcome(BaseModel):
     url: str
     status: DocumentStatus
     kind: str = ""
+    holder: str = ""
     failure_class: str = ""
     error: str = ""
 
@@ -110,6 +113,7 @@ class SourceReport(BaseModel):
     new: int = 0
     stored: int = 0
     unchanged: int = 0
+    duplicate: int = 0
     skipped: int = 0
     failed: int = 0
     crawl_degraded: bool = False
@@ -133,6 +137,7 @@ class SourceReport(BaseModel):
                 ("new", self.new),
                 ("stored", self.stored),
                 ("unchanged", self.unchanged),
+                ("duplicate", self.duplicate),
                 ("skipped", self.skipped),
                 ("failed", self.failed),
             )
@@ -245,6 +250,25 @@ class SourceIngestor(BaseModel):
                 return DocumentOutcome(
                     slug=entry.slug, url=entry.url, status=UNCHANGED, kind=fetched.kind
                 )
+            holder = shard.holder_of(digest, entry.slug)
+            if holder:
+                shard.record_alias(
+                    DocumentAlias(
+                        slug=entry.slug,
+                        url=entry.url,
+                        holder=holder,
+                        content_sha256=digest,
+                        seen_at=now_stamp(),
+                    )
+                )
+                shard.clear_failure(entry.slug)
+                return DocumentOutcome(
+                    slug=entry.slug,
+                    url=entry.url,
+                    status=DUPLICATE,
+                    kind=fetched.kind,
+                    holder=holder,
+                )
             title = fetched.title or entry.title or entry.slug
             written = self.write(entry.slug, fetched, title)
             document = StoredDocument(
@@ -331,6 +355,7 @@ class SourceIngestor(BaseModel):
             new=fresh,
             stored=sum(1 for one in outcomes if one.status == STORED),
             unchanged=sum(1 for one in outcomes if one.status == UNCHANGED),
+            duplicate=sum(1 for one in outcomes if one.status == DUPLICATE),
             skipped=len(work) - len(selected),
             failed=sum(1 for one in outcomes if one.status == FAILED),
             crawl_degraded=shard.crawl_degraded,

@@ -20,6 +20,8 @@ from inkwell.agent.tools.voice import (
     load_format_examples,
     load_style_corpus,
     merge_voice_analyses,
+    samples_to_analyze,
+    speaker_tagged,
     voice_cache_dir,
     voice_cache_key,
 )
@@ -605,3 +607,32 @@ class TestVoiceOutranksFormatChecks:
         rows = next(ref for ref in manifest.refs if ref.label == "Format checks")
         assert "voice outranks every row" in rows.instruction
         assert "keep the" in rows.instruction
+
+
+class TestTheSampleTypeIsReadOffTheSample:
+    """What the analyst is told about a sample follows the text, not the door
+    it came in through.
+
+    The session's own source used to be declared a conversation whatever it
+    was, so a `revise` run over a published chapter handed the analyst a
+    transcript's reading instructions — analyse the <user> blocks, separate the
+    author's instruction voice from their prose voice — for a document that has
+    no turns at all.
+    """
+
+    def test_a_share_link_transcript_is_a_conversation(self) -> None:
+        text = "<user>\nmake it sharper\n</user>\n<claude>\nsure\n</claude>"
+
+        assert speaker_tagged(text)
+        assert samples_to_analyze(text, [])[0].source_type == "conversation"
+
+    def test_a_published_chapter_is_prose(self) -> None:
+        text = "**Deception is hard to measure.** Chapter 2 opens on the gap."
+
+        assert not speaker_tagged(text)
+        assert samples_to_analyze(text, [])[0].source_type == "prose"
+
+    def test_the_corpus_is_typed_the_same_way(self) -> None:
+        sample = StyleSample(label="essay", text="Plain prose.", source_type="ignored")
+
+        assert samples_to_analyze("draft", [sample])[1].source_type == "prose"

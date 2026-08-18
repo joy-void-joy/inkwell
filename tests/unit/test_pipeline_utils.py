@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.models import ArticlePlan, ResearchCompilation, ReviewFinding
 from inkwell.agent.notes import PipelineNotes
@@ -11,6 +13,8 @@ from inkwell.agent.pipeline import (
     author_context_block,
     brief_block,
     consolidate_findings,
+    corpus_briefing,
+    planning_topic,
     render_brief,
     resolve_writer_mode,
     slugify,
@@ -271,3 +275,45 @@ class TestSuggestedAdditionsReachTheRefiner:
 
         assert "reject it with a reason" in block
         assert "Silence" in block
+
+
+class TestCorpusBriefingReachesThePlanner:
+    """What the corpus holds, pushed rather than left to a tool call.
+
+    `corpus_search` was available to the research stage all along. A stage
+    reaches for it once it knows there is something to look for, which is
+    exactly what a piece working from an older draft does not know.
+    """
+
+    async def test_an_empty_corpus_adds_nothing_to_the_task(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_root", lambda: tmp_path / "corpus"
+        )
+
+        assert await corpus_briefing("AI and cyber risk") == ""
+
+    def test_the_brief_is_the_subject_where_there_is_one(self, tmp_path: Path) -> None:
+        """Better than the source: a revision's source is a draft whose own
+        subject is the thing we are trying to widen past."""
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_brief("A textbook chapter on AI and cyber risk.")
+
+        assert planning_topic(notes, "textbook").startswith("A textbook chapter")
+
+    def test_the_source_stands_in_when_no_brief_was_given(self, tmp_path: Path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+        path = notes.text_artifact_path("conversation")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Cyber risk and the offense-defence balance.", "utf-8")
+
+        assert "offense-defence" in planning_topic(notes, "textbook")
+
+    def test_a_run_with_neither_falls_back_rather_than_failing(
+        self, tmp_path: Path
+    ) -> None:
+        """A missing corpus subject is not a reason to end a run."""
+        notes = PipelineNotes(tmp_path / "notes")
+
+        assert planning_topic(notes, "textbook") == "textbook"

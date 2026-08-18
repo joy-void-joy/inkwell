@@ -21,10 +21,12 @@ declaration looked at.
 
 import asyncio
 import logging
+from typing import Annotated
 
 import typer
 
 from inkwell.agent.config import corpus_root, current_settings
+from inkwell.agent.pipeline import CORPUS_BRIEFING_LIMIT, corpus_briefing
 from inkwell.corpus.ingest import (
     DEFAULT_CONCURRENCY,
     IngestReport,
@@ -64,6 +66,24 @@ def sources() -> None:
     typer.echo("\nnot corpus sources:")
     for dropped in DROPPED_SOURCES:
         typer.echo(f"  {dropped.key:<16} {dropped.reason}")
+
+
+@app.command("brief")
+def brief(
+    topic: Annotated[str, typer.Argument(help="Subject to brief the planner on")],
+    limit: Annotated[
+        int, typer.Option(help="How many documents to show")
+    ] = CORPUS_BRIEFING_LIMIT,
+) -> None:
+    """Show the corpus briefing the plan stage would be handed for a topic.
+
+    The planner is given this before it writes a research question, so what it
+    says here is what a run can notice that its source material never raised.
+    Seeing it costs nothing and answers the question a sync cannot: not "what
+    did we store" but "what will the planner actually be shown".
+    """
+    rendered = asyncio.run(corpus_briefing(topic, limit=limit))
+    typer.echo(rendered or "The corpus has nothing on this subject.")
 
 
 @app.command("status")

@@ -58,6 +58,7 @@ from inkwell.agent.book import (
 from inkwell.agent.book_links import pointing
 from inkwell.agent.config import (
     book_store,
+    corpus_root,
     current_settings,
     load_settings,
     stage_model,
@@ -147,6 +148,8 @@ from inkwell.agent.glossary import (
 )
 from inkwell.agent.segmenter import reader
 from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
+from inkwell.corpus.retrieval import CorpusQuery, search_corpus
+from inkwell.corpus.storage import CorpusStore
 from inkwell.pdf import reads_by_page
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import (
@@ -727,6 +730,80 @@ def add_reader_section_refs(manifest: ContentManifest, notes: PipelineNotes) -> 
         )
     add_reader_chapter_ref(manifest, reader)
     add_reader_unrouted_ref(manifest, reader)
+
+
+TOPIC_QUERY_CHARS = 2000
+"""How much text describes the subject to a nearest-neighbour query.
+
+A hard input limit rather than a display one: this is what gets embedded, and
+an embedding takes a bounded string. Nothing is lost by it — the source is
+mounted whole for the planner beside the briefing this query produces.
+"""
+
+
+def planning_topic(notes: PipelineNotes, target_format: str) -> str:
+    """What to ask the corpus for, before a plan exists to ask from.
+
+    The author's brief where there is one: it says what the piece is meant to
+    be, which is a better subject description than the source, and a revision's
+    source is a draft whose own subject is what we are trying to widen past.
+    The opening of the source stands in otherwise.
+    """
+    brief = notes.load_brief()
+    if brief:
+        return brief[:TOPIC_QUERY_CHARS]
+    source = notes.text_artifact_path("conversation")
+    if not source.exists():
+        return target_format
+    return source.read_text(encoding="utf-8")[:TOPIC_QUERY_CHARS]
+
+
+CORPUS_BRIEFING_LIMIT = 30
+"""How many corpus documents the planner is shown before it writes a question.
+
+Titles and dates only, so the ceiling is about what a planner can hold rather
+than what a context window can take.
+"""
+
+
+async def corpus_briefing(topic: str, *, limit: int = CORPUS_BRIEFING_LIMIT) -> str:
+    """What the corpus already holds on this subject, newest first.
+
+    Pushed rather than left to a tool call. `corpus_search` has been available
+    to the research stage all along, and a stage only reaches for it once it
+    knows there is something to look for — which is exactly what a piece
+    working from an older draft does not know. Handing the planner the recent
+    material before it writes a single research question is what lets a
+    question be *about* a development instead of about a claim in the source.
+
+    Titles, dates and venues, not bodies: the planner is deciding what to ask,
+    and the stages after it can read any of these in full.
+    """
+    answer = await search_corpus(
+        CorpusQuery(tier="browse", like=topic, limit=limit),
+        CorpusStore(root=corpus_root()),
+    )
+    if not answer.documents:
+        return ""
+
+    def lines() -> Iterator[str]:
+        yield (
+            f"## What the corpus already holds on this subject\n\n"
+            f"{answer.matched} document(s) matched; the {len(answer.documents)} "
+            f"nearest are below, newest first. These are already fetched — "
+            f"corpus_search reads any of them in full, at no search cost.\n"
+        )
+        for hit in answer.documents:
+            dated = f" ({hit.published})" if hit.published else ""
+            yield f"- **{hit.title}**{dated} — {hit.venue or hit.organization}"
+        yield (
+            "\nRead this list for what the source material does not mention. "
+            "A development here that the source predates is the strongest "
+            "candidate there is for a research question, because no question "
+            "derived from the source can reach it."
+        )
+
+    return "\n".join(lines()) + "\n\n"
 
 
 def suggested_additions_block(notes: PipelineNotes) -> str:
@@ -1755,6 +1832,7 @@ async def plan_article(
         f"Extract a structured article plan from the source material.\n"
         f"{format_hint}\n\n"
         f"{manifest.render()}\n\n"
+        f"{await corpus_briefing(planning_topic(notes, target_format))}"
     )
     if author_directions:
         task += (

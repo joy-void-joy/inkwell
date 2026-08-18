@@ -2077,3 +2077,46 @@ async def test_a_missing_sitemap_is_not_put_through_a_browser_either(
         reader = HttpPageReader(client, browser_bound)
         assert await reader.read(SITEMAP) == b"<urlset></urlset>"
     assert reached == [SITEMAP]
+
+
+async def test_a_challenged_client_renders_rather_than_giving_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interstitial is the same signal as a 403, and 403 escalates.
+
+    Cleared by running the script it arrived with, which is the one thing the
+    browser's bare connection does not do — so this escalates to a render
+    rather than to the connection a refusal escalates to.
+    """
+    rendered: list[str] = []
+
+    async def render(url: str, *, profile: str | None = None) -> str:
+        rendered.append(url)
+        return article_html("Past The Gate").decode()
+
+    monkeypatch.setattr("inkwell.corpus.fetch.rendered_html", render)
+    url = f"{FIXTURE_HOST}/research/one"
+    challenged = httpx.MockTransport(
+        lambda request: httpx.Response(200, text=CHALLENGE_HTML.decode())
+    )
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+
+    async with httpx.AsyncClient(transport=challenged) as client:
+        reached = await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+    assert rendered == [url]
+    assert "Past The Gate" in reached.text
+    assert reached.rendered
+
+
+async def test_a_challenge_a_render_cannot_clear_says_that_is_what_happened() -> None:
+    """The failure has to distinguish "not tried yet" from "nothing left"."""
+    url = f"{FIXTURE_HOST}/research/one"
+    challenged = httpx.MockTransport(
+        lambda request: httpx.Response(200, text=CHALLENGE_HTML.decode())
+    )
+    plain = fixture_declaration()
+
+    async with httpx.AsyncClient(transport=challenged) as client:
+        with pytest.raises(FetchRefused, match="to a plain client"):
+            await DocumentFetcher(client=client).fetch(url, plain)

@@ -111,18 +111,26 @@ def worth_a_browser(error: httpx.HTTPStatusError) -> bool:
     return error.response.status_code in CLIENT_REFUSED_STATUSES
 
 
-def refused_as_challenge(url: str, html: str) -> None:
-    """Refuse an anti-bot interstitial, wherever the HTML came from.
+def refuse_challenge(url: str, html: str, reached_by: str) -> None:
+    """Refuse an anti-bot interstitial, naming the connection that got it.
 
     A status code is what catches a refusal on the plain path, and a browser
     has none to offer: what a host turns a browser away with is a page, served
     with a 200 and a body that extracts perfectly well. Checking here as well
     is what stops "the browser reached it" from meaning "the browser reached
     the block page and we stored that as the document".
+
+    ``reached_by`` is in the message because the two cases call for opposite
+    responses. A plain client meeting a challenge has somewhere left to go; a
+    rendered browser page meeting one has exhausted what this project can do,
+    and an operator reading the failure needs to know which they are looking
+    at without reading this file.
     """
     marker = challenge_page_marker(html)
     if marker is not None:
-        raise FetchRefused(f"{url} served an anti-bot page (matched {marker!r})")
+        raise FetchRefused(
+            f"{url} served an anti-bot page to {reached_by} (matched {marker!r})"
+        )
 
 
 async def http_get(client: httpx.AsyncClient, url: str) -> httpx.Response:
@@ -211,7 +219,17 @@ class DocumentFetcher(BaseModel):
         if looks_like_pdf(response):
             return FetchedDocument(url=url, kind="pdf", data=response.content)
 
-        refused_as_challenge(url, response.text)
+        challenged = challenge_page_marker(response.text)
+        if challenged is not None:
+            if not declaration.needs_browser:
+                raise FetchRefused(
+                    f"{url} served an anti-bot page to a plain client "
+                    f"(matched {challenged!r})"
+                )
+            # An interstitial is cleared by running the script it came with,
+            # which is the one thing the browser's bare connection does not do.
+            return await self.fetch_rendered(url)
+
         extracted = extract_page(response.text, url=url, output_format=MARKDOWN_FORMAT)
         floor = declaration.thin_chars or self.thin_chars
         thin = extracted is None or len(extracted.text) < floor
@@ -241,7 +259,7 @@ class DocumentFetcher(BaseModel):
         if body[: len(PDF_MAGIC)] == PDF_MAGIC:
             return FetchedDocument(url=url, kind="pdf", data=body, rendered=True)
         html = body.decode("utf-8", errors="replace")
-        refused_as_challenge(url, html)
+        refuse_challenge(url, html, "the browser's connection")
         extracted = extract_page(html, url=url, output_format=MARKDOWN_FORMAT)
         if extracted is None:
             raise FetchRefused(f"No article text in what a browser reached at {url}")
@@ -258,7 +276,7 @@ class DocumentFetcher(BaseModel):
     async def fetch_rendered(self, url: str) -> FetchedDocument:
         """Fetch one document through the profile's persistent browser context."""
         html = await rendered_html(url, profile=self.profile)
-        refused_as_challenge(url, html)
+        refuse_challenge(url, html, "a rendered browser page")
         extracted = extract_page(html, url=url, output_format=MARKDOWN_FORMAT)
         if extracted is None:
             raise FetchRefused(f"No article text after rendering {url}")

@@ -2026,3 +2026,54 @@ def test_dropping_a_holder_releases_the_aliases_that_named_it(
         "second",
         "third",
     }
+
+
+async def test_a_missing_document_is_not_put_through_a_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 is absent for every client, so a second attempt cannot differ.
+
+    The escalation exists for a host discriminating on the client. Spending a
+    page load to reach the same 404 costs seconds per dead URL on a sweep of
+    thousands, and arrives wrapped in a traceback that reads like a new fault.
+    """
+    reached: list[str] = []
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        reached.append(url)
+        return article_html("Reached")
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+    url = f"{FIXTURE_HOST}/research/gone"
+
+    async with httpx.AsyncClient(transport=refusing_transport(404)) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+    assert reached == []
+
+
+async def test_a_missing_sitemap_is_not_put_through_a_browser_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enumeration reaches for the browser on the same terms fetching does."""
+    reached: list[str] = []
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        reached.append(url)
+        return b"<urlset></urlset>"
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+
+    async with httpx.AsyncClient(transport=refusing_transport(404)) as client:
+        reader = HttpPageReader(client, browser_bound)
+        with pytest.raises(httpx.HTTPStatusError):
+            await reader.read(SITEMAP)
+    assert reached == []
+
+    async with httpx.AsyncClient(transport=refusing_transport(403)) as client:
+        reader = HttpPageReader(client, browser_bound)
+        assert await reader.read(SITEMAP) == b"<urlset></urlset>"
+    assert reached == [SITEMAP]

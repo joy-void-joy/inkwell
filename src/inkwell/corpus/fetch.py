@@ -89,6 +89,28 @@ class FetchRefused(Exception):
     """
 
 
+CLIENT_REFUSED_STATUSES = (401, 403)
+"""Statuses that mean "not for you" rather than "not there".
+
+The whole of what makes reaching for a browser worth a page load. Kept here
+rather than read off the failure vocabulary because it answers a different
+question about the same numbers: that one names what went wrong for a report,
+this one decides whether a second attempt could possibly go differently.
+"""
+
+
+def worth_a_browser(error: httpx.HTTPStatusError) -> bool:
+    """Whether a browser could plausibly get a different answer to this.
+
+    A host discriminating on the client — its user agent, its TLS handshake,
+    the cookies it carries — may well answer a browser, which is the case the
+    escalation exists for. A document that is absent is absent for every
+    client there is, so a 404 put through a browser spends a page load to
+    arrive at the same 404 wrapped in a longer traceback.
+    """
+    return error.response.status_code in CLIENT_REFUSED_STATUSES
+
+
 def refused_as_challenge(url: str, html: str) -> None:
     """Refuse an anti-bot interstitial, wherever the HTML came from.
 
@@ -137,8 +159,8 @@ class HttpPageReader(PageReader):
     async def read(self, url: str) -> bytes:
         try:
             return (await http_get(self.client, url)).content
-        except httpx.HTTPStatusError:
-            if not self.declaration.needs_browser:
+        except httpx.HTTPStatusError as error:
+            if not (self.declaration.needs_browser and worth_a_browser(error)):
                 raise
             return await fetched_through_browser(url, profile=self.profile)
 
@@ -176,8 +198,8 @@ class DocumentFetcher(BaseModel):
         """
         try:
             response = await http_get(self.client, url)
-        except httpx.HTTPStatusError:
-            if not declaration.needs_browser:
+        except httpx.HTTPStatusError as error:
+            if not (declaration.needs_browser and worth_a_browser(error)):
                 raise
             return await self.fetch_refused(url)
 

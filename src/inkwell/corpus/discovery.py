@@ -310,10 +310,14 @@ async def sitemap_locations(
             try:
                 raw = await pages.read(current.url)
                 page = sitemap_page(gunzipped(current.url, raw))
-            except Exception:
+            except Exception as error:
                 logger.warning(
-                    "Sitemap unreadable, skipping: %s", current.url, exc_info=True
+                    "Sitemap unreadable, skipping: %s — %s: %s",
+                    current.url,
+                    type(error).__name__,
+                    error,
                 )
+                logger.debug("Sitemap %s failed", current.url, exc_info=True)
                 continue
             if page.is_index:
                 pending.extend(

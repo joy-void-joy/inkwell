@@ -609,6 +609,14 @@ ANTI_PATTERN_ROWS: dict[str, list[AntiPatternRow]] = {
             "strength": "soft",
         },
         {
+            "id": "silent-truncation",
+            "pattern": "\\[\\s*:\\s*(?:\\d[\\d_]*\\d|[A-Z][A-Z0-9_]{2,})\\s*\\]",
+            "message": "Slicing a prefix discards the rest with nothing said, and a cut artifact looks exactly like a complete one. Emit the whole value: the container grows to fit what it holds, not the reverse. Cut only for a hard limit a document format or a function contract imposes \u2014 never for printing space, log volume, or ease of reading \u2014 and where a cut is forced, save the full copy and point at it from what survives. On a bound that is genuinely one of those, add `# lup: ignore[silent-truncation]` naming which",
+            "context": "code",
+            "refiner": "slice_exempt_lines",
+            "strength": "soft",
+        },
+        {
             "id": "bare-except",
             "pattern": "\\bexcept\\s*:",
             "message": "Bare `except:` catches SystemExit/KeyboardInterrupt \u2014 name the exception",
@@ -952,6 +960,14 @@ ANTI_PATTERN_ROWS: dict[str, list[AntiPatternRow]] = {
             "message": "Avoid .strip(chars)/.lstrip/.rstrip for structured data \u2014 parse it instead (urllib.parse for URLs, pathlib.Path for paths, json for JSON, datetime for dates)",
             "context": "code",
             "refiner": "",
+            "strength": "soft",
+        },
+        {
+            "id": "silent-truncation",
+            "pattern": "\\[\\s*:\\s*(?:\\d[\\d_]*\\d|[A-Z][A-Z0-9_]{2,})\\s*\\]",
+            "message": "Slicing a prefix discards the rest with nothing said, and a cut artifact looks exactly like a complete one. Emit the whole value: the container grows to fit what it holds, not the reverse. Cut only for a hard limit a document format or a function contract imposes \u2014 never for printing space, log volume, or ease of reading \u2014 and where a cut is forced, save the full copy and point at it from what survives. On a bound that is genuinely one of those, add `# lup: ignore[silent-truncation]` naming which",
+            "context": "code",
+            "refiner": "slice_exempt_lines",
             "strength": "soft",
         },
         {

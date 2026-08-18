@@ -33,6 +33,7 @@ from inkwell.devtools.corpus import app as corpus_app
 from inkwell.devtools.dev.app import app as dev_app
 from inkwell.devtools.harness.app import app as harness_app
 from inkwell.devtools.manuscript import app as manuscript_app
+from inkwell.devtools.report import app as report_app
 from inkwell.devtools.profiles import inkwell_profile_directory
 from inkwell.devtools.setup import app as setup_app
 from inkwell.devtools.subapps import APPLICATION_SPECS, INHERITED
@@ -71,6 +72,7 @@ APPLICATION_APPS = {
     "feedback": feedback.create_app(assembled_prompt),
     "harness": harness_app,
     "manuscript": manuscript_app,
+    "report": report_app,
     "setup": setup_app,
 }
 """Where each application spec meets the Typer app answering to its name.

@@ -72,6 +72,8 @@ def abstract_of(document: FetchedDocument) -> str:
         if line.strip() and not line.startswith("#") and not line.startswith("|")
     ]
     words = " ".join(prose).split()
+    # lup: ignore[silent-truncation] — the index's standing-in abstract, marked
+    # with an ellipsis; the document itself is stored whole beside it
     opening = " ".join(words[:ABSTRACT_WORDS])
     return f"{opening}…" if len(words) > ABSTRACT_WORDS else opening
 

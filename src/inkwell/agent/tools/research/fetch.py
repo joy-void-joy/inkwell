@@ -156,6 +156,8 @@ def challenge_page_marker(text: str) -> str | None:
     """
     if len(text) > 30_000:
         return None
+    # lup: ignore[silent-truncation] — a detector's window, not content: the
+    # text is returned whole and only this marker scan reads a bounded head
     sample = text[:6000].lower()
     for marker in CHALLENGE_MARKERS:
         if marker in sample:

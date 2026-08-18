@@ -512,6 +512,8 @@ SLUG_MAX_CHARS = 80
 
 def slugify(label: str) -> str:
     """Turn a section title or label into a filesystem-safe slug."""
+    # lup: ignore[silent-truncation] — a filename length limit, and the label
+    # this derives from is carried in full everywhere it is read
     return "-".join(label.lower().translate(SLUG_CHAR_MAP).split())[:SLUG_MAX_CHARS]
 
 
@@ -753,10 +755,14 @@ def planning_topic(notes: PipelineNotes, target_format: str) -> str:
     """
     brief = notes.load_brief()
     if brief:
+        # lup: ignore[silent-truncation] — an embedding takes a bounded string,
+        # and this is a query rather than content: the brief and the source are
+        # both mounted whole for the planner beside the briefing it produces
         return brief[:TOPIC_QUERY_CHARS]
     source = notes.text_artifact_path("conversation")
     if not source.exists():
         return target_format
+    # lup: ignore[silent-truncation] — the same query bound, same full copies
     return source.read_text(encoding="utf-8")[:TOPIC_QUERY_CHARS]
 
 
@@ -3013,6 +3019,8 @@ def consolidate_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
             if f.severity in ("critical", "praise"):
                 continue
             if f.text_excerpt:
+                # lup: ignore[silent-truncation] — a dedup key, never displayed
+                # and never stored; the finding it keys keeps its whole excerpt
                 key = f.text_excerpt[:200]
                 if key in seen:
                     first = seen[key]

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generator_version": "0.2.0",
-  "source_digest": "876ec70c8a7d3be9ddd6dd16943f2e9c06e7b907632501a6d811e359f45c38b0",
+  "source_digest": "93808c954f97ab8fd6aa13659e83690bd6cbcbfaa44877e32d4a06a1ee8d8b60",
   "target_requirements": [
     "claude-code"
   ],
@@ -9,7 +9,7 @@
     {
       "path": ".claude/CLAUDE.md",
       "category": "generated",
-      "sha256": "cab19e63cd353dd9fb29666441d4aeb34ca1e3274da5953cd52a5da37a3d5823",
+      "sha256": "34530ec0928ce161b366a6045de3f80d920c104b06b99072f412b2126f69846b",
       "semantic_id": "harness.guidance",
       "executable": false
     },
@@ -163,7 +163,7 @@
     {
       "path": ".claude/plugins/lup/commands/land.md",
       "category": "generated",
-      "sha256": "cf0f289e410dcbac463ae79f3cdb7667104243b9661526e5f97066bc6930a7c9",
+      "sha256": "ee1b8a78458558f423f779d97eac817a204a8e034bdecc2c10e0a4d374c00e02",
       "semantic_id": "skill.land",
       "executable": false
     },
@@ -289,7 +289,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/edit.py",
       "category": "generated",
-      "sha256": "5446cba74afae5cce2e1876a5e380c20ed718e03cf5d532d7bf6fd9487f79bd3",
+      "sha256": "c355ff10c0f08fdef54076974afdd7bf500ec679e3bbe41401616f2782daeb57",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -303,7 +303,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/kernel/lex.py",
       "category": "generated",
-      "sha256": "c4d219287e476031d8fd76f515a94e721af36ea8dc12d0a032d619d197338ea3",
+      "sha256": "c57f27c3c627af9cd0abdd01987b0f831281641a97273c28920b16d81d8b1c8f",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -345,7 +345,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/policy_data.py",
       "category": "generated",
-      "sha256": "a646037d15dfa70d9753da595325eb43aad7b5a4b44237fabe1bc4dfa2caa0c3",
+      "sha256": "739b1123a03d6d7eafdf267f9040aa1dbe00f00e9f0e65daae58a7e9f1e4736f",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -387,7 +387,7 @@
     {
       "path": "docs/conventions.md",
       "category": "generated",
-      "sha256": "24242d1b0399613a520dc869e442bd66045d0541d11a28c87ddf351d70d11b78",
+      "sha256": "c64235f55e763f603c4c5b8d59862bb03680be61b098f93599816995b2e0b6fd",
       "semantic_id": "docs.conventions",
       "executable": false
     },
@@ -443,14 +443,14 @@
     {
       "path": "docs/platform-differentiation.md",
       "category": "generated",
-      "sha256": "1cbafc5fa8406436120871b9c407817755fe0bdd17d38ef008c2a496e4d9e3b4",
+      "sha256": "5ae0d17e3bc92dee63f364b8647e9778835a247b8560e129b5057f03506a3490",
       "semantic_id": "docs.platform-differentiation",
       "executable": false
     },
     {
       "path": "docs/quality-pipeline.md",
       "category": "generated",
-      "sha256": "e00271f11cb1f278e700f89f6160431f44b75eb23af030601aa63bc449d039fc",
+      "sha256": "7a7d09ac75b5bad396dee94409e7bf0bc8725a3ecd882923c5f02a7bf0fb77ee",
       "semantic_id": "docs.quality-pipeline",
       "executable": false
     },

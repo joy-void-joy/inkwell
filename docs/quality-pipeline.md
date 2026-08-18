@@ -51,7 +51,8 @@ below's, which is why both layers exist.
 the commit hook installs, spelled from the same constant — and its second is
 `dev check`: `ruff format --check`, `ruff check`, `pyright`, both `pytest`
 suites, the review-note report, the anti-pattern rules, the native seam
-boundaries, library placement, generated-tree drift, and the guidance budget.
+boundaries, library placement, hook reachability, generated-tree drift, and
+the guidance budget.
 
 Unique catch: this is the authoritative gate. It binds whether or not a
 contributor armed the git guards, and it is what the push guard runs
@@ -83,9 +84,9 @@ One command:
 
 That is deliberately the whole of the gate. `dev check` is the same bar a
 checkout runs locally — format, lint, types, tests, review notes,
-anti-patterns, seam boundaries, library placement, generated-tree drift, and
-the guidance budget — so a green local run and a green pipeline cannot mean
-different things. Putting `harness check all` in a step ahead of it, as this
+anti-patterns, seam boundaries, library placement, hook reachability,
+generated-tree drift, and the guidance budget — so a green local run and a
+green pipeline cannot mean different things. Putting `harness check all` in a step ahead of it, as this
 repository does, buys a faster and more specific refusal of the one failure
 a contributor can produce without running anything; it reads the same verdict
 either way.

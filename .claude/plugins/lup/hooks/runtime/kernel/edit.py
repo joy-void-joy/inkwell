@@ -61,6 +61,19 @@ this budget exists to avoid. A project whose formatter is configured
 differently passes its own.
 """
 
+# lup: ignore[constant-declaration] — the kernel carries no config, and the
+# hook compiled from it must read the same width the sweep does
+ABBREVIATION_CHARS = 16
+"""The widest prefix that abbreviates an identifier rather than cutting a text.
+
+A git SHA shortens to seven or twelve, a uuid to sixteen, a content hash to
+whatever still collides with nothing; all of them stay the name of the thing
+they came from. Nothing anyone wrote survives being shortened this far, so a
+bound at or under this is read as naming rather than keeping — which is what
+lets `silent-truncation` flag every wider slice without a table of receivers
+it would have to guess from.
+"""
+
 
 def standalone_suppression(line: str) -> re.Match[str] | None:
     """The directive on a line that carries nothing but the directive."""
@@ -748,6 +761,108 @@ def tuple_shape_exempt_lines(source: str) -> set[int]:
     return variadic - fixed
 
 
+def slice_exempt_lines(source: str) -> set[int]:
+    """Return bounded-prefix-slice lines the tree shows to be something else.
+
+    The pattern reads every ``[:n]``, because what separates an honest prefix
+    from a destroyed tail is what becomes of the remainder, and no character
+    class can see that. Four contexts settle it without types.
+
+    A slice of a digest derives an identifier. ``hexdigest()[:12]`` shortens a
+    hash whose prefix identifies the same thing the whole of it did, and there
+    is no content behind it to lose.
+
+    A bound at or under ``ABBREVIATION_CHARS`` abbreviates rather than cuts.
+    Nothing anyone wrote survives being shortened to sixteen characters, so a
+    slice that narrow is never someone keeping part of a text — it is a git
+    SHA, a uuid, a short key. Reading the width rather than the receiver's
+    name is what makes this decidable: ``commit[:12]`` carries no type saying
+    it is a hash, and a rule that guessed from the identifier would clear a
+    variable called ``commit_message`` for the same reason.
+
+    A line carrying the complementary slice is a split. ``x[:n]`` beside
+    ``x[n:]`` keeps everything it started with, which is this rule's remedy
+    rather than its defect.
+
+    A slice a test reads is sniffing. ``raw[:100].startswith(...)`` asks a
+    question of a prefix and stores nothing, so whatever it came from is still
+    whole wherever it lives.
+
+    Source that does not parse clears nothing. The rule is soft, so the most an
+    unrefined finding costs is a directive carrying a reason.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+
+    def prefix_slices(node: ast.AST) -> Iterator[ast.Subscript]:
+        """Every ``[:n]`` at or under this node."""
+        for inner in ast.walk(node):
+            match inner:
+                case ast.Subscript(slice=ast.Slice(lower=None, upper=upper)) if (
+                    upper is not None
+                ):
+                    yield inner
+
+    def spanned(node: ast.Subscript) -> range:
+        """Every line the sliced expression covers.
+
+        A chain that opens on one line and closes with its ``[:n]`` on another
+        reports at the bracket while the node starts at the receiver, so
+        clearing only ``lineno`` clears a line the pattern never matched and
+        leaves the one it did.
+        """
+        return range(node.lineno, (node.end_lineno or node.lineno) + 1)
+
+    def derives_a_digest(node: ast.expr) -> bool:
+        """Whether the sliced value came from a hash or a uuid."""
+        return any(
+            isinstance(inner, ast.Attribute) and inner.attr in ("hexdigest", "hex")
+            for inner in ast.walk(node)
+        )
+
+    def abbreviates(bounds: ast.expr | None) -> bool:
+        """Whether the bound is too narrow to be a portion of anything written."""
+        return (
+            isinstance(bounds, ast.Constant)
+            and isinstance(bounds.value, int)
+            and bounds.value <= ABBREVIATION_CHARS
+        )
+
+    split_lines = {
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Slice)
+        and node.slice.lower is not None
+        and node.slice.upper is None
+    }
+
+    def tested() -> Iterator[int]:
+        """Lines whose prefix slice is read by a comparison rather than kept."""
+        for node in ast.walk(tree):
+            match node:
+                case (
+                    ast.Compare()
+                    | ast.Call(func=ast.Attribute(attr="startswith" | "endswith"))
+                ):
+                    for found in prefix_slices(node):
+                        yield from spanned(found)
+
+    def settled() -> Iterator[int]:
+        """Lines whose prefix slice is a digest, a split, or an abbreviation."""
+        for node in prefix_slices(tree):
+            if (
+                node.lineno in split_lines
+                or derives_a_digest(node.value)
+                or (isinstance(node.slice, ast.Slice) and abbreviates(node.slice.upper))
+            ):
+                yield from spanned(node)
+
+    return set(tested()) | set(settled())
+
+
 def refiner_named(name: str) -> Callable[[str], set[int]] | None:
     """The AST context one row names, where the row names one.
 
@@ -767,6 +882,8 @@ def refiner_named(name: str) -> Callable[[str], set[int]] | None:
             return dict_get_exempt_lines
         case "tuple_shape_exempt_lines":
             return tuple_shape_exempt_lines
+        case "slice_exempt_lines":
+            return slice_exempt_lines
     return None
 
 
@@ -976,14 +1093,15 @@ def file_ignore(source: str) -> FileIgnore:
 def suppression_site(number: int, line: str) -> str:
     """One suppression, located, named, and quoted before it is approved.
 
-    The rules are named rather than left to be read back out of the quote,
-    because the quote is a preview: a long line is cut, and a directive is
-    written at the end of the line it guards — the end being what a cut takes.
+    The rules are named rather than left to be read back out of the quote, so
+    an approval states what it approves without anyone parsing the line again.
+    The line itself is quoted whole: a directive is written at the end of what
+    it guards, which is the end a cut would take first.
     """
     match = IGNORE_RE.search(line)
     named = ignore_rule_ids(match) if match is not None else None
     silenced = ", ".join(named) if named else "every rule"
-    return f"line {number} silences {silenced}: {line.strip()[:160]}"
+    return f"line {number} silences {silenced}: {line.strip()}"
 
 
 def suppression_reason(sites: list[str], creation: bool = False) -> str:

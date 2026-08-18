@@ -178,6 +178,8 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
             acquisition=hit.acquisition(),
             title=hit.title or None,
             url=hit.url or None,
+            # lup: ignore[silent-truncation] — the snippet is the preview beside
+            # full_text_path, which is the whole page saved to disk and pointed at
             snippet=hit.text[:SNIPPET_LENGTH] or None,
             highlights=list(hit.highlights) or None,
             published_date=hit.published_at(),

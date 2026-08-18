@@ -36,7 +36,13 @@ from inkwell.corpus.discovery import (
 )
 from inkwell.corpus.fetch import DocumentFetcher, FetchRefused, HttpPageReader
 from inkwell.corpus.prune import prune_source
-from inkwell.corpus.ingest import IngestReport, ingest_source, ingest_with
+from inkwell.corpus.ingest import (
+    IngestReport,
+    UnknownSource,
+    ingest_source,
+    ingest_with,
+    resolve_sources,
+)
 from inkwell.corpus.quality import DEFAULT_RULES, ThinRule, assess
 from inkwell.corpus.registry import (
     DECLARED_SOURCES,
@@ -274,9 +280,15 @@ def test_every_declared_source_is_named_once() -> None:
 
 def test_only_sources_whose_enumeration_is_proven_are_active() -> None:
     """The seven the ported database enumerated, plus the news desks whose
-    feeds were walked for real, plus the two whose first sweep was taken
-    deliberately: OpenAI, whose surface is large, and BleepingComputer, which
-    refuses a plain client and is reached over the browser's connection."""
+    feeds were walked for real, plus BleepingComputer, whose first sweep was
+    taken deliberately and which needed an honest user agent rather than a
+    browser.
+
+    OpenAI is declared and not swept: it answers an anti-bot interstitial to a
+    rendered browser as readily as it 403s a plain client, so every page of it
+    refuses and sweeping it spends a browser launch per URL to be turned away.
+    Naming it explicitly still syncs it, which is how that gets retried.
+    """
     assert {entry.key for entry in active_declarations()} == {
         "aisi",
         "anthropic",
@@ -288,7 +300,6 @@ def test_only_sources_whose_enumeration_is_proven_are_active() -> None:
         "techcrunch",
         "cyberscoop",
         "bbc",
-        "openai",
         "bleepingcomputer",
     }
 
@@ -2120,3 +2131,26 @@ async def test_a_challenge_a_render_cannot_clear_says_that_is_what_happened() ->
     async with httpx.AsyncClient(transport=challenged) as client:
         with pytest.raises(FetchRefused, match="to a plain client"):
             await DocumentFetcher(client=client).fetch(url, plain)
+
+
+def test_naming_an_inactive_source_sweeps_it_anyway() -> None:
+    """Deactivating parks a source; it does not put it out of reach.
+
+    The whole of what makes ``active`` a safe thing to set. A source held out
+    of the nightly sweep because every page of it refuses is one an operator
+    still has to be able to retry the moment they have a way in, and having
+    to edit the registry to do that would make deactivating a decision nobody
+    takes lightly enough to take at all.
+    """
+    swept_by_default = {entry.key for entry in resolve_sources(())}
+    assert "openai" not in swept_by_default
+
+    assert [entry.key for entry in resolve_sources(("openai",))] == ["openai"]
+    named = resolve_sources(("openai", "metr"))
+    assert {entry.key for entry in named} == {"openai", "metr"}
+
+
+def test_naming_a_source_that_does_not_exist_says_which_do() -> None:
+    """A typo in a source name is a wasted sweep, so it fails before one."""
+    with pytest.raises(UnknownSource, match="No such source: nosuchlab"):
+        resolve_sources(("nosuchlab",))

@@ -384,23 +384,25 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
                 apex="openai.com",
             ),
         ),
+        active=False,
         needs_browser=True,
         thin_chars=1500,
         notes=(
-            "Swept across three domains: the main site, the deployment-safety "
-            "site, and the help centre. The published surface is large, so the "
-            "first sweep was taken as a deliberate act rather than inherited "
-            "from a sync of everything — it is the primary account of the July "
-            "2026 Hugging Face intrusion, which is what settled it. PDFs on "
-            "cdn.openai.com still need seeds once someone enumerates them. "
-            "openai.com refuses a plain client with a 403, and the "
+            "Inactive: openai.com serves an anti-bot interstitial to a rendered "
+            "browser as readily as it 403s a plain client, so every page of it "
+            "refuses and a sweep of everything spends a browser launch per URL "
+            "to be turned away. This is BleepingComputer's lesson a second "
+            "time — a refusal is not a rendering problem, and headless Chrome "
+            "scores as a pretender too. Left declared with the browser fields "
+            "set because they are right about the other half: the "
             "deployment-safety site renders each section client-side from one "
-            "shell, so both ways of being out of reach apply here and the "
-            "browser path is what answers either. The shell clears the shared "
-            "thin floor comfortably — it extracts to 1177 characters of "
-            "introduction, where 800 is the default — so the floor is raised "
-            "to sit above it and below the 2620 of the shortest page here that "
-            "is genuinely an article."
+            "shell, which extracts to 1177 characters where the shared thin "
+            "floor is 800, so the floor is raised to sit above the shell and "
+            "below the 2620 of the shortest page here that is genuinely an "
+            "article. Reaching the main site again needs a way past the "
+            "interstitial rather than another sweep. Naming the source "
+            "explicitly still syncs it, which is how to retry. PDFs on "
+            "cdn.openai.com still need seeds once someone enumerates them."
         ),
     ),
     SourceDeclaration(

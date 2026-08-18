@@ -325,13 +325,15 @@ def test_dropped_sources_are_recorded_with_a_reason() -> None:
 
 
 def test_a_source_needing_a_browser_says_so() -> None:
-    """The playwright path is chosen by declaration, not guessed per page."""
+    """The playwright path is chosen by declaration, not guessed per page.
+
+    Only the two that genuinely render client-side. A source refusing a plain
+    fetcher is not on this list and should not be: BleepingComputer looked
+    like one for months and turned out to be refusing the user agent, which a
+    browser does not fix — headless Chrome scores as a pretender too.
+    """
     browser_bound = [entry for entry in DECLARED_SOURCES if entry.needs_browser]
-    assert {entry.key for entry in browser_bound} == {
-        "deepmind",
-        "xai",
-        "bleepingcomputer",
-    }
+    assert {entry.key for entry in browser_bound} == {"deepmind", "xai"}
 
 
 def declared_union_bases() -> list[type[BaseModel]]:

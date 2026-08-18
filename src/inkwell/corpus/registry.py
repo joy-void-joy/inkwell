@@ -548,15 +548,15 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
                 require_terms=AI_HEADLINE_TERMS,
             ),
         ),
-        needs_browser=True,
         notes=(
             "A security desk with no AI section, so the whole feed is walked "
             "and headlines carry the topic filter. First to report the "
             "operational detail on the July 2026 Hugging Face intrusion, which "
-            "is why it is declared. Reached through the browser context: the "
-            "feed reads fine in a browser and answers a plain fetcher with 403, "
-            "so the refusal is what the escalation is keyed on rather than a "
-            "thin body — retrying the plain path would earn the same 403."
+            "is why it is declared. Its edge refuses a client claiming to be "
+            "Chrome and serves one that says what it is, so it needs no "
+            "browser and never did — what it needed was an honest user agent, "
+            "and the 403 it answered for months was earned rather than "
+            "arbitrary."
         ),
     ),
     SourceDeclaration(

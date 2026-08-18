@@ -14,6 +14,7 @@ declaration looked at.
     uv run lup-devtools corpus sync
     uv run lup-devtools corpus sync epoch metr --limit 20
     uv run lup-devtools corpus status
+    uv run lup-devtools corpus progress --watch 30
     uv run lup-devtools corpus tags
     uv run lup-devtools corpus retag
     uv run lup-devtools corpus embed
@@ -21,9 +22,11 @@ declaration looked at.
 
 import asyncio
 import logging
+from time import monotonic, sleep
 from typing import Annotated
 
 import typer
+from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.config import corpus_root, current_settings
 from inkwell.agent.pipeline import CORPUS_BRIEFING_LIMIT, corpus_briefing
@@ -37,6 +40,7 @@ from inkwell.corpus.ingest import (
 from inkwell.corpus.registry import (
     DECLARED_SOURCES,
     DROPPED_SOURCES,
+    active_declarations,
     corpus_vocabulary,
 )
 from inkwell.corpus.semantics import LocalEmbedder, embed_source
@@ -108,6 +112,104 @@ def status() -> None:
             f"{len(shard.failures):>7} {len(shard.untagged()):>9}  "
             f"{shard.updated_at or 'unknown'}{flags}"
         )
+
+
+BAR_WIDTH = 24
+"""How wide a progress bar is drawn, in characters."""
+
+
+class SweepProgress(BaseModel):
+    """How far a sweep has got, counted off the store rather than the run.
+
+    Read from disk on purpose. ``corpus sync`` reports per source when the
+    whole run finishes, so a sweep of a dozen sources says nothing for as long
+    as it takes — but each source publishes its shard as it goes, so what has
+    landed is on disk and can be counted by anything, including after the
+    process that was doing it has died.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    stored: int = Field(description="Documents the corpus holds")
+    listed: int = Field(description="Documents enumeration found to fetch")
+    started: int = Field(description="Sources that have published a shard")
+    total: int = Field(description="Sources a full sweep would touch")
+
+    def fraction(self) -> float:
+        """How much of the enumerated work is done, 0 where nothing is listed."""
+        return self.stored / self.listed if self.listed else 0.0
+
+    def bar(self) -> str:
+        """The fraction as a bar somebody watching can read at a glance."""
+        filled = round(self.fraction() * BAR_WIDTH)
+        return "#" * filled + "." * (BAR_WIDTH - filled)
+
+    def eta(self, elapsed: float) -> float:
+        """Seconds until the enumerated documents are all fetched.
+
+        From the rate this sweep has actually achieved, not a nominal one. It
+        is an estimate over a moving denominator — enumeration keeps finding
+        documents while fetching runs — so it moves, and a caller showing it
+        should say so rather than presenting it as a countdown.
+        """
+        if not self.stored or elapsed <= 0:
+            return 0.0
+        return (self.listed - self.stored) * elapsed / self.stored
+
+    def render(self, elapsed: float) -> str:
+        """One line: the bar, the counts, the rate, and where it is heading."""
+        rate = self.stored * 60 / elapsed if elapsed > 0 else 0.0
+        return (
+            f"[{self.bar()}] {self.stored}/{self.listed} docs "
+            f"({self.fraction():.0%}) · {self.started}/{self.total} sources · "
+            f"{rate:.0f}/min · {elapsed:.0f}s elapsed · eta ~{self.eta(elapsed):.0f}s"
+        )
+
+
+def swept(corpus: CorpusStore) -> SweepProgress:
+    """What the store holds right now, across every active source."""
+    active = active_declarations()
+    shards = [
+        shard
+        for declaration in active
+        if (shard := corpus.load_by_name(declaration.key)) is not None
+    ]
+    return SweepProgress(
+        stored=sum(len(shard.documents) for shard in shards),
+        listed=sum(
+            1 for shard in shards for entry in shard.discovered if entry.present
+        ),
+        started=len(shards),
+        total=len(active),
+    )
+
+
+@app.command("progress")
+def progress(
+    watch: float = typer.Option(
+        0.0, "--watch", help="Keep reporting every this many seconds; 0 reports once"
+    ),
+) -> None:
+    """Say how far a sweep has got, while it is still going.
+
+    ``sync`` prints its per-source report when the whole run ends, which for a
+    dozen sources is a long silence. This reads the same shards the sweep is
+    writing, so it answers from outside the run — including from another
+    terminal, or after the run was interrupted.
+    """
+    corpus = store()
+    started = monotonic()
+    typer.echo(swept(corpus).render(0.0))
+    if watch <= 0:
+        return
+    while True:
+        sleep(watch)
+        elapsed = monotonic() - started
+        found = swept(corpus)
+        typer.echo(found.render(elapsed), nl=True)
+        if found.listed and found.stored >= found.listed:
+            typer.echo("sweep has fetched everything enumerated")
+            return
 
 
 @app.command("tags")

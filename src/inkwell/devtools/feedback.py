@@ -26,7 +26,12 @@ from lup.devtools.utils import JSON_OPT, format_table, output_json
 from lup.workspace.history import iter_session_dirs
 
 from inkwell.agent.core import pipeline_notes_dir
-from inkwell.agent.models import ClassifiedComment, IntakeRecord, PipelineSnapshot
+from inkwell.agent.models import (
+    ClassifiedComment,
+    IntakeRecord,
+    PipelineSnapshot,
+    ReviewOutput,
+)
 from inkwell.agent.session import CommentRecords
 
 logger = logging.getLogger(__name__)
@@ -279,6 +284,135 @@ def latest_session() -> Path | None:
     return max(with_notes, key=lambda d: pipeline_notes_dir(d).stat().st_mtime)
 
 
+class ReviewArtifact(BaseModel):
+    """Which file one reviewer writes its findings to."""
+
+    reviewer: str = Field(description="The reviewer, as its findings name it")
+    filename: str = Field(description="Its artifact under a session's artifacts dir")
+    quotes_absent: bool = Field(
+        default=False,
+        description=(
+            "Whether its excerpt quotes what the draft is MISSING rather than "
+            "what the draft got wrong. The two read a finished draft in "
+            "opposite directions: acting on a wrong passage removes the quoted "
+            "words, acting on a missing one puts them in"
+        ),
+    )
+
+
+REVIEW_ARTIFACTS: tuple[ReviewArtifact, ...] = (
+    ReviewArtifact(reviewer="factcheck", filename="review_factcheck.json"),
+    ReviewArtifact(reviewer="narrative", filename="review_narrative.json"),
+    ReviewArtifact(reviewer="style", filename="review_style.json"),
+    ReviewArtifact(
+        reviewer="coverage", filename="review_coverage.json", quotes_absent=True
+    ),
+    ReviewArtifact(reviewer="source_fidelity", filename="review_source_fidelity.json"),
+)
+"""Where each reviewer's findings land, so a yield report needs no run.
+
+Coverage is the one that reads backwards, and it is declared here rather than
+explained at the point of reading: its whole job is what is NOT in the draft,
+so its excerpt is the author's specific that should be present. Scored like
+the others it would report a finding nobody restored as a finding acted upon —
+exactly inverting the reviewer whose findings go most ignored.
+"""
+
+
+class ReviewerYield(BaseModel):
+    """What one reviewer raised on a run, and how much of it landed.
+
+    ``acted_on`` counts findings whose quoted passage is gone from the final
+    draft. That is a proxy and it is named as one: a rewrite that changed a
+    sentence for its own reasons scores as having acted, and one that fixed a
+    fact without disturbing the quoted words scores as having ignored. It is
+    the only signal on disk that does not need both drafts re-read by a model,
+    and across enough findings its direction is informative where a single row
+    is not.
+    """
+
+    reviewer: str = Field(description="Which reviewer this counts")
+    raised: int = Field(default=0, description="Findings it recorded")
+    critical: int = Field(default=0, description="Of those, ranked critical")
+    quoted: int = Field(default=0, description="Findings carrying a passage to match")
+    acted_on: int = Field(
+        default=0, description="Quoted findings whose passage the final draft dropped"
+    )
+
+    @property
+    def landed(self) -> str:
+        """Share of quoted findings the draft acted on, or why there is none."""
+        if not self.quoted:
+            return "none quoted"
+        return f"{round(100 * self.acted_on / self.quoted)}%"
+
+
+def reviewer_yield(artifacts: Path, final_draft: str) -> list[ReviewerYield]:
+    """Per reviewer: what it raised on this run, and what the draft did with it."""
+
+    def counted(artifact: ReviewArtifact, path: Path) -> ReviewerYield:
+        findings = ReviewOutput.model_validate_json(
+            path.read_text(encoding="utf-8")
+        ).findings
+        quoted = [f for f in findings if f.text_excerpt.strip()]
+        present = [f for f in quoted if f.text_excerpt in final_draft]
+        return ReviewerYield(
+            reviewer=artifact.reviewer,
+            raised=len(findings),
+            critical=sum(1 for f in findings if f.severity == "critical"),
+            quoted=len(quoted),
+            acted_on=(
+                len(present) if artifact.quotes_absent else len(quoted) - len(present)
+            ),
+        )
+
+    return [
+        counted(artifact, path)
+        for artifact in REVIEW_ARTIFACTS
+        if (path := artifacts / artifact.filename).exists()
+    ]
+
+
+class SessionYield(BaseModel):
+    """One reviewer's yield on one run, carrying which run it was."""
+
+    session_id: str = Field(description="The run this counts")
+    counted: ReviewerYield = Field(description="What that reviewer did on it")
+
+
+def final_draft_of(notes_dir: Path) -> str:
+    """The text a run finished with, empty when it never reached one.
+
+    The run's ``output``, which is the draft after the rewrite — never
+    ``merged``, which is the draft the reviewers were reading. Comparing a
+    finding against the text it was written about answers whether the passage
+    existed, not whether anything was done about it, and scores every reviewer
+    at zero.
+    """
+    snapshot = notes_dir / "snapshot_rewrite.json"
+    if not snapshot.exists():
+        return ""
+    try:
+        finished = PipelineSnapshot.model_validate_json(
+            snapshot.read_text(encoding="utf-8")
+        ).output
+    except (ValidationError, ValueError):
+        logger.warning("Unreadable rewrite snapshot at %s", snapshot)
+        return ""
+    return finished.content if finished else ""
+
+
+def collect_review_yield(session: str | None) -> Iterator[SessionYield]:
+    """Every reviewer's yield across the runs on disk, or one named run."""
+    for session_dir in iter_session_dirs(session) if session else iter_session_dirs():
+        notes_dir = pipeline_notes_dir(session_dir)
+        draft = final_draft_of(notes_dir)
+        if not draft:
+            continue
+        for counted in reviewer_yield(notes_dir / "artifacts", draft):
+            yield SessionYield(session_id=session_dir.name, counted=counted)
+
+
 def create_app(prompt: Callable[[], AgentPrompt]) -> typer.Typer:
     """The feedback tree: the library's loop commands, plus inkwell's own."""
     app = create_feedback_app(prompt)
@@ -311,5 +445,45 @@ def create_app(prompt: Callable[[], AgentPrompt]) -> typer.Typer:
             output_json(status)
             return
         typer.echo(render(status))
+
+    @app.command("review-yield")
+    def review_yield_cmd(
+        session: Annotated[
+            str | None,
+            typer.Option("--session", "-s", help="Session id (default: every session)"),
+        ] = None,
+        as_json: JSON_OPT = False,
+    ) -> None:
+        """Per reviewer, per run: what it raised and what the final draft did.
+
+        The question a cost decision needs and no cost table answers — a stage
+        that raised forty findings the rewrite ignored is not cheap at any
+        price, and one that raised three the rewrite acted on every time is not
+        expensive. Reads finished runs on disk, so it costs nothing to ask.
+        """
+        rows = list(collect_review_yield(session))
+        if not rows:
+            typer.echo("No finished run has both reviewer findings and a draft")
+            raise typer.Exit(1)
+        if as_json:
+            output_json(rows)
+            return
+        typer.echo(
+            format_table(
+                ["session", "reviewer", "raised", "critical", "quoted", "acted", "%"],
+                [
+                    [
+                        row.session_id[:8],
+                        row.counted.reviewer,
+                        str(row.counted.raised),
+                        str(row.counted.critical),
+                        str(row.counted.quoted),
+                        str(row.counted.acted_on),
+                        row.counted.landed,
+                    ]
+                    for row in rows
+                ],
+            )
+        )
 
     return app

@@ -5,15 +5,17 @@ work rather than something a run does for itself: ``corpus sync`` is what
 populates it, out of band and on whatever schedule the author likes, and
 ``corpus retag`` is what judges what it stored — two costs, bandwidth and model
 time, kept apart so neither has to wait on the other's rate. ``corpus embed``
-comes third where the semantic layer is wanted, and reads what the second wrote.
-A writing run then reads what is there, and tops up a single source only when it
-finds one thin mid-question.
+comes third where the semantic layer is wanted, and reads what the second wrote;
+``corpus pipeline`` runs all three in that order for an operator who wants the
+whole thing rather than a stage of it. A writing run then reads what is there,
+and tops up a single source only when it finds one thin mid-question.
 
 Every command prints what happened per source, because a bulk crawl is only
 maintainable if a run tells you which sources are healthy and which need a
 declaration looked at.
 
     uv run lup-devtools corpus sources
+    uv run lup-devtools corpus pipeline
     uv run lup-devtools corpus sync
     uv run lup-devtools corpus sync epoch metr --limit 20
     uv run lup-devtools corpus status
@@ -47,10 +49,16 @@ from inkwell.corpus.ingest import (
 from inkwell.corpus.registry import (
     DECLARED_SOURCES,
     DROPPED_SOURCES,
+    SourceDeclaration,
     active_declarations,
     corpus_vocabulary,
 )
-from inkwell.corpus.semantics import LocalEmbedder, embed_source
+from inkwell.corpus.semantics import (
+    DEFAULT_EMBED_CONCURRENCY,
+    LocalEmbedder,
+    awaiting_judgement,
+    embed_sources,
+)
 from inkwell.corpus.storage import CorpusStore
 from inkwell.corpus.tagging import DEFAULT_RETAG_CONCURRENCY, retag_corpus
 
@@ -385,6 +393,40 @@ def tags() -> None:
         typer.echo(f"{term.tag:<38} {mark:<7} {term.description}")
 
 
+def indexed_declarations(
+    corpus: CorpusStore, keys: tuple[str, ...]
+) -> tuple[SourceDeclaration, ...]:
+    """The declarations ``keys`` names, or every one the corpus holds an index for.
+
+    Falling back to what is *indexed* rather than to what is active is what
+    keeps a source that has been retired from the corpus reachable: it is
+    still on disk, and reading it does not need its declaration to be current.
+    """
+    if keys:
+        return resolve_sources(keys)
+    return tuple(
+        declaration
+        for declaration in DECLARED_SOURCES
+        if declaration.key in corpus.sources()
+    )
+
+
+def judge_with(
+    corpus: CorpusStore,
+    declarations: tuple[SourceDeclaration, ...],
+    *,
+    force: bool,
+    concurrency: int,
+) -> None:
+    """Re-tag ``declarations`` and print what each source did."""
+    typer.echo(f"vocabulary {corpus_vocabulary().signature()}\n")
+    reports = asyncio.run(
+        retag_corpus(declarations, corpus, force=force, concurrency=concurrency)
+    )
+    for report in reports:
+        typer.echo(report.summary())
+
+
 @app.command("retag")
 def retag(
     source: list[str] = typer.Argument(
@@ -409,23 +451,47 @@ def retag(
     stores bodies and judges nothing.
     """
     corpus = store()
-    keys = tuple(source or ())
     try:
-        declarations = (
-            resolve_sources(keys)
-            if keys
-            else tuple(
-                declaration
-                for declaration in DECLARED_SOURCES
-                if declaration.key in corpus.sources()
-            )
-        )
+        declarations = indexed_declarations(corpus, tuple(source or ()))
     except UnknownSource as error:
         raise typer.BadParameter(str(error)) from error
+    judge_with(corpus, declarations, force=force, concurrency=concurrency)
 
-    typer.echo(f"vocabulary {corpus_vocabulary().signature()}\n")
+
+def refuse_unjudged(corpus: CorpusStore, keys: tuple[str, ...]) -> None:
+    """Stop before embedding a corpus the judging has not caught up with.
+
+    Embedding early does not produce a thinner layer — it produces one those
+    documents are absent from, and absence reads exactly like a corpus that
+    never held them. A PDF is the whole of the case: it has no abstract by
+    construction, so until something judges it there is no text to embed at
+    all. Refusing costs one command to undo; a layer quietly short of every
+    PDF is not something a later run has any way to notice.
+    """
+    waiting = [
+        (key, len(awaiting_judgement(shard)))
+        for key in keys
+        if (shard := corpus.load_by_name(key)) is not None
+    ]
+    named = [(key, count) for key, count in waiting if count]
+    if not named:
+        return
+    total = sum(count for _, count in named)
+    typer.echo(f"{total} documents have nothing to embed until they are judged:")
+    for key, count in named:
+        typer.echo(f"  {key}: {count}")
+    typer.echo("\nRun `corpus retag` first, or `--allow-gaps` to embed without them.")
+    raise typer.Exit(code=1)
+
+
+def embed_with(
+    corpus: CorpusStore, keys: tuple[str, ...], model: str, concurrency: int
+) -> None:
+    """Compute ``keys``' vectors, saying which embedder did it and what it did."""
+    embedder = LocalEmbedder(model or current_settings().corpus_embedding_model)
+    typer.echo(f"embedding with {embedder.identity()}\n")
     reports = asyncio.run(
-        retag_corpus(declarations, corpus, force=force, concurrency=concurrency)
+        embed_sources(keys, corpus, embedder, concurrency=concurrency)
     )
     for report in reports:
         typer.echo(report.summary())
@@ -438,6 +504,16 @@ def embed(
     ),
     model: str = typer.Option(
         "", "--model", help="Embedding model to use (default: the configured one)"
+    ),
+    concurrency: int = typer.Option(
+        DEFAULT_EMBED_CONCURRENCY,
+        "--concurrency",
+        help="Sources embedded at once; one source is a single batched call",
+    ),
+    allow_gaps: bool = typer.Option(
+        False,
+        "--allow-gaps",
+        help="Embed anyway, leaving documents nothing has judged without vectors",
     ),
 ) -> None:
     """Compute the optional semantic layer's vectors, one file per source.
@@ -457,12 +533,9 @@ def embed(
     if not keys:
         typer.echo("Nothing is ingested yet — run `corpus sync` first.")
         raise typer.Exit(code=1)
-
-    embedder = LocalEmbedder(model or current_settings().corpus_embedding_model)
-    typer.echo(f"embedding with {embedder.identity()}\n")
-    for key in keys:
-        report = asyncio.run(embed_source(key, corpus, embedder))
-        typer.echo(report.summary())
+    if not allow_gaps:
+        refuse_unjudged(corpus, keys)
+    embed_with(corpus, keys, model, concurrency)
 
 
 def report_failures(report: IngestReport) -> None:
@@ -477,6 +550,42 @@ def report_failures(report: IngestReport) -> None:
             typer.echo(
                 f"  {source.source}/{failed.slug} [{failed.failure_class}] {failed.error}"
             )
+
+
+def sweep_with(
+    corpus: CorpusStore,
+    keys: tuple[str, ...],
+    *,
+    profile: str | None,
+    concurrency: int,
+    limit: int,
+    refresh: bool,
+    show_progress: bool,
+) -> IngestReport:
+    """Run one sweep and print what it did, leaving the exit code to the caller."""
+    try:
+        report = asyncio.run(
+            swept_with_bar(
+                corpus,
+                sync_corpus(
+                    corpus,
+                    keys=keys,
+                    profile=profile,
+                    concurrency=concurrency,
+                    limit=limit,
+                    refresh=refresh,
+                ),
+                show_progress,
+            )
+        )
+    except UnknownSource as error:
+        raise typer.BadParameter(str(error)) from error
+
+    typer.echo(report.summary())
+    if report.failed() or any(one.avenue_failures for one in report.sources):
+        typer.echo("\nrecorded for the next run to retry:")
+        report_failures(report)
+    return report
 
 
 @app.command("sync")
@@ -520,31 +629,110 @@ def sync(
     shards the sweep is publishing, which is the same thing ``corpus
     progress`` reads from another terminal and works the same way here.
     """
-    keys = tuple(source or ())
     corpus = store()
-    try:
-        report = asyncio.run(
-            swept_with_bar(
-                corpus,
-                sync_corpus(
-                    corpus,
-                    keys=keys,
-                    profile=profile,
-                    concurrency=concurrency,
-                    limit=limit,
-                    refresh=refresh,
-                ),
-                show_progress,
-            )
-        )
-    except UnknownSource as error:
-        raise typer.BadParameter(str(error)) from error
-
-    typer.echo(report.summary())
+    report = sweep_with(
+        corpus,
+        tuple(source or ()),
+        profile=profile,
+        concurrency=concurrency,
+        limit=limit,
+        refresh=refresh,
+        show_progress=show_progress,
+    )
     if report.stored():
         typer.echo(f"\n{report.stored()} stored unjudged — `corpus retag` tags them")
-    if report.failed() or any(s.avenue_failures for s in report.sources):
-        typer.echo("\nrecorded for the next run to retry:")
-        report_failures(report)
+    if report.aborted_sources():
+        raise typer.Exit(code=1)
+
+
+@app.command("pipeline")
+def pipeline(
+    source: list[str] = typer.Argument(
+        default=None, help="Sources to run through (default: every active source)"
+    ),
+    limit: int = typer.Option(
+        0, "--limit", help="Fetch at most this many new documents per source"
+    ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Refetch documents already stored; the content hash decides what changed",
+    ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="Profile whose browser context reaches JS-hard sources"
+    ),
+    concurrency: int = typer.Option(
+        DEFAULT_CONCURRENCY,
+        "--concurrency",
+        help="Documents fetched at once per source",
+    ),
+    judging: int = typer.Option(
+        DEFAULT_RETAG_CONCURRENCY,
+        "--judge-concurrency",
+        help="Documents judged at once per source — each one a delegated session",
+    ),
+    embedding: int = typer.Option(
+        DEFAULT_EMBED_CONCURRENCY,
+        "--embed-concurrency",
+        help="Sources embedded at once",
+    ),
+    model: str = typer.Option(
+        "", "--model", help="Embedding model to use (default: the configured one)"
+    ),
+    semantic: bool = typer.Option(
+        True,
+        "--embed/--no-embed",
+        help="Compute the semantic layer once the judging is done",
+    ),
+    show_progress: bool = typer.Option(
+        True,
+        "--progress/--no-progress",
+        help="Say how far the sweep has got as it goes — a bar in a terminal, "
+        "a line per document elsewhere",
+    ),
+) -> None:
+    """Fetch, judge, then embed — the three stages in the one order that works.
+
+    Each stage has its own rate because each spends a different thing: the
+    first bandwidth, the second a delegated session per document, the third
+    whatever the embedder costs. That is why they are three commands and why
+    the rates are three flags rather than one — running them together must not
+    mean pretending a host's tolerance and a model's throughput are the same
+    number.
+
+    Order is not a preference here. A vector is computed from the abstract a
+    source published or the summary a judgement wrote, and a PDF has no
+    abstract by construction, so embedding before judging leaves every PDF out
+    of the layer entirely. Running this is what makes that unable to happen;
+    ``corpus embed`` on its own refuses instead.
+
+    Nothing stops early. A sweep that loses a source still leaves the rest to
+    be judged and embedded, and the exit code at the end is what reports it.
+    """
+    corpus = store()
+    try:
+        declarations = resolve_sources(tuple(source or ()))
+    except UnknownSource as error:
+        raise typer.BadParameter(str(error)) from error
+    keys = tuple(declaration.key for declaration in declarations)
+
+    typer.echo("── sync ──")
+    report = sweep_with(
+        corpus,
+        keys,
+        profile=profile,
+        concurrency=concurrency,
+        limit=limit,
+        refresh=refresh,
+        show_progress=show_progress,
+    )
+
+    typer.echo("\n── retag ──")
+    judge_with(corpus, declarations, force=False, concurrency=judging)
+
+    if semantic:
+        typer.echo("\n── embed ──")
+        embed_with(corpus, keys, model, embedding)
+
     if report.aborted_sources():
         raise typer.Exit(code=1)

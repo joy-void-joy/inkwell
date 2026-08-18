@@ -24,6 +24,7 @@ from inkwell.agent.client import query
 from lup.telemetry.trace import TraceLogger
 
 from inkwell.agent.config import stage_model
+from inkwell.agent.models import SourceRole
 from inkwell.agent.stages import EXTRACTOR_PROMPT
 from inkwell.pdf import reads_by_page
 
@@ -39,8 +40,10 @@ class ExtractedSource(BaseModel):
         description="The original source string exactly as the author gave it — "
         "a URL, a file path, or the inline text it was drawn from"
     )
-    role: Literal["source", "style_reference", "context"] = Field(
+    role: SourceRole = Field(
         description="'source' = primary content to write from; "
+        "'revision_target' = the piece this run rewrites, which the draft "
+        "replaces rather than draws from; "
         "'style_reference' = writing whose voice to emulate; "
         "'context' = background only, mentioned but not a primary input"
     )
@@ -105,9 +108,24 @@ class ExtractionManifest(BaseModel):
         themselves), the actual document never arrived.
         """
         return any(
-            entry.role == "source" and entry.origin in ("url", "file")
+            entry.role in ("source", "revision_target")
+            and entry.origin in ("url", "file")
             for entry in self.sources
         )
+
+
+SOURCE_BLOCK_LABELS: dict[SourceRole, str] = {
+    "source": "Source",
+    "revision_target": "Draft being revised",
+    "style_reference": "Reference",
+    "context": "Reference",
+}
+"""How each role announces itself at the head of its block in the source text.
+
+The revision target says what it is, because a stage that reads the assembled
+text and cannot tell the draft from its references treats the piece it was
+asked to replace as one more thing to write from.
+"""
 
 
 def guess_origin(value: str) -> Literal["url", "file", "inline"]:
@@ -182,8 +200,7 @@ def assemble_sources(manifest: ExtractionManifest) -> AssembledSources:
         text = read_source_content(entry)
         if not text.strip():
             return ""
-        label = "Source" if entry.role == "source" else "Reference"
-        return f"--- {label}: {entry.raw_input} ---\n\n{text}"
+        return f"--- {SOURCE_BLOCK_LABELS[entry.role]}: {entry.raw_input} ---\n\n{text}"
 
     def navigable_document(entry: ExtractedSource) -> Path | None:
         """The document this entry points at, when it is one to read by page."""
@@ -202,12 +219,30 @@ def assemble_sources(manifest: ExtractionManifest) -> AssembledSources:
     )
 
 
+def material_role_note(material_role: SourceRole) -> str:
+    """What the task adds when the entry point already knows its material's role.
+
+    Empty for ``source``, which is what routing decides on its own anyway.
+    """
+    if material_role != "revision_target":
+        return ""
+    return (
+        "\n\nThis run was launched to REVISE. The substantive content among "
+        "these inputs is a draft the author wants rewritten and replaced — "
+        "route it `revision_target`, not `source`. It is published or "
+        "finished prose, so being polished and carrying its own citations is "
+        "what a revision target looks like, never evidence that it is a "
+        "reference to write from."
+    )
+
+
 async def run_extraction_agent(
     inputs: list[str],
     output_dir: Path,
     *,
     source_servers: dict[str, McpServerEntry],
     source_tool_names: list[str],
+    material_role: SourceRole = "source",
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
 ) -> ExtractionManifest:
@@ -219,6 +254,10 @@ async def run_extraction_agent(
     empty input, and a best-effort manifest (every input treated as a source)
     when the agent yields no structured output, so the caller can still fall
     back to deterministic extraction per source.
+
+    ``material_role`` is what the entry point already knows its material to be,
+    so a ``revise`` run does not depend on the agent inferring that a chapter it
+    was handed is the piece being replaced rather than one to write from.
     """
     if not inputs:
         return ExtractionManifest()
@@ -231,7 +270,7 @@ async def run_extraction_agent(
         f"Route every source by role, pull out the author's instructions and "
         f"deliverables, and extract each source's full content to its own file. "
         f"Write any inline-prose sources to files under {output_dir}. "
-        f"Return one manifest entry per source."
+        f"Return one manifest entry per source." + material_role_note(material_role)
     )
 
     result = await query(
@@ -253,7 +292,7 @@ async def run_extraction_agent(
         return ExtractionManifest(
             sources=[
                 ExtractedSource(
-                    raw_input=value, role="source", origin=guess_origin(value)
+                    raw_input=value, role=material_role, origin=guess_origin(value)
                 )
                 for value in inputs
             ]

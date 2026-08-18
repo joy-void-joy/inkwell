@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, computed_field
 
 from inkwell.agent.config import stage_model
 from inkwell.agent.client import query, result_text
+from inkwell.agent.models import SourceRole
 from inkwell.agent.provenance import Acquisition
 from inkwell.pdf import page_count, reads_by_page
 from lup.runtime.usage import CostAccumulator
@@ -48,6 +49,22 @@ class SourceDocument(BaseModel):
     path: str = Field(description="Absolute path to the original document")
     kind: Literal["pdf", "text"] = Field(description="Document type")
     page_count: int = Field(default=0, description="Number of pages (PDFs)")
+    role: SourceRole = Field(
+        default="source",
+        description="What this document is to the run. A 'revision_target' is "
+        "the piece being replaced: still consultable, so a writer can read the "
+        "passage it is rewriting, but never the authority the finished draft "
+        "is checked against.",
+    )
+
+    @property
+    def authoritative(self) -> bool:
+        """Whether the finished draft is answerable to this document.
+
+        False for the piece a revision replaces. Checking a rewrite against the
+        text it supersedes scores every intended change as an infidelity.
+        """
+        return self.role != "revision_target"
 
     @computed_field
     @property
@@ -66,14 +83,22 @@ def registry_path_for(artifacts_dir: Path) -> Path:
 
 
 def build_source_registry(
-    source_paths: list[str], artifacts_dir: Path
+    source_paths: list[str],
+    artifacts_dir: Path,
+    revision_targets: list[str] | None = None,
 ) -> list[SourceDocument]:
     """Register source documents and build their navigation text layers.
 
     Skips paths that don't exist as local files. Persists the registry
     to ``artifacts_dir/sources.json`` so tools in any later stage (or a
     resumed process) can load it.
+
+    ``revision_targets`` names the paths among them that this run replaces
+    rather than answers to. They are registered like any other document, so a
+    writer can still read the passage it is rewriting; what the role changes is
+    who gets to check the finished draft against them.
     """
+    superseded = {Path(raw).expanduser().resolve() for raw in revision_targets or []}
     sources_dir = artifacts_dir / "sources"
     sources_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,6 +117,11 @@ def build_source_registry(
                 path=str(path.resolve()),
                 kind="pdf" if is_pdf else "text",
                 page_count=page_count(path) if is_pdf else 0,
+                role=(
+                    "revision_target"
+                    if original.resolve() in superseded or path.resolve() in superseded
+                    else "source"
+                ),
             )
 
     documents = list(registered())
@@ -105,10 +135,14 @@ def build_source_registry(
 
 
 async def build_source_registry_async(
-    source_paths: list[str], artifacts_dir: Path
+    source_paths: list[str],
+    artifacts_dir: Path,
+    revision_targets: list[str] | None = None,
 ) -> list[SourceDocument]:
     """Thread-offloaded ``build_source_registry`` (it copies files and shells out)."""
-    return await asyncio.to_thread(build_source_registry, source_paths, artifacts_dir)
+    return await asyncio.to_thread(
+        build_source_registry, source_paths, artifacts_dir, revision_targets
+    )
 
 
 def load_source_registry(registry: Path) -> list[SourceDocument]:

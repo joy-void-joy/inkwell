@@ -70,6 +70,7 @@ from inkwell.agent.models import (
     ClassifiedComment,
     MergedDraft,
     PipelineSnapshot,
+    SourceRole,
     ResearchCompilation,
     RestartQueue,
     RestartStrategy,
@@ -558,6 +559,10 @@ def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
             instruction=(
                 f"authoritative source document ({doc.kind}{pages}) — verify "
                 "claims against it via consult_source or Read"
+                if doc.authoritative
+                else f"the draft this run replaces ({doc.kind}{pages}) — read it "
+                "via consult_source or Read to see what a passage said, never "
+                "as the authority your own draft is answerable to"
             ),
         )
     for notes_file in sorted(reading_notes_dir(notes.artifacts_dir).glob("*.md")):
@@ -1647,6 +1652,7 @@ async def plan_article(
     *,
     target_format: str = "auto",
     assignment: ChapterAssignment | None = None,
+    material_role: SourceRole = "source",
     voice_file_paths: list[str] | None = None,
     source_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
@@ -1693,12 +1699,18 @@ async def plan_article(
     format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     conversation_path = notes.text_artifact_path("conversation")
 
+    revising = material_role == "revision_target"
     manifest = ContentManifest()
     manifest.add(
         conversation_path,
         "source",
-        "Source material",
-        instruction="extract article plan from this",
+        "Draft being revised" if revising else "Source material",
+        instruction=(
+            "the piece this run replaces — plan its successor, section by "
+            "section, and question every claim it rests on"
+            if revising
+            else "extract article plan from this"
+        ),
     )
     for p in source_file_paths or []:
         if p != str(conversation_path):
@@ -2713,7 +2725,14 @@ async def review_all(
                 cost_accumulator=cost_accumulator,
             ),
         ]
-    if load_source_registry(registry_path_for(notes.artifacts_dir)):
+    # Only a document the finished draft answers to earns a fidelity check. A
+    # run that has nothing but the piece it replaces gets none: every change it
+    # was asked to make would read there as a departure from the source.
+    if [
+        d
+        for d in load_source_registry(registry_path_for(notes.artifacts_dir))
+        if d.authoritative
+    ]:
         review_tasks.append(
             review_source_fidelity(
                 notes,
@@ -3268,6 +3287,7 @@ class PipelineRunner:
         self,
         *,
         sources: list[str],
+        material_role: SourceRole = "source",
         refs: list[str] | None = None,
         target_format: str = "auto",
         assignment: ChapterAssignment | None = None,
@@ -3282,6 +3302,8 @@ class PipelineRunner:
         skipped_stages: list[str] | None = None,
     ) -> None:
         self.sources = sources
+        self.material_role: SourceRole = material_role
+        self.revision_target_paths: list[str] = []
         self.refs = refs or []
         self.style_refs: list[str] = []
         self.context_refs: list[str] = list(self.refs)
@@ -4365,6 +4387,7 @@ class PipelineRunner:
             source_dir,
             source_servers=self.source_servers,
             source_tool_names=self.source_tool_names,
+            material_role=self.material_role,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -4382,7 +4405,13 @@ class PipelineRunner:
         self.style_refs = [
             e.raw_input for e in manifest.sources if e.role == "style_reference"
         ]
-        routed = [e.raw_input for e in manifest.sources if e.role == "source"]
+        revising = [e for e in manifest.sources if e.role == "revision_target"]
+        self.revision_target_paths = [e.local_path for e in revising if e.local_path]
+        routed = [
+            e.raw_input
+            for e in manifest.sources
+            if e.role in ("source", "revision_target")
+        ]
         self.sources = (routed or agent_inputs) + self_doc_sources
         context = [e.raw_input for e in manifest.sources if e.role == "context"]
         self.context_refs = list(dict.fromkeys(self.context_refs + context))
@@ -4437,8 +4466,14 @@ class PipelineRunner:
         ] + assembled.documents
         if conversation.strip():
             registry_candidates.append(str(output_path))
+        superseded = list(self.revision_target_paths)
+        if self.material_role == "revision_target":
+            # The assembled text is the draft itself here, so registering it as
+            # an authority would point the fidelity check at what this run
+            # replaces.
+            superseded.append(str(output_path))
         registered = await build_source_registry_async(
-            registry_candidates, notes.artifacts_dir
+            registry_candidates, notes.artifacts_dir, superseded
         )
         if registered:
             await self.hooks.on_progress(
@@ -4762,6 +4797,7 @@ class PipelineRunner:
                 notes,
                 target_format=self.target_format,
                 assignment=self.assignment,
+                material_role=self.material_role,
                 voice_file_paths=self.snapshot.voice_file_paths,
                 source_file_paths=self.snapshot.source_file_paths,
                 author_notes=self.author_notes,
@@ -6137,6 +6173,7 @@ class PipelineRunner:
 async def run_pipeline(
     *,
     sources: list[str],
+    material_role: SourceRole = "source",
     refs: list[str] | None = None,
     target_format: str = "auto",
     assignment: ChapterAssignment | None = None,
@@ -6153,6 +6190,7 @@ async def run_pipeline(
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
         sources=sources,
+        material_role=material_role,
         refs=refs,
         target_format=target_format,
         assignment=assignment,

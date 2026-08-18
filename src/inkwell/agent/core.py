@@ -27,7 +27,7 @@ from lup.telemetry.trace import TraceLogger
 
 import inkwell.agent.config as config_mod
 from inkwell.agent.book import ChapterAssignment
-from inkwell.agent.models import AgentSessionResult, PipelineSnapshot
+from inkwell.agent.models import AgentSessionResult, PipelineSnapshot, SourceRole
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     DISPLAY_STAGES,
@@ -165,6 +165,7 @@ class SessionTrace(BaseModel):
 async def run_session(
     *,
     sources: list[str] | None = None,
+    material_role: SourceRole = "source",
     refs: list[str] | None = None,
     resume_session_id: str | None = None,
     resume_from_stage: str | None = None,
@@ -194,6 +195,8 @@ async def run_session(
       leaving a checkpoint to resume from after the author reviews the Doc
     - skipped_stages: Backbone stages this run does not perform, read off the
       entry point that launched it rather than decided stage by stage
+    - material_role: What `sources` is to this run — 'source' to write from, or
+      'revision_target' for the piece the run replaces
     - assignment: Which book this run writes a chapter of, and which chapter of
       it where the launch settled that too; absent for a standalone piece,
       which stays bookless rather than becoming a book of one chapter
@@ -244,6 +247,7 @@ async def run_session(
 
             runner = PipelineRunner(
                 sources=sources or [],
+                material_role=material_role,
                 refs=refs or [],
                 target_format=target_format,
                 assignment=assignment,
@@ -261,6 +265,7 @@ async def run_session(
         else:
             output = await run_pipeline(
                 sources=sources or [],
+                material_role=material_role,
                 refs=refs or [],
                 target_format=target_format,
                 assignment=assignment,

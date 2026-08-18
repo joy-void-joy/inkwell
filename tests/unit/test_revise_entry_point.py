@@ -6,7 +6,11 @@ enters the pipeline as ordinary material, and that the instruction riding
 beside it asks for the currency check the entry point exists for.
 """
 
+from pathlib import Path
+
+from inkwell.agent.extract_agent import material_role_note
 from inkwell.agent.pipeline import DISPLAY_STAGES, PipelineRunner
+from inkwell.agent.tools.source_consult import SourceDocument, build_source_registry
 from inkwell.environment.entrypoints import (
     ENTRY_POINTS,
     REVISE,
@@ -78,9 +82,19 @@ class TestTheStandingInstructionIsData:
     def test_it_asks_for_clarity_and_currency(self) -> None:
         assert "clarity and currency" in REVISE_INSTRUCTION
 
-    def test_it_keeps_the_author_s_piece_theirs(self) -> None:
-        assert "voice, argument, and structure" in REVISE_INSTRUCTION
-        assert "not a new one" in REVISE_INSTRUCTION
+    def test_it_keeps_the_author_s_voice_and_argument(self) -> None:
+        """Those two, and deliberately not the structure: a revision that may
+        not reorder or cut is a re-prose."""
+        assert "voice and the argument" in REVISE_INSTRUCTION
+        assert "yours to change" in REVISE_INSTRUCTION
+
+    def test_it_says_the_draft_is_the_piece_being_replaced(self) -> None:
+        assert "REPLACES" in REVISE_INSTRUCTION
+
+    def test_published_prose_is_not_a_reason_to_tread_lightly(self) -> None:
+        """The failure this instruction exists to stop: a run pointed at a
+        textbook chapter reading its polish as a reason to leave it alone."""
+        assert "not a reason to tread lightly" in REVISE_INSTRUCTION
 
 
 class TestCurrencyIsCheckedAgainstTheDraft:
@@ -99,3 +113,59 @@ class TestCurrencyIsCheckedAgainstTheDraft:
     def test_the_sections_are_the_draft_s(self) -> None:
         """Planned as the piece it already is, rather than planned afresh."""
         assert "its sections are the draft's sections" in REVISE_INSTRUCTION
+
+
+class TestTheDraftTravelsUnderItsOwnRole:
+    """The declaration the preservation reviewers read.
+
+    The instruction alone cannot stop them: to a fidelity check every intended
+    change reads as a departure from the source, and to a coverage check every
+    cut reads as a dropped specific. Both consult the role instead.
+    """
+
+    def test_revise_declares_its_material_a_revision_target(self) -> None:
+        assert REVISE.material_role == "revision_target"
+
+    def test_every_other_entry_point_supplies_ordinary_source(self) -> None:
+        others = [e for e in ENTRY_POINTS if e is not REVISE]
+
+        assert all(e.material_role == "source" for e in others)
+
+    def test_the_role_reaches_the_extraction_agent(self) -> None:
+        """Declared rather than inferred: published prose carrying its own
+        citations reads the same as a reference to write from."""
+        note = material_role_note("revision_target")
+
+        assert "revision_target" in note
+        assert material_role_note("source") == ""
+
+
+class TestARevisionTargetIsNotAnAuthority:
+    """Consultable, so a writer can read the passage it is rewriting; never
+    the document the finished draft is checked against."""
+
+    def test_an_ordinary_source_is_authoritative(self) -> None:
+        assert SourceDocument(label="paper", path="/p.pdf", kind="pdf").authoritative
+
+    def test_the_piece_being_replaced_is_not(self) -> None:
+        document = SourceDocument(
+            label="chapter2", path="/c.md", kind="text", role="revision_target"
+        )
+
+        assert not document.authoritative
+
+    def test_the_registry_marks_the_paths_the_run_replaces(
+        self, tmp_path: Path
+    ) -> None:
+        draft = tmp_path / "chapter2.md"
+        draft.write_text("published prose", encoding="utf-8")
+        other = tmp_path / "paper.md"
+        other.write_text("a real source", encoding="utf-8")
+
+        registered = build_source_registry(
+            [str(draft), str(other)], tmp_path / "artifacts", [str(draft)]
+        )
+
+        by_label = {d.label: d for d in registered}
+        assert not by_label["chapter2"].authoritative
+        assert by_label["paper"].authoritative

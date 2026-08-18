@@ -90,6 +90,7 @@ async def run_declared_session(
     with use_settings(session_settings(values)):
         return await run_session(
             sources=entry_point.sources(values),
+            material_role=entry_point.material_role,
             refs=REFS.read(values),
             resume_session_id=entry_point.resumed_session(values),
             resume_from_stage=entry_point.resume_from(values),

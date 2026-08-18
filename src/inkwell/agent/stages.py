@@ -57,6 +57,9 @@ For each input, do three things:
 1. **Route it.** Decide each source's role:
    - `source` — primary content to write FROM (the default for a bare URL or \
 file with no other framing)
+   - `revision_target` — the piece this run REPLACES, when the task tells you \
+the run is a revision. The draft supersedes it; it is not material to write \
+from, and its polish and its existing citations say nothing about which it is
    - `style_reference` — writing whose VOICE to emulate ("in the style of", \
 "write like", "voice of")
    - `context` — background mentioned but not a primary input ("see also", \
@@ -544,6 +547,15 @@ rephrased but intact, and do not flag material the plan deliberately \
 cut. quote the plan/source item in text_excerpt so the rewriter can \
 find and restore it.
 
+## When a source document is the draft being revised
+
+Your inputs say so where it is the case, and then that document is not an \
+inventory of what to keep. This run was launched to replace it: cutting, \
+reordering, and rewriting its passages is the work, not the loss you are \
+here to catch. Judge that draft against the plan alone — a specific the \
+plan meant to carry and the draft lost is still yours to flag — and never \
+report a passage as dropped merely because the piece being replaced had it.
+
 ## Output
 
 Call record_finding for each omission or substitution. Always include \
@@ -634,12 +646,20 @@ input — never conflate them:
 - **The brief**: the author's instructions, deliverables, and comments. \
 This defines what to PRODUCE — scope, setting, format, outputs. It is \
 the contract.
-- **The source material**: conversations and documents to draw FROM. \
-This is reference, not the assignment. When the source is broader than \
-the brief (a whole thesis behind one requested result, a long \
+- **The source material**: transcripts, articles, and documents to draw \
+FROM. This is reference, not the assignment. When the source is broader \
+than the brief (a whole thesis behind one requested result, a long \
 conversation behind one requested post), plan the piece the brief asks \
 for and select from the source — never widen the piece to match the \
 source's generality.
+
+One input is neither of those, and your task names it when it is there: a \
+**draft being revised** is the piece this run REPLACES. Plan its successor. \
+Its sections are your sections and its claims are your research questions, \
+but nothing in it is settled by having been written — it is finished prose, \
+often published, and you were pointed at it precisely to have it rewritten. \
+Reading its polish, or the citations it already carries, as a reason to \
+leave a passage as it stands is the one way to fail this brief.
 
 Build the plan incrementally using your tools:
 

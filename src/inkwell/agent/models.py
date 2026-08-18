@@ -22,6 +22,16 @@ from inkwell.agent.book import BookOutline, ChapterPlacement
 from inkwell.agent.provenance import SourceProvenance, Venue
 
 
+type SourceRole = Literal["source", "revision_target", "style_reference", "context"]
+"""What one input is to the run that was handed it.
+
+The distinction the pipeline cannot recover on its own is 'source' against
+'revision_target': one is content to write from, the other is the piece the
+run replaces, and finished prose carrying its own citations looks the same
+either way. It is declared by the entry point, which already knows.
+"""
+
+
 class AuthorNote(BaseModel):
     """A note from any pipeline stage addressed to the author."""
 

@@ -336,13 +336,33 @@ class TestCorpusBriefingReachesThePlanner:
         assert "A post" in briefing
         assert "nearest first" not in briefing
 
-    def test_the_brief_is_the_subject_where_there_is_one(self, tmp_path: Path) -> None:
-        """Better than the source: a revision's source is a draft whose own
-        subject is the thing we are trying to widen past."""
+    def test_the_brief_leads_the_subject_where_there_is_one(
+        self, tmp_path: Path
+    ) -> None:
+        """An author's brief says what the piece is meant to be, which is the
+        sharper description of the two, so it goes first."""
         notes = PipelineNotes(tmp_path / "notes")
         notes.save_brief("A textbook chapter on AI and cyber risk.")
 
         assert planning_topic(notes, "textbook").startswith("A textbook chapter")
+
+    def test_the_material_is_asked_about_as_well_as_the_brief(
+        self, tmp_path: Path
+    ) -> None:
+        """What distinguishes two parts of one work. A brief composed for the
+        run rather than by a person says the same thing about every part it
+        launches, so a corpus asked with the brief alone returns one list for a
+        whole book and the planner cannot tell the parts apart."""
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_brief("You are revising one part of a larger work.")
+        path = notes.text_artifact_path("conversation")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("## 2.3.2 Cyber Risk\n\nOffence-defence balance.", "utf-8")
+
+        asked = planning_topic(notes, "textbook")
+
+        assert "revising one part" in asked
+        assert "Offence-defence" in asked
 
     def test_the_source_stands_in_when_no_brief_was_given(self, tmp_path: Path) -> None:
         notes = PipelineNotes(tmp_path / "notes")

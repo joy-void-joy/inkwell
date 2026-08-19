@@ -738,33 +738,45 @@ def add_reader_section_refs(manifest: ContentManifest, notes: PipelineNotes) -> 
 
 
 TOPIC_QUERY_CHARS = 2000
-"""How much text describes the subject to a nearest-neighbour query.
+"""How much of each side of a subject description a query carries.
 
 A hard input limit rather than a display one: this is what gets embedded, and
-an embedding takes a bounded string. Nothing is lost by it — the source is
-mounted whole for the planner beside the briefing this query produces.
+an embedding takes a bounded string. Per side rather than in total, because the
+brief and the material answer different halves of "what is this about" and a
+shared bound would let a long brief crowd the material out of its own query.
+Nothing is lost by it — both are mounted whole for the planner beside the
+briefing this query produces.
 """
 
 
 def planning_topic(notes: PipelineNotes, target_format: str) -> str:
     """What to ask the corpus for, before a plan exists to ask from.
 
-    The author's brief where there is one: it says what the piece is meant to
-    be, which is a better subject description than the source, and a revision's
-    source is a draft whose own subject is what we are trying to widen past.
-    The opening of the source stands in otherwise.
+    The brief and the material both, rather than whichever of the two looks
+    better. A brief an author wrote is the sharper subject description, and
+    preferring it was right for as long as every brief had an author. A brief
+    composed for the run says the same thing about every piece it launches — a
+    revision of one part of a work is handed what that part is *for*, which is
+    near enough identical to what its siblings are handed — and asking the
+    corpus with it returns one list for the whole book. The material is what
+    tells those parts apart. Taking both means neither case has to be
+    recognised, and the two together are still a bounded query.
+
+    The format stands in where there is neither, so the corpus is always asked
+    something rather than asked nothing.
     """
-    brief = notes.load_brief()
-    if brief:
+
+    def bounded(text: str) -> str:
+        """One side of the query, cut to what an embedding takes."""
         # lup: ignore[silent-truncation] — an embedding takes a bounded string,
         # and this is a query rather than content: the brief and the source are
         # both mounted whole for the planner beside the briefing it produces
-        return brief[:TOPIC_QUERY_CHARS]
+        return text[:TOPIC_QUERY_CHARS]
+
     source = notes.text_artifact_path("conversation")
-    if not source.exists():
-        return target_format
-    # lup: ignore[silent-truncation] — the same query bound, same full copies
-    return source.read_text(encoding="utf-8")[:TOPIC_QUERY_CHARS]
+    material = source.read_text(encoding="utf-8") if source.exists() else ""
+    asked = (bounded(notes.load_brief()), bounded(material))
+    return "\n\n".join(held for held in asked if held) or target_format
 
 
 CORPUS_BRIEFING_LIMIT = 30

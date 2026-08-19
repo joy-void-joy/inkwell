@@ -28,7 +28,7 @@ declaration looked at.
 import asyncio
 import logging
 import sys
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterator
 from shutil import get_terminal_size
 from time import monotonic, sleep
 from typing import Annotated
@@ -856,7 +856,7 @@ def prune(
 @app.command("pending")
 def pending(
     source: list[str] = typer.Argument(
-        default=None, help="Sources to report (default: every source with an index)"
+        default=None, help="Sources to report (default: every declared source)"
     ),
     show: bool = typer.Option(
         False, "--show", help="List the slugs rather than only counting them"
@@ -868,23 +868,51 @@ def pending(
     afterwards: a document dropped for repair, a URL settled as an alias, and
     one simply not reached yet are three different states, and only the first
     is work the next run will actually do.
+
+    Every *declared* source, not only the ones a sweep can currently reach. A
+    source held back pending recon is the one whose absence from the corpus is
+    easiest to miss, and reporting only what is already stored answers "what is
+    pending" with a survey of what is not — which reads as full coverage of a
+    corpus that is missing whole labs. What such a source would fetch cannot be
+    counted without enumerating its site, so it says why it is held back instead
+    of standing in a zero that looks like nothing to do.
     """
     corpus = store()
-    keys = tuple(source or corpus.sources())
+    declared = {entry.key: entry for entry in DECLARED_SOURCES}
+    keys = tuple(source or declared)
     if not keys:
-        typer.echo("Nothing is ingested yet — run `corpus sync` first.")
+        typer.echo("No source is declared — nothing could be swept.")
         raise typer.Exit(code=1)
 
     width = max(len(key) for key in keys)
     typer.echo(f"{'key':<{width}} {'pending':>8} {'held':>8} {'aliased':>8}")
-    for key in keys:
-        shard = corpus.load_by_name(key)
-        if shard is None:
-            continue
-        work = pending_entries(shard)
+
+    def reported() -> Iterator[str]:
+        """Each source's line, and the keys nothing can sweep as it goes."""
+        for key in keys:
+            entry = declared[key] if key in declared else None
+            shard = corpus.load_by_name(key)
+            if entry is not None and not entry.active:
+                typer.echo(f"{key:<{width}} {'—':>8} {'—':>8} {'—':>8}  held out")
+                typer.echo(f"    {entry.notes or 'no reason recorded'}")
+                yield key
+                continue
+            if shard is None:
+                typer.echo(f"{key:<{width}} {'?':>8} {'-':>8} {'-':>8}  never swept")
+                continue
+            work = pending_entries(shard)
+            typer.echo(
+                f"{key:<{width}} {len(work):>8} {len(shard.documents):>8} "
+                f"{len(shard.aliases):>8}"
+            )
+            for found in work if show else ():
+                typer.echo(f"    {found.slug}")
+
+    withheld = tuple(reported())
+    if withheld:
+        typer.echo("")
         typer.echo(
-            f"{key:<{width}} {len(work):>8} {len(shard.documents):>8} "
-            f"{len(shard.aliases):>8}"
+            f"{len(withheld)} declared source(s) are held out of the sweep, so what "
+            f"they hold is not in the corpus and no sweep will fetch it until each "
+            f"one's note is answered: {', '.join(withheld)}"
         )
-        for entry in work if show else ():
-            typer.echo(f"    {entry.slug}")

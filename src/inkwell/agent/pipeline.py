@@ -59,6 +59,7 @@ from inkwell.agent.book_links import pointing
 from inkwell.agent.config import (
     book_store,
     corpus_root,
+    corpus_semantics,
     current_settings,
     load_settings,
     stage_model,
@@ -787,18 +788,27 @@ async def corpus_briefing(topic: str, *, limit: int = CORPUS_BRIEFING_LIMIT) -> 
     Titles, dates and venues, not bodies: the planner is deciding what to ask,
     and the stages after it can read any of these in full.
     """
+    store = CorpusStore(root=corpus_root())
     answer = await search_corpus(
         CorpusQuery(tier="browse", like=topic, limit=limit),
-        CorpusStore(root=corpus_root()),
+        store,
+        semantics=corpus_semantics(store),
     )
     if not answer.documents:
         return ""
 
     def lines() -> Iterator[str]:
+        # Asked of the layer rather than of the query: `mode` is which way this
+        # was asked, and a neighbour query falls back to the structural ordering
+        # where the layer cannot answer. A briefing that called the result
+        # "nearest" either way would tell the planner these were the closest
+        # documents on its subject when they were the most recent ones on any
+        # subject — and the planner cannot tell the difference from the list.
+        placed = "nearest first" if answer.semantic.available else answer.ordering
         yield (
             f"## What the corpus already holds on this subject\n\n"
-            f"{answer.matched} document(s) matched; the {len(answer.documents)} "
-            f"nearest are below, newest first. These are already fetched — "
+            f"{answer.matched} document(s) matched; {len(answer.documents)} "
+            f"are below, {placed}. These are already fetched — "
             f"corpus_search reads any of them in full, at no search cost.\n"
         )
         for hit in answer.documents:

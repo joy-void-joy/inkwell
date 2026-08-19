@@ -25,6 +25,9 @@ from inkwell.agent.pipeline import (
 )
 from inkwell.agent.stages import get_format_guidance
 from inkwell.agent.tools.stage_outputs import PlanCollector, SetPlanHeaderInput
+from inkwell.corpus.semantics import SemanticLayer
+from inkwell.corpus.storage import CorpusStore, SourceShard, StoredDocument
+from inkwell.corpus.tags import DocumentTags
 
 
 class TestSlugify:
@@ -296,6 +299,42 @@ class TestCorpusBriefingReachesThePlanner:
         )
 
         assert await corpus_briefing("AI and cyber risk") == ""
+
+    async def test_the_briefing_says_how_its_results_were_ordered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A neighbour query falls back to the structural ordering where the
+        semantic layer cannot answer, and calling the result "nearest" either way
+        would tell the planner these were the closest documents on its subject
+        when they were the most recent ones on any subject."""
+        store = CorpusStore(root=tmp_path / "corpus")
+        store.save(
+            SourceShard(
+                source="aisi",
+                documents=[
+                    StoredDocument(
+                        slug="a-post",
+                        url="https://fixture.test/a-post",
+                        title="A post",
+                        kind="markdown",
+                        abstract="Prose about cyber risk.",
+                        tags=DocumentTags(judged=True),
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_root", lambda: tmp_path / "corpus"
+        )
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_semantics",
+            lambda held: SemanticLayer(store=held, enabled=False),
+        )
+
+        briefing = await corpus_briefing("AI and cyber risk")
+
+        assert "A post" in briefing
+        assert "nearest first" not in briefing
 
     def test_the_brief_is_the_subject_where_there_is_one(self, tmp_path: Path) -> None:
         """Better than the source: a revision's source is a draft whose own

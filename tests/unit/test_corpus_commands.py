@@ -149,3 +149,41 @@ def test_a_retag_draws_a_bar_over_the_documents_it_has_to_judge(
     assert bar is not None
     assert bar.total == 2
     bar.close()
+
+
+def test_a_source_held_out_of_the_sweep_is_reported_with_its_reason(
+    swept: CorpusStore,
+) -> None:
+    """Its absence from the corpus is the thing easiest to miss.
+
+    Reporting only the sources holding an index answers "what is pending" with a
+    survey of what is not, which reads as full coverage of a corpus missing whole
+    labs.
+    """
+    result = CliRunner().invoke(commands.app, ["pending"])
+
+    assert result.exit_code == 0
+    assert "held out" in result.output
+    assert "deepmind" in result.output
+    assert "pending recon" in result.output
+    assert "held out of the sweep" in result.output
+
+
+def test_a_swept_source_still_reports_what_the_next_run_would_fetch(
+    swept: CorpusStore,
+) -> None:
+    result = CliRunner().invoke(commands.app, ["pending", "aisi"])
+
+    assert result.exit_code == 0
+    assert "aisi" in result.output
+    assert "held out" not in result.output
+
+
+def test_a_declared_source_nothing_has_swept_says_so_rather_than_zero(
+    swept: CorpusStore,
+) -> None:
+    """A zero would read as nothing to do, which is the opposite of the truth."""
+    result = CliRunner().invoke(commands.app, ["pending", "epoch"])
+
+    assert result.exit_code == 0
+    assert "never swept" in result.output

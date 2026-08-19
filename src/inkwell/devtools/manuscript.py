@@ -35,10 +35,14 @@ from inkwell.agent.config import manuscript_store
 from inkwell.agent.glossary import (
     DECLARED_VOCABULARY,
     load_chapter_glossary,
-    write_chapter_glossary,
 )
 from inkwell.manuscript.facts import FACT_KINDS, Dependency, ProposedChange
-from inkwell.manuscript.graph import adopted, consumers, readings, sweep
+from inkwell.manuscript.graph import (
+    consumers,
+    missing_root,
+    readings,
+    sweep,
+)
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.loop import (
     DEFAULT_CONCURRENCY,
@@ -47,24 +51,16 @@ from inkwell.manuscript.loop import (
     schedulable,
 )
 from inkwell.manuscript.mailbox import PartAnswer, PartMailbox
+from inkwell.manuscript.recording import import_work
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 from inkwell.manuscript.vocabulary import (
     Abbreviation,
-    as_glossary,
-    read_abbreviations,
 )
 
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="Read a work of many parts into the tree a run works on")
-
-ABBREVIATIONS_PATH = Path("includes/abbreviations.md")
-"""Where an mkdocs work keeps the vocabulary it declares, relative to its docs.
-
-The Atlas's own location. Overridable per import, because it is a convention
-of that project rather than a rule of the format.
-"""
 
 INDENT = "  "
 """One level of nesting in the printed tree."""
@@ -125,6 +121,26 @@ def held_work(store: ManuscriptStore, work: str) -> Manuscript:
     return tree
 
 
+def refuse_unrooted(work: str, tree: Manuscript) -> None:
+    """Stop with one line about the checkout, where the checkout is gone.
+
+    Every command that reads a work's prose leads with this. The alternative is
+    each of them reporting two hundred parts whose text was edited, which is
+    both wrong and unactionable — the edit nobody made is a directory nobody
+    has.
+    """
+    gone = missing_root(tree)
+    if gone is None:
+        return
+    typer.echo(f"{work} was imported from {gone}, which is not there.", err=True)
+    typer.echo(
+        "Restore that checkout, or re-import the work from where it lives now:",
+        err=True,
+    )
+    typer.echo(f"  lup-devtools manuscript import <chapters> --work {work}", err=True)
+    raise typer.Exit(1)
+
+
 def declared_vocabulary(store: ManuscriptStore, work: str) -> tuple[Abbreviation, ...]:
     """The terms a work's authors declared, as the sweep matches them.
 
@@ -164,30 +180,13 @@ def import_cmd(
         typer.echo(f"No such directory: {chapters}", err=True)
         raise typer.Exit(1)
     store = manuscript_store()
-    tree = read_manuscript(chapters, title=title)
-    store.publish_tree(work, tree)
-
-    abbreviations_at = (
-        vocabulary if vocabulary is not None else chapters.parent / ABBREVIATIONS_PATH
+    recorded = import_work(
+        store, work, chapters, title=title, vocabulary=vocabulary, adopt=adopt
     )
-    abbreviations = read_abbreviations(abbreviations_at)
-    if abbreviations:
-        vocabulary_path = store.glossary_path(work, DECLARED_VOCABULARY)
-        vocabulary_path.parent.mkdir(parents=True, exist_ok=True)
-        write_chapter_glossary(vocabulary_path, as_glossary(abbreviations))
-
-    held = readings(tree, abbreviations)
-    state = store.load_state(work)
-    if adopt:
-        state = adopted(state, held)
-    store.publish_state(work, state)
-
-    leaves = len(held)
-    edges = sum(len(reading.consumed.dependencies) for reading in held)
-    typer.echo(f"{work}: {leaves} leaf part(s) recorded from {chapters}")
-    typer.echo(f"  vocabulary: {len(abbreviations)} declared term(s)")
-    typer.echo(f"  dependencies: {edges} across the work")
-    typer.echo(f"  adopted: {len(state.stamps)} part(s) stamped as built")
+    typer.echo(f"{work}: {recorded.parts} leaf part(s) recorded from {chapters}")
+    typer.echo(f"  vocabulary: {recorded.vocabulary} declared term(s)")
+    typer.echo(f"  dependencies: {recorded.dependencies} across the work")
+    typer.echo(f"  adopted: {recorded.adopted} part(s) stamped as built")
     typer.echo(f"  recorded at: {store.work_dir(work)}")
 
 
@@ -202,6 +201,7 @@ def status_cmd(
     """What the work has left to do, and why each part of it is outstanding."""
     store = manuscript_store()
     tree = held_work(store, work)
+    refuse_unrooted(work, tree)
     state = store.load_state(work)
     found = sweep(state, readings(tree, declared_vocabulary(store, work)))
     if as_json:
@@ -218,6 +218,35 @@ def status_cmd(
         if found.settled()
         else f"{len(found.dirty())} part(s) outstanding"
     )
+
+
+@app.command("clear")
+def clear_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    key: Annotated[str, typer.Argument(help="Which part to return to idle")],
+) -> None:
+    """Take back what was said about one part, returning it to idle.
+
+    The way out of the two standings that are deliberately sticky. A failed
+    part stays failed so a pass cannot pick it up and fail the same way
+    forever; a requested part stays requested until something rewrites it. Both
+    are right, and both need a door: this is somebody saying they have read the
+    failure, or changed their mind, which is the judgement the loop cannot make
+    for itself.
+
+    Leaves every stamp and every change fact alone. This says nothing about
+    what the part *is* — only that nothing is outstanding on it now, so the
+    dependency pass answers for it again on the evidence.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    if tree.node(key) is None:
+        typer.echo(f"{work} has no part called {key!r}", err=True)
+        raise typer.Exit(1)
+    state = store.load_state(work)
+    standing = state.standing(key)
+    store.publish_state(work, state.declared(key, "idle", ""))
+    typer.echo(f"{key}: {standing} → idle")
 
 
 @app.command("request")
@@ -308,19 +337,37 @@ def run_cmd(
     """
     store = manuscript_store()
     tree = held_work(store, work)
+    refuse_unrooted(work, tree)
     vocabulary = declared_vocabulary(store, work)
     state = store.load_state(work)
-    outstanding = schedulable(sweep(state, readings(tree, vocabulary)), state)
+    found = sweep(state, readings(tree, vocabulary))
+    outstanding = schedulable(found, state)
+    stuck = found.blocked()
 
     if dry_run:
-        for verdict in outstanding:
+        # The same cut a pass takes, so what the dry run lists is what would
+        # actually be picked up rather than everything that qualifies.
+        taking = outstanding[:limit] if limit else outstanding
+        for verdict in taking:
             typer.echo(verdict.render())
         typer.echo("")
-        typer.echo(f"{len(outstanding)} part(s) would run, {passes} pass(es) at most")
+        typer.echo(
+            f"{len(taking)} part(s) would run this pass, {passes} pass(es) at most"
+            + (f" — {len(outstanding)} outstanding in total" if limit else "")
+        )
+        for verdict in stuck:
+            typer.echo(f"  blocked: {verdict.render()}")
         return
     if not outstanding:
-        typer.echo(f"{work} is settled — nothing to run")
-        return
+        typer.echo(
+            f"{work} is settled — nothing to run"
+            if not stuck
+            else f"{work} has nothing runnable: {len(stuck)} part(s) have lost "
+            "their text, which a run cannot put back"
+        )
+        for verdict in stuck:
+            typer.echo(f"  {verdict.render()}")
+        raise typer.Exit(1 if stuck else 0)
 
     reports = asyncio.run(
         run_loop(

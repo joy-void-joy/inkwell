@@ -33,7 +33,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from inkwell.manuscript.facts import Consumption, Dependency, consumption_of
 from inkwell.manuscript.links import links_from
 from inkwell.manuscript.splice import held_text
-from inkwell.manuscript.state import NodeVerdict, PartText, Staleness, WorkState
+from inkwell.manuscript.state import (
+    UNRUNNABLE_STALENESS,
+    NodeVerdict,
+    PartText,
+    Staleness,
+    WorkState,
+)
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 from inkwell.manuscript.vocabulary import Abbreviation, terms_used
 
@@ -51,6 +57,11 @@ class PartReading(BaseModel):
 
     node: ManuscriptNode = Field(description="The part")
     text: str = Field(description="What it holds now")
+    found: bool = Field(
+        default=True,
+        description="Whether the work still holds that text where it was imported "
+        "from. False for a part whose file or heading is not there",
+    )
     consumed: Consumption = Field(
         default_factory=Consumption,
         description="What its text implies it depends on, before any run has said",
@@ -58,29 +69,52 @@ class PartReading(BaseModel):
 
     def part(self) -> PartText:
         """This reading as the state judges it."""
-        return PartText(key=self.node.key, text=self.text)
+        return PartText(key=self.node.key, text=self.text, found=self.found)
 
 
 def source_text(
     root: Path,
     node: ManuscriptNode,
     # lup: ignore[dict-str-payload] — a cache keyed by whatever paths a work has
-    opened: dict[str, str],
-) -> str:
+    opened: dict[str, str | None],
+) -> str | None:
     """One part's text, reading each file at most once across a whole sweep.
 
     Seven subsections sharing a section file would otherwise read it seven
     times, and a work of two hundred parts is read in a loop that runs on
     every status check.
+
+    ``None`` where the part's text is not there to read — the file is missing,
+    or the heading it begins at is no longer in that file. Distinct from the
+    empty string, which is a part the work declares no text for and a part an
+    author emptied, because those need no repair and a missing file does.
     """
     if not node.path:
         return ""
     if node.path not in opened:
         target = root / node.path
         opened[node.path] = (
-            target.read_text(encoding="utf-8") if target.is_file() else ""
+            target.read_text(encoding="utf-8") if target.is_file() else None
         )
-    return held_text(opened[node.path], node)
+    source = opened[node.path]
+    if source is None or not node.heading:
+        return source
+    # A found span always carries its own heading line, so empty says the
+    # heading is not in the file rather than that the part has no prose.
+    return held_text(source, node) or None
+
+
+def missing_root(manuscript: Manuscript) -> Path | None:
+    """The directory the work was read from, where it is no longer there.
+
+    Asked before a sweep is reported, because the answer changes what the sweep
+    *means*: every part of a work whose checkout has moved reads as having lost
+    its text, and two hundred parts each saying so is a worse account of one
+    missing directory than one line naming it. ``None`` where the root is
+    present and the verdicts stand on their own.
+    """
+    root = Path(manuscript.root)
+    return None if root.is_dir() else root
 
 
 def readings(
@@ -96,15 +130,17 @@ def readings(
     root = Path(manuscript.root)
     declared = tuple(vocabulary)
     # lup: ignore[dict-str-payload] — a cache keyed by whatever paths a work has
-    opened: dict[str, str] = {}
+    opened: dict[str, str | None] = {}
 
     def read() -> Iterator[PartReading]:
         """Each leaf paired with what it holds and what that implies."""
         for node in manuscript.leaves():
-            text = source_text(root, node, opened)
+            held = source_text(root, node, opened)
+            text = held or ""
             yield PartReading(
                 node=node,
                 text=text,
+                found=held is not None,
                 consumed=consumption_of(
                     (
                         *terms_used(text, declared),
@@ -131,6 +167,18 @@ class WorkSweep(BaseModel):
     def dirty(self) -> tuple[NodeVerdict, ...]:
         """Every part with work outstanding, which is what a pass has left."""
         return tuple(held for held in self.verdicts if held.dirty())
+
+    def blocked(self) -> tuple[NodeVerdict, ...]:
+        """Every part outstanding that no run can put right.
+
+        Reported apart from the rest because the repair is somebody else's: a
+        work read from a checkout that is no longer there is outstanding in
+        every part and runnable in none, and a caller that only asked what was
+        schedulable would call that settled.
+        """
+        return tuple(
+            held for held in self.verdicts if held.staleness in UNRUNNABLE_STALENESS
+        )
 
     def settled(self) -> bool:
         """Whether the work is at rest, which is what ends a pass."""

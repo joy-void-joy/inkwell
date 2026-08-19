@@ -93,6 +93,12 @@ class PartText(BaseModel):
 
     key: str = Field(description="The part")
     text: str = Field(description="What it holds now")
+    found: bool = Field(
+        default=True,
+        description="Whether that text was there to read. False says the file or "
+        "the heading is gone, which empty text alone cannot distinguish from a "
+        "part an author emptied",
+    )
 
 
 class NodeRecord(BaseModel):
@@ -153,7 +159,7 @@ class BuildStamp(BaseModel):
 
 
 type Staleness = Literal[
-    "fresh", "never-built", "requested", "source-moved", "upstream"
+    "fresh", "never-built", "requested", "source-gone", "source-moved", "upstream"
 ]
 """Why a part is or is not out of date.
 
@@ -161,12 +167,31 @@ Named rather than reduced to a boolean because the loop shows it and because
 the repairs differ: ``source-moved`` means somebody edited the file directly,
 ``upstream`` means something it depends on changed, and telling an author the
 difference is most of what a status display is for.
+
+``source-gone`` is the one that is not about the prose at all: the part's text
+cannot be read, because its file or its heading is no longer where the work was
+imported from. It is separated from ``source-moved`` because the repair is
+different in kind — a checkout to restore or an import to redo, not a rewrite —
+and a work whose root has moved would otherwise report every part as edited,
+which is a wrong diagnosis rather than a vague one.
+"""
+
+UNRUNNABLE_STALENESS: tuple[Staleness, ...] = ("source-gone",)
+"""Verdicts no run can answer, whatever else is outstanding about the part.
+
+A part whose text is not there has nothing for a run to revise, so scheduling
+it would spend a turn to fail and would replace a diagnosis somebody can act on
+— restore the checkout, or re-import — with a ``failed`` standing that reads
+like the pipeline broke. Declared beside the verdicts rather than at the loop,
+because the sweep reports these apart and the loop declines to schedule them,
+and those two have to be the same set.
 """
 
 STALENESS_PHRASING: dict[Staleness, str] = {
     "fresh": "up to date",
     "never-built": "never built",
     "requested": "revision asked for",
+    "source-gone": "its text is no longer where the work was imported from",
     "source-moved": "its text was edited since it was built",
     "upstream": "something it leans on changed",
 }
@@ -251,7 +276,7 @@ class WorkState(BaseModel):
         """Every part something is outstanding on, which a status display shows."""
         return tuple(held for held in self.records if held.standing in ACTIVE_STANDINGS)
 
-    def verdict(self, key: str, source: str) -> NodeVerdict:
+    def verdict(self, key: str, source: str, found: bool = True) -> NodeVerdict:
         """Whether one part is out of date, given the text it holds now.
 
         The order the causes are tried in is the order they are worth telling
@@ -260,10 +285,19 @@ class WorkState(BaseModel):
         part somebody asked for is going to be rewritten whatever else is also
         true of it. The reasons still carry everything that reached it, so a
         run is shown all of what moved rather than only the headline.
+
+        A part whose text is not there answers before any of them, because no
+        rewrite is available to it whatever else is also true: what it needs is
+        the checkout it was imported from, and reporting it as edited prose
+        would send somebody looking for a change nobody made.
         """
         standing = self.standing(key)
         stamp = self.stamp(key)
         reached = tuple(fact.reason() for fact in self.reaching(key))
+        if not found:
+            return NodeVerdict(
+                key=key, staleness="source-gone", standing=standing, reasons=reached
+            )
         if standing == "requested":
             asked = self.record(key)
             told = (asked.reason,) if asked and asked.reason else ()
@@ -335,4 +369,4 @@ class WorkState(BaseModel):
     def verdicts(self, held: Iterable[PartText]) -> Iterator[NodeVerdict]:
         """A verdict for each part, given the text each of them holds now."""
         for part in held:
-            yield self.verdict(part.key, part.text)
+            yield self.verdict(part.key, part.text, part.found)

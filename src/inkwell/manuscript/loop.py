@@ -41,7 +41,7 @@ from inkwell.manuscript.mailbox import (
 )
 from inkwell.manuscript.reconcile import reconcile
 from inkwell.manuscript.runner import PartOutcome, TurnEnding, run_part
-from inkwell.manuscript.state import NodeVerdict, WorkState
+from inkwell.manuscript.state import UNRUNNABLE_STALENESS, NodeVerdict, WorkState
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript
 from inkwell.manuscript.vocabulary import Abbreviation
@@ -107,10 +107,20 @@ class PassReport(BaseModel):
         description="What the reconciler found the wave's rewrites disagreed on",
     )
     remaining: int = Field(default=0, description="Parts still outstanding after it")
+    blocked: int = Field(
+        default=0,
+        description="Parts outstanding that no run of this loop can put right",
+    )
 
     def settled(self) -> bool:
-        """Whether the work came to rest in this pass."""
-        return self.remaining == 0
+        """Whether the work came to rest in this pass.
+
+        Rest means nothing is left, not merely that nothing is runnable — a
+        work whose parts are blocked has come to a stop rather than to rest,
+        and calling that settled would report a broken checkout as a finished
+        book.
+        """
+        return self.remaining == 0 and self.blocked == 0
 
     def counted(self, outcome: TurnEnding) -> int:
         """How many parts this pass left in one condition."""
@@ -118,10 +128,11 @@ class PassReport(BaseModel):
 
     def render(self) -> str:
         """This pass as a line somebody watching the loop reads."""
+        stuck = f", {self.blocked} blocked" if self.blocked else ""
         return (
             f"{len(self.scheduled)} run — {self.counted('rewritten')} rewritten, "
             f"{self.counted('parked')} parked, {self.counted('failed')} failed; "
-            f"{self.remaining} outstanding"
+            f"{self.remaining} outstanding{stuck}"
         )
 
 
@@ -130,12 +141,15 @@ def schedulable(found: WorkSweep, state: WorkState) -> tuple[NodeVerdict, ...]:
 
     A part another run is holding is left alone, and so is one parked on a
     question nobody has answered — picking either up would either duplicate
-    work or re-ask what is already asked and get no further.
+    work or re-ask what is already asked and get no further. So is a part no
+    run could answer, which is what leaves a work whose source has moved
+    reporting where its text went instead of failing two hundred turns.
     """
     return tuple(
         verdict
         for verdict in found.dirty()
         if state.standing(verdict.key) not in HELD_STANDINGS
+        and verdict.staleness not in UNRUNNABLE_STALENESS
     )
 
 
@@ -169,6 +183,7 @@ def recording(
     mailbox: PartMailbox,
     manuscript: Manuscript,
     work: str,
+    session: str = "",
 ) -> Recorded:
     """What one part's turn did to the work, in the four ways it can end.
 
@@ -177,23 +192,31 @@ def recording(
     outcome rather than worked out from its fields here, so a fourth way to
     end is one literal and one arm instead of a condition this function got
     wrong.
+
+    The run stays named on every ending that is not a rewrite. A rewrite
+    records its run in the build stamp, but a part that failed or parked keeps
+    it only as the holder — and that is the part somebody most wants to open
+    the transcript of, so clearing it would lose the run precisely when it is
+    the thing being asked about.
     """
     if isinstance(outcome, BaseException):
         logger.exception("Running %s raised", verdict.key, exc_info=outcome)
         return Recorded(
-            state=state.declared(verdict.key, "failed", str(outcome)),
+            state=state.declared(verdict.key, "failed", str(outcome), session),
             result=PartResult(key=verdict.key, outcome="failed", detail=str(outcome)),
         )
     match outcome.ended():
         case "parked":
             reason = parked_by(mailbox, manuscript, outcome, work)
             return Recorded(
-                state=state.declared(verdict.key, "parked", reason),
+                state=state.declared(verdict.key, "parked", reason, outcome.session),
                 result=PartResult(key=verdict.key, outcome="parked", detail=reason),
             )
         case "failed":
             return Recorded(
-                state=state.declared(verdict.key, "failed", outcome.failure),
+                state=state.declared(
+                    verdict.key, "failed", outcome.failure, outcome.session
+                ),
                 result=PartResult(
                     key=verdict.key, outcome="failed", detail=outcome.failure
                 ),
@@ -231,6 +254,11 @@ async def run_pass(
 
     by_key = {reading.node.key: reading for reading in held}
     gate = asyncio.Semaphore(concurrency)
+    # Settled before the lease rather than inside the turn, so the standing that
+    # marks a part running can name the run holding it. A holder recorded after
+    # the fact would be unavailable for exactly the window somebody watching
+    # wants it: while the part is still running.
+    sessions = {verdict.key: uuid.uuid4().hex[:16] for verdict in picked}
 
     async def attempt(verdict: NodeVerdict) -> PartOutcome:
         """One part's turn, with the concurrency cap held for its duration."""
@@ -240,14 +268,16 @@ async def run_pass(
                 work,
                 manuscript,
                 by_key[verdict.key].node,
-                session_id=uuid.uuid4().hex[:16],
+                session_id=sessions[verdict.key],
                 reasons=verdict.reasons,
                 vocabulary=vocabulary,
             )
 
     leased = opening
     for verdict in picked:
-        leased = leased.declared(verdict.key, "running", "picked up by a pass")
+        leased = leased.declared(
+            verdict.key, "running", "picked up by a pass", sessions[verdict.key]
+        )
     store.publish_state(work, leased)
 
     outcomes = await asyncio.gather(
@@ -258,7 +288,15 @@ async def run_pass(
         """Each part recorded against the state the one before it produced."""
         state = leased
         for verdict, outcome in zip(picked, outcomes):
-            step = recording(state, verdict, outcome, mailbox, manuscript, work)
+            step = recording(
+                state,
+                verdict,
+                outcome,
+                mailbox,
+                manuscript,
+                work,
+                sessions[verdict.key],
+            )
             state = step.state
             store.publish_state(work, state)
             yield step
@@ -280,12 +318,14 @@ async def run_pass(
             settled = settled.changed(conflict.between, conflict.changes())
         store.publish_state(work, settled)
 
+    closing = sweep(settled, after)
     return PassReport(
         work=work,
         scheduled=tuple(verdict.key for verdict in picked),
         results=tuple(step.result for step in taken),
         conflicts=tuple(conflict.detail for conflict in conflicts),
-        remaining=len(schedulable(sweep(settled, after), settled)),
+        remaining=len(schedulable(closing, settled)),
+        blocked=len(closing.blocked()),
     )
 
 

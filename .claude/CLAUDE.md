@@ -18,6 +18,22 @@ Built on Python 3.13+ and the lup framework, which it takes as a git dependency 
 
 Stage prompts and tool lists are declared in `agent/stages.py` and executed by `agent/pipeline.py`.
 
+### A Work of Many Parts
+
+That pipeline writes one piece. A book is a tree of them, and `manuscript/` is the build loop over that tree — read a work into parts, ask which are out of date and why, run those, ask again until a pass finds nothing. The revisable unit is a subsection, three levels down, not a chapter.
+
+- **A part run is one ordinary run.** The part's own text is the material, under `revision_target`, and nothing here re-implements a stage. Composed at the outside deliberately, which is what keeps a book-length feature out of `agent/pipeline.py`.
+- **The loop is the single writer of state.** Parts run concurrently with no lock because each writes prose into a span that cannot overlap another's and hands back what it did.
+- **Propagation keys on what changed, not who changed it**, which is why a pass settles rather than cascading.
+- **The work declares its format**, once at import, and every run inherits it. A part asked to infer the format of a book it sees one subsection of answers differently on the next part.
+- **Parked is not failed**, and both are sticky on purpose: a run that cannot settle something asks and its part waits at no cost, while a failed part keeps what it said. Both need somebody to open the door.
+
+### The Research Corpus
+
+`corpus/` holds documents enumerated from declared sources, tagged against a vocabulary and optionally embedded. The three stages run in one order — fetch, judge, then embed, because embedding reads what judging wrote. The plan stage is *handed* a briefing of what the corpus already holds on the topic rather than left to search for it: what the corpus has and the source material does not is the strongest research question there is, and no question derived from the source could reach it.
+
+`docs/inkwell.md` carries both of these in full — the store layout, the sweep ladder, and every standing a part can hold.
+
 ### Google Docs as Live Surface
 
 The agent writes into a Google Doc the author follows in real time:
@@ -93,6 +109,12 @@ inkwell write "https://claude.ai/share/abc123" paper.pdf -f twitter
 inkwell run "write a blog post about X"
 inkwell style add ~/writing/my-essay.md   # Voice-matching corpus
 inkwell --help
+
+uv run inkwell-web                        # Sessions and works, in the browser
+uv run lup-devtools manuscript import <chapters> --work atlas
+uv run lup-devtools manuscript status atlas --dirty
+uv run lup-devtools manuscript run atlas --dry-run --limit 1
+uv run lup-devtools corpus pipeline       # Fetch, judge, then embed
 ```
 
 **Tests:** `tests/unit/` mocks external APIs; `tests/integration/` needs API keys and is marked `@pytest.mark.integration`. `docs/inkwell.md` carries what is worth testing and what is not.

@@ -283,6 +283,18 @@ from the text it already holds — `make -t`, and the same argument — so the
 first useful pass rewrites what somebody asked about rather than the book. The
 full pass stays available and stays expensive; it stops being the entry fee.
 
+**The work declares the format, not the run.** A part handed to the pipeline
+with no format declared falls to `auto`, which asks that part's own extract
+stage to infer the shape of a book it is shown one subsection of — and two
+parts answering differently is how a textbook acquires a chapter that reads
+like a blog post. `manuscript import --format` records it once on the work and
+every run against it inherits it, defaulting to `textbook` because a work read
+as chapters holding sections holding subsections is one. That is what carries
+dependency order, definitions-before-use, and self-containment into a part's
+run; an undeclared format is refused where it is typed rather than downstream,
+since nothing downstream refuses it — it simply carries no rules and says
+nothing.
+
 **A rewrite splices.** One part's span is replaced and its siblings stay
 byte-identical, because a model asked to reassemble the file re-emits prose
 nobody asked it to touch. Over 201 parts revised repeatedly that is the

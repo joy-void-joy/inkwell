@@ -72,6 +72,7 @@ src/inkwell/
 │   ├── graph.py            # The dependency pass, and adopting a work as already built
 │   ├── splice.py           # Replacing one part's span, leaving its siblings byte-identical
 │   ├── store.py            # A work's records, outliving every run and outside its own repository
+│   ├── recording.py        # Importing a work: read, declare its vocabulary, adopt what exists
 │   ├── runner.py           # One part through the pipeline and back into its file
 │   ├── mailbox.py          # What a part could not settle, escalated up the tree
 │   ├── reconcile.py        # Reading a wave's rewrites against each other — the link step
@@ -253,11 +254,31 @@ difference between converging on the author's book and walking away from it.
 parks, and nothing retries it until somebody answers — through the CLI or the
 work's tree in the web surface. A failed part stays failed with what it said,
 because one that quietly returned to idle would be picked up next pass and
-fail identically forever.
+fail identically forever. Both standings are deliberately sticky, so both need
+a door: `manuscript clear` is somebody saying they have read the failure or
+changed their mind, which is the judgement the loop cannot make for itself.
+
+**A missing checkout is one fact, not two hundred.** A part whose file or
+heading is gone reads `source-gone` rather than as edited prose: the repair is
+a checkout to restore or an import to redo, not a rewrite, so the loop declines
+to schedule those parts instead of spending a turn each to fail, and a sweep
+reports them apart from what is runnable. A work blocked in every part is
+stopped, not settled. Every command that reads a work's prose leads with one
+line naming the directory that is not there.
 
 State lives in inkwell's own store beside the corpus and the book records,
 never in the work's repository: that tree belongs to whoever writes the book,
 and state left there would not survive a fresh clone.
+
+**The browser drives the loop, it does not merely watch it.** A work is a REST
+resource of its own rather than a view of whichever run is open: the tree with
+every part's state, what a run *would* pick up before anybody pays for it, a
+start that runs the loop in the background reporting each pass as it lands, and
+a stop. One loop per work, refused rather than queued, because the loop is the
+single writer of a work's state and two over one book would each lease parts
+the other had leased. The preview is not a convenience — every part a pass
+picks up is a whole pipeline run, so a start button offered without one would
+be offering to spend an unknown amount on a click.
 
 ## Test principles
 

@@ -20,7 +20,9 @@ import logging
 from collections.abc import Iterator
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.config import manuscript_store
@@ -36,7 +38,10 @@ from inkwell.manuscript.graph import consumers, missing_root, readings, sweep
 from inkwell.manuscript.loop import (
     DEFAULT_CONCURRENCY,
     DEFAULT_PASSES,
+    NotPicked,
+    narrowed,
     schedulable,
+    unpicked,
 )
 from inkwell.manuscript.mailbox import PartAnswer, PartMailbox, PartQuestion
 from inkwell.manuscript.recording import WorkImport, import_work
@@ -244,6 +249,12 @@ class RunRequest(BaseModel):
     limit: int = Field(
         default=0, ge=0, description="Most parts to run per pass; 0 for every one"
     )
+    parts: tuple[str, ...] = Field(
+        default=(),
+        description="Run only these parts, by key. Empty runs whatever is "
+        "outstanding. Narrows the sweep rather than overriding it, so a part "
+        "that is up to date stays up to date",
+    )
     concurrency: int = Field(
         default=DEFAULT_CONCURRENCY, ge=1, description="How many parts run at once"
     )
@@ -269,6 +280,11 @@ class WouldRun(BaseModel):
     )
     blocked: tuple[NodeVerdict, ...] = Field(
         default=(), description="Parts outstanding that no run could put right"
+    )
+    passed_over: tuple[NotPicked, ...] = Field(
+        default=(),
+        description="Parts that were named but will not run, and why not — so "
+        "asking for one subsection and getting an empty pass says which it was",
     )
 
 
@@ -463,29 +479,39 @@ def work_tree(work: str) -> WorkTree:
     )
 
 
-def would_run(store: ManuscriptStore, work: str, limit: int) -> WouldRun:
+def would_run(
+    store: ManuscriptStore, work: str, limit: int, only: tuple[str, ...] = ()
+) -> WouldRun:
     """What a pass over this work would pick up, spending nothing to find out."""
     tree = tree_of(store, work)
     state = store.load_state(work)
     found = sweep(state, readings(tree, vocabulary_of(store, work)))
-    outstanding = schedulable(found, state)
+    outstanding = narrowed(schedulable(found, state), only)
     return WouldRun(
         work=work,
         parts=outstanding[:limit] if limit else outstanding,
         outstanding=len(outstanding),
         blocked=found.blocked(),
+        passed_over=unpicked(found, state, only),
     )
 
 
 @router.get("/{work}/would-run")
-def preview_run(work: str, limit: int = 0) -> WouldRun:
+def preview_run(
+    work: str,
+    limit: int = 0,
+    part: Annotated[list[str] | None, Query()] = None,
+) -> WouldRun:
     """What running this work would do, before anybody agrees to pay for it.
 
     Every part a pass picks up is a whole pipeline run, so this is the question
     that comes before the button: a browser offering only *start* would be
     offering to spend an unknown amount on one click.
+
+    ``part`` asks the same question about one subsection, which is what a row in
+    the tree needs before it can offer to run just itself.
     """
-    return would_run(manuscript_store(), work, limit)
+    return would_run(manuscript_store(), work, limit, tuple(part or ()))
 
 
 @router.post("/{work}/run", status_code=202)
@@ -512,6 +538,7 @@ def start_run(work: str, request: RunRequest) -> WorkLoopStatus:
             vocabulary=vocabulary_of(store, work),
             passes=request.passes,
             limit=request.limit,
+            only=request.parts,
             concurrency=request.concurrency,
             reconciling=request.reconcile,
         )

@@ -41,7 +41,12 @@ from inkwell.manuscript.mailbox import (
 )
 from inkwell.manuscript.reconcile import reconcile
 from inkwell.manuscript.runner import PartOutcome, TurnEnding, run_part
-from inkwell.manuscript.state import UNRUNNABLE_STALENESS, NodeVerdict, WorkState
+from inkwell.manuscript.state import (
+    STALENESS_PHRASING,
+    UNRUNNABLE_STALENESS,
+    NodeVerdict,
+    WorkState,
+)
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript
 from inkwell.manuscript.vocabulary import Abbreviation
@@ -153,6 +158,68 @@ def schedulable(found: WorkSweep, state: WorkState) -> tuple[NodeVerdict, ...]:
     )
 
 
+def narrowed(
+    picked: tuple[NodeVerdict, ...], only: tuple[str, ...]
+) -> tuple[NodeVerdict, ...]:
+    """What a pass picked up, kept to the parts somebody named.
+
+    A narrowing of the sweep rather than an override of it. A named part still
+    has to be outstanding and runnable to run, so asking for one gets exactly
+    the run it would have got in its turn, carrying the same reasons — where
+    naming a part were enough to run it, there would be two ways to ask for a
+    revision that disagreed about why the part was being revised.
+
+    That leaves a named part the sweep did not pick up running nothing, which
+    is the caller's to report: an author who asked for one part and was handed
+    a settled pass has been told the work is finished, when what happened is
+    that this part is not the one that is outstanding.
+
+    An empty ``only`` is the whole sweep, so a loop that names nothing reads
+    exactly as it did before there was anything to name.
+    """
+    return (
+        picked
+        if not only
+        else tuple(verdict for verdict in picked if verdict.key in only)
+    )
+
+
+class NotPicked(BaseModel):
+    """A part somebody named that a pass will not run, and what is keeping it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    key: str = Field(description="The part that was named")
+    reason: str = Field(description="Why this pass leaves it alone")
+
+
+def unpicked(
+    found: WorkSweep, state: WorkState, only: tuple[str, ...]
+) -> tuple[NotPicked, ...]:
+    """Each named part a pass will not pick up, and why not.
+
+    The question naming a part raises and nothing else answers. A pass that ran
+    nothing reads identically whether the part is up to date, held by another
+    run, parked on a question somebody has to answer, or not a part of this work
+    at all — and those are four different things to do next, only one of which
+    is "wait".
+    """
+    picked = tuple(verdict.key for verdict in schedulable(found, state))
+
+    def why(key: str) -> str:
+        """What is keeping one named part out of this pass."""
+        verdict = next((held for held in found.verdicts if held.key == key), None)
+        if verdict is None:
+            return "not a part of this work"
+        if verdict.standing in HELD_STANDINGS:
+            return f"{verdict.standing}, and left alone until that clears"
+        return STALENESS_PHRASING[verdict.staleness]
+
+    return tuple(
+        NotPicked(key=key, reason=why(key)) for key in only if key not in picked
+    )
+
+
 def parked_by(
     mailbox: PartMailbox, manuscript: Manuscript, outcome: PartOutcome, work: str
 ) -> str:
@@ -241,14 +308,19 @@ async def run_pass(
     *,
     vocabulary: tuple[Abbreviation, ...] = (),
     limit: int = 0,
+    only: tuple[str, ...] = (),
     concurrency: int = DEFAULT_CONCURRENCY,
     reconciling: bool = True,
 ) -> PassReport:
-    """Run every part a pass may pick up, and record what each one did."""
+    """Run every part a pass may pick up, and record what each one did.
+
+    ``only`` keeps the pass to the parts named, for an author revising one
+    subsection rather than taking the whole work to rest.
+    """
     mailbox = PartMailbox(root=store.work_dir(work))
     held = readings(manuscript, vocabulary)
     opening = store.load_state(work)
-    picked = schedulable(sweep(opening, held), opening)
+    picked = narrowed(schedulable(sweep(opening, held), opening), only)
     if limit:
         picked = picked[:limit]
 
@@ -337,6 +409,7 @@ async def run_loop(
     vocabulary: tuple[Abbreviation, ...] = (),
     passes: int = DEFAULT_PASSES,
     limit: int = 0,
+    only: tuple[str, ...] = (),
     concurrency: int = DEFAULT_CONCURRENCY,
     reconciling: bool = True,
     reporting: Callable[[PassReport], None] | None = None,
@@ -346,6 +419,11 @@ async def run_loop(
     Stops early on a pass that scheduled nothing, which is either a settled
     work or one where everything outstanding is parked on a question — and in
     both cases running again would do exactly as much.
+
+    ``only`` keeps every pass to the parts named. Propagation still runs, so a
+    rewrite of one subsection publishes what it moved and the parts leaning on
+    it go out of date — they are simply not run here, which is what an author
+    revising one thing asked for.
 
     ``reporting`` hears each pass as it finishes rather than at the end. A book
     of two hundred parts takes long enough that something watching wants to be
@@ -362,6 +440,7 @@ async def run_loop(
                 manuscript,
                 vocabulary=vocabulary,
                 limit=limit,
+                only=only,
                 concurrency=concurrency,
                 reconciling=reconciling,
             )

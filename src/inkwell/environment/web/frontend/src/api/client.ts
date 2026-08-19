@@ -395,8 +395,10 @@ export async function recordWork(request: {
 export async function previewWorkRun(
   work: string,
   limit = 0,
+  parts: string[] = [],
 ): Promise<WouldRun> {
   const params = new URLSearchParams({ limit: String(limit) });
+  for (const key of parts) params.append("part", key);
   const res = await fetch(
     `${BASE}/works/${encodeURIComponent(work)}/would-run?${params}`,
   );
@@ -409,6 +411,7 @@ export async function startWorkRun(
   request: {
     passes?: number;
     limit?: number;
+    parts?: string[];
     concurrency?: number;
     reconcile?: boolean;
   },

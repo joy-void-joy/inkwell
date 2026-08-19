@@ -6,7 +6,9 @@ import {
   fetchWhatItReaches,
   fetchWorkQuestions,
   fetchWorkTree,
+  previewWorkRun,
   requestWorkPart,
+  startWorkRun,
 } from "../api/client";
 import { stalenessLabel } from "../types";
 import type { PartNode, QuestionView, ReachedBy, WorkTree } from "../types";
@@ -77,6 +79,37 @@ export function WorkTreeView() {
     setAsking("");
     setReason("");
     reload();
+  };
+
+  // One part, one pass. A loop narrowed to a single part would only ever pick
+  // that part up again, and a rewrite leaves it fresh, so further passes are
+  // reserved for the propagation this deliberately does not chase: revising one
+  // subsection puts the parts leaning on it out of date and leaves them there,
+  // which is what asking for one subsection meant.
+  //
+  // Asked before started, the way the run panel asks before its own button: a
+  // part the sweep will not pick up is reported here rather than starting a
+  // pass that runs nothing and reads as a finished book.
+  const runOne = async (key: string) => {
+    try {
+      const would = await previewWorkRun(workId, 0, [key]);
+      const [skipped] = would.passed_over;
+      if (skipped) {
+        setError(`${skipped.key} is not being run: ${skipped.reason}`);
+        return;
+      }
+      await startWorkRun(workId, { passes: 1, parts: [key] });
+      reload();
+    } catch (failure) {
+      setError(String(failure));
+    }
+  };
+
+  const askAndRun = async (key: string) => {
+    await requestWorkPart(workId, key, reason);
+    setAsking("");
+    setReason("");
+    await runOne(key);
   };
 
   const clear = async (key: string) => {
@@ -261,6 +294,17 @@ export function WorkTreeView() {
             {node.leaf && asking !== node.key && (
               <button onClick={() => setAsking(node.key)}>Revise</button>
             )}
+            {node.leaf &&
+              node.staleness !== "fresh" &&
+              node.staleness !== "source-gone" &&
+              node.standing === "idle" && (
+                <button
+                  onClick={() => runOne(node.key)}
+                  title="Take this part through the pipeline now, and nothing else"
+                >
+                  Run this part
+                </button>
+              )}
             {node.leaf && node.standing !== "idle" && (
               <button onClick={() => clear(node.key)} title="Return it to idle">
                 Clear
@@ -279,6 +323,9 @@ export function WorkTreeView() {
                   }}
                 />
                 <button onClick={() => askFor(node.key)}>Ask</button>
+                <button onClick={() => askAndRun(node.key)}>
+                  Ask and run it now
+                </button>
                 <button onClick={() => setAsking("")}>Cancel</button>
               </span>
             )}

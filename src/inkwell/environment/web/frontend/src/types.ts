@@ -90,6 +90,7 @@ export interface WouldRun {
   parts: { key: string; staleness: Staleness; reasons: string[] }[];
   outstanding: number;
   blocked: { key: string; staleness: Staleness; reasons: string[] }[];
+  passed_over: { key: string; reason: string }[];
 }
 
 export interface WorkImport {

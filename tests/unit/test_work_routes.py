@@ -299,6 +299,29 @@ class TestSayingWhatARunWouldCostBeforeItRuns:
         assert len(would.parts) == 1
         assert would.outstanding == 2
 
+    def test_naming_a_part_previews_that_part_rather_than_the_first_one(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """What a limit cannot express. A limit takes the first parts in tree
+        order, so a row offering to run itself has to be able to name itself."""
+        works.request_part("work", CYBER, works.RequestRevision())
+        works.request_part("work", "02/03/2.3.1", works.RequestRevision())
+
+        would = works.preview_run("work", part=[CYBER])
+
+        assert [verdict.key for verdict in would.parts] == [CYBER]
+
+    def test_a_named_part_that_would_not_run_says_why(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """The browser shows this instead of starting a pass that runs nothing
+        and reads back as a finished book."""
+        would = works.preview_run("work", part=[CYBER])
+
+        assert would.parts == ()
+        assert [held.key for held in would.passed_over] == [CYBER]
+        assert would.passed_over[0].reason == "up to date"
+
 
 class TestALoopIsRefusedWhereItCouldNotHelp:
     def test_a_work_whose_checkout_is_gone_is_refused(

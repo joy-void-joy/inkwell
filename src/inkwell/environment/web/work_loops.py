@@ -127,6 +127,7 @@ class WorkLoopManager:
         vocabulary: tuple[Abbreviation, ...] = (),
         passes: int,
         limit: int,
+        only: tuple[str, ...] = (),
         concurrency: int,
         reconciling: bool,
     ) -> WorkLoopStatus:
@@ -148,6 +149,7 @@ class WorkLoopManager:
                     vocabulary=vocabulary,
                     passes=passes,
                     limit=limit,
+                    only=only,
                     concurrency=concurrency,
                     reconciling=reconciling,
                     reporting=lambda report: self.recorded(work, report),

@@ -49,8 +49,10 @@ from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.loop import (
     DEFAULT_CONCURRENCY,
     DEFAULT_PASSES,
+    narrowed,
     run_loop,
     schedulable,
+    unpicked,
 )
 from inkwell.manuscript.mailbox import PartAnswer, PartMailbox
 from inkwell.agent.stages import unknown_format
@@ -340,6 +342,14 @@ def run_cmd(
     limit: Annotated[
         int, typer.Option(help="Most parts to run per pass; 0 for every one")
     ] = 0,
+    part: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--part",
+            help="Run only this part, by key. Repeat for several; "
+            "omit to run whatever is outstanding",
+        ),
+    ] = None,
     concurrency: Annotated[
         int, typer.Option(help="How many parts run at once")
     ] = DEFAULT_CONCURRENCY,
@@ -360,6 +370,12 @@ def run_cmd(
     to how much is outstanding — which is what `--dry-run` and `--limit` are
     for, and why the dry run is worth taking first on a work you have not run
     against before.
+
+    `--part` revises one subsection instead: the pass is kept to what you named,
+    and a named part that is up to date or held is reported rather than silently
+    passed over. It narrows the sweep rather than overriding it, so a part that
+    is already where it should be needs `request` before a run has anything to
+    do with it.
     """
     store = manuscript_store()
     tree = held_work(store, work)
@@ -367,8 +383,11 @@ def run_cmd(
     vocabulary = declared_vocabulary(store, work)
     state = store.load_state(work)
     found = sweep(state, readings(tree, vocabulary))
-    outstanding = schedulable(found, state)
+    only = tuple(part or ())
+    outstanding = narrowed(schedulable(found, state), only)
     stuck = found.blocked()
+    for held in unpicked(found, state, only):
+        typer.echo(f"  not running {held.key}: {held.reason}")
 
     if dry_run:
         # The same cut a pass takes, so what the dry run lists is what would
@@ -386,7 +405,9 @@ def run_cmd(
         return
     if not outstanding:
         typer.echo(
-            f"{work} is settled — nothing to run"
+            f"nothing to run of the {len(only)} part(s) named"
+            if only
+            else f"{work} is settled — nothing to run"
             if not stuck
             else f"{work} has nothing runnable: {len(stuck)} part(s) have lost "
             "their text, which a run cannot put back"
@@ -403,6 +424,7 @@ def run_cmd(
             vocabulary=vocabulary,
             passes=passes,
             limit=limit,
+            only=only,
             concurrency=concurrency,
             reconciling=reconcile_wave,
         )

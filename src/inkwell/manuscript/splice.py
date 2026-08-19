@@ -43,6 +43,19 @@ class PartNotFound(Exception):
     """
 
 
+class HeadingLost(Exception):
+    """A replacement that does not open with the part's own heading.
+
+    Refused rather than written, because the damage is silent and outlives the
+    run that did it. Spliced in, prose that dropped its heading leaves the file
+    with no part where the tree records one: the next sweep reads the part as
+    text the author deleted, its standing goes unrunnable, and the prose itself
+    has merged into whichever part precedes it — where a later revision of
+    *that* part will rewrite it as its own. Nothing about the file looks wrong
+    afterwards, which is why this is the one thing checked before writing.
+    """
+
+
 class PartSpan(BaseModel):
     """Which lines of a file one part occupies, its heading line included.
 
@@ -122,6 +135,22 @@ def held_text(source: str, node: ManuscriptNode) -> str:
     return "" if span is None else span.text_of(source.splitlines())
 
 
+def opens_with(replacement: str, heading: str) -> bool:
+    """Whether a rewrite still begins at the part it is replacing.
+
+    Asked of the parser rather than of the first line, so a rewrite that opens
+    with a fenced block quoting a heading is not mistaken for one that kept its
+    own. Two things have to hold: the part's heading is the first the
+    replacement declares, and nothing but blank lines precedes it — leading
+    prose would be spliced in above the heading, where the file gives it to the
+    part before rather than to this one.
+    """
+    spans = spans_in(replacement)
+    if not spans or spans[0].title != titled(heading):
+        return False
+    return not any(line.strip() for line in replacement.splitlines()[: spans[0].start])
+
+
 def spliced(source: str, heading: str, replacement: str) -> str:
     """One section file with a single part's lines replaced.
 
@@ -130,6 +159,11 @@ def spliced(source: str, heading: str, replacement: str) -> str:
     over a file it never changed — and the rewrite it was carrying would be
     gone with no way to tell it had ever existed.
 
+    Raises too where the *replacement* lost the heading, which is the same
+    argument pointed the other way: a rewrite is refused rather than written
+    into a shape that reads as an author's deletion. The part keeps the text it
+    had, and the run that returned prose it could not place says so.
+
     Whether the file ends in a newline is preserved, because that is a
     property of the file rather than of the part being replaced, and a splice
     that dropped it would show up as a change in every diff of the work.
@@ -137,6 +171,11 @@ def spliced(source: str, heading: str, replacement: str) -> str:
     span = span_of(source, heading)
     if span is None:
         raise PartNotFound(f"No part headed {titled(heading)!r} in this file")
+    if not opens_with(replacement, heading):
+        raise HeadingLost(
+            f"This rewrite does not open with the heading {titled(heading)!r}, "
+            "so there is nowhere in the file it can be placed as that part"
+        )
     lines = source.splitlines()
     rebuilt = LINE_BREAK.join(
         [*lines[: span.start], *replacement.splitlines(), *lines[span.end :]]

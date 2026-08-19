@@ -63,6 +63,7 @@ from inkwell.corpus.storage import (
 from inkwell.corpus.tagging import (
     DocumentTagger,
     ModelTagJudge,
+    RetagStep,
     TagJudge,
     TagJudgement,
     TagRequest,
@@ -1593,6 +1594,71 @@ async def test_documents_already_judged_against_this_vocabulary_are_left_alone(
     )
     assert forced.retagged == 2
     assert forced.changed == 0
+
+
+async def test_a_retag_says_where_it_has_got_to_as_each_document_lands(
+    tmp_path: Path,
+) -> None:
+    """A run of a few hundred documents says nothing at all otherwise.
+
+    Judging rewrites tags in place rather than adding documents, so a watcher
+    counting the corpus from outside sees the same number throughout — which is
+    why the run itself has to say. Per document rather than per source, because
+    a source of two hundred and a source of two are one tick each otherwise.
+    """
+    ingested = await ingested_with(tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)))
+
+    steps = list[RetagStep]()
+    await retag_source(
+        ingested.declaration,
+        ingested.store,
+        DocumentTagger(
+            vocabulary=wider_vocabulary(HARNESS_DESIGN),
+            judge=FixtureJudge(default=(HARNESS_DESIGN.tag,)),
+        ),
+        concurrency=1,
+        progress=steps.append,
+    )
+
+    assert [(step.source, step.done, step.total) for step in steps] == [
+        (ingested.declaration.key, 1, 2),
+        (ingested.declaration.key, 2, 2),
+    ]
+
+
+async def test_a_retag_records_each_judgement_as_it_lands(tmp_path: Path) -> None:
+    """Every judgement is a delegated session, so losing one is losing its cost.
+
+    Written as each lands rather than once the source finishes, which is what
+    leaves a run stopped part way through holding what it already paid for.
+    Read off disk from inside the run, because what an interrupted run would
+    have left is exactly what the index says while the run is still going.
+    """
+    ingested = await ingested_with(tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)))
+
+    landed = list[int]()
+
+    def count_on_disk(_step: RetagStep) -> None:
+        landed.append(
+            sum(
+                1
+                for document in ingested.shard().documents
+                if HARNESS_DESIGN.tag in document.tags.core
+            )
+        )
+
+    await retag_source(
+        ingested.declaration,
+        ingested.store,
+        DocumentTagger(
+            vocabulary=wider_vocabulary(HARNESS_DESIGN),
+            judge=FixtureJudge(default=(HARNESS_DESIGN.tag,)),
+        ),
+        concurrency=1,
+        progress=count_on_disk,
+    )
+
+    assert landed == [1, 2]
 
 
 async def test_a_judgement_that_does_not_come_back_leaves_earlier_tags_standing(

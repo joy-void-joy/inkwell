@@ -20,6 +20,7 @@ a single fetch.
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -28,7 +29,12 @@ from inkwell.corpus.registry import (
     SourceDeclaration,
     corpus_vocabulary,
 )
-from inkwell.corpus.storage import CorpusStore, StoredDocument, now_stamp
+from inkwell.corpus.storage import (
+    CorpusStore,
+    SourceShard,
+    StoredDocument,
+    now_stamp,
+)
 from inkwell.corpus.tags import DocumentTags, TagTerm, TagVocabulary, folded
 
 logger = logging.getLogger(__name__)
@@ -344,6 +350,41 @@ class RetagReport(BaseModel):
         return f"{self.source}: {counted}"
 
 
+class RetagStep(BaseModel):
+    """One document judged, told to whoever is watching the run.
+
+    Reported *from* the run rather than read off the corpus, which is where
+    this differs from a sweep's progress. A sweep adds documents, so counting
+    what is on disk tells you how far it got; judging rewrites tags in place
+    and leaves the count alone, so a watcher reading the store sees the same
+    number throughout and cannot tell a run that has judged nothing from one
+    that has judged half.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source: str
+    done: int
+    total: int
+
+
+def stale_documents(
+    shard: SourceShard, vocabulary: TagVocabulary, *, force: bool = False
+) -> tuple[StoredDocument, ...]:
+    """The documents a re-tag would judge — those not current against ``vocabulary``.
+
+    Separate from ``retag_source`` so a caller can size the work before
+    starting it: a bar over documents needs its denominator before the first
+    judgement, and this is a read of the index rather than a second pass over
+    the corpus.
+    """
+    return tuple(
+        document
+        for document in shard.documents
+        if force or not document.tags.current(vocabulary)
+    )
+
+
 DEFAULT_RETAG_CONCURRENCY = 4
 """How many documents of one source are judged at once. Each is a delegated
 session, so this is a ceiling on sessions rather than on requests."""
@@ -356,6 +397,7 @@ async def retag_source(
     *,
     force: bool = False,
     concurrency: int = DEFAULT_RETAG_CONCURRENCY,
+    progress: Callable[[RetagStep], None] | None = None,
 ) -> RetagReport:
     """Re-tag one source's stored documents, fetching nothing.
 
@@ -365,26 +407,32 @@ async def retag_source(
     otherwise, so re-running after no edit is nearly free — and costs no write
     either, which keeps a source nothing was stored for from gaining an index
     that says it holds nothing.
+
+    Each judgement is recorded as it lands rather than at the end, so a run
+    interrupted partway through a source keeps every judgement it paid for.
+    Writing the index costs nothing against the model call that preceded it,
+    and recording is synchronous, so the concurrent judgements never interleave
+    with each other's writes.
     """
     shard = store.load(declaration)
     limiter = asyncio.Semaphore(concurrency)
-    stale = [
-        document
-        for document in shard.documents
-        if force or not document.tags.current(tagger.vocabulary)
-    ]
+    stale = stale_documents(shard, tagger.vocabulary, force=force)
+    judged = 0
 
     async def reassign(document: StoredDocument) -> Assignment:
+        nonlocal judged
         async with limiter:
-            return await tagger.assign(
+            assignment = await tagger.assign(
                 declaration, document, store.document_path(declaration.key, document)
             )
+        shard.record_document(assignment.applied_to(document))
+        store.save(shard)
+        judged += 1
+        if progress is not None:
+            progress(RetagStep(source=declaration.key, done=judged, total=len(stale)))
+        return assignment
 
     assignments = list(await asyncio.gather(*(reassign(one) for one in stale)))
-    for document, assignment in zip(stale, assignments):
-        shard.record_document(assignment.applied_to(document))
-    if stale:
-        store.save(shard)
 
     return RetagReport(
         source=declaration.key,
@@ -408,12 +456,24 @@ async def retag_corpus(
     *,
     force: bool = False,
     concurrency: int = DEFAULT_RETAG_CONCURRENCY,
+    progress: Callable[[RetagStep], None] | None = None,
 ) -> tuple[RetagReport, ...]:
-    """Re-tag several sources in turn, reporting each."""
+    """Re-tag several sources in turn, reporting each.
+
+    The per-source report comes when that source finishes, so a run over a
+    dozen sources says nothing for as long as it takes unless something is
+    watching ``progress`` — which is why the callback is per document rather
+    than per source.
+    """
     assigning = tagger if tagger is not None else DocumentTagger()
     reports = [
         await retag_source(
-            declaration, store, assigning, force=force, concurrency=concurrency
+            declaration,
+            store,
+            assigning,
+            force=force,
+            concurrency=concurrency,
+            progress=progress,
         )
         for declaration in declarations
     ]

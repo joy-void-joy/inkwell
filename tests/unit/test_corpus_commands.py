@@ -14,7 +14,9 @@ import pytest
 from typer.testing import CliRunner
 
 import inkwell.devtools.corpus as commands
+from inkwell.corpus.registry import declaration_for
 from inkwell.corpus.storage import CorpusStore, SourceShard, StoredDocument
+from inkwell.corpus.tagging import RetagReport, RetagStep
 from inkwell.corpus.tags import DocumentTags
 
 
@@ -97,3 +99,53 @@ def test_a_judged_corpus_is_embedded_without_being_asked_twice(
     result = CliRunner().invoke(commands.app, ["embed"])
 
     assert "have nothing to embed" not in result.output
+
+
+async def announcing(
+    declarations: tuple[object, ...],
+    corpus: CorpusStore,
+    *,
+    force: bool,
+    concurrency: int,
+    progress: object,
+) -> tuple[RetagReport, ...]:
+    """A re-tag that judges nothing and reports two documents landing."""
+    assert callable(progress)
+    for done in (1, 2):
+        progress(RetagStep(source="aisi", done=done, total=2))
+    return (RetagReport(source="aisi", examined=2, retagged=2),)
+
+
+def test_a_retag_says_where_it_has_got_to_where_no_bar_can_be_drawn(
+    swept: CorpusStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Captured or piped, a redrawing bar is escape codes rather than a display.
+
+    The failure this refuses is the one that made the command look broken:
+    deciding a bar cannot be drawn and then saying nothing at all for as long
+    as a few hundred delegated judgements take.
+    """
+    monkeypatch.setattr(commands.sys.stderr, "isatty", lambda: False)
+    monkeypatch.setattr(commands, "retag_corpus", announcing)
+    declaration = declaration_for("aisi")
+    assert declaration is not None
+
+    commands.judge_with(swept, (declaration,), force=False, concurrency=1)
+
+    said = capsys.readouterr()
+    assert "aisi 1/2" in said.err
+    assert "aisi 2/2" in said.err
+    assert "aisi: examined 2" in said.out
+
+
+def test_a_retag_draws_a_bar_over_the_documents_it_has_to_judge(
+    swept: CorpusStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sized in documents, because a source of two hundred is one tick otherwise."""
+    monkeypatch.setattr(commands.sys.stderr, "isatty", lambda: True)
+
+    bar = commands.judging_bar(2)
+
+    assert bar is not None
+    assert bar.total == 2
+    bar.close()

@@ -61,7 +61,12 @@ from inkwell.corpus.semantics import (
     embed_sources,
 )
 from inkwell.corpus.storage import CorpusStore, pending_entries
-from inkwell.corpus.tagging import DEFAULT_RETAG_CONCURRENCY, retag_corpus
+from inkwell.corpus.tagging import (
+    DEFAULT_RETAG_CONCURRENCY,
+    RetagStep,
+    retag_corpus,
+    stale_documents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +417,29 @@ def indexed_declarations(
     )
 
 
+def judging_bar(pending: int) -> tqdm | None:
+    """A bar to draw the judging in, or nothing where one could not be seen.
+
+    Sized in documents rather than in sources, because a source of two hundred
+    and a source of two are one tick each otherwise — and it is the two hundred
+    that decides how long the run takes.
+
+    ``None`` where stderr is not a terminal, on the same grounds as a sweep's
+    bar: a redrawing bar needs one to redraw over, and the caller says the same
+    thing in lines instead.
+    """
+    if not sys.stderr.isatty():
+        return None
+    return tqdm(
+        total=pending or None,
+        unit="doc",
+        desc="retagging",
+        leave=True,
+        ncols=get_terminal_size(fallback=(FALLBACK_WIDTH, 24)).columns
+        or FALLBACK_WIDTH,
+    )
+
+
 def judge_with(
     corpus: CorpusStore,
     declarations: tuple[SourceDeclaration, ...],
@@ -419,11 +447,42 @@ def judge_with(
     force: bool,
     concurrency: int,
 ) -> None:
-    """Re-tag ``declarations`` and print what each source did."""
-    typer.echo(f"vocabulary {corpus_vocabulary().signature()}\n")
-    reports = asyncio.run(
-        retag_corpus(declarations, corpus, force=force, concurrency=concurrency)
+    """Re-tag ``declarations``, drawing the run, and print what each source did.
+
+    The denominator is counted up front, off the indexes, because a run of a
+    few hundred documents at four delegated sessions at a time is measured in
+    tens of minutes and a report that only arrives at the end is a report that
+    arrives after the user has decided the command is broken.
+    """
+    vocabulary = corpus_vocabulary()
+    typer.echo(f"vocabulary {vocabulary.signature()}\n")
+    pending = sum(
+        len(stale_documents(corpus.load(declaration), vocabulary, force=force))
+        for declaration in declarations
     )
+    bar = judging_bar(pending)
+
+    def stepped(step: RetagStep) -> None:
+        """One document judged, drawn however this run can be watched."""
+        if bar is None:
+            typer.echo(f"{step.source} {step.done}/{step.total}", err=True)
+            return
+        bar.update(1)
+        bar.set_postfix_str(f"{step.source} {step.done}/{step.total}")
+
+    try:
+        reports = asyncio.run(
+            retag_corpus(
+                declarations,
+                corpus,
+                force=force,
+                concurrency=concurrency,
+                progress=stepped,
+            )
+        )
+    finally:
+        if bar is not None:
+            bar.close()
     for report in reports:
         typer.echo(report.summary())
 

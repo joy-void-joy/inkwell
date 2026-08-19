@@ -12,8 +12,11 @@ import type {
   SessionDetail,
   SessionSummary,
   SuppliedValues,
+  WorkImport,
+  WorkLoopStatus,
   WorkSummary,
   WorkTree,
+  WouldRun,
 } from "../types";
 
 const BASE = `${import.meta.env.BASE_URL}api`;
@@ -345,6 +348,18 @@ export async function requestWorkPart(
   return res.json();
 }
 
+export async function clearWorkPart(
+  work: string,
+  key: string,
+): Promise<PartNode> {
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/parts/${key}/clear`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function fetchWhatItReaches(
   work: string,
   subject: string,
@@ -353,6 +368,63 @@ export async function fetchWhatItReaches(
   const params = new URLSearchParams({ subject, kind });
   const res = await fetch(
     `${BASE}/works/${encodeURIComponent(work)}/reaches?${params}`,
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function recordWork(request: {
+  work: string;
+  chapters: string;
+  title?: string;
+  vocabulary?: string;
+  adopt?: boolean;
+}): Promise<WorkImport> {
+  const res = await fetch(`${BASE}/works`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// Asked before the run rather than after: every part a pass picks up is a whole
+// pipeline run, so this is what turns "start" from a blank cheque into a choice.
+export async function previewWorkRun(
+  work: string,
+  limit = 0,
+): Promise<WouldRun> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/would-run?${params}`,
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function startWorkRun(
+  work: string,
+  request: {
+    passes?: number;
+    limit?: number;
+    concurrency?: number;
+    reconcile?: boolean;
+  },
+): Promise<WorkLoopStatus> {
+  const res = await fetch(`${BASE}/works/${encodeURIComponent(work)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function stopWorkRun(work: string): Promise<WorkLoopStatus> {
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/run/stop`,
+    { method: "POST" },
   );
   if (!res.ok) throw new Error(await res.text());
   return res.json();

@@ -10,6 +10,7 @@ export type Staleness =
   | "fresh"
   | "never-built"
   | "requested"
+  | "source-gone"
   | "source-moved"
   | "upstream";
 
@@ -41,14 +42,63 @@ export interface PartNode {
   standing: NodeStanding;
   reasons: string[];
   questions: number;
+  session: string;
+  below: number;
+  outstanding_below: number;
+}
+
+export interface PartResult {
+  key: string;
+  outcome: "rewritten" | "parked" | "failed";
+  detail: string;
+}
+
+export interface PassReport {
+  work: string;
+  scheduled: string[];
+  results: PartResult[];
+  conflicts: string[];
+  remaining: number;
+  blocked: number;
+}
+
+export interface WorkLoopStatus {
+  work: string;
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  passes: PassReport[];
+  stopped: boolean;
+  failure: string;
 }
 
 export interface WorkTree {
   id: string;
   title: string;
+  root: string;
+  rooted: boolean;
   nodes: PartNode[];
   outstanding: number;
+  blocked: number;
   settled: boolean;
+  loop: WorkLoopStatus | null;
+}
+
+export interface WouldRun {
+  work: string;
+  parts: { key: string; staleness: Staleness; reasons: string[] }[];
+  outstanding: number;
+  blocked: { key: string; staleness: Staleness; reasons: string[] }[];
+}
+
+export interface WorkImport {
+  work: string;
+  title: string;
+  root: string;
+  parts: number;
+  vocabulary: number;
+  dependencies: number;
+  adopted: number;
 }
 
 export interface QuestionView {
@@ -70,6 +120,7 @@ const STALENESS_LABELS: Record<Staleness, string> = {
   fresh: "up to date",
   "never-built": "never built",
   requested: "revision asked for",
+  "source-gone": "its text is not where the work was imported from",
   "source-moved": "edited since it was built",
   upstream: "something it leans on changed",
 };

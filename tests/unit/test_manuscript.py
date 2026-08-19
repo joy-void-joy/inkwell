@@ -11,6 +11,14 @@ from pathlib import Path
 
 import pytest
 
+from inkwell.agent.glossary import (
+    DECLARED_VOCABULARY,
+    ChapterGlossary,
+    GlossaryEntry,
+    NodeGlossary,
+    read_glossary,
+    write_chapter_glossary,
+)
 from inkwell.agent.models import AgentSessionResult, WritingOutput
 from inkwell.agent.stages import unknown_format
 from inkwell.manuscript.facts import (
@@ -26,7 +34,7 @@ from inkwell.manuscript.graph import (
     readings,
     sweep,
 )
-from inkwell.manuscript.loop import schedulable
+from inkwell.manuscript.loop import narrowed, schedulable, unpicked
 from inkwell.manuscript.mailbox import (
     PartAnswer,
     PartMailbox,
@@ -41,8 +49,14 @@ from inkwell.manuscript.ingest import (
     read_manuscript,
 )
 from inkwell.manuscript import runner as runner_module
-from inkwell.manuscript.runner import run_part
-from inkwell.manuscript.splice import PartNotFound, held_text, spliced
+from inkwell.manuscript.runner import coinages, ledger, named_in, run_part
+from inkwell.manuscript.splice import (
+    HeadingLost,
+    PartNotFound,
+    held_text,
+    opens_with,
+    spliced,
+)
 from inkwell.manuscript.state import WorkState
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
@@ -821,3 +835,315 @@ class TestAnUndeclaredFormatIsRefusedWhereItIsTyped:
         refusal = unknown_format("textbok")
 
         assert "textbok" in refusal and "textbook" in refusal
+
+
+class TestAPartRunSharesTheWorksTermLedger:
+    """The vocabulary has to reach the writers while they write.
+
+    Worth pinning at the call: the defect this replaces was a run whose writers
+    coined into a file under the session's notes while the harvest that carried
+    those terms into the work read a path under the work's own store. Nothing
+    was ever at that path, so the work's vocabulary never grew, and a part told
+    to look up what the work already calls something was reaching into an empty
+    file — a rule with no data behind it.
+    """
+
+    def part_of(self, tmp_path: Path) -> tuple[ManuscriptStore, Manuscript, str]:
+        """A work in a store, and the key of the part these tests revise."""
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        work = read_manuscript(atlas_like(tmp_path))
+        return store, work, "02/03/2.3.2"
+
+    def declare(self, store: ManuscriptStore, term: str, meaning: str) -> None:
+        """What the authors of the work spelled out before any run existed."""
+        path = store.glossary_path("atlas", DECLARED_VOCABULARY)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_chapter_glossary(
+            path,
+            ChapterGlossary(terms=[GlossaryEntry(term=term, meaning=meaning)]),
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_run_is_handed_the_works_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store, work, key = self.part_of(tmp_path)
+        node = work.node(key)
+        assert node is not None
+        asked: dict[str, object] = {}
+
+        async def record(**passed: object) -> AgentSessionResult:
+            asked.update(passed)
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        await run_part(store, "atlas", work, node, session_id="s")
+
+        scope = asked["glossary"]
+        assert isinstance(scope, NodeGlossary)
+        assert scope.own() == store.glossary_path("atlas", key)
+
+    def test_the_authors_vocabulary_answers_a_writer_before_a_run_coins(
+        self, tmp_path: Path
+    ) -> None:
+        """The read that a writer's lookup goes through, on a work no run has
+        touched: an empty answer here is what let a part rename what the book
+        had already settled."""
+        store, _, key = self.part_of(tmp_path)
+        self.declare(store, "Superintelligence", "Capability past every human.")
+
+        held = read_glossary(ledger(store, "atlas", key))
+
+        assert [entry.term for entry in held.terms] == ["Superintelligence"]
+
+    def test_the_declared_file_is_read_before_anything_a_part_coined(
+        self, tmp_path: Path
+    ) -> None:
+        """First-definition-wins makes the authors' spelling bind, and only the
+        read order says the authors go first."""
+        store, _, key = self.part_of(tmp_path)
+        self.declare(store, "Superintelligence", "The authors' meaning.")
+        write_chapter_glossary(
+            store.glossary_path("atlas", "02/03/2.3.1"),
+            ChapterGlossary(
+                terms=[GlossaryEntry(term="Superintelligence", meaning="A run's.")]
+            ),
+        )
+
+        first = read_glossary(ledger(store, "atlas", key)).terms[0]
+
+        assert first.meaning == "The authors' meaning."
+
+    def test_a_term_a_run_coined_reaches_the_parts_leaning_on_it(
+        self, tmp_path: Path
+    ) -> None:
+        store, _, key = self.part_of(tmp_path)
+        scope = ledger(store, "atlas", key)
+        scope.own().parent.mkdir(parents=True, exist_ok=True)
+        before = named_in(scope)
+        write_chapter_glossary(
+            scope.own(),
+            ChapterGlossary(
+                terms=[GlossaryEntry(term="Sharp Left Turn", meaning="A.")]
+            ),
+        )
+
+        moved = coinages(scope, before, key)
+
+        assert [change.dependency.subject for change in moved] == ["Sharp Left Turn"]
+        assert "coined" in moved[0].detail
+
+    def test_a_term_the_part_already_held_moves_nothing(self, tmp_path: Path) -> None:
+        """What keeps the loop settling. The write stage reseeds this file every
+        run, so a part that coins the same term again has moved nothing — and
+        saying it had would dirty everything downstream on every pass."""
+        store, _, key = self.part_of(tmp_path)
+        scope = ledger(store, "atlas", key)
+        scope.own().parent.mkdir(parents=True, exist_ok=True)
+        settled = ChapterGlossary(
+            terms=[GlossaryEntry(term="Sharp Left Turn", meaning="One meaning.")]
+        )
+        write_chapter_glossary(scope.own(), settled)
+        before = named_in(scope)
+        write_chapter_glossary(scope.own(), settled)
+
+        assert coinages(scope, before, key) == ()
+
+    def test_a_meaning_the_run_replaced_is_a_change(self, tmp_path: Path) -> None:
+        """Downstream parts lean on what a term means, so a name kept over a
+        meaning replaced is the change they most need to hear."""
+        store, _, key = self.part_of(tmp_path)
+        scope = ledger(store, "atlas", key)
+        scope.own().parent.mkdir(parents=True, exist_ok=True)
+        write_chapter_glossary(
+            scope.own(),
+            ChapterGlossary(terms=[GlossaryEntry(term="Deception", meaning="Old.")]),
+        )
+        before = named_in(scope)
+        write_chapter_glossary(
+            scope.own(),
+            ChapterGlossary(terms=[GlossaryEntry(term="Deception", meaning="New.")]),
+        )
+
+        moved = coinages(scope, before, key)
+
+        assert [change.dependency.subject for change in moved] == ["Deception"]
+        assert "redefined" in moved[0].detail
+
+
+class TestARewriteThatLostItsHeadingIsRefused:
+    """Spliced in, prose that dropped its heading leaves the file with no part
+    where the tree records one: the part reads as text the author deleted, and
+    the prose itself has merged into whichever part precedes it. Nothing looks
+    wrong afterwards, which is why it is checked before the write rather than
+    reported after it."""
+
+    def test_a_replacement_without_the_heading_is_refused(self) -> None:
+        with pytest.raises(HeadingLost):
+            spliced(MISUSE, "2.3.2 Cyber Risk {: #02}", "Rewritten prose.\n")
+
+    def test_prose_before_the_heading_is_refused(self) -> None:
+        """Leading prose splices in above the heading, where the file gives it
+        to the part before rather than to this one."""
+        with pytest.raises(HeadingLost):
+            spliced(
+                MISUSE,
+                "2.3.2 Cyber Risk {: #02}",
+                "Here is the revision.\n\n## 2.3.2 Cyber Risk\n\nProse.\n",
+            )
+
+    def test_a_heading_inside_a_fence_does_not_count_as_keeping_it(self) -> None:
+        with pytest.raises(HeadingLost):
+            spliced(
+                MISUSE,
+                "2.3.2 Cyber Risk {: #02}",
+                "```\n## 2.3.2 Cyber Risk\n```\n",
+            )
+
+    def test_a_rewrite_of_another_part_is_refused(self) -> None:
+        """The one that would otherwise land silently: valid markdown, a real
+        heading, and the wrong part."""
+        with pytest.raises(HeadingLost):
+            spliced(
+                MISUSE,
+                "2.3.2 Cyber Risk {: #02}",
+                "## 2.3.1 Bio Risk\n\nProse.\n",
+            )
+
+    def test_a_replacement_that_kept_its_heading_is_spliced(self) -> None:
+        held = spliced(
+            MISUSE, "2.3.2 Cyber Risk {: #02}", "## 2.3.2 Cyber Risk\n\nNew.\n"
+        )
+
+        assert "New." in held
+        assert "## 2.3.1 Bio Risk {: #01}" in held
+
+    def test_the_anchor_the_author_wrote_need_not_come_back(self) -> None:
+        """Matched on the title, as everything else about a part is: the
+        attribute list is presentation, and refusing on it would fail every
+        rewrite that rendered the heading plainly."""
+        assert opens_with("## 2.3.2 Cyber Risk\n", "2.3.2 Cyber Risk {: #02}")
+
+    @pytest.mark.asyncio
+    async def test_the_part_keeps_its_text_and_the_run_says_what_happened(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chapters = atlas_like(tmp_path)
+        work = read_manuscript(chapters)
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+        before = (chapters / "02" / "03.md").read_text(encoding="utf-8")
+
+        async def unheaded(**passed: object) -> AgentSessionResult:
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="Prose with no heading.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", unheaded)
+        outcome = await run_part(
+            ManuscriptStore(root=tmp_path / "manuscripts"),
+            "atlas",
+            work,
+            node,
+            session_id="s",
+        )
+
+        assert outcome.ended() == "failed"
+        assert "2.3.2 Cyber Risk" in outcome.failure
+        assert (chapters / "02" / "03.md").read_text(encoding="utf-8") == before
+
+
+class TestAPassCanBeKeptToOnePart:
+    """Revising one subsection is the thing an author asks for most, and a limit
+    cannot express it: a limit takes the first parts in tree order, so asking
+    for one part by naming it and cutting the pass to one runs whichever part
+    happens to come first in the book."""
+
+    def sweep_of(self, tmp_path: Path) -> tuple[WorkSweep, WorkState]:
+        """A work where two parts are outstanding and the rest are settled."""
+        work = read_manuscript(atlas_like(tmp_path))
+        held = readings(work)
+        state = adopted(WorkState(), held)
+        state = state.declared("02/03/2.3.1", "requested", "tighten it")
+        state = state.declared("02/03/2.3.3", "requested", "and this one")
+        return sweep(state, held), state
+
+    def test_naming_nothing_is_the_whole_sweep(self, tmp_path: Path) -> None:
+        found, state = self.sweep_of(tmp_path)
+        picked = schedulable(found, state)
+
+        assert narrowed(picked, ()) == picked
+
+    def test_naming_one_part_leaves_the_others(self, tmp_path: Path) -> None:
+        found, state = self.sweep_of(tmp_path)
+
+        picked = narrowed(schedulable(found, state), ("02/03/2.3.3",))
+
+        assert [verdict.key for verdict in picked] == ["02/03/2.3.3"]
+
+    def test_a_named_part_keeps_the_reasons_it_would_have_had(
+        self, tmp_path: Path
+    ) -> None:
+        """Narrowing the sweep rather than overriding it is what carries the
+        reasons through: a part run without them is revised on general
+        principle."""
+        found, state = self.sweep_of(tmp_path)
+
+        picked = narrowed(schedulable(found, state), ("02/03/2.3.1",))
+
+        assert picked[0].reasons == ("tighten it",)
+
+    def test_a_named_part_that_is_up_to_date_is_reported_rather_than_run(
+        self, tmp_path: Path
+    ) -> None:
+        found, state = self.sweep_of(tmp_path)
+
+        passed = unpicked(found, state, ("02/03/2.3.2",))
+
+        assert [held.key for held in passed] == ["02/03/2.3.2"]
+        assert passed[0].reason == "up to date"
+
+    def test_a_part_the_work_does_not_have_is_reported_as_such(
+        self, tmp_path: Path
+    ) -> None:
+        """A mistyped key is the likeliest way to name a part, and it looks
+        exactly like a settled work from a pass that ran nothing."""
+        found, state = self.sweep_of(tmp_path)
+
+        passed = unpicked(found, state, ("02/03/9.9.9",))
+
+        assert passed[0].reason == "not a part of this work"
+
+    def test_a_part_another_run_holds_says_so(self, tmp_path: Path) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        held = readings(work)
+        state = adopted(WorkState(), held)
+        state = state.declared("02/03/2.3.1", "running", "picked up by a pass", "s1")
+
+        passed = unpicked(sweep(state, held), state, ("02/03/2.3.1",))
+
+        assert "running" in passed[0].reason
+
+    def test_a_part_parked_on_a_question_is_not_re_asked(self, tmp_path: Path) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        held = readings(work)
+        state = adopted(WorkState(), held)
+        state = state.declared("02/03/2.3.1", "parked", "waiting on an answer", "s1")
+
+        passed = unpicked(sweep(state, held), state, ("02/03/2.3.1",))
+
+        assert "parked" in passed[0].reason
+
+    def test_naming_a_part_nothing_asked_for_runs_nothing(self, tmp_path: Path) -> None:
+        """Naming a part is not itself a request. Two ways to ask for a revision
+        would disagree about why the part was being revised, so the door to a
+        settled part stays `request`."""
+        found, state = self.sweep_of(tmp_path)
+
+        assert narrowed(schedulable(found, state), ("02/03/2.3.2",)) == ()

@@ -3451,6 +3451,7 @@ class PipelineRunner:
         refs: list[str] | None = None,
         target_format: str = "auto",
         assignment: ChapterAssignment | None = None,
+        glossary: GlossaryScope | None = None,
         existing_doc_id: str | None = None,
         session_state: WritingSessionState | None = None,
         notes: PipelineNotes | None = None,
@@ -3469,6 +3470,7 @@ class PipelineRunner:
         self.context_refs: list[str] = list(self.refs)
         self.target_format = target_format
         self.launched_assignment = assignment
+        self.launched_glossary = glossary
         self.existing_doc_id = existing_doc_id
         self.state = session_state or WritingSessionState()
         self.notes = notes
@@ -3551,7 +3553,15 @@ class PipelineRunner:
         stage that hands writers a glossary — writing, merging, rewriting after
         a restart — is reaching into the same scope, and a chapter's coinages
         cannot reach the merge that assembles it only for one of the three.
+
+        A launch that named the scope outranks anything derived here, for the
+        same reason a launch that named the chapter does: the composer that
+        knows this run is one part of a work knows which ledger that part shares
+        with its siblings, and a run handed one subsection could not work it out
+        from a plan of its own.
         """
+        if self.launched_glossary is not None:
+            return self.launched_glossary
         return glossary_scope_for(self.ensure_notes(), self.placement)
 
     @property
@@ -6337,6 +6347,7 @@ async def run_pipeline(
     refs: list[str] | None = None,
     target_format: str = "auto",
     assignment: ChapterAssignment | None = None,
+    glossary: GlossaryScope | None = None,
     existing_doc_id: str | None = None,
     session_state: WritingSessionState | None = None,
     notes: PipelineNotes | None = None,
@@ -6354,6 +6365,7 @@ async def run_pipeline(
         refs=refs,
         target_format=target_format,
         assignment=assignment,
+        glossary=glossary,
         existing_doc_id=existing_doc_id,
         session_state=session_state,
         notes=notes,

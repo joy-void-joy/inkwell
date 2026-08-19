@@ -5,11 +5,13 @@ something is *called* has to live outside any one writer and outside any one
 run. That is this ledger: a writer coins into it, every other writer reads it,
 and the first definition of a term is the one that binds.
 
-Two scopes, one shape. A standalone article's ledger is one file in the run's
+Three scopes, one shape. A standalone article's ledger is one file in the run's
 own notes and dies with them, because no later run needs the terms it settled.
 A book chapter's ledger is a file per chapter under the book's record, read in
 chapter order — see :mod:`inkwell.agent.book` for the partition and why it
-needs no lock. A row measures a draft against the same reading a writer gets,
+needs no lock. An imported work's ledger is that partition taken down to the
+part, and reads the vocabulary its authors declared before anything a run
+coined. A row measures a draft against the same reading a writer gets,
 through :func:`read_glossary` and :meth:`BookGlossary.canon`, so what the
 writer is handed and what the draft is checked against cannot disagree.
 

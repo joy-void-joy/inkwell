@@ -27,6 +27,7 @@ from lup.telemetry.trace import TraceLogger
 
 import inkwell.agent.config as config_mod
 from inkwell.agent.book import ChapterAssignment
+from inkwell.agent.glossary import GlossaryScope
 from inkwell.agent.models import AgentSessionResult, PipelineSnapshot, SourceRole
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
@@ -172,6 +173,7 @@ async def run_session(
     restart_from_stage: str | None = None,
     target_format: str = "auto",
     assignment: ChapterAssignment | None = None,
+    glossary: GlossaryScope | None = None,
     existing_doc_id: str | None = None,
     session_id: str | None = None,
     task_id: str | None = None,
@@ -200,6 +202,10 @@ async def run_session(
     - assignment: Which book this run writes a chapter of, and which chapter of
       it where the launch settled that too; absent for a standalone piece,
       which stays bookless rather than becoming a book of one chapter
+    - glossary: Which term ledger this run's writers coin into and read, where
+      the launch knows one the run could not derive — a part of an imported
+      work shares its work's ledger, and a run handed one subsection has no
+      way of finding it
     """
     if session_id is None:
         session_id = resume_session_id or uuid.uuid4().hex[:16]
@@ -251,6 +257,7 @@ async def run_session(
                 refs=refs or [],
                 target_format=target_format,
                 assignment=assignment,
+                glossary=glossary,
                 existing_doc_id=existing_doc_id,
                 session_state=setup.session_state,
                 notes=pipeline_notes,
@@ -269,6 +276,7 @@ async def run_session(
                 refs=refs or [],
                 target_format=target_format,
                 assignment=assignment,
+                glossary=glossary,
                 existing_doc_id=existing_doc_id,
                 session_state=setup.session_state,
                 notes=pipeline_notes,

@@ -15,9 +15,11 @@ into place by this module, which is also the only thing that touches the
 work's state. That keeps the loop's concurrency story simple — the loop is the
 single writer of state, a run writes one span of one file — and it keeps a
 book-length feature out of a pipeline that already runs to a quarter of a
-megabyte. The cost is that the run's writers coin into their own run glossary
-rather than straight into the work's, so what they coined is carried across
-afterwards; the seam is named in :func:`harvested` rather than hidden.
+megabyte. What the run is told is nonetheless enough to reach what it shares
+with its siblings: the work's term ledger is handed in as the scope its writers
+coin into, so the authors' declared vocabulary answers a writer's lookup during
+the run rather than being reconciled against its prose afterwards, when the
+name is already on the page.
 
 **The format comes from the work, not from the part.** A run handed one
 subsection and asked to infer its own format is guessing at a book it can see a
@@ -33,6 +35,7 @@ to idle would be picked up again on the next pass and fail the same way.
 """
 
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
@@ -40,10 +43,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.core import run_session
 from inkwell.agent.glossary import (
-    ChapterGlossary,
     GlossaryEntry,
+    NodeGlossary,
     load_chapter_glossary,
-    write_chapter_glossary,
 )
 from inkwell.manuscript.facts import (
     Consumption,
@@ -52,7 +54,12 @@ from inkwell.manuscript.facts import (
     consumption_of,
 )
 from inkwell.manuscript.links import links_from
-from inkwell.manuscript.splice import PartNotFound, held_text, spliced
+from inkwell.manuscript.splice import (
+    HeadingLost,
+    PartNotFound,
+    held_text,
+    spliced,
+)
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 from inkwell.manuscript.vocabulary import Abbreviation, terms_used
@@ -182,57 +189,59 @@ def own_change(key: str) -> ProposedChange:
     )
 
 
-def harvested(
-    store: ManuscriptStore, work: str, key: str, run_glossary: Path
-) -> tuple[ProposedChange, ...]:
-    """Carry what a run coined into the work's ledger, and say what is new.
+def ledger(store: ManuscriptStore, work: str, key: str) -> NodeGlossary:
+    """The term ledger one part's run coins into and reads.
 
-    The seam this module's outside-composition costs. A run's writers coin
-    into the run's own glossary; this moves those terms into the part's file
-    under the work, where the next part to run will read them.
-
-    First definition still wins, and the work's existing terms are what it
-    wins against: a term the work already has is not re-coined and publishes
-    no change, so a run that reached for an established name moves nothing.
-    Only a genuinely new coinage is a change other parts could care about.
+    Handed to the run rather than reconciled after it, which is what makes the
+    work's vocabulary reach the writers at all: the scope reads the authors'
+    declared file first and every sibling part's after it, so a writer asking
+    what something is called is answered by the work rather than by an empty
+    file, and first-definition-wins is settled while the prose is being written
+    instead of discovered once it is too late to change.
     """
-    coined = load_chapter_glossary(run_glossary).terms
-    if not coined:
-        return ()
-    known = {
-        entry.term.casefold()
-        for path in sorted(store.glossary_dir(work).glob("*.json"))
-        for entry in load_chapter_glossary(path).terms
+    return NodeGlossary(store=store, work=work, key=key)
+
+
+def named_in(scope: NodeGlossary) -> dict[str, GlossaryEntry]:
+    """Every term this part's own file records, by the name it answers to.
+
+    Read once before a run and once after, because the difference is what the
+    run settled. Carrying the whole entry rather than the name is what lets a
+    term the part redefined count as a change as well as one it newly coined:
+    downstream parts lean on what a term *means*, so a name kept over a meaning
+    replaced is exactly the change they most need to hear.
+    """
+    return {
+        entry.term.casefold(): entry
+        for entry in load_chapter_glossary(scope.own()).terms
     }
-    fresh = [entry for entry in coined if entry.term.casefold() not in known]
-    if not fresh:
-        return ()
-    own = store.glossary_path(work, key)
-    own.parent.mkdir(parents=True, exist_ok=True)
-    held = load_chapter_glossary(own)
-    write_chapter_glossary(
-        own,
-        ChapterGlossary(
-            run=key,
-            conventions=held.conventions,
-            terms=[
-                *held.terms,
-                *[
-                    GlossaryEntry(
-                        term=entry.term, meaning=entry.meaning, aliases=entry.aliases
-                    )
-                    for entry in fresh
-                ],
-            ],
-        ),
-    )
-    return tuple(
-        ProposedChange(
-            dependency=Dependency(kind="term", subject=entry.term),
-            detail=f"coined while revising {key}",
-        )
-        for entry in fresh
-    )
+
+
+def coinages(
+    scope: NodeGlossary, before: dict[str, GlossaryEntry], key: str
+) -> tuple[ProposedChange, ...]:
+    """What a run settled in the ledger, as facts the parts leaning on it hear.
+
+    A name the part already held with the same meaning publishes nothing — the
+    write stage reseeds this file each run, so a part that coins again what it
+    coined last time has moved nothing, and reporting it would dirty every part
+    downstream on every pass and stop the loop ever settling.
+    """
+
+    def moved() -> Iterator[ProposedChange]:
+        """Each term this run left standing differently from how it found it."""
+        for name, entry in named_in(scope).items():
+            # lup: ignore[dict-get] — keyed by whatever names the part coined
+            held = before.get(name)
+            if held is not None and held.meaning == entry.meaning:
+                continue
+            settled = "coined" if held is None else "redefined"
+            yield ProposedChange(
+                dependency=Dependency(kind="term", subject=entry.term),
+                detail=f"{settled} while revising {key}",
+            )
+
+    return tuple(moved())
 
 
 def written_back(manuscript: Manuscript, node: ManuscriptNode, text: str) -> Path:
@@ -240,8 +249,9 @@ def written_back(manuscript: Manuscript, node: ManuscriptNode, text: str) -> Pat
 
     A part that owns its file has the file replaced; a part that shares one has
     its own span replaced and its siblings left byte-identical. Raises where
-    the part's heading is no longer in the file, because the alternative is a
-    rewrite that goes nowhere and a run that reports success anyway.
+    the part's heading is no longer in the file, or where the rewrite arrived
+    without one, because the alternative is a rewrite that goes nowhere and a
+    run that reports success anyway.
     """
     target = Path(manuscript.root) / node.path
     if not node.heading:
@@ -286,10 +296,15 @@ async def run_part(
     material = room / REVISION_FILE
     material.write_text(current, encoding="utf-8")
 
+    shared = ledger(store, work, node.key)
+    shared.own().parent.mkdir(parents=True, exist_ok=True)
+    settled = named_in(shared)
+
     result = await run_session(
         sources=[str(material), part_instruction(manuscript, node, reasons)],
         material_role="revision_target",
         target_format=manuscript.target_format,
+        glossary=shared,
         session_id=session_id,
     )
     produced = result.output.content if result.output else ""
@@ -302,11 +317,11 @@ async def run_part(
 
     try:
         written_back(manuscript, node, produced)
-    except (PartNotFound, OSError) as failure:
+    except (HeadingLost, PartNotFound, OSError) as failure:
         logger.exception("Could not put %s back into %s", node.key, node.path)
         return PartOutcome(key=node.key, session=session_id, failure=str(failure))
 
-    coined = harvested(store, work, node.key, room / "glossary.json")
+    coined = coinages(shared, settled, node.key)
     return PartOutcome(
         key=node.key,
         session=session_id,

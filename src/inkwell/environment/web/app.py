@@ -18,6 +18,7 @@ from inkwell.environment.web.routes import sessions as sessions_route
 from inkwell.environment.web.routes import works as works_route
 from inkwell.environment.web.routes import ws as ws_route
 from inkwell.environment.web.session_manager import SessionManager
+from inkwell.environment.web.work_loops import WorkLoopManager
 
 FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
 
@@ -94,9 +95,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     manager = SessionManager()
     sessions_route.set_manager(manager)
     ws_route.set_manager(manager)
+    loops = WorkLoopManager()
+    works_route.set_loops(loops)
     try:
         yield
     finally:
+        await loops.shutdown()
         await manager.shutdown()
 
 

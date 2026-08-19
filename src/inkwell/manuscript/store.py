@@ -28,8 +28,9 @@ reading alongside the loop sees one whole state or the one before it.
 
 import logging
 from pathlib import Path, PurePosixPath
+from typing import Annotated
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, StringConstraints, ValidationError
 
 from lup.channels.models import publish_atomic
 
@@ -45,6 +46,15 @@ The same shape a book identity takes, and for the same two reasons: every run
 against one work has to spell it identically months apart, and it names a
 directory, so no title can walk out of the store's root. What the work is
 *called* is prose and lives in its tree.
+"""
+
+type WorkId = Annotated[str, StringConstraints(pattern=WORK_ID_PATTERN)]
+"""A work's identity, refused at the boundary rather than checked at each caller.
+
+The pattern above says what an id may be; this is what makes saying so bind. A
+surface that takes an id from outside declares it with this type and gets the
+refusal for free, which is the difference between a documented constraint and an
+enforced one.
 """
 
 TREE_FILE = "tree.json"
@@ -79,8 +89,18 @@ class ManuscriptStore(BaseModel, frozen=True):
     root: Path
 
     def work_dir(self, work: str) -> Path:
-        """Where one work's records sit."""
-        return self.root / work
+        """Where one work's records sit, or a refusal if that is not under the root.
+
+        Checked here rather than trusted from the caller, because this is the
+        one place the id becomes a path and so the only place the danger is
+        real. :data:`WorkId` refuses a malformed id at every surface that takes
+        one from outside; this refuses the traversal itself, so a caller that
+        never went through such a surface cannot reach out of the store either.
+        """
+        held = self.root / work
+        if self.root.resolve() not in held.resolve().parents:
+            raise ValueError(f"{work!r} does not name a work under {self.root}")
+        return held
 
     def tree_path(self, work: str) -> Path:
         """The file holding one work's imported structure."""

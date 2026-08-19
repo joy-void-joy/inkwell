@@ -28,7 +28,7 @@ up next pass and fail the same way for the same reason, forever.
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -339,12 +339,18 @@ async def run_loop(
     limit: int = 0,
     concurrency: int = DEFAULT_CONCURRENCY,
     reconciling: bool = True,
+    reporting: Callable[[PassReport], None] | None = None,
 ) -> tuple[PassReport, ...]:
     """Pass over a work until it settles, or until the cap says to stop.
 
     Stops early on a pass that scheduled nothing, which is either a settled
     work or one where everything outstanding is parked on a question — and in
     both cases running again would do exactly as much.
+
+    ``reporting`` hears each pass as it finishes rather than at the end. A book
+    of two hundred parts takes long enough that something watching wants to be
+    told on the way, and the return value only exists once there is nothing
+    left to watch.
     """
 
     async def taken() -> AsyncIterator[PassReport]:
@@ -360,6 +366,8 @@ async def run_loop(
                 reconciling=reconciling,
             )
             logger.info("Pass %d of %s: %s", number, work, report.render())
+            if reporting is not None:
+                reporting(report)
             yield report
             if not report.scheduled or report.settled():
                 return

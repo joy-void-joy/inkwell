@@ -8,13 +8,16 @@ answered question stops being open, that its part becomes runnable, and that a
 part still waiting on something else does not.
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from inkwell.agent.glossary import DECLARED_VOCABULARY, write_chapter_glossary
 from inkwell.environment.web.routes import works
+from inkwell.environment.web.work_loops import WorkLoopManager
 from inkwell.manuscript.graph import adopted, readings
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.mailbox import PartMailbox, PartQuestion, question_id
@@ -42,6 +45,18 @@ Prose about ASI and offensive capability in cyber operations.
 ABBREVIATIONS = "*[ASI]: Artificial Superintelligence.\n"
 
 CYBER = "02/03/2.3.2"
+
+
+@pytest.fixture(autouse=True)
+def no_loops_left_running() -> Iterator[None]:
+    """Leave the loop holder as each test found it.
+
+    The holder is the app's, set once at startup, so a test that wires one in
+    would otherwise decide what the next test sees — and the routes answer
+    differently depending on whether a loop could be running.
+    """
+    yield
+    works.holder.loops = None
 
 
 @pytest.fixture
@@ -207,3 +222,195 @@ class TestAskingWhatAChangeWouldReach:
             works.reaches("work", subject="ASI", kind="vibes")
 
         assert raised.value.status_code == 400
+
+
+class TestRecordingAWorkFromTheBrowser:
+    def test_an_import_records_the_work_and_adopts_it(
+        self, recorded: ManuscriptStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Adopting is what makes the first useful pass small rather than total."""
+        monkeypatch.setattr(works, "manuscript_store", lambda: recorded)
+
+        result = works.record_work(
+            works.ImportRequest(
+                work="second",
+                chapters=str(tmp_path / "chapters"),
+                title="Another Work",
+            )
+        )
+
+        assert result.parts == 2
+        assert result.adopted == 2
+        assert works.work_tree("second").settled
+
+    def test_declining_to_adopt_leaves_every_part_unbuilt(
+        self, recorded: ManuscriptStore, tmp_path: Path
+    ) -> None:
+        works.record_work(
+            works.ImportRequest(
+                work="unbuilt", chapters=str(tmp_path / "chapters"), adopt=False
+            )
+        )
+        tree = works.work_tree("unbuilt")
+
+        assert tree.outstanding == 2
+        assert all(node.staleness == "never-built" for node in tree.nodes if node.leaf)
+
+    def test_a_directory_that_is_not_there_is_refused(
+        self, recorded: ManuscriptStore, tmp_path: Path
+    ) -> None:
+        with pytest.raises(HTTPException) as raised:
+            works.record_work(
+                works.ImportRequest(work="nowhere", chapters=str(tmp_path / "absent"))
+            )
+
+        assert raised.value.status_code == 422
+
+    def test_a_work_id_that_could_leave_the_store_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The id names a directory, so the type refuses what a path would not."""
+        with pytest.raises(ValidationError):
+            works.ImportRequest(work="../escaped", chapters=str(tmp_path))
+
+
+class TestSayingWhatARunWouldCostBeforeItRuns:
+    def test_a_settled_work_would_run_nothing(self, recorded: ManuscriptStore) -> None:
+        assert works.preview_run("work").parts == ()
+
+    def test_a_requested_part_is_what_would_run(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.request_part("work", CYBER, works.RequestRevision(reason="why"))
+
+        would = works.preview_run("work")
+
+        assert [verdict.key for verdict in would.parts] == [CYBER]
+        assert would.outstanding == 1
+
+    def test_a_limit_cuts_the_preview_the_way_it_cuts_the_pass(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.request_part("work", CYBER, works.RequestRevision())
+        works.request_part("work", "02/03/2.3.1", works.RequestRevision())
+
+        would = works.preview_run("work", limit=1)
+
+        assert len(would.parts) == 1
+        assert would.outstanding == 2
+
+
+class TestALoopIsRefusedWhereItCouldNotHelp:
+    def test_a_work_whose_checkout_is_gone_is_refused(
+        self, recorded: ManuscriptStore, tmp_path: Path
+    ) -> None:
+        """The answer is about a directory, not about two hundred rewrites."""
+        works.set_loops(WorkLoopManager())
+        tree = recorded.load_tree("work")
+        assert tree is not None
+        recorded.publish_tree(
+            "work", tree.model_copy(update={"root": str(tmp_path / "moved")})
+        )
+
+        with pytest.raises(HTTPException) as raised:
+            works.start_run("work", works.RunRequest())
+
+        assert raised.value.status_code == 409
+        assert "which is not there" in raised.value.detail
+
+    def test_a_second_loop_over_one_work_is_refused(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The loop is the single writer of state; two would lease the same parts."""
+        loops = WorkLoopManager()
+        works.set_loops(loops)
+        monkeypatch.setattr(loops, "running", lambda work: True)
+
+        with pytest.raises(HTTPException) as raised:
+            works.start_run("work", works.RunRequest())
+
+        assert raised.value.status_code == 409
+
+    def test_a_work_with_no_loop_reports_one_that_is_not_running(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.set_loops(WorkLoopManager())
+
+        assert not works.run_status("work").running
+
+
+class TestClearingIsTheWayOutOfAStickyStanding:
+    def test_a_requested_part_can_be_taken_back(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.set_loops(WorkLoopManager())
+        works.request_part("work", CYBER, works.RequestRevision(reason="changed mind"))
+
+        node = works.clear_part("work", CYBER)
+
+        assert node.standing == "idle"
+        assert node.staleness == "fresh"
+        assert works.work_tree("work").settled
+
+    def test_a_failed_part_can_be_tried_again(self, recorded: ManuscriptStore) -> None:
+        """A failed part stays failed on its own, which is why this has to exist."""
+        works.set_loops(WorkLoopManager())
+        recorded.publish_state(
+            "work", recorded.load_state("work").declared(CYBER, "failed", "it broke")
+        )
+
+        assert works.clear_part("work", CYBER).standing == "idle"
+
+    def test_clearing_is_refused_while_a_loop_holds_the_work(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loops = WorkLoopManager()
+        works.set_loops(loops)
+        monkeypatch.setattr(loops, "running", lambda work: True)
+
+        with pytest.raises(HTTPException) as raised:
+            works.clear_part("work", CYBER)
+
+        assert raised.value.status_code == 409
+
+
+class TestTheTreeCarriesWhatARowNeedsToBeReadable:
+    def test_a_chapter_rolls_up_what_is_outstanding_beneath_it(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """The question an author opens a two-hundred-part tree with."""
+        works.request_part("work", CYBER, works.RequestRevision())
+        tree = works.work_tree("work")
+
+        chapter = next(node for node in tree.nodes if node.key == "02")
+
+        assert chapter.below == 2
+        assert chapter.outstanding_below == 1
+
+    def test_a_part_names_the_run_that_last_held_it(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        recorded.publish_state(
+            "work",
+            recorded.load_state("work").declared(CYBER, "failed", "broke", "abc123"),
+        )
+        tree = works.work_tree("work")
+
+        assert (
+            next(node for node in tree.nodes if node.key == CYBER).session == "abc123"
+        )
+
+    def test_a_work_read_from_a_missing_checkout_says_so_once(
+        self, recorded: ManuscriptStore, tmp_path: Path
+    ) -> None:
+        held = recorded.load_tree("work")
+        assert held is not None
+        recorded.publish_tree(
+            "work", held.model_copy(update={"root": str(tmp_path / "moved")})
+        )
+
+        tree = works.work_tree("work")
+
+        assert not tree.rooted
+        assert tree.blocked == 2
+        assert not tree.settled

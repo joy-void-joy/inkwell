@@ -31,7 +31,7 @@ src/inkwell/
 │   ├── provenance.py       # Venue, evidential role, and acquisition records
 │   ├── book.py             # Which chapter of which book, and the record it outlives
 │   ├── book_links.py       # A chapter pointing at the book, resolved at the write
-│   ├── glossary.py         # The shared term ledger, per run and across a book
+│   ├── glossary.py         # The shared term ledger: per run, across a book, across a work
 │   ├── diversity.py        # Citation distribution and position-diversity checks
 │   ├── prompts.py          # System prompt for the writing agent
 │   ├── stages.py           # Stage prompts and tool lists, per pipeline stage
@@ -277,6 +277,16 @@ depends on a term exactly when its prose contains it as a word — the work's
 own semantics read back, not inferred. Markdown links would have given
 nothing: the Atlas has no cross-links, every non-http target being an image.
 
+**The ledger is handed to the run, not reconciled after it.** A part's run
+coins into the work's term ledger directly — one file per part, with the
+authors' declared vocabulary read first — so a writer asking what the book
+already calls something is answered by the book while the prose is being
+written. First-definition-wins then settles at the coining rather than at a
+reconciliation afterwards, when the rival name is already on the page, and the
+authors outrank every run without a rule saying so: the read order is the rule.
+What a part newly coined, or kept the name of while replacing the meaning, is
+what it publishes as having moved.
+
 **Adoption is what makes it affordable.** A work nothing has built is a work
 where every part is out of date. `manuscript import` stamps each part as built
 from the text it already holds — `make -t`, and the same argument — so the
@@ -299,6 +309,16 @@ nothing.
 byte-identical, because a model asked to reassemble the file re-emits prose
 nobody asked it to touch. Over 201 parts revised repeatedly that is the
 difference between converging on the author's book and walking away from it.
+
+**A rewrite that lost its heading is refused, not written.** Spliced in, prose
+without the part's own heading leaves the file holding no part where the tree
+records one: the next sweep reads it as text the author deleted, the standing
+goes unrunnable, and the prose has merged into whichever part precedes it,
+where a later revision of *that* part will rewrite it as its own. Nothing about
+the file looks wrong afterwards, which is why the heading is checked before the
+write — off the parser, so a fenced heading does not count, and a rewrite of
+the wrong part does not either. The part keeps its text and the run fails
+saying what came back.
 
 **Parked is not failed.** A run that cannot settle something asks, its part
 parks, and nothing retries it until somebody answers — through the CLI or the
@@ -329,6 +349,19 @@ single writer of a work's state and two over one book would each lease parts
 the other had leased. The preview is not a convenience — every part a pass
 picks up is a whole pipeline run, so a start button offered without one would
 be offering to spend an unknown amount on a click.
+
+**A pass can be kept to the parts somebody named**, which is the thing an
+author asks for most and the one thing a limit cannot express: a limit takes
+the first parts in tree order, so cutting a pass to one runs whichever part
+comes first in the book rather than the one being asked about. `--part` on the
+command line and a row's own *run this part* in the browser narrow the sweep
+instead. Narrowing rather than overriding is what keeps one way to ask for a
+revision: a named part still has to be outstanding, carrying the reasons it
+would have carried in its turn, so `request` remains the door to a part that is
+already up to date — and a named part the sweep passes over is reported with
+what is keeping it, because up to date, held by another run, parked on a
+question, and not a part of this work are four different things to do next that
+all look like a settled book from a pass that ran nothing.
 
 ## Test principles
 

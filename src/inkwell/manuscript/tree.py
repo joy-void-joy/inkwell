@@ -22,6 +22,21 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lup.channels.models import utc_now
 
+DEFAULT_WORK_FORMAT = "textbook"
+"""What a work's parts are written as, unless whoever imported it says otherwise.
+
+A work read as chapters holding sections holding subsections *is* a textbook,
+and the format declaration of that name is what carries dependency order,
+definitions-before-use, and self-containment into a part's run. The alternative
+default is ``auto``, which asks each part's own extract stage to guess the
+format of a book it is only shown one subsection of — and a guess that lands
+differently on two parts of one work is worse than either answer.
+
+Overridable rather than fixed, because a work of many parts need not be a
+textbook: a collection of essays is imported the same way and wants its own
+format.
+"""
+
 type NodeKind = Literal["work", "chapter", "section", "subsection", "group"]
 """What one node is, named rather than derived from its depth.
 
@@ -74,6 +89,12 @@ class Manuscript(BaseModel):
 
     title: str = Field(description="What the work is called")
     root: str = Field(description="Directory the work was read from")
+    target_format: str = Field(
+        default=DEFAULT_WORK_FORMAT,
+        description="What every part of this work is written as. Recorded on the "
+        "work rather than asked per run, so pass three cannot answer it "
+        "differently from pass one",
+    )
     imported_at: datetime = Field(
         default_factory=utc_now, description="When the tree was last read"
     )

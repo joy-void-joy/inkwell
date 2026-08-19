@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { fetchWorks, recordWork } from "../api/client";
-import type { WorkSummary } from "../types";
+import { fetchFormats, fetchWorks, recordWork } from "../api/client";
+import type { FormatOption, WorkSummary } from "../types";
 
 // A work is not a session and is listed apart from one. A session has a
 // beginning and an end; a work outlives every run against it and is what an
@@ -13,6 +13,12 @@ import type { WorkSummary } from "../types";
 
 const POLL_MS = 10000;
 
+// The format is asked for here rather than on the run panel because it belongs
+// to the work, not to a run: a book whose third pass writes to different rules
+// than its first is a book with a seam through it. Defaulted to what the server
+// defaults to, so the common case is one less decision.
+const FORMAT_DEFAULT = "textbook";
+
 export function WorkList() {
   const [works, setWorks] = useState<WorkSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -22,6 +28,8 @@ export function WorkList() {
   const [work, setWork] = useState("");
   const [chapters, setChapters] = useState("");
   const [title, setTitle] = useState("");
+  const [targetFormat, setTargetFormat] = useState(FORMAT_DEFAULT);
+  const [formats, setFormats] = useState<FormatOption[]>([]);
   const [adopt, setAdopt] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -45,19 +53,35 @@ export function WorkList() {
     };
   }, [reloads]);
 
+  // Read off the same declaration the new-session page offers, so a format
+  // added to the catalogue reaches both surfaces without either being edited.
+  useEffect(() => {
+    fetchFormats()
+      .then(setFormats)
+      .catch(() => {});
+  }, []);
+
   const submit = async () => {
     setBusy(true);
     setError("");
     setRecorded("");
     try {
-      const result = await recordWork({ work, chapters, title, adopt });
+      const result = await recordWork({
+        work,
+        chapters,
+        title,
+        target_format: targetFormat,
+        adopt,
+      });
       setRecorded(
-        `${result.title}: ${result.parts} part(s), ${result.vocabulary} declared term(s), ` +
-          `${result.dependencies} dependencies, ${result.adopted} stamped as built`,
+        `${result.title}: ${result.parts} part(s) as ${result.target_format}, ` +
+          `${result.vocabulary} declared term(s), ${result.dependencies} dependencies, ` +
+          `${result.adopted} stamped as built`,
       );
       setWork("");
       setChapters("");
       setTitle("");
+      setTargetFormat(FORMAT_DEFAULT);
       setImporting(false);
       setReloads((held) => held + 1);
     } catch (failure) {
@@ -132,6 +156,27 @@ export function WorkList() {
                 placeholder="AI Safety Atlas"
                 onChange={(event) => setTitle(event.target.value)}
               />
+            </label>
+            <label>
+              Written as
+              <select
+                value={targetFormat}
+                onChange={(event) => setTargetFormat(event.target.value)}
+              >
+                {formats.length === 0 && (
+                  <option value={FORMAT_DEFAULT}>{FORMAT_DEFAULT}</option>
+                )}
+                {formats.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <small>
+                Every run against this work inherits it. A work of chapters is a
+                textbook — leaving it on <code>auto</code> asks each part to
+                guess the format of a book it sees one subsection of.
+              </small>
             </label>
             <label className="run-checkbox">
               <input

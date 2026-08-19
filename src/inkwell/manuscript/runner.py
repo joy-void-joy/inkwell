@@ -19,6 +19,12 @@ megabyte. The cost is that the run's writers coin into their own run glossary
 rather than straight into the work's, so what they coined is carried across
 afterwards; the seam is named in :func:`harvested` rather than hidden.
 
+**The format comes from the work, not from the part.** A run handed one
+subsection and asked to infer its own format is guessing at a book it can see a
+page of, and two parts of one work guessing differently is how a textbook
+acquires a chapter that reads like a blog post. The work declares it once at
+import and every part inherits it.
+
 **The lease is the standing.** A part is marked ``running`` with the session
 holding it before anything starts, and a part already held is one the loop
 will not schedule twice. A run that fails leaves ``failed`` with what it said,
@@ -283,6 +289,7 @@ async def run_part(
     result = await run_session(
         sources=[str(material), part_instruction(manuscript, node, reasons)],
         material_role="revision_target",
+        target_format=manuscript.target_format,
         session_id=session_id,
     )
     produced = result.output.content if result.output else ""

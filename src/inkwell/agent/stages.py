@@ -1598,6 +1598,23 @@ def format_spec(target_format: str) -> OutputFormatSpec | None:
     return next((spec for spec in OUTPUT_FORMATS if spec.key == key), None)
 
 
+def unknown_format(target_format: str) -> str:
+    """One line naming what this codebase knows, where it does not know this.
+
+    Empty for a format that is declared, or for ``auto``, which is not a format
+    but the instruction to pick one. A surface taking a format from a person
+    leads with this: an undeclared format is not refused anywhere downstream, it
+    simply carries no guidance and no checks, so a typo costs a run's worth of
+    rules and says nothing.
+    """
+    if target_format == "auto" or format_spec(target_format) is not None:
+        return ""
+    return (
+        f"{target_format!r} is not a format this installation declares. "
+        f"Use one of: auto, " + ", ".join(spec.key for spec in OUTPUT_FORMATS)
+    )
+
+
 def format_checks_for(
     target_format: str, declared: Sequence[FormatCheck] = ()
 ) -> list[FormatCheck]:

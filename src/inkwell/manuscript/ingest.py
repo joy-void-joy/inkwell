@@ -30,7 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from lup.types import JsonObject, JsonValue
 
 from inkwell.corpus.discovery import slugified
-from inkwell.manuscript.tree import Manuscript, ManuscriptNode
+from inkwell.manuscript.tree import (
+    DEFAULT_WORK_FORMAT,
+    Manuscript,
+    ManuscriptNode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +275,12 @@ def chapter_node(directory: Path, root: Path) -> ManuscriptNode:
     )
 
 
-def read_manuscript(chapters_dir: Path, *, title: str = "") -> Manuscript:
+def read_manuscript(
+    chapters_dir: Path,
+    *,
+    title: str = "",
+    target_format: str = DEFAULT_WORK_FORMAT,
+) -> Manuscript:
     """Read a whole work from the directory holding its chapters.
 
     Chapter directories are taken in name order, which is what the Atlas's own
@@ -285,5 +294,6 @@ def read_manuscript(chapters_dir: Path, *, title: str = "") -> Manuscript:
     return Manuscript(
         title=title or root.parent.name,
         root=str(root),
+        target_format=target_format,
         children=[chapter_node(directory, root) for directory in directories],
     )

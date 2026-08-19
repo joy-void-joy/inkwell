@@ -13,13 +13,20 @@ interface Props {
   workId: string;
   loop: WorkLoopStatus | null;
   rooted: boolean;
+  targetFormat: string;
   onChanged: () => void;
 }
 
 const PASS_DEFAULT = 5;
 const CONCURRENCY_DEFAULT = 4;
 
-export function RunPanel({ workId, loop, rooted, onChanged }: Props) {
+export function RunPanel({
+  workId,
+  loop,
+  rooted,
+  targetFormat,
+  onChanged,
+}: Props) {
   const [would, setWould] = useState<WouldRun | null>(null);
   const [passes, setPasses] = useState(PASS_DEFAULT);
   const [limit, setLimit] = useState(1);
@@ -57,6 +64,11 @@ export function RunPanel({ workId, loop, rooted, onChanged }: Props) {
   return (
     <section className="run-panel">
       <h2>Run the loop</h2>
+
+      <p className="run-format">
+        Every part is written as <code>{targetFormat}</code> — the work's own
+        format, settled when it was imported. Re-import it to change that.
+      </p>
 
       {!rooted && (
         <p className="run-blocked">

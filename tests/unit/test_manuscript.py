@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from inkwell.agent.models import AgentSessionResult, WritingOutput
+from inkwell.agent.stages import unknown_format
 from inkwell.manuscript.facts import (
     Consumption,
     Dependency,
@@ -38,6 +40,8 @@ from inkwell.manuscript.ingest import (
     ordinal_of,
     read_manuscript,
 )
+from inkwell.manuscript import runner as runner_module
+from inkwell.manuscript.runner import run_part
 from inkwell.manuscript.splice import PartNotFound, held_text, spliced
 from inkwell.manuscript.state import WorkState
 from inkwell.manuscript.store import ManuscriptStore
@@ -699,3 +703,121 @@ class TestAPassLeavesHeldWorkAlone:
         found = self.swept(tmp_path, state)
 
         assert "02/03/2.3.2" not in [held.key for held in schedulable(found, state)]
+
+
+class TestAPartIsWrittenAsTheWorkIsWrittenAs:
+    """A part run's format comes from the work, and one run cannot answer it
+    differently from the next.
+
+    Worth pinning at the call rather than at the field: the defect this replaces
+    was not a wrong format, it was no format — ``run_session`` defaulting to
+    ``auto`` while nothing in the manuscript path passed one, so a subsection of
+    a textbook was revised without the rules the textbook declares and nothing
+    said so.
+    """
+
+    def test_a_work_of_chapters_is_a_textbook_unless_told_otherwise(
+        self, tmp_path: Path
+    ) -> None:
+        assert read_manuscript(atlas_like(tmp_path)).target_format == "textbook"
+
+    def test_the_format_is_what_the_import_was_given(self, tmp_path: Path) -> None:
+        work = read_manuscript(atlas_like(tmp_path), target_format="lesswrong")
+
+        assert work.target_format == "lesswrong"
+
+    def test_the_format_survives_the_store(self, tmp_path: Path) -> None:
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        store.publish_tree(
+            "w", read_manuscript(atlas_like(tmp_path), target_format="memo")
+        )
+        held = store.load_tree("w")
+
+        assert held is not None and held.target_format == "memo"
+
+    def test_a_work_recorded_before_formats_reads_as_a_textbook(self) -> None:
+        """A tree.json written without the field is not a work with no format."""
+        held = Manuscript.model_validate({"title": "t", "root": "/r", "children": []})
+
+        assert held.target_format == "textbook"
+
+    @pytest.mark.asyncio
+    async def test_the_run_is_told_the_works_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chapters = atlas_like(tmp_path)
+        work = read_manuscript(chapters, target_format="textbook")
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+        asked: dict[str, object] = {}
+
+        async def record(**passed: object) -> AgentSessionResult:
+            asked.update(passed)
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        await run_part(
+            ManuscriptStore(root=tmp_path / "manuscripts"),
+            "w",
+            work,
+            node,
+            session_id="s",
+            scratch=tmp_path / "room",
+        )
+
+        assert asked["target_format"] == "textbook"
+
+    @pytest.mark.asyncio
+    async def test_a_work_declaring_another_format_carries_that_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The work is asked, not the module default — otherwise the override is
+        a field nothing reads."""
+        chapters = atlas_like(tmp_path)
+        work = read_manuscript(chapters, target_format="lesswrong")
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+        asked: dict[str, object] = {}
+
+        async def record(**passed: object) -> AgentSessionResult:
+            asked.update(passed)
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        await run_part(
+            ManuscriptStore(root=tmp_path / "manuscripts"),
+            "w",
+            work,
+            node,
+            session_id="s",
+            scratch=tmp_path / "room",
+        )
+
+        assert asked["target_format"] == "lesswrong"
+
+
+class TestAnUndeclaredFormatIsRefusedWhereItIsTyped:
+    """An unknown format carries no guidance and no checks, and nothing
+    downstream refuses it — so the surface taking it from a person does."""
+
+    def test_a_declared_format_passes(self) -> None:
+        assert unknown_format("textbook") == ""
+
+    def test_auto_passes_because_it_is_an_instruction_not_a_format(self) -> None:
+        assert unknown_format("auto") == ""
+
+    def test_a_custom_format_carrying_its_description_passes(self) -> None:
+        assert unknown_format("custom: a field guide entry") == ""
+
+    def test_a_typo_is_named_along_with_what_is_declared(self) -> None:
+        refusal = unknown_format("textbok")
+
+        assert "textbok" in refusal and "textbook" in refusal

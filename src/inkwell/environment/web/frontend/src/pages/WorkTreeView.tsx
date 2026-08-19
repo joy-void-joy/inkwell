@@ -161,6 +161,7 @@ export function WorkTreeView() {
         workId={workId}
         loop={tree.loop}
         rooted={tree.rooted}
+        targetFormat={tree.target_format}
         onChanged={reload}
       />
 

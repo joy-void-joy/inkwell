@@ -377,6 +377,7 @@ export async function recordWork(request: {
   work: string;
   chapters: string;
   title?: string;
+  target_format?: string;
   vocabulary?: string;
   adopt?: boolean;
 }): Promise<WorkImport> {

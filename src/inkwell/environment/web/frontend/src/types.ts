@@ -76,6 +76,7 @@ export interface WorkTree {
   id: string;
   title: string;
   root: string;
+  target_format: string;
   rooted: boolean;
   nodes: PartNode[];
   outstanding: number;
@@ -95,6 +96,7 @@ export interface WorkImport {
   work: string;
   title: string;
   root: string;
+  target_format: string;
   parts: number;
   vocabulary: number;
   dependencies: number;

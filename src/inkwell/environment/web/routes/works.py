@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.config import manuscript_store
 from inkwell.agent.glossary import DECLARED_VOCABULARY, load_chapter_glossary
+from inkwell.agent.stages import unknown_format
 from inkwell.environment.web.work_loops import (
     LoopAlreadyRunning,
     WorkLoopManager,
@@ -46,7 +47,11 @@ from inkwell.manuscript.state import (
     WorkState,
 )
 from inkwell.manuscript.store import ManuscriptStore, WorkId
-from inkwell.manuscript.tree import Manuscript, ManuscriptNode
+from inkwell.manuscript.tree import (
+    DEFAULT_WORK_FORMAT,
+    Manuscript,
+    ManuscriptNode,
+)
 from inkwell.manuscript.vocabulary import Abbreviation
 
 logger = logging.getLogger(__name__)
@@ -153,6 +158,10 @@ class WorkTree(BaseModel):
     id: str = Field(description="The work")
     title: str = Field(description="What it is called")
     root: str = Field(default="", description="Where its chapters were read from")
+    target_format: str = Field(
+        default=DEFAULT_WORK_FORMAT,
+        description="What every run against this work writes its part as",
+    )
     rooted: bool = Field(
         default=True,
         description="Whether that directory is still there. False makes every "
@@ -208,6 +217,10 @@ class ImportRequest(BaseModel):
     work: WorkId = Field(description="Slug to record it under")
     chapters: str = Field(description="Directory holding the work's chapters")
     title: str = Field(default="", description="What to call it")
+    target_format: str = Field(
+        default=DEFAULT_WORK_FORMAT,
+        description="What every part of it is written as; every run inherits it",
+    )
     vocabulary: str = Field(
         default="", description="The declared abbreviations file, where it is elsewhere"
     )
@@ -406,12 +419,16 @@ def record_work(request: ImportRequest) -> WorkImport:
             status_code=409,
             detail=f"{request.work} has a loop running — stop it before re-importing",
         )
+    refusal = unknown_format(request.target_format)
+    if refusal:
+        raise HTTPException(status_code=422, detail=refusal)
     declared = Path(request.vocabulary).expanduser() if request.vocabulary else None
     return import_work(
         manuscript_store(),
         request.work,
         chapters,
         title=request.title,
+        target_format=request.target_format,
         vocabulary=declared,
         adopt=request.adopt,
     )
@@ -436,6 +453,7 @@ def work_tree(work: str) -> WorkTree:
         id=work,
         title=tree.title,
         root=tree.root,
+        target_format=tree.target_format,
         rooted=missing_root(tree) is None,
         nodes=tuple(rendered()),
         outstanding=len(found.dirty()),

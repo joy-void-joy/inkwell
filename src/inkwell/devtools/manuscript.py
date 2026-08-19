@@ -7,7 +7,9 @@ against the Atlas, there has to be agreement about what its parts are.
 read a work differently from how its authors organised it.
 
 The rest is the build loop's front door. ``import`` records the work so runs
-months apart share one account of it, and *adopts* it: every part stamped as
+months apart share one account of it — including the format its parts are
+written as, which every run against the work then inherits rather than guessing
+at from the one subsection it is shown — and *adopts* it: every part stamped as
 built from the text it already holds, so the first useful pass rewrites what
 somebody asked about rather than the whole book. ``status`` is the dependency
 pass — what is out of date and why. ``request`` is how an author asks for a
@@ -51,9 +53,14 @@ from inkwell.manuscript.loop import (
     schedulable,
 )
 from inkwell.manuscript.mailbox import PartAnswer, PartMailbox
+from inkwell.agent.stages import unknown_format
 from inkwell.manuscript.recording import import_work
 from inkwell.manuscript.store import ManuscriptStore
-from inkwell.manuscript.tree import Manuscript, ManuscriptNode
+from inkwell.manuscript.tree import (
+    DEFAULT_WORK_FORMAT,
+    Manuscript,
+    ManuscriptNode,
+)
 from inkwell.manuscript.vocabulary import (
     Abbreviation,
 )
@@ -160,6 +167,14 @@ def import_cmd(
     ],
     work: Annotated[str, typer.Option(help="Slug to record this work under")],
     title: Annotated[str, typer.Option(help="What to call the work")] = "",
+    target_format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="What every part of this work is written as — every run against "
+            "it inherits this",
+        ),
+    ] = DEFAULT_WORK_FORMAT,
     vocabulary: Annotated[
         Path | None,
         typer.Option(help="The work's declared abbreviations file"),
@@ -179,11 +194,22 @@ def import_cmd(
     if not chapters.is_dir():
         typer.echo(f"No such directory: {chapters}", err=True)
         raise typer.Exit(1)
+    refusal = unknown_format(target_format)
+    if refusal:
+        typer.echo(refusal, err=True)
+        raise typer.Exit(1)
     store = manuscript_store()
     recorded = import_work(
-        store, work, chapters, title=title, vocabulary=vocabulary, adopt=adopt
+        store,
+        work,
+        chapters,
+        title=title,
+        target_format=target_format,
+        vocabulary=vocabulary,
+        adopt=adopt,
     )
     typer.echo(f"{work}: {recorded.parts} leaf part(s) recorded from {chapters}")
+    typer.echo(f"  format: {recorded.target_format} — every run inherits it")
     typer.echo(f"  vocabulary: {recorded.vocabulary} declared term(s)")
     typer.echo(f"  dependencies: {recorded.dependencies} across the work")
     typer.echo(f"  adopted: {recorded.adopted} part(s) stamped as built")

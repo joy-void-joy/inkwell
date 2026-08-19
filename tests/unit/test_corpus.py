@@ -34,6 +34,7 @@ from inkwell.corpus.discovery import (
     feed_entries,
     source_id_for,
 )
+from inkwell.corpus.archive import raw_capture
 from inkwell.corpus.fetch import DocumentFetcher, FetchRefused, HttpPageReader
 from inkwell.corpus.prune import prune_source
 from inkwell.corpus.ingest import (
@@ -285,10 +286,11 @@ def test_only_sources_whose_enumeration_is_proven_are_active() -> None:
     taken deliberately and which needed an honest user agent rather than a
     browser.
 
-    OpenAI is declared and not swept: it answers an anti-bot interstitial to a
-    rendered browser as readily as it 403s a plain client, so every page of it
-    refuses and sweeping it spends a browser launch per URL to be turned away.
-    Naming it explicitly still syncs it, which is how that gets retried.
+    OpenAI is active on two surfaces its gate does not cover. Its edge answers an
+    anti-bot interstitial to a rendered browser as readily as it 403s a plain
+    client, but its robots.txt is `Allow: /` and advertises its sitemap, its own
+    news feed serves 1139 items to our own user agent, and a public archive holds
+    the bodies. What was missing was never a way past the interstitial.
     """
     assert {entry.key for entry in active_declarations()} == {
         "aisi",
@@ -298,6 +300,7 @@ def test_only_sources_whose_enumeration_is_proven_are_active() -> None:
         "govai",
         "iaps",
         "metr",
+        "openai",
         "techcrunch",
         "cyberscoop",
         "bbc",
@@ -2209,14 +2212,157 @@ def test_naming_an_inactive_source_sweeps_it_anyway() -> None:
     takes lightly enough to take at all.
     """
     swept_by_default = {entry.key for entry in resolve_sources(())}
-    assert "openai" not in swept_by_default
+    assert "deepmind" not in swept_by_default
 
-    assert [entry.key for entry in resolve_sources(("openai",))] == ["openai"]
-    named = resolve_sources(("openai", "metr"))
-    assert {entry.key for entry in named} == {"openai", "metr"}
+    assert [entry.key for entry in resolve_sources(("deepmind",))] == ["deepmind"]
+    named = resolve_sources(("deepmind", "metr"))
+    assert {entry.key for entry in named} == {"deepmind", "metr"}
 
 
 def test_naming_a_source_that_does_not_exist_says_which_do() -> None:
     """A typo in a source name is a wasted sweep, so it fails before one."""
     with pytest.raises(UnknownSource, match="No such source: nosuchlab"):
         resolve_sources(("nosuchlab",))
+
+
+# ── A gate on the connection, answered by a party that is not behind it ────────
+
+
+def archiving_transport(
+    *, article: bytes, capture: str = "20260819010803", available: bool = True
+) -> httpx.MockTransport:
+    """A host that refuses everything, and an archive that holds the page.
+
+    The shape the fallback exists for: `openai.com` answers `Allow: /` in its
+    robots.txt and then 403s the article, so the document is public and the
+    connection is what was refused.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host == "archive.org":
+            body = (
+                {
+                    "archived_snapshots": {
+                        "closest": {
+                            "url": f"http://web.archive.org/web/{capture}/{ARCHIVED}",
+                            "timestamp": capture,
+                            "available": True,
+                        }
+                    }
+                }
+                if available
+                else {"archived_snapshots": {}}
+            )
+            return httpx.Response(200, json=body)
+        if host == "web.archive.org":
+            return httpx.Response(200, content=article)
+        return httpx.Response(403, text="forbidden")
+
+    return httpx.MockTransport(handler)
+
+
+ARCHIVED = "https://fixture.test/research/one"
+"""The document whose host refuses us in these tests."""
+
+
+async def test_a_gated_document_is_read_from_an_archived_capture() -> None:
+    """The host's refusal is about the connection, and the archive is not on it."""
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    transport = archiving_transport(article=article_html("Pacing model development"))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        document = await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+    assert document.kind == "markdown"
+    assert "Pacing model development" in document.text
+    assert document.url == ARCHIVED
+
+
+async def test_an_archived_document_records_where_it_actually_came_from() -> None:
+    """A capture is weaker evidence than a live fetch, so it never passes as one."""
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    transport = archiving_transport(article=article_html("Preparedness"))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        document = await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+    assert "web.archive.org" in document.via
+    assert "20260819010803" in document.via
+
+
+async def test_a_source_that_declares_no_fallback_never_asks_an_archive() -> None:
+    """Reaching for a copy is a per-source decision about provenance."""
+    declaration = fixture_declaration()
+    transport = archiving_transport(article=article_html("Unwanted"))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+
+async def test_an_archive_holding_nothing_says_what_the_host_refused_with() -> None:
+    """Two things went wrong and an operator has to know which to chase."""
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    transport = archiving_transport(article=b"", available=False)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(FetchRefused, match="no archived capture"):
+            await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+
+async def test_an_archived_interstitial_is_refused_like_a_live_one() -> None:
+    """A capture of a block page is exactly as useless as meeting one directly."""
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    challenge = b"<html><body>Just a moment...</body></html>"
+    transport = archiving_transport(article=challenge)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(FetchRefused, match="anti-bot"):
+            await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+
+async def test_a_live_page_is_never_replaced_by_an_archived_copy() -> None:
+    """The host is asked first and its answer always wins, or the corpus dates
+    itself for no reason."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "fixture.test":
+            raise AssertionError(f"an archive was asked for a live page: {request.url}")
+        return httpx.Response(200, content=article_html("Live"))
+
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        document = await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+    assert "Live" in document.text
+    assert document.via == ""
+
+
+def test_a_capture_url_is_built_from_the_stamp_and_the_original() -> None:
+    """Assembled from parts rather than edited out of the archive's own reply."""
+    built = raw_capture("https://openai.com/index/preparedness", "20260819010803")
+
+    assert built == (
+        "https://web.archive.org/web/20260819010803id_/"
+        "https://openai.com/index/preparedness"
+    )
+
+
+async def test_an_absent_document_is_never_asked_of_an_archive() -> None:
+    """A 404 is absent for every reader there is, so a second party adds nothing.
+
+    The restriction that keeps the fallback about gates: a page that has moved
+    would otherwise be answered from a capture forever, and the corpus would hold
+    a copy of something the source deliberately took down.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "fixture.test":
+            raise AssertionError(f"an archive was asked about a 404: {request.url}")
+        return httpx.Response(404, text="gone")
+
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)

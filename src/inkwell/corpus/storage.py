@@ -98,6 +98,14 @@ class StoredDocument(BaseModel):
 
     slug: str
     url: str
+    via: str = ""
+    """Where the text came from, when that was not ``url`` itself.
+
+    Empty for everything a host served. An archived capture's URL where the host
+    refused us and a public archive held the page — weaker evidence than a live
+    fetch, so a reader deciding whether to cite it can see that from the index
+    rather than having to know which sources happen to be gated.
+    """
     category: str = ""
     title: str = ""
     kind: DocumentKind = "markdown"

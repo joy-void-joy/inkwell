@@ -91,6 +91,16 @@ class SourceDeclaration(BaseModel):
         description="Whether its pages need a real browser to reach their content "
         "— a client-rendered shell, or a host that refuses a plain fetcher",
     )
+    archive_fallback: bool = Field(
+        default=False,
+        description="Whether a document this host withholds from us may be read "
+        "from the newest capture a public archive holds. For a source whose "
+        "robots.txt permits the read and whose edge refuses it anyway: the gate is "
+        "on the connection, not on the content, and an archive is not behind it. "
+        "Off by default because an archived copy is weaker evidence than a live "
+        "fetch — taken at some past moment, and possibly stale — so a source opts "
+        "in and every document that arrives this way records that it did",
+    )
     thin_chars: int = Field(
         default=0,
         description="How short an extraction has to be before this source's pages "
@@ -375,6 +385,11 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         authority="lab_publication",
         hosts=("openai.com",),
         avenues=(
+            FeedAvenue(
+                feed="https://openai.com/news/rss.xml",
+                apex="openai.com",
+                category="news",
+            ),
             SweepAvenue(
                 domains=(
                     "https://openai.com",
@@ -384,24 +399,26 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
                 apex="openai.com",
             ),
         ),
-        active=False,
         needs_browser=True,
+        archive_fallback=True,
         thin_chars=1500,
         notes=(
-            "Inactive: openai.com serves an anti-bot interstitial to a rendered "
-            "browser as readily as it 403s a plain client, so every page of it "
-            "refuses and a sweep of everything spends a browser launch per URL "
-            "to be turned away. This is BleepingComputer's lesson a second "
-            "time — a refusal is not a rendering problem, and headless Chrome "
-            "scores as a pretender too. Left declared with the browser fields "
-            "set because they are right about the other half: the "
-            "deployment-safety site renders each section client-side from one "
-            "shell, which extracts to 1177 characters where the shared thin "
-            "floor is 800, so the floor is raised to sit above the shell and "
-            "below the 2620 of the shortest page here that is genuinely an "
-            "article. Reaching the main site again needs a way past the "
-            "interstitial rather than another sweep. Naming the source "
-            "explicitly still syncs it, which is how to retry. PDFs on "
+            "robots.txt is `Allow: /` with one disallowed path and advertises the "
+            "sitemap, so the read is invited and what refuses it is the edge. The "
+            "refusal is not uniform, which is what an earlier sweep read as a "
+            "blanket one: /index/ articles do answer a rendered browser and "
+            "extract to tens of thousands of characters, while the marketing "
+            "paths — /business/, /academy/ — serve the interstitial to a browser "
+            "too. So the browser reaches the documents worth having, and the "
+            "archive fallback is the backstop for the rest rather than the main "
+            "route; on the gated paths it usually finds a listing page or no "
+            "capture, which the thin floor and the missing-capture failure both "
+            "report rather than store. The news feed is the enumeration that "
+            "needs no gate at all: 1139 items with titles, categories and dates, "
+            "served to our own user agent, with the sitemap sweep listing the "
+            "rest. The thin floor is 1500 because the deployment-safety site "
+            "renders each section client-side from one shell extracting to 1177 "
+            "characters, where the shortest genuine article here is 2620. PDFs on "
             "cdn.openai.com still need seeds once someone enumerates them."
         ),
     ),

@@ -274,6 +274,7 @@ class SourceIngestor(BaseModel):
             document = StoredDocument(
                 slug=entry.slug,
                 url=entry.url,
+                via=fetched.via,
                 category=entry.category,
                 title=title,
                 kind=fetched.kind,

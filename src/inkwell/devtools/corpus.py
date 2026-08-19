@@ -46,12 +46,15 @@ from inkwell.corpus.ingest import (
     resolve_sources,
     sync_corpus,
 )
+from inkwell.corpus.failures import classify
+from inkwell.corpus.fetch import DocumentFetcher, corpus_client
 from inkwell.corpus.registry import (
     DECLARED_SOURCES,
     DROPPED_SOURCES,
     SourceDeclaration,
     active_declarations,
     corpus_vocabulary,
+    declaration_for,
 )
 from inkwell.corpus.prune import prune_corpus
 from inkwell.corpus.semantics import (
@@ -646,6 +649,63 @@ def sweep_with(
         typer.echo("\nrecorded for the next run to retry:")
         report_failures(report)
     return report
+
+
+@app.command("probe")
+def probe(
+    url: str = typer.Argument(help="The document URL to try"),
+    source: str = typer.Option(
+        ..., "--source", help="Whose declaration decides how it is fetched"
+    ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="Profile whose browser context reaches JS-hard sources"
+    ),
+) -> None:
+    """Fetch one URL exactly as a sweep would, and say what happened to it.
+
+    A source's gate is not a fact that stays settled. An edge starts refusing,
+    or stops; a shell grows past the thin floor; an archive picks the page up
+    next month. Each of those changes what a sweep of thousands of URLs would
+    do, and the only honest way to find out has been to run one — which is both
+    slow and, for a host that is refusing, rude.
+
+    So this is the single-document version of the same ladder, down to the same
+    declaration: the host first, the browser where the source declares one, a
+    public archive where it declares that. It reports which of them answered,
+    because that is the thing a sweep's counters cannot tell you and the whole
+    question when a source is behaving differently from its note.
+
+    Stores nothing. What comes back is reported and dropped, so probing is safe
+    to repeat while working out what a declaration should say.
+    """
+    declaration = declaration_for(source)
+    if declaration is None:
+        typer.echo(f"No such source: {source}", err=True)
+        raise typer.Exit(code=1)
+
+    async def attempt() -> None:
+        """One fetch through the real ladder, reported however it ends."""
+        async with corpus_client() as client:
+            fetcher = DocumentFetcher(client=client, profile=profile)
+            try:
+                fetched = await fetcher.fetch(url, declaration)
+            except Exception as failure:
+                typer.echo(f"{url}\n  refused [{classify(failure)}]: {failure}")
+                raise typer.Exit(code=1) from failure
+            reached = fetched.via or url
+            typer.echo(f"{url}")
+            typer.echo(f"  kind:      {fetched.kind}")
+            typer.echo(f"  title:     {fetched.title or '(none extracted)'}")
+            typer.echo(f"  published: {fetched.published or '(not stated)'}")
+            typer.echo(
+                f"  chars:     {len(fetched.text) or len(fetched.data)}"
+                f"{'' if fetched.kind == 'markdown' else ' (bytes)'}"
+            )
+            typer.echo(f"  reached:   {'the host' if not fetched.via else reached}")
+            if fetched.rendered:
+                typer.echo("  rendered:  through a browser")
+
+    asyncio.run(attempt())
 
 
 @app.command("sync")

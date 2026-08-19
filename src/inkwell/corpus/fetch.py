@@ -35,6 +35,7 @@ from inkwell.agent.tools.research.fetch import (
     content_type,
     extract_page,
 )
+from inkwell.corpus.archive import closest_capture
 from inkwell.corpus.discovery import PageReader
 from inkwell.corpus.registry import SourceDeclaration
 
@@ -74,6 +75,15 @@ class FetchedDocument(BaseModel):
     text: str = ""
     data: bytes = b""
     rendered: bool = False
+    via: str = ""
+    """Where this came from, when that was not the document's own URL.
+
+    Empty for everything the host served, which is the overwhelming majority and
+    needs no provenance beyond ``url``. Set to an archived capture's URL where a
+    gated document was read from a public archive instead, because that is weaker
+    evidence — a copy taken at a stated time — and a reader deciding whether to
+    cite it needs to be able to tell.
+    """
 
     def payload(self) -> bytes:
         """The bytes whose hash is this document's content identity."""
@@ -86,6 +96,20 @@ class FetchRefused(Exception):
     Separate from a transport error because it is not worth retrying the same
     way: an anti-bot interstitial or an oversized body will look the same next
     time, and the failure classifier reads the distinction.
+    """
+
+
+class FetchGated(FetchRefused):
+    """A document the host withheld from *us* rather than one that is unusable.
+
+    The distinction a second party can act on. An oversized body and a page with
+    no article text in it are the same for every reader there is, so asking
+    anybody else for them would waste a request. A gate — a 401, a 403, an
+    anti-bot interstitial — is about this connection, and a public archive that
+    already holds the page is not behind it.
+
+    A subclass rather than a flag, so every existing handler still catches it and
+    only the one place that can do something different has to know the difference.
     """
 
 
@@ -128,7 +152,7 @@ def refuse_challenge(url: str, html: str, reached_by: str) -> None:
     """
     marker = challenge_page_marker(html)
     if marker is not None:
-        raise FetchRefused(
+        raise FetchGated(
             f"{url} served an anti-bot page to {reached_by} (matched {marker!r})"
         )
 
@@ -199,9 +223,36 @@ class DocumentFetcher(BaseModel):
     max_bytes: int = MAX_DOCUMENT_BYTES
 
     async def fetch(self, url: str, declaration: SourceDeclaration) -> FetchedDocument:
-        """Fetch one document, extracting HTML and leaving a PDF alone.
+        """Fetch one document from its host, or from an archive that holds it.
 
-        Raises ``FetchRefused`` for something reached but unusable, and lets
+        The host is always asked first and its answer is always preferred: an
+        archived capture is a copy taken at some past moment, and reaching for one
+        where the live page was available would date the corpus for no reason.
+
+        The archive is asked only where the host refused *us* — a gate on this
+        connection — and only where the source declares that fallback. A document
+        that is absent, oversized, or holds no article text is that way for every
+        reader there is, so asking a second party would spend a request to learn
+        the same thing.
+        """
+        try:
+            return await self.fetch_live(url, declaration)
+        except httpx.HTTPStatusError as error:
+            if not (declaration.archive_fallback and worth_a_browser(error)):
+                raise
+            return await self.fetch_archived(url, declaration, str(error))
+        except FetchGated as gated:
+            if not declaration.archive_fallback:
+                raise
+            return await self.fetch_archived(url, declaration, str(gated))
+
+    async def fetch_live(
+        self, url: str, declaration: SourceDeclaration
+    ) -> FetchedDocument:
+        """Fetch one document from its own host, extracting HTML and leaving a PDF.
+
+        Raises ``FetchGated`` where the host withheld it from this client and
+        ``FetchRefused`` where what came back is unusable to anybody, and lets
         transport errors through for the caller to classify.
         """
         try:
@@ -222,7 +273,7 @@ class DocumentFetcher(BaseModel):
         challenged = challenge_page_marker(response.text)
         if challenged is not None:
             if not declaration.needs_browser:
-                raise FetchRefused(
+                raise FetchGated(
                     f"{url} served an anti-bot page to a plain client "
                     f"(matched {challenged!r})"
                 )
@@ -243,6 +294,55 @@ class DocumentFetcher(BaseModel):
             title=extracted.title,
             published=extracted.published,
             text=extracted.text,
+        )
+
+    async def fetch_archived(
+        self, url: str, declaration: SourceDeclaration, refused: str
+    ) -> FetchedDocument:
+        """Read one gated document from the newest capture a public archive holds.
+
+        The capture goes through the same reading as a live response — the size
+        limit, the PDF check, the challenge check, the thin floor — because it is
+        the same kind of evidence about the same page, and a capture of an
+        interstitial is exactly as useless as a live one. What differs is only
+        where it came from, which the result records.
+
+        ``refused`` is what the host said, carried into the failure where the
+        archive has nothing either: an operator reading "no capture" needs to know
+        what the live attempt was turned away with to know which to chase.
+        """
+        capture = await closest_capture(self.client, url)
+        if not capture.found():
+            raise FetchRefused(
+                f"{url} was refused ({refused}) and no archived capture is "
+                f"available: {capture.detail}"
+            )
+        response = await http_get(self.client, capture.url)
+        if len(response.content) > self.max_bytes:
+            raise FetchRefused(
+                f"the capture of {url} is "
+                f"{len(response.content) // BYTES_PER_MB} MB, over the limit"
+            )
+        if looks_like_pdf(response):
+            return FetchedDocument(
+                url=url, kind="pdf", data=response.content, via=capture.url
+            )
+        refuse_challenge(url, response.text, "a public archive's capture")
+        extracted = extract_page(response.text, url=url, output_format=MARKDOWN_FORMAT)
+        floor = declaration.thin_chars or self.thin_chars
+        if extracted is None or len(extracted.text) < floor:
+            raise FetchRefused(
+                f"the archived capture of {url} holds no article text over "
+                f"{floor} characters"
+            )
+        logger.info("Read %s from an archived capture of %s", url, capture.timestamp)
+        return FetchedDocument(
+            url=url,
+            kind="markdown",
+            title=extracted.title,
+            published=extracted.published,
+            text=extracted.text,
+            via=capture.url,
         )
 
     async def fetch_refused(self, url: str) -> FetchedDocument:

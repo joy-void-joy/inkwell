@@ -61,6 +61,7 @@ src/inkwell/
 │   ├── retrieval.py        # Browse, narrow, read — field navigation over the index
 │   ├── semantics.py        # The optional vector layer, and the seam that computes it
 │   ├── fetch.py            # Reaching a document, escalating to a browser where declared
+│   ├── archive.py          # Reading a gated document from a public archive's capture
 │   └── ingest.py           # A run: enumerate, fetch what is new, tag, store, report
 ├── manuscript/             # A work of many parts, built incrementally rather than written once
 │   ├── tree.py             # The tree a work is, and the key each part keeps across imports
@@ -202,6 +203,43 @@ carries the difference as data rather than the code carrying a special case:
 `BoldedSummaries` states the textbook floor and the memo ceiling, and
 `BoldEmphasis` takes the exemption that lets bold be navigation in a format
 whose convention asks for it while staying overuse everywhere else.
+
+## Reaching a source that refuses us
+
+A sweep escalates rather than insisting: the plain client first, then a real
+browser where the source declares one needs it, then the newest capture a public
+archive holds where the source declares that fallback. Each rung answers a
+different reason a fetch failed, and a source declares only the rungs its own
+behaviour has been shown to need.
+
+**The distinction the ladder turns on is who was refused.** A 404, an oversized
+body, a page with no article text in it — those are the same for every reader
+there is, so asking anybody else spends a request to learn the same thing. A
+401, a 403, an anti-bot interstitial: those are about *this connection*, and
+another party may not be behind them. `FetchGated` is that distinction as a
+type, so only the one place that can act on it has to know.
+
+**An archive is asked, never impersonated.** Nothing spoofs a user agent, solves
+a challenge, or pretends to be a browser it is not. Some hosts publish openly
+and refuse automated clients anyway — `openai.com` serves `robots.txt` saying
+`Allow: /`, advertises its sitemap, and then answers an identified crawler with
+an interstitial on some paths — so the gate is on the connection and not on the
+content, and a public archive that already crawled the page is not on it. A
+source whose `robots.txt` disallows a path has no business being declared here at
+all.
+
+**Provenance is recorded rather than smoothed over.** A capture is weaker
+evidence than a live fetch: a copy, taken at a stated time, possibly stale. So
+the host is always asked first and its answer always preferred, and a document
+that did arrive from a capture carries the snapshot URL it came from. A corpus
+whose archived documents were indistinguishable from live ones would be one that
+quietly dated itself.
+
+`corpus probe <url> --source <key>` runs that whole ladder for one document and
+says which rung answered. A source's gate is not a fact that stays settled — an
+edge starts refusing or stops, an archive picks a page up next month — and the
+alternative to a single-document probe was sweeping thousands of URLs to find
+out, which is both slow and, against a host that is refusing, rude.
 
 ## A work of many parts
 

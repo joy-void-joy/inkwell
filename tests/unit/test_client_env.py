@@ -36,6 +36,10 @@ RECORDING_RUNTIME = Runtime(
         home_subdir="recording-home",
     ),
     open=capture_request,
+    # Contains nothing, so what the request carries is what inkwell put there.
+    # A stand-in that routed the config home at a workspace of its own would
+    # make the unset case assert against its own injection instead.
+    workspace_home=lambda environment, _workspace: environment,
 )
 
 

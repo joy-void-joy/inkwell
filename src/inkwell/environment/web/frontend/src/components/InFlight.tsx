@@ -72,7 +72,7 @@ export function InFlightPart({
           onClick={() => acting(() => clearWorkPart(part.work, part.key))}
           title="Release the lease, so the part can be run again"
         >
-          Clear the lease
+          {busy ? "Clearing…" : "Clear the lease"}
         </button>
       )}
       {part.status === "running" && (
@@ -81,7 +81,7 @@ export function InFlightPart({
           onClick={() => acting(() => sendAction(part.session, "quit"))}
           title="Stop this part's run, leaving the rest of the pass alone"
         >
-          Stop this run
+          {busy ? "Stopping…" : "Stop this run"}
         </button>
       )}
       <div className="in-flight-detail">

@@ -45,6 +45,15 @@ export function WorkTreeView() {
   const [reason, setReason] = useState("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
+  // Which part an action is in flight for, and what was done to the last one.
+  //
+  // Every action here is a request and then a poll, and a part run takes a
+  // second or two to appear in the work's state — so a button that only
+  // reloaded looked, for that second or two, exactly like a button that did
+  // nothing, and the honest response to that is to click it again.
+  const [acting, setActing] = useState("");
+  const [done, setDone] = useState("");
+
   // A counter rather than a hoisted loader, so the fetch lives entirely inside
   // the effect and nothing sets state synchronously in the effect body. An
   // action bumps it; the effect is what reads.
@@ -80,13 +89,19 @@ export function WorkTreeView() {
   // pass per part. Reported when it fails, because a row that silently stayed
   // as it was reads exactly like one nothing was asked of.
   const askFor = async (key: string) => {
+    setActing(key);
+    setDone("");
+    setError("");
     try {
       await requestWorkPart(workId, key, reason);
       setAsking("");
       setReason("");
+      setDone(`${key} is queued — the next loop over the work picks it up`);
       reload();
     } catch (failure) {
       setError(String(failure));
+    } finally {
+      setActing("");
     }
   };
 
@@ -100,6 +115,9 @@ export function WorkTreeView() {
   // part the sweep will not pick up is reported here rather than starting a
   // pass that runs nothing and reads as a finished book.
   const runNow = async (node: PartNode, reason: string) => {
+    setActing(node.key);
+    setDone("");
+    setError("");
     try {
       // A pass picks up what is out of date, so a part that is already up to
       // date has to be asked for before it can be run at all — and "run it
@@ -118,18 +136,27 @@ export function WorkTreeView() {
       await startWorkRun(workId, { passes: 1, parts: [node.key] });
       setAsking("");
       setReason("");
+      setDone(`Started a run of ${node.key} — it appears under Being written now`);
       reload();
     } catch (failure) {
       setError(String(failure));
+    } finally {
+      setActing("");
     }
   };
 
   const clear = async (key: string) => {
+    setActing(key);
+    setDone("");
+    setError("");
     try {
       await clearWorkPart(workId, key);
+      setDone(`${key} is back to idle`);
       reload();
     } catch (failure) {
       setError(String(failure));
+    } finally {
+      setActing("");
     }
   };
 
@@ -185,6 +212,7 @@ export function WorkTreeView() {
       )}
 
       {error && <p className="run-error">{error}</p>}
+      {done && <p className="work-recorded">{done}</p>}
 
       <p>
         {tree.settled
@@ -309,10 +337,15 @@ export function WorkTreeView() {
               node.staleness !== "source-gone" &&
               node.standing === "idle" && (
                 <button
+                  disabled={acting === node.key}
                   onClick={() => runNow(node, "")}
                   title="Take this part through the pipeline now, and nothing else"
                 >
-                  {node.staleness === "fresh" ? "Run it again" : "Run this part"}
+                  {acting === node.key
+                    ? "Starting…"
+                    : node.staleness === "fresh"
+                      ? "Run it again"
+                      : "Run this part"}
                 </button>
               )}
             {/* Not offered while a run holds the part: what asking would write
@@ -327,8 +360,12 @@ export function WorkTreeView() {
               </button>
             )}
             {node.leaf && node.standing !== "idle" && (
-              <button onClick={() => clear(node.key)} title="Return it to idle">
-                Clear
+              <button
+                disabled={acting === node.key}
+                onClick={() => clear(node.key)}
+                title="Return it to idle"
+              >
+                {acting === node.key ? "Clearing…" : "Clear"}
               </button>
             )}
             {asking === node.key && (
@@ -343,10 +380,14 @@ export function WorkTreeView() {
                     if (event.key === "Escape") setAsking("");
                   }}
                 />
-                <button onClick={() => runNow(node, reason)}>
-                  Revise it now
+                <button
+                  disabled={acting === node.key}
+                  onClick={() => runNow(node, reason)}
+                >
+                  {acting === node.key ? "Starting…" : "Revise it now"}
                 </button>
                 <button
+                  disabled={acting === node.key}
                   onClick={() => askFor(node.key)}
                   title="Record it and leave it for the next loop over the work"
                 >

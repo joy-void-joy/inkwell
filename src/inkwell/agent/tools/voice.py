@@ -453,6 +453,14 @@ async def analyze_single_source(
 
     if cache_path.exists():
         return VoiceAnalysis.from_cached(label, cache_path.read_text(encoding="utf-8"))
+    # An empty analysis is dropped by every caller, so this is the last place
+    # that knows the difference between a sample with no voice in it and an
+    # analyst that was refused the file it was told to write. Unsaid, the run
+    # goes on to write the whole piece with no voice guide and nothing about
+    # the author's voice is ever mentioned again.
+    logger.error(
+        "Voice analysis of %s produced nothing: %s was never written", label, cache_path
+    )
     return VoiceAnalysis(label=label)
 
 

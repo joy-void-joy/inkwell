@@ -273,9 +273,14 @@ def recording(
     """
     if isinstance(outcome, BaseException):
         logger.exception("Running %s raised", verdict.key, exc_info=outcome)
+        # Named by its class where it carries no message, because the one that
+        # carries none is cancellation: a stopped run stringifies to the empty
+        # string, and a part recorded as failed for no stated reason is the
+        # thing somebody stares at wondering what they did wrong.
+        said = str(outcome) or type(outcome).__name__
         return Recorded(
-            state=state.declared(verdict.key, "failed", str(outcome), session),
-            result=PartResult(key=verdict.key, outcome="failed", detail=str(outcome)),
+            state=state.declared(verdict.key, "failed", said, session),
+            result=PartResult(key=verdict.key, outcome="failed", detail=said),
         )
     match outcome.ended():
         case "parked":

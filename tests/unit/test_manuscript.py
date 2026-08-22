@@ -7,6 +7,7 @@ edit an author actually makes — since state is keyed on it and a key that
 moved is state that was lost.
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,14 @@ from inkwell.manuscript.graph import (
     readings,
     sweep,
 )
-from inkwell.manuscript.loop import narrowed, run_pass, schedulable, unpicked
+from inkwell.manuscript.loop import (
+    Recorded,
+    narrowed,
+    recording,
+    run_pass,
+    schedulable,
+    unpicked,
+)
 from inkwell.manuscript.mailbox import (
     PartAnswer,
     PartMailbox,
@@ -845,6 +853,44 @@ class TestAnUndeclaredFormatIsRefusedWhereItIsTyped:
         refusal = unknown_format("textbok")
 
         assert "textbok" in refusal and "textbook" in refusal
+
+
+class TestAFailedPartAlwaysSaysWhy:
+    """A part recorded as failed for no stated reason is the thing somebody
+    stares at wondering what they did wrong. The one exception that carries no
+    message is the one a person causes: stopping a run stringifies to nothing,
+    so the reason was empty exactly when somebody had just pressed a button and
+    wanted to know what it did."""
+
+    def recorded(self, tmp_path: Path, raised: BaseException) -> Recorded:
+        """What the loop writes down for a turn that raised."""
+        work = read_manuscript(atlas_like(tmp_path))
+        held = readings(work)
+        state = adopted(WorkState(), held)
+        found = sweep(state.declared("02/03/2.3.2", "requested", "sharpen"), held)
+        verdict = next(held for held in found.verdicts if held.key == "02/03/2.3.2")
+        return recording(
+            state,
+            verdict,
+            raised,
+            PartMailbox(root=tmp_path / "box"),
+            work,
+            "atlas",
+            "run1",
+        )
+
+    def test_a_stopped_run_is_named_rather_than_left_blank(
+        self, tmp_path: Path
+    ) -> None:
+        step = self.recorded(tmp_path, asyncio.CancelledError())
+
+        assert step.result.detail == "CancelledError"
+        assert step.state.record("02/03/2.3.2") is not None
+
+    def test_a_run_that_said_why_keeps_its_words(self, tmp_path: Path) -> None:
+        step = self.recorded(tmp_path, RuntimeError("the model went away"))
+
+        assert step.result.detail == "the model went away"
 
 
 class TestAPartRunCanReadTheWorkItIsIn:

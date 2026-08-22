@@ -23,11 +23,25 @@ from inkwell.agent.config import current_settings, stage_model
 from inkwell.agent.client import query
 from inkwell.agent.stages import format_key
 from lup.telemetry.trace import TraceLogger
-from lup.mcp import ToolError, lup_tool
+from lup.mcp import LupMcpTool, ToolError, lup_tool
+
+from inkwell.agent.tools.stage_outputs import (
+    ToolServers,
+    build_output_server,
+    build_stage_tool,
+)
 
 logger = logging.getLogger(__name__)
 
-BUILTIN_WRITE_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Agent"]
+ANALYST_TOOLS = ["Read", "Grep", "Glob"]
+"""What a voice analyst is given: everything needed to read, nothing to write.
+
+An analyst hands its guide back through a tool rather than writing a file, so
+it needs no write access at all — and should have none. What it reads is the
+author's corpus and, through the run around it, researched material off the
+open web, which is the last context to hold a tool that can overwrite a file
+by name.
+"""
 
 
 class StyleSample(BaseModel):
@@ -403,6 +417,54 @@ def source_type_hint(source_type: str) -> str:
     return SOURCE_TYPE_HINTS[source_type] if source_type in SOURCE_TYPE_HINTS else ""
 
 
+class VoiceGuideInput(BaseModel):
+    """The guide an analyst hands back when it has finished reading."""
+
+    guide: str = Field(description="The complete analysis, as markdown")
+
+
+class VoiceGuideKept(BaseModel):
+    """What the analyst is told once its guide is on disk."""
+
+    characters: int = Field(description="How much was kept")
+
+
+def voice_output_tool(path: Path) -> LupMcpTool:
+    """The tool an analyst hands its finished guide to.
+
+    Handed back rather than written, which is what lets an analyst run with no
+    write tools at all. The path is bound here and never reaches the agent, so
+    the guide can land in exactly one place and no prompt can talk it into
+    naming another — what an analyst reads is the author's corpus and, through
+    the run around it, whatever the research stage fetched off the open web.
+    """
+
+    async def keep(params: VoiceGuideInput) -> VoiceGuideKept:
+        """Keep the guide, refusing an empty one rather than storing it."""
+        if not params.guide.strip():
+            raise ToolError(
+                "An empty guide is not an analysis. Read the sample, describe "
+                "the voice in it, and call this again with the whole thing."
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(params.guide, encoding="utf-8")
+        return VoiceGuideKept(characters=len(params.guide))
+
+    return build_stage_tool(
+        "submit_voice_analysis",
+        "Hand back your finished voice analysis, as markdown. Call this once, "
+        "with the whole guide: it is the only way your work is kept, and a run "
+        "that never calls it produces nothing at all.",
+        VoiceGuideInput,
+        keep,
+    )
+
+
+def voice_output_server(path: Path, name: str) -> ToolServers:
+    """That tool, as the one-server set a session is handed."""
+    return build_output_server(name, [voice_output_tool(path)])
+
+
 async def analyze_single_source(
     sample: StyleSample,
     trace_logger: TraceLogger | None = None,
@@ -435,17 +497,18 @@ async def analyze_single_source(
         source_path=source_path,
     )
 
-    task = f"{prompt}\n\nWrite your complete analysis to: {cache_path}"
+    handing = voice_output_server(cache_path, "voice_analysis")
+    task = f"{prompt}\n\nHand your complete analysis back with submit_voice_analysis."
 
     await query(
         task,
         model=stage_model("voice"),
         system_prompt="You are a writing style analyst.",
-        tools=BUILTIN_WRITE_TOOLS,
+        tools=ANALYST_TOOLS,
         max_thinking_tokens=128_000 - 1,
         autonomy="unattended",
-        mcp_servers=mcp_servers or {},
-        allowed_tools=mcp_tool_names or [],
+        mcp_servers={**(mcp_servers or {}), **handing.servers},
+        allowed_tools=[*(mcp_tool_names or []), *handing.tool_names],
         prefix=f"[voice:{label}] ",
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
@@ -528,20 +591,21 @@ async def merge_voice_analyses(
     )
     merge_input_path.write_text(merge_content, encoding="utf-8")
 
+    handing = voice_output_server(output_path, "voice_merge")
     task = (
         f"Read the merge instructions and individual analyses from: {merge_input_path}\n\n"
-        f"Write the unified voice guide to: {output_path}"
+        "Hand the unified voice guide back with submit_voice_analysis."
     )
 
     await query(
         task,
         model=stage_model("voice"),
         system_prompt="You are a writing style analyst producing a unified voice guide.",
-        tools=BUILTIN_WRITE_TOOLS,
+        tools=ANALYST_TOOLS,
         max_thinking_tokens=128_000 - 1,
         autonomy="unattended",
-        mcp_servers=mcp_servers or {},
-        allowed_tools=mcp_tool_names or [],
+        mcp_servers={**(mcp_servers or {}), **handing.servers},
+        allowed_tools=[*(mcp_tool_names or []), *handing.tool_names],
         prefix="[voice:merge] ",
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,

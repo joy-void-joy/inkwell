@@ -22,6 +22,7 @@ from collections.abc import (
 )
 from contextlib import asynccontextmanager
 from functools import partial
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -503,10 +504,28 @@ so that runs of them collapse with the surrounding whitespace."""
 
 SLUG_MAX_CHARS = 80
 
+SLUG_DIGEST_CHARS = 8
+"""How much of a long label's digest rides along to keep its slug its own."""
+
 
 def slugify(label: str) -> str:
-    """Turn a section title or label into a filesystem-safe slug."""
-    return "-".join(label.lower().translate(SLUG_CHAR_MAP).split())[:SLUG_MAX_CHARS]
+    """Turn a section title or label into a filesystem-safe slug.
+
+    A label longer than the filename bound keeps a digest of the whole, so two
+    labels agreeing for eighty characters still name two files. Cutting alone
+    gave them one, and the second draft written there replaced the first with
+    nothing said — the one truncation here that could actually lose a section.
+
+    Short labels are untouched by that, so a slug already on disk keeps its
+    name. What a reader is shown is the title either way: the snapshot keys
+    drafts by it, and this names the working file.
+    """
+    slug = "-".join(label.lower().translate(SLUG_CHAR_MAP).split())
+    if len(slug) <= SLUG_MAX_CHARS:
+        return slug
+    digest = sha256(label.encode("utf-8")).hexdigest()[:SLUG_DIGEST_CHARS]
+    kept = SLUG_MAX_CHARS - SLUG_DIGEST_CHARS - 1
+    return f"{slug[:kept]}-{digest}"
 
 
 ASSUMPTION_TAG_PREFIX: dict[AssumptionTag, str] = {
@@ -2868,7 +2887,11 @@ def consolidate_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
             if f.severity in ("critical", "praise"):
                 continue
             if f.text_excerpt:
-                key = f.text_excerpt[:200]
+                # The whole excerpt, not a prefix of it. Keying on the first
+                # 200 characters folded two reviewers who quoted different
+                # passages sharing an opening, and the second one's anchor
+                # went with it — the fold keeps a suggestion, not an excerpt.
+                key = f.text_excerpt
                 if key in seen:
                     first = seen[key]
                     first.suggestion = (

@@ -72,6 +72,8 @@ def abstract_of(document: FetchedDocument) -> str:
         if line.strip() and not line.startswith("#") and not line.startswith("|")
     ]
     words = " ".join(prose).split()
+    # lup: ignore[silent-truncation] — a derived opening beside the stored
+    # document, and the ellipsis below says outright that it was cut
     opening = " ".join(words[:ABSTRACT_WORDS])
     return f"{opening}…" if len(words) > ABSTRACT_WORDS else opening
 

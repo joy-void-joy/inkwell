@@ -156,6 +156,9 @@ def challenge_page_marker(text: str) -> str | None:
     """
     if len(text) > 30_000:
         return None
+    # lup: ignore[silent-truncation] — a window scanned for a marker, never
+    # emitted; the caller's own text is untouched and a challenge shell is
+    # shorter than this besides
     sample = text[:6000].lower()
     for marker in CHALLENGE_MARKERS:
         if marker in sample:

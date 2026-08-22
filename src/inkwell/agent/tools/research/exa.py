@@ -68,6 +68,9 @@ class ExaResult(TypedDict):
     title: str | None
     url: str | None
     snippet: str | None
+    """The result's text: a preview where `full_text_path` holds the whole,
+    and the whole itself where no content directory was configured to hold
+    it. Never a cut with nothing pointing at the rest."""
     highlights: list[str] | None
     published_date: str | None
     score: float | None
@@ -170,22 +173,43 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
         try:
             return save_content("exa", hit.url or params.query, hit.text).path
         except RuntimeError:
-            logger.debug("No content directory configured; returning snippet only")
+            logger.warning(
+                "No content directory configured; carrying the full text of %s "
+                "inline instead of pointing at a saved copy",
+                hit.url or params.query,
+            )
             return None
 
-    results = [
-        ExaResult(
+    def readable(hit: WireResult, saved: str | None) -> str | None:
+        """The text this result carries, which is never less than all of it.
+
+        A preview where the whole is on disk and the result points at it; the
+        whole itself where there was nowhere to put it. Cutting in that second
+        case is what loses content outright — the caller is handed 500
+        characters and no path, which reads exactly like a short page.
+        """
+        if saved is None and len(hit.text) > SNIPPET_LENGTH:
+            return hit.text or None
+        # lup: ignore[silent-truncation] — the preview beside the whole, not
+        # instead of it: `saved` is where the text is, and the branch above is
+        # what answers the case where it is nowhere
+        return hit.text[:SNIPPET_LENGTH] or None
+
+    def result(hit: WireResult) -> ExaResult:
+        """One hit, with its text either pointed at or carried."""
+        saved = stored(hit)
+        return ExaResult(
             acquisition=hit.acquisition(),
             title=hit.title or None,
             url=hit.url or None,
-            snippet=hit.text[:SNIPPET_LENGTH] or None,
+            snippet=readable(hit, saved),
             highlights=list(hit.highlights) or None,
             published_date=hit.published_at(),
             score=hit.score,
-            full_text_path=stored(hit),
+            full_text_path=saved,
         )
-        for hit in found.results
-    ]
+
+    results = [result(hit) for hit in found.results]
 
     return ExaSearchOutput(
         query=params.query,

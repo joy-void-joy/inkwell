@@ -143,6 +143,10 @@ profiles/
 # across sessions and worktrees. Rebuilt by `lup-devtools corpus sync`. Rooted,
 # so it never swallows the `src/inkwell/corpus/` package that builds it.
 /corpus/
+# An imported work's tree and state, one directory per work. The same store
+# root as the two above and rooted for the same reason: it holds the path of
+# somebody's own checkout, so it is machine state rather than a branch artifact.
+/manuscripts/
 credentials/
 .envrc
 .venv
@@ -217,6 +221,10 @@ __marimo__/
 # Project-specific
 # Session traces are local-only dev artifacts and are never committed
 notes/traces/
+# What the harness observes of a session, including its lock files. The same
+# local-only artifact as the traces above, and rooted here so no branch carries
+# one session's observations into another's.
+notes/harness/
 worktrees/
 tmp/
 sync.json.local

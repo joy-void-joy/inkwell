@@ -61,9 +61,7 @@
       "allowWrite": [
         "~/.cache/uv"
       ],
-      "denyWrite": [
-        "README.md"
-      ]
+      "denyWrite": []
     },
     "network": {
       "allowedDomains": [

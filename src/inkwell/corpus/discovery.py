@@ -310,10 +310,14 @@ async def sitemap_locations(
             try:
                 raw = await pages.read(current.url)
                 page = sitemap_page(gunzipped(current.url, raw))
-            except Exception:
+            except Exception as error:
                 logger.warning(
-                    "Sitemap unreadable, skipping: %s", current.url, exc_info=True
+                    "Sitemap unreadable, skipping: %s — %s: %s",
+                    current.url,
+                    type(error).__name__,
+                    error,
                 )
+                logger.debug("Sitemap %s failed", current.url, exc_info=True)
                 continue
             if page.is_index:
                 pending.extend(
@@ -543,12 +547,33 @@ class SitemapAvenue(Avenue):
         return self.sitemap
 
     async def discover(self, pages: PageCache) -> list[DiscoveredItem]:
+        """Every document this sitemap lists under the category's prefix.
+
+        Both kinds of nothing are failures here, and they are different
+        failures worth telling apart. A sitemap naming no location at all was
+        not a sitemap — a moved one answers with the site's own page, which
+        parses to nothing. A sitemap naming plenty and none of them under this
+        prefix is a category that moved, and the message says which prefix
+        found nothing so the declaration can be corrected rather than guessed at.
+        """
         prefix = self.prefix()
-        return [
+        locations = await sitemap_locations(pages, self.sitemap)
+        if not locations:
+            raise AvenueEmpty(
+                f"{self.sitemap} named no location — it has moved, or what it "
+                "serves is no longer a sitemap"
+            )
+        found = [
             DiscoveredItem(category=self.category, slug=slug, url=url)
-            for url in await sitemap_locations(pages, self.sitemap)
+            for url in locations
             if (slug := url_slug(url, prefix))
         ]
+        if not found:
+            raise AvenueEmpty(
+                f"{self.sitemap} named {len(locations)} location(s), none of "
+                f"them under {prefix!r}"
+            )
+        return found
 
 
 class ListingAvenue(Avenue):
@@ -724,6 +749,121 @@ Deliberately short: a sweep wants everything, so when in doubt it keeps. PDFs
 are absent on purpose — a PDF is the document."""
 
 
+class FeedEntry(BaseModel):
+    """One entry of a syndication feed: where it points and what it is called."""
+
+    model_config = ConfigDict(frozen=True)
+
+    url: str
+    title: str
+
+
+def feed_entries(data: bytes) -> tuple[FeedEntry, ...]:
+    """Read a syndication feed's entries, namespace- and dialect-agnostically.
+
+    RSS puts the URL in ``<item><link>`` as text and Atom puts it in
+    ``<entry><link href=...>``, so both are read rather than the feed being
+    sniffed for which dialect it is. An entry with no resolvable URL is
+    dropped: it names no document to fetch.
+    """
+    root = xml_root(data)
+
+    def child_text(element: ElementTree.Element, name: str) -> str:
+        """The first non-empty text of a named child, empty when there is none."""
+        return next(
+            (
+                (child.text or "").strip()
+                for child in element
+                if local_name(child.tag) == name and (child.text or "").strip()
+            ),
+            "",
+        )
+
+    def entry_url(element: ElementTree.Element) -> str:
+        """The document an entry points at, by whichever dialect carries it."""
+        for child in element:
+            if local_name(child.tag) != "link":
+                continue
+            href = (
+                child.attrib["href"] if "href" in child.attrib else (child.text or "")
+            )
+            if href.strip():
+                return href.strip()
+        return ""
+
+    return tuple(
+        FeedEntry(url=url, title=child_text(element, "title"))
+        for element in root.iter()
+        if local_name(element.tag) in ("item", "entry")
+        if (url := entry_url(element))
+    )
+
+
+class FeedAvenue(Avenue):
+    """A topic feed a source publishes, walked as the source's own filter.
+
+    News outlets are the case this exists for. A sitemap or a whole-domain
+    sweep of an outlet enumerates everything it has ever published, and the
+    corpus wants one subject out of that. The outlet already maintains that
+    selection — its own AI section, as a feed — so the filter is the
+    publisher's editorial judgement applied at enumeration, and nothing off
+    the topic is ever fetched.
+
+    A feed is a window rather than an archive: it names what is recent, not
+    what exists. Incremental syncs are what accumulate the back catalogue,
+    which is why the corpus keys identity off the URL — the same article seen
+    on two runs is one document.
+    """
+
+    feed: str = Field(description="URL of the RSS or Atom feed to walk")
+    apex: str = Field(
+        default="", description="Registrable domain for cross-subdomain slugs"
+    )
+    require_terms: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Keep only entries whose title contains one of these, matched "
+            "case-insensitively. Empty keeps everything, which is right when "
+            "the feed is already the topic — an outlet's own AI section needs "
+            "no second filter, and its security section does"
+        ),
+    )
+
+    def origin(self) -> str:
+        return self.feed
+
+    def resolved_apex(self) -> str:
+        """The apex a declaration states, else the feed's own host."""
+        return self.apex or host_of(self.feed).removeprefix("www.")
+
+    def on_topic(self, title: str) -> bool:
+        """Whether an entry's title carries one of the required terms.
+
+        Titles only, which is the honest limit of filtering before fetching:
+        an article about a model that never names one in its headline is
+        missed. The alternative is fetching an outlet's whole output to judge
+        it, which is what declaring a topic feed was meant to avoid.
+        """
+        if not self.require_terms:
+            return True
+        lowered = title.lower()
+        return any(term.lower() in lowered for term in self.require_terms)
+
+    async def discover(self, pages: PageCache) -> list[DiscoveredItem]:
+        apex = self.resolved_apex()
+        found = dict[str, DiscoveredItem]()
+        for entry in feed_entries(await pages.read(self.feed)):
+            slug = source_id_for(entry.url, apex)
+            if slug not in found and self.on_topic(entry.title):
+                found[slug] = DiscoveredItem(
+                    category=self.category,
+                    slug=slug,
+                    url=entry.url,
+                    title=entry.title,
+                )
+        return [found[slug] for slug in sorted(found)]
+
+
 class SweepAvenue(Avenue):
     """Everything a source publishes across every domain it publishes on.
 
@@ -805,10 +945,36 @@ class SweepAvenue(Avenue):
             key = normalize_url(url)
             if key not in found:
                 found[key] = self.item_for(url, apex)
+        if not found:
+            raise AvenueEmpty(
+                f"none of {', '.join(self.domains)} named a document — every "
+                "sitemap was empty, unreadable, or filtered away entirely"
+            )
         return list(found.values())
 
 
 # ── Running discovery for a source ────────────────────────────────────────────
+
+
+class AvenueEmpty(Exception):
+    """An avenue that was reached and turned out to enumerate nothing.
+
+    Its own failure because it is the one a run reports as success. A source
+    that is down fails loudly and lands in the failures; a source that *moved*
+    answers every request and names no document, so the run says "0 listed, 0
+    failed" — which reads as a source that publishes nothing rather than as a
+    declaration pointing somewhere that is no longer there.
+
+    Apollo is the case this was written for: it left WordPress for Webflow, the
+    per-type sitemaps it used to publish became ordinary web pages, and those
+    parse to no locations at all. It sat broken through a whole sweep looking
+    exactly like a quiet source.
+
+    Raised by the avenue rather than by the sitemap walk, because whether zero
+    is a failure is the avenue's question: one sitemap naming nothing is a dead
+    declaration, while one domain of a multi-domain sweep naming nothing is
+    ordinary and the sweep carries on to the others.
+    """
 
 
 class AvenueFailure(BaseModel):

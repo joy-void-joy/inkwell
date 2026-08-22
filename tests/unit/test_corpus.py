@@ -7,7 +7,9 @@ costs only itself. The network is faked with a fixture reader and an httpx mock
 transport, so the real extraction, hashing, and merge paths all run.
 """
 
+import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import get_args
 
@@ -16,10 +18,12 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from inkwell.agent.provenance import Venue
+from inkwell.devtools.corpus import SweepProgress, swept_with_bar, tracked
 from inkwell.corpus.discovery import (
     Avenue,
     DiscoveredItem,
     DiscoveryOutcome,
+    FeedAvenue,
     ListingAvenue,
     PageCache,
     PageReader,
@@ -27,10 +31,19 @@ from inkwell.corpus.discovery import (
     SweepAvenue,
     TableAvenue,
     discover_avenues,
+    feed_entries,
     source_id_for,
 )
-from inkwell.corpus.fetch import DocumentFetcher
-from inkwell.corpus.ingest import ingest_source, ingest_with
+from inkwell.corpus.archive import raw_capture
+from inkwell.corpus.fetch import DocumentFetcher, FetchRefused, HttpPageReader
+from inkwell.corpus.prune import prune_source
+from inkwell.corpus.ingest import (
+    IngestReport,
+    UnknownSource,
+    ingest_source,
+    ingest_with,
+    resolve_sources,
+)
 from inkwell.corpus.quality import DEFAULT_RULES, ThinRule, assess
 from inkwell.corpus.registry import (
     DECLARED_SOURCES,
@@ -42,6 +55,7 @@ from inkwell.corpus.registry import (
 )
 from inkwell.corpus.storage import (
     CorpusStore,
+    DiscoveredEntry,
     SourceShard,
     StoredDocument,
     merged_discovery,
@@ -49,6 +63,8 @@ from inkwell.corpus.storage import (
 )
 from inkwell.corpus.tagging import (
     DocumentTagger,
+    ModelTagJudge,
+    RetagStep,
     TagJudge,
     TagJudgement,
     TagRequest,
@@ -264,8 +280,18 @@ def test_every_declared_source_is_named_once() -> None:
     assert len(keys) == len(dict.fromkeys(keys))
 
 
-def test_the_seven_proven_sources_are_active() -> None:
-    """The sources the ported database actually enumerated are the active ones."""
+def test_only_sources_whose_enumeration_is_proven_are_active() -> None:
+    """The seven the ported database enumerated, plus the news desks whose
+    feeds were walked for real, plus BleepingComputer, whose first sweep was
+    taken deliberately and which needed an honest user agent rather than a
+    browser.
+
+    OpenAI is active on two surfaces its gate does not cover. Its edge answers an
+    anti-bot interstitial to a rendered browser as readily as it 403s a plain
+    client, but its robots.txt is `Allow: /` and advertises its sitemap, its own
+    news feed serves 1139 items to our own user agent, and a public archive holds
+    the bodies. What was missing was never a way past the interstitial.
+    """
     assert {entry.key for entry in active_declarations()} == {
         "aisi",
         "anthropic",
@@ -274,6 +300,11 @@ def test_the_seven_proven_sources_are_active() -> None:
         "govai",
         "iaps",
         "metr",
+        "openai",
+        "techcrunch",
+        "cyberscoop",
+        "bbc",
+        "bleepingcomputer",
     }
 
 
@@ -315,9 +346,20 @@ def test_dropped_sources_are_recorded_with_a_reason() -> None:
 
 
 def test_a_source_needing_a_browser_says_so() -> None:
-    """The playwright path is chosen by declaration, not guessed per page."""
-    js_hard = [entry for entry in DECLARED_SOURCES if entry.renders_with_javascript]
-    assert {entry.key for entry in js_hard} == {"deepmind", "xai"}
+    """The playwright path is chosen by declaration, not guessed per page.
+
+    Only the sources that genuinely render client-side. Refusing a plain
+    fetcher is not by itself grounds to be on this list: BleepingComputer
+    looked like one for months and turned out to be refusing the user agent,
+    which a browser does not fix — headless Chrome scores as a pretender too.
+
+    OpenAI earns its place on the rendering half rather than the refusal half.
+    Eighteen ``deploymentsafety`` section URLs extracted byte-identical text,
+    which is one shell rendering every section client-side, and that is what a
+    browser answers. Its 403 may well be the BleepingComputer story again.
+    """
+    browser_bound = [entry for entry in DECLARED_SOURCES if entry.needs_browser]
+    assert {entry.key for entry in browser_bound} == {"deepmind", "xai", "openai"}
 
 
 def declared_union_bases() -> list[type[BaseModel]]:
@@ -340,7 +382,7 @@ def test_the_declared_unions_stay_abstract() -> None:
 
 def test_declaring_a_source_needs_no_new_module() -> None:
     """Every avenue in the registry is one of the declared avenue types."""
-    kinds = (SitemapAvenue, ListingAvenue, TableAvenue, SweepAvenue)
+    kinds = (SitemapAvenue, ListingAvenue, TableAvenue, SweepAvenue, FeedAvenue)
     for entry in DECLARED_SOURCES:
         for avenue in entry.avenues:
             assert isinstance(avenue, kinds), f"{entry.key} brought its own avenue"
@@ -576,9 +618,7 @@ async def test_ingesting_a_pdf_never_extracts_its_text(tmp_path: Path) -> None:
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        report = await ingest_source(
-            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
-        )
+        report = await ingest_source(declaration, store, DocumentFetcher(client=client))
 
     assert report.stored == 1
     document = store.load(declaration).stored("paper")
@@ -630,6 +670,300 @@ def test_quality_is_recorded_per_document(tmp_path: Path) -> None:
     assert document.quality.metrics.chars == 4
 
 
+# ── A host that refuses a plain client is reached through the browser ─────────
+
+
+def refusing_transport(status: int = 403) -> httpx.MockTransport:
+    """A transport that turns every request away, as an anti-bot host does."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="forbidden")
+
+    return httpx.MockTransport(handler)
+
+
+async def test_a_refused_document_is_reached_over_the_browsers_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 403 raises before any body exists, so the escalation cannot key on one.
+
+    This is the whole of what the thin-body path could not do: a refusal never
+    produces the short extraction that path is watching for, so a source that
+    answers a browser and refuses a client would declare the browser path and
+    never once take it.
+    """
+    reached: list[str] = []
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        reached.append(url)
+        return article_html("Reached")
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    declaration = fixture_declaration()
+    browser_bound = declaration.model_copy(update={"needs_browser": True})
+    url = f"{FIXTURE_HOST}/research/one"
+    async with httpx.AsyncClient(transport=refusing_transport()) as client:
+        document = await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+    assert reached == [url]
+    assert document.kind == "markdown"
+    assert document.rendered
+    assert "Reached" in document.text
+
+
+async def test_a_refusal_is_let_through_where_no_browser_is_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Escalation is what a source declared, never what a status code suggests.
+
+    Otherwise every genuinely dead URL in a sweep would cost a browser launch.
+    """
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        raise AssertionError(f"a browser was launched for undeclared {url}")
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    declaration = fixture_declaration()
+    async with httpx.AsyncClient(transport=refusing_transport()) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await DocumentFetcher(client=client).fetch(
+                f"{FIXTURE_HOST}/research/one", declaration
+            )
+
+
+async def test_a_refused_feed_is_reached_too_so_the_source_enumerates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source refused at its feed discovers nothing to fetch in the first place.
+
+    Bytes rather than a rendered DOM: a feed put through a browser's XML viewer
+    comes back as that viewer's HTML, which the entry parser cannot read.
+    """
+    feed = "https://fixture.test/feed/"
+    served = (
+        b'<?xml version="1.0"?>\n<rss version="2.0"><channel>'
+        b"<title>Fixture Desk</title><item>"
+        b"<title>One</title>"
+        b"<link>https://fixture.test/research/one/</link>"
+        b"</item></channel></rss>"
+    )
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        return served
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    avenue = FeedAvenue(category="security", feed=feed, apex="fixture.test")
+    declaration = fixture_declaration(avenues=(avenue,)).model_copy(
+        update={"needs_browser": True}
+    )
+    async with httpx.AsyncClient(transport=refusing_transport()) as client:
+        found = await avenue.discover(
+            PageCache(reader=HttpPageReader(client, declaration))
+        )
+
+    assert [item.url for item in found] == ["https://fixture.test/research/one/"]
+
+
+# ── A source that moved is reported, not mistaken for a quiet one ────────────
+
+
+WEBFLOW_PAGE = b"<!DOCTYPE html><html><head><title>Apollo</title></head></html>"
+"""What a moved sitemap actually serves: the site's own page, not a 404."""
+
+
+class TestAnAvenueThatEnumeratesNothingSaysSo:
+    """Apollo left WordPress for Webflow, its per-type sitemaps became ordinary
+    web pages, and those parse to no locations. The run said `0 listed, 0
+    failed` — which reads as a source that publishes nothing, and it sat broken
+    through a whole sweep looking exactly like one."""
+
+    async def test_a_sitemap_serving_a_web_page_is_a_recorded_failure(self) -> None:
+        avenue = SitemapAvenue(category="science", sitemap=SITEMAP)
+        reader = FixtureReader((FixturePage(url=SITEMAP, body=WEBFLOW_PAGE),))
+
+        found = await discover_avenues((avenue,), PageCache(reader=reader))
+
+        assert found.items == ()
+        assert len(found.failures) == 1
+        assert "moved" in found.failures[0].error
+
+    async def test_a_category_that_moved_names_the_prefix_that_found_nothing(
+        self,
+    ) -> None:
+        """A live sitemap and an empty category is a different repair from a
+        dead sitemap, so it is a different message."""
+        avenue = SitemapAvenue(category="products", sitemap=SITEMAP)
+        reader = FixtureReader(
+            (FixturePage(url=SITEMAP, body=sitemap_xml(("/science/one",))),)
+        )
+
+        found = await discover_avenues((avenue,), PageCache(reader=reader))
+
+        assert len(found.failures) == 1
+        assert "/products/" in found.failures[0].error
+
+    async def test_one_avenue_going_empty_costs_only_itself(self) -> None:
+        """Four avenues share Apollo's one sitemap; a category disappearing
+        must not take the three that are still there."""
+        pages = (FixturePage(url=SITEMAP, body=sitemap_xml(("/science/one",))),)
+        found = await discover_avenues(
+            (
+                SitemapAvenue(category="science", sitemap=SITEMAP),
+                SitemapAvenue(category="products", sitemap=SITEMAP),
+            ),
+            PageCache(reader=FixtureReader(pages)),
+        )
+
+        assert [item.slug for item in found.items] == ["one"]
+        assert len(found.failures) == 1
+
+    async def test_a_sweep_tolerates_one_empty_domain(self) -> None:
+        """Whether zero is a failure is the avenue's question: a multi-domain
+        sweep carries on past a domain that names nothing."""
+        live = "https://fixture.test/sitemap.xml"
+        dead = "https://gone.test/sitemap.xml"
+        avenue = SweepAvenue(
+            domains=("https://fixture.test", "https://gone.test"),
+            apex="fixture.test",
+        )
+        reader = FixtureReader(
+            (
+                FixturePage(url=live, body=sitemap_xml(("/research/one",))),
+                FixturePage(url=dead, body=WEBFLOW_PAGE),
+            )
+        )
+
+        found = await discover_avenues((avenue,), PageCache(reader=reader))
+
+        assert found.failures == ()
+        assert [item.url for item in found.items] == [f"{FIXTURE_HOST}/research/one"]
+
+    async def test_a_sweep_where_every_domain_is_empty_is_a_failure(self) -> None:
+        avenue = SweepAvenue(domains=("https://fixture.test",), apex="fixture.test")
+        reader = FixtureReader((FixturePage(url=SITEMAP, body=WEBFLOW_PAGE),))
+
+        found = await discover_avenues((avenue,), PageCache(reader=reader))
+
+        assert len(found.failures) == 1
+
+
+# ── A sweep says where it has got to while it is still going ─────────────────
+
+
+class TestTheSweepIsNeverSilentAboutWhereItGot:
+    """It was, twice over, and both failures looked identical from outside:
+    tqdm switches itself off when stderr is not a terminal, and draws an empty
+    string when the terminal reports no width. Either way the sweep ran for
+    hours saying nothing, which is what the display exists to prevent."""
+
+    async def watched(self, store: CorpusStore, capfd) -> str:
+        """What a short sweep says while it runs."""
+
+        async def sweeping() -> IngestReport:
+            await asyncio.sleep(0.3)
+            return IngestReport(sources=())
+
+        await swept_with_bar(store, sweeping(), True)
+        return capfd.readouterr().err
+
+    async def test_a_terminal_gets_a_bar(
+        self, tmp_path: Path, capfd, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        said = await self.watched(CorpusStore(root=tmp_path), capfd)
+
+        assert "sweeping" in said
+
+    async def test_anything_else_gets_lines_rather_than_silence(
+        self, tmp_path: Path, capfd, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The case that was broken: piped, redirected, or captured."""
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+        said = await self.watched(CorpusStore(root=tmp_path), capfd)
+
+        assert "docs" in said
+        assert "sources" in said
+
+    async def test_asking_for_no_progress_is_the_only_way_to_get_none(
+        self, tmp_path: Path, capfd
+    ) -> None:
+        async def sweeping() -> IngestReport:
+            return IngestReport(sources=())
+
+        await swept_with_bar(CorpusStore(root=tmp_path), sweeping(), False)
+
+        assert capfd.readouterr().err == ""
+
+
+class TestThePaceIsThisRunsOwn:
+    """Rate and estimate divided the whole store by this run's elapsed time,
+    crediting the sweep with every document every earlier run had fetched. The
+    first reading came out at 995143/min."""
+
+    def held(self, stored: int) -> SweepProgress:
+        return SweepProgress(stored=stored, listed=1000, started=1, total=1)
+
+    def test_a_watch_that_has_seen_nothing_land_claims_no_rate(self) -> None:
+        assert self.held(500).rate(elapsed=10.0, gained=0) == 0.0
+
+    def test_the_rate_counts_only_what_this_watch_saw(self) -> None:
+        """Six documents in a minute is six a minute, whatever the store held
+        before it started."""
+        assert self.held(506).rate(elapsed=60.0, gained=6) == 6.0
+
+    def test_the_estimate_paces_on_what_landed_not_on_the_total(self) -> None:
+        """494 left at 6/min is a little over 82 minutes."""
+        remaining = self.held(506).eta(elapsed=60.0, gained=6)
+
+        assert 4900 < remaining < 4950
+
+    def test_a_reading_reports_time_as_hours_and_minutes(self) -> None:
+        said = self.held(506).render(elapsed=60.0, gained=6)
+
+        assert "01:00 elapsed" in said
+        assert "eta ~1:22:" in said
+
+
+class TestTheBarStopsHoweverTheSweepEnds:
+    """`sync` awaits the watcher when the sweep returns, so a watcher that
+    never stops is a CLI that never exits — which is worse than no bar."""
+
+    async def test_the_sweep_result_comes_back_through_the_bar(
+        self, tmp_path: Path
+    ) -> None:
+        store = CorpusStore(root=tmp_path)
+
+        async def sweeping() -> IngestReport:
+            return IngestReport(sources=())
+
+        found = await swept_with_bar(store, sweeping(), False)
+
+        assert isinstance(found, IngestReport)
+
+    async def test_a_sweep_that_raises_still_stops_the_bar(
+        self, tmp_path: Path
+    ) -> None:
+        """Otherwise the `finally` awaits a watcher that is still looping."""
+        store = CorpusStore(root=tmp_path)
+
+        async def failing() -> IngestReport:
+            raise RuntimeError("the sweep fell over")
+
+        with pytest.raises(RuntimeError, match="fell over"):
+            await asyncio.wait_for(swept_with_bar(store, failing(), False), timeout=5)
+
+    async def test_the_watcher_takes_a_reading_after_being_told_to_stop(
+        self, tmp_path: Path
+    ) -> None:
+        """The last reading is the one that matters, and it is taken after the
+        sweep finished rather than whenever the poll last came round."""
+        store = CorpusStore(root=tmp_path)
+        until = asyncio.Event()
+        until.set()
+
+        await asyncio.wait_for(tracked(store, 0.01, False, until), timeout=5)
+
+
 # ── Runs are observable, and one source failing costs only itself ─────────────
 
 
@@ -648,7 +982,6 @@ async def test_a_run_reports_what_it_discovered_fetched_and_skipped(
             declaration,
             store,
             DocumentFetcher(client=client),
-            tagger=fixture_tagger(),
             limit=1,
         )
         assert first.discovered == 2
@@ -656,9 +989,7 @@ async def test_a_run_reports_what_it_discovered_fetched_and_skipped(
         assert first.stored == 1
         assert first.skipped == 1
 
-        second = await ingest_source(
-            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
-        )
+        second = await ingest_source(declaration, store, DocumentFetcher(client=client))
     assert second.new == 0
     assert second.stored == 1
     assert second.skipped == 0
@@ -676,14 +1007,11 @@ async def test_a_stored_document_is_not_rewritten_when_it_has_not_changed(
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        await ingest_source(
-            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
-        )
+        await ingest_source(declaration, store, DocumentFetcher(client=client))
         again = await ingest_source(
             declaration,
             store,
             DocumentFetcher(client=client),
-            tagger=fixture_tagger(),
             refresh=True,
         )
     assert again.stored == 0
@@ -700,9 +1028,7 @@ async def test_a_document_failure_is_recorded_for_the_next_run(tmp_path: Path) -
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        report = await ingest_source(
-            declaration, store, DocumentFetcher(client=client), tagger=fixture_tagger()
-        )
+        report = await ingest_source(declaration, store, DocumentFetcher(client=client))
 
     assert report.stored == 1
     assert report.failed == 1
@@ -737,7 +1063,6 @@ async def test_one_unreachable_source_does_not_take_the_run_down(
             (broken, healthy),
             store,
             DocumentFetcher(client=client),
-            tagger=fixture_tagger(),
         )
 
     by_source = {entry.source: entry for entry in report.sources}
@@ -760,7 +1085,6 @@ async def test_a_source_whose_store_cannot_be_written_is_reported_not_raised(
             declaration,
             CorpusStore(root=blocked),
             DocumentFetcher(client=client),
-            tagger=fixture_tagger(),
         )
     assert report.aborted
     assert "aborted" in report.summary()
@@ -984,11 +1308,11 @@ def test_every_tag_a_source_declares_is_one_the_vocabulary_holds() -> None:
     assert all(vocabulary.holds(tag) for tag in declared)
 
 
-# ── Tags are assigned as a document enters, on every entry ────────────────────
+# ── A sweep stores bodies; a re-tag judges them ───────────────────────────────
 
 
 class IngestedCorpus(BaseModel):
-    """A fixture corpus that has been through one ingestion."""
+    """A fixture corpus that has been swept, and in most cases re-tagged."""
 
     declaration: SourceDeclaration
     store: CorpusStore
@@ -1002,10 +1326,10 @@ class IngestedCorpus(BaseModel):
         return found
 
 
-async def ingested_with(
-    tmp_path: Path, judge: TagJudge, *, slugs: tuple[str, ...] = ("one", "two")
+async def swept(
+    tmp_path: Path, *, slugs: tuple[str, ...] = ("one", "two")
 ) -> IngestedCorpus:
-    """Ingest a fixture source with ``judge`` doing the judging."""
+    """Sweep a fixture source, which stores bodies and judges nothing."""
     declaration = fixture_declaration()
     pages = (
         FixturePage(
@@ -1018,13 +1342,75 @@ async def ingested_with(
     )
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        await ingest_source(
-            declaration,
-            store,
-            DocumentFetcher(client=client),
-            tagger=fixture_tagger(judge),
-        )
+        await ingest_source(declaration, store, DocumentFetcher(client=client))
     return IngestedCorpus(declaration=declaration, store=store)
+
+
+async def ingested_with(
+    tmp_path: Path, judge: TagJudge, *, slugs: tuple[str, ...] = ("one", "two")
+) -> IngestedCorpus:
+    """Sweep a fixture source, then re-tag it with ``judge`` doing the judging."""
+    ingested = await swept(tmp_path, slugs=slugs)
+    await retag_source(ingested.declaration, ingested.store, fixture_tagger(judge))
+    return ingested
+
+
+async def test_a_sweep_stores_a_document_without_judging_it(tmp_path: Path) -> None:
+    """Fetching costs bandwidth alone, so a sweep runs at the hosts' rate.
+
+    The judge here answers nothing at all: if a sweep reached one, every
+    document would come back untagged rather than merely unjudged, and the
+    ``judged`` flag below is what tells those two apart.
+    """
+    ingested = await swept(tmp_path)
+
+    documents = ingested.shard().documents
+    assert len(documents) == 2
+    assert not any(document.tags.judged for document in documents)
+    assert all(
+        document.tags.applied() == ("organization:fixture",) for document in documents
+    )
+    assert not any(document.summary for document in documents)
+
+
+async def test_a_sweep_opens_no_session_anywhere_on_its_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stronger than "the tagger is not called": nothing on the path calls one.
+
+    Refused at the client every session in this project is opened through,
+    rather than at the tagger, so this keeps holding for a model reached from
+    somewhere a later change puts one — enumeration, fetching, quality. The
+    judging pays for a model deliberately and elsewhere; a sweep pays for
+    bandwidth, and that is the property worth being unable to lose quietly.
+    """
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a sweep opened a session")
+
+    monkeypatch.setattr("inkwell.agent.client.query", refuse)
+    with pytest.raises(AssertionError, match="opened a session"):
+        await ModelTagJudge().judge(TagRequest(slug="one", title="One"))
+
+    ingested = await swept(tmp_path)
+
+    assert len(ingested.shard().documents) == 2
+
+
+async def test_a_swept_document_is_stale_until_something_judges_it(
+    tmp_path: Path,
+) -> None:
+    """A re-tag picks up what a sweep stored, with nobody passing ``--force``."""
+    ingested = await swept(tmp_path)
+
+    judge = FixtureJudge(default=(EVALUATIONS.tag,))
+    report = await retag_source(
+        ingested.declaration, ingested.store, fixture_tagger(judge)
+    )
+
+    assert report.retagged == 2
+    assert report.current == 0
+    assert {request.slug for request in judge.requests} == {"one", "two"}
 
 
 async def test_every_stored_document_carries_tags(tmp_path: Path) -> None:
@@ -1114,12 +1500,8 @@ async def test_a_pdf_gets_a_judged_summary_where_it_can_have_no_abstract(
     judge = FixtureJudge(summary="A one-page paper about evaluation harnesses.")
     store = CorpusStore(root=tmp_path)
     async with client_for(pages) as client:
-        await ingest_source(
-            declaration,
-            store,
-            DocumentFetcher(client=client),
-            tagger=fixture_tagger(judge),
-        )
+        await ingest_source(declaration, store, DocumentFetcher(client=client))
+    await retag_source(declaration, store, fixture_tagger(judge))
 
     document = store.load(declaration).stored("paper")
     assert document is not None
@@ -1217,6 +1599,71 @@ async def test_documents_already_judged_against_this_vocabulary_are_left_alone(
     assert forced.changed == 0
 
 
+async def test_a_retag_says_where_it_has_got_to_as_each_document_lands(
+    tmp_path: Path,
+) -> None:
+    """A run of a few hundred documents says nothing at all otherwise.
+
+    Judging rewrites tags in place rather than adding documents, so a watcher
+    counting the corpus from outside sees the same number throughout — which is
+    why the run itself has to say. Per document rather than per source, because
+    a source of two hundred and a source of two are one tick each otherwise.
+    """
+    ingested = await ingested_with(tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)))
+
+    steps = list[RetagStep]()
+    await retag_source(
+        ingested.declaration,
+        ingested.store,
+        DocumentTagger(
+            vocabulary=wider_vocabulary(HARNESS_DESIGN),
+            judge=FixtureJudge(default=(HARNESS_DESIGN.tag,)),
+        ),
+        concurrency=1,
+        progress=steps.append,
+    )
+
+    assert [(step.source, step.done, step.total) for step in steps] == [
+        (ingested.declaration.key, 1, 2),
+        (ingested.declaration.key, 2, 2),
+    ]
+
+
+async def test_a_retag_records_each_judgement_as_it_lands(tmp_path: Path) -> None:
+    """Every judgement is a delegated session, so losing one is losing its cost.
+
+    Written as each lands rather than once the source finishes, which is what
+    leaves a run stopped part way through holding what it already paid for.
+    Read off disk from inside the run, because what an interrupted run would
+    have left is exactly what the index says while the run is still going.
+    """
+    ingested = await ingested_with(tmp_path, FixtureJudge(default=(EVALUATIONS.tag,)))
+
+    landed = list[int]()
+
+    def count_on_disk(_step: RetagStep) -> None:
+        landed.append(
+            sum(
+                1
+                for document in ingested.shard().documents
+                if HARNESS_DESIGN.tag in document.tags.core
+            )
+        )
+
+    await retag_source(
+        ingested.declaration,
+        ingested.store,
+        DocumentTagger(
+            vocabulary=wider_vocabulary(HARNESS_DESIGN),
+            judge=FixtureJudge(default=(HARNESS_DESIGN.tag,)),
+        ),
+        concurrency=1,
+        progress=count_on_disk,
+    )
+
+    assert landed == [1, 2]
+
+
 async def test_a_judgement_that_does_not_come_back_leaves_earlier_tags_standing(
     tmp_path: Path,
 ) -> None:
@@ -1310,3 +1757,612 @@ def test_a_browse_narrows_on_a_tag_and_still_sees_the_gap() -> None:
     blind_spot = CorpusFilter(untagged_only=True).apply(everything)
     assert [entry.document.slug for entry in blind_spot] == ["two"]
     assert shard.tags() == ("organization:fixture", EVALUATIONS.tag)
+
+
+RSS_FEED = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <title>CyberScoop</title>
+  <item>
+    <title>Irregular says human oversight responsible for AI sandbox escape</title>
+    <link>https://cyberscoop.com/irregular-ai-sandbox-escape/</link>
+  </item>
+  <item>
+    <title>Details emerge on BlackFile attacks on financial companies</title>
+    <link>https://cyberscoop.com/blackfile-financial-attacks/</link>
+  </item>
+</channel></rss>"""
+
+ATOM_FEED = b"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>The Desk</title>
+  <entry>
+    <title>OpenAI agent breached Hugging Face</title>
+    <link href="https://desk.example/openai-hugging-face/"/>
+  </entry>
+  <entry>
+    <title>A story with no link</title>
+  </entry>
+</feed>"""
+
+
+class TestFeedEntries:
+    """Both syndication dialects, read without sniffing which one it is."""
+
+    def test_rss_puts_the_url_in_link_text(self) -> None:
+        entries = feed_entries(RSS_FEED)
+
+        assert len(entries) == 2
+        assert entries[0].url == "https://cyberscoop.com/irregular-ai-sandbox-escape/"
+        assert entries[0].title.startswith("Irregular says")
+
+    def test_atom_puts_the_url_in_a_link_href(self) -> None:
+        entries = feed_entries(ATOM_FEED)
+
+        assert entries[0].url == "https://desk.example/openai-hugging-face/"
+        assert entries[0].title == "OpenAI agent breached Hugging Face"
+
+    def test_an_entry_naming_no_document_is_dropped(self) -> None:
+        """It points at nothing to fetch, so it is not a discovered item."""
+        assert len(feed_entries(ATOM_FEED)) == 1
+
+
+class TestFeedAvenue:
+    """A news desk's own section, walked as the corpus's topic filter."""
+
+    async def read(self, avenue: FeedAvenue, body: bytes) -> list[DiscoveredItem]:
+        reader = FixtureReader((FixturePage(url=avenue.feed, body=body),))
+        return await avenue.discover(PageCache(reader=reader))
+
+    async def test_an_unfiltered_feed_keeps_every_entry(self) -> None:
+        """Right when the feed is already the topic — an outlet's AI section."""
+        avenue = FeedAvenue(category="ai", feed="https://cyberscoop.com/feed/")
+
+        assert len(await self.read(avenue, RSS_FEED)) == 2
+
+    async def test_required_terms_filter_before_anything_is_fetched(self) -> None:
+        """The point of filtering at enumeration: the off-topic article's URL
+        never reaches the fetcher at all."""
+        avenue = FeedAvenue(
+            category="security",
+            feed="https://cyberscoop.com/feed/",
+            require_terms=("ai ", "artificial intelligence"),
+        )
+
+        found = await self.read(avenue, RSS_FEED)
+
+        assert [item.url for item in found] == [
+            "https://cyberscoop.com/irregular-ai-sandbox-escape/"
+        ]
+
+    async def test_the_headline_carries_through_to_the_item(self) -> None:
+        avenue = FeedAvenue(category="ai", feed="https://desk.example/feed/")
+
+        found = await self.read(avenue, ATOM_FEED)
+
+        assert found[0].title == "OpenAI agent breached Hugging Face"
+
+    async def test_the_apex_is_the_articles_host_not_the_feeds(self) -> None:
+        """BBC is the case: the feed is served from feeds.bbci.co.uk while the
+        articles live on bbc.com, so an apex taken from the feed's own host
+        would label every slug after a host no article is on."""
+        avenue = FeedAvenue(
+            category="technology",
+            feed="https://feeds.desk.example/tech/rss.xml",
+            apex="desk.example",
+        )
+
+        found = await self.read(avenue, ATOM_FEED)
+
+        assert found[0].slug == "openai-hugging-face"
+
+
+# ── A block page is never a document, whichever connection reached it ─────────
+
+
+CHALLENGE_HTML = (
+    b"<html><head><title>Just a moment...</title></head><body>"
+    b"<h1>Verify you are human</h1><p>Enable JavaScript and cookies to continue"
+    b"</p></body></html>"
+)
+
+
+async def test_a_challenge_page_the_browser_reaches_is_refused_not_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A browser has no status code to raise, so the block page is the only tell.
+
+    What a host turns a browser away with is a page, served with a 200 and a
+    body that extracts perfectly well — which is exactly how a refusal would
+    come to be stored as though it were the document.
+    """
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        return CHALLENGE_HTML
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+    url = f"{FIXTURE_HOST}/research/one"
+
+    async with httpx.AsyncClient(transport=refusing_transport()) as client:
+        with pytest.raises(FetchRefused, match="anti-bot"):
+            await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+
+async def test_a_challenge_page_a_render_reaches_is_refused_not_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same for the thin-body escalation, which is the other way in."""
+
+    async def render(url: str, *, profile: str | None = None) -> str:
+        return CHALLENGE_HTML.decode()
+
+    monkeypatch.setattr("inkwell.corpus.fetch.rendered_html", render)
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+    url = f"{FIXTURE_HOST}/research/one"
+    thin = httpx.MockTransport(lambda request: httpx.Response(200, text="<p>x</p>"))
+
+    async with httpx.AsyncClient(transport=thin) as client:
+        with pytest.raises(FetchRefused, match="anti-bot"):
+            await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+
+# ── One page at several URLs enters the corpus once ──────────────────────────
+
+
+async def test_one_page_served_at_two_urls_is_stored_once(tmp_path: Path) -> None:
+    """A section-per-URL app would otherwise enter once per section.
+
+    The count is the point as much as the storage is: eighteen copies of one
+    page reported as eighteen stored documents is a corpus that looks fuller
+    than it is, and nothing downstream can tell the difference.
+    """
+    declaration = fixture_declaration()
+    shell = article_html("The One Page")
+    pages = (
+        FixturePage(url=SITEMAP, body=sitemap_xml(("/research/one", "/research/two"))),
+        FixturePage(url=f"{FIXTURE_HOST}/research/one", body=shell),
+        FixturePage(url=f"{FIXTURE_HOST}/research/two", body=shell),
+    )
+    store = CorpusStore(root=tmp_path)
+    async with client_for(pages) as client:
+        report = await ingest_source(declaration, store, DocumentFetcher(client=client))
+
+    assert report.stored == 1
+    assert report.duplicate == 1
+    shard = store.load(declaration)
+    assert len(shard.documents) == 1
+    assert len(shard.aliases) == 1
+    assert shard.aliases[0].holder == shard.documents[0].slug
+    assert shard.aliases[0].slug != shard.documents[0].slug
+
+
+async def test_a_settled_alias_is_not_fetched_again(tmp_path: Path) -> None:
+    """Reached and decided, so a re-run costs nothing to reach the same answer."""
+    declaration = fixture_declaration()
+    shell = article_html("The One Page")
+    pages = (
+        FixturePage(url=SITEMAP, body=sitemap_xml(("/research/one", "/research/two"))),
+        FixturePage(url=f"{FIXTURE_HOST}/research/one", body=shell),
+        FixturePage(url=f"{FIXTURE_HOST}/research/two", body=shell),
+    )
+    store = CorpusStore(root=tmp_path)
+    async with client_for(pages) as client:
+        await ingest_source(declaration, store, DocumentFetcher(client=client))
+        again = await ingest_source(declaration, store, DocumentFetcher(client=client))
+
+    assert (again.stored, again.duplicate, again.unchanged) == (0, 0, 0)
+    settled = store.load(declaration)
+    assert len(settled.documents) == 1
+    assert len(settled.aliases) == 1
+
+
+# ── Repairing a corpus built before anything was watching ────────────────────
+
+
+def doubled_shard(tmp_path: Path) -> CorpusStore:
+    """A source holding one page under three slugs, and one document of its own."""
+    store = CorpusStore(root=tmp_path)
+    declaration = fixture_declaration()
+    shard = store.load(declaration)
+    for slug, digest, stamp in (
+        ("second", "shared", "2026-01-02T00:00:00Z"),
+        ("first", "shared", "2026-01-01T00:00:00Z"),
+        ("third", "shared", "2026-01-03T00:00:00Z"),
+        ("its-own", "distinct", "2026-01-01T00:00:00Z"),
+    ):
+        shard.record_document(
+            StoredDocument(
+                slug=slug,
+                url=f"{FIXTURE_HOST}/research/{slug}",
+                filename=store.store_markdown("fixture", slug, f"body of {slug}"),
+                content_sha256=digest,
+                fetched_at=stamp,
+            )
+        )
+        shard.discovered.append(
+            DiscoveredEntry(slug=slug, url=f"{FIXTURE_HOST}/research/{slug}")
+        )
+    store.save(shard)
+    return store
+
+
+def test_a_dry_prune_reports_what_it_would_do_and_touches_nothing(
+    tmp_path: Path,
+) -> None:
+    """The point of a destructive command is being able to see it first."""
+    store = doubled_shard(tmp_path)
+
+    report = prune_source("fixture", store, dry_run=True)
+
+    assert (report.documents, report.collapsed, report.dropped) == (4, 2, 0)
+    assert len(store.load(fixture_declaration()).documents) == 4
+    assert (tmp_path / "fixture" / "third.md").is_file()
+
+
+def test_pruning_keeps_the_copy_that_arrived_first(tmp_path: Path) -> None:
+    """Deterministic, so pruning the same corpus twice decides the same way."""
+    store = doubled_shard(tmp_path)
+
+    prune_source("fixture", store)
+
+    shard = store.load(fixture_declaration())
+    assert {one.slug for one in shard.documents} == {"first", "its-own"}
+    assert {alias.slug for alias in shard.aliases} == {"second", "third"}
+    assert {alias.holder for alias in shard.aliases} == {"first"}
+    assert not (tmp_path / "fixture" / "third.md").exists()
+    assert (tmp_path / "fixture" / "first.md").is_file()
+
+
+def test_a_dropped_document_leaves_no_alias_behind_it(tmp_path: Path) -> None:
+    """A wrong document is refetched, and an alias is what would prevent that.
+
+    An alias tells the next sweep this URL was reached and decided. That is
+    right for a copy and exactly wrong for chrome extracted where the body
+    never rendered, which is why dropping is a separate operation rather than
+    a flag on collapsing.
+    """
+    store = doubled_shard(tmp_path)
+
+    report = prune_source("fixture", store, drop=("first", "second", "third"))
+
+    assert (report.collapsed, report.dropped) == (0, 3)
+    shard = store.load(fixture_declaration())
+    assert {one.slug for one in shard.documents} == {"its-own"}
+    assert shard.aliases == []
+
+
+def test_a_drop_naming_nothing_says_so_rather_than_passing_quietly(
+    tmp_path: Path,
+) -> None:
+    """A typo in a destructive command must not read as a clean run."""
+    store = doubled_shard(tmp_path)
+
+    report = prune_source("fixture", store, drop=("no-such-slug",))
+
+    assert report.missing == ("no-such-slug",)
+    assert "no such slug: no-such-slug" in report.summary()
+
+
+async def test_a_source_declares_how_short_its_own_shell_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell clearing the shared floor is a fact about a site, not the fetcher.
+
+    OpenAI's deployment-safety sections extract to more than the default floor
+    and are still one shell, so a source that knows its own shell says how big
+    it is rather than every source sharing one guess.
+    """
+    rendered: list[str] = []
+
+    async def render(url: str, *, profile: str | None = None) -> str:
+        rendered.append(url)
+        return article_html("The Real Section").decode()
+
+    monkeypatch.setattr("inkwell.corpus.fetch.rendered_html", render)
+    shell = f"<html><body><article><p>{'shell text. ' * 90}</p></article></body></html>"
+    url = f"{FIXTURE_HOST}/research/one"
+    serving = httpx.MockTransport(lambda request: httpx.Response(200, text=shell))
+
+    unraised = fixture_declaration().model_copy(update={"needs_browser": True})
+    async with httpx.AsyncClient(transport=serving) as client:
+        kept = await DocumentFetcher(client=client).fetch(url, unraised)
+    assert rendered == []
+    assert "shell text" in kept.text
+
+    raised = unraised.model_copy(update={"thin_chars": 5_000})
+    async with httpx.AsyncClient(transport=serving) as client:
+        reached = await DocumentFetcher(client=client).fetch(url, raised)
+    assert rendered == [url]
+    assert "The Real Section" in reached.text
+
+
+def test_openais_floor_sits_between_its_shell_and_its_shortest_article() -> None:
+    """The number is measured off the corpus, so say what it was measured against."""
+    openai = declaration_for("openai")
+    assert openai is not None
+    assert 1177 < openai.thin_chars < 2620
+
+
+def test_dropping_a_holder_releases_the_aliases_that_named_it(
+    tmp_path: Path,
+) -> None:
+    """An alias points at bytes, so removing them leaves it naming nothing.
+
+    Left standing it would keep its own URL settled against a document the
+    corpus no longer holds — and that URL is precisely what a repair wants
+    fetched again.
+    """
+    store = doubled_shard(tmp_path)
+    prune_source("fixture", store)
+    assert len(store.load(fixture_declaration()).aliases) == 2
+
+    prune_source("fixture", store, drop=("first",))
+
+    shard = store.load(fixture_declaration())
+    assert {one.slug for one in shard.documents} == {"its-own"}
+    assert shard.aliases == []
+    assert {entry.slug for entry in pending_entries(shard)} >= {
+        "first",
+        "second",
+        "third",
+    }
+
+
+async def test_a_missing_document_is_not_put_through_a_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 is absent for every client, so a second attempt cannot differ.
+
+    The escalation exists for a host discriminating on the client. Spending a
+    page load to reach the same 404 costs seconds per dead URL on a sweep of
+    thousands, and arrives wrapped in a traceback that reads like a new fault.
+    """
+    reached: list[str] = []
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        reached.append(url)
+        return article_html("Reached")
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+    url = f"{FIXTURE_HOST}/research/gone"
+
+    async with httpx.AsyncClient(transport=refusing_transport(404)) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+    assert reached == []
+
+
+async def test_a_missing_sitemap_is_not_put_through_a_browser_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enumeration reaches for the browser on the same terms fetching does."""
+    reached: list[str] = []
+
+    async def through_browser(url: str, *, profile: str | None = None) -> bytes:
+        reached.append(url)
+        return b"<urlset></urlset>"
+
+    monkeypatch.setattr("inkwell.corpus.fetch.fetched_through_browser", through_browser)
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+
+    async with httpx.AsyncClient(transport=refusing_transport(404)) as client:
+        reader = HttpPageReader(client, browser_bound)
+        with pytest.raises(httpx.HTTPStatusError):
+            await reader.read(SITEMAP)
+    assert reached == []
+
+    async with httpx.AsyncClient(transport=refusing_transport(403)) as client:
+        reader = HttpPageReader(client, browser_bound)
+        assert await reader.read(SITEMAP) == b"<urlset></urlset>"
+    assert reached == [SITEMAP]
+
+
+async def test_a_challenged_client_renders_rather_than_giving_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interstitial is the same signal as a 403, and 403 escalates.
+
+    Cleared by running the script it arrived with, which is the one thing the
+    browser's bare connection does not do — so this escalates to a render
+    rather than to the connection a refusal escalates to.
+    """
+    rendered: list[str] = []
+
+    async def render(url: str, *, profile: str | None = None) -> str:
+        rendered.append(url)
+        return article_html("Past The Gate").decode()
+
+    monkeypatch.setattr("inkwell.corpus.fetch.rendered_html", render)
+    url = f"{FIXTURE_HOST}/research/one"
+    challenged = httpx.MockTransport(
+        lambda request: httpx.Response(200, text=CHALLENGE_HTML.decode())
+    )
+    browser_bound = fixture_declaration().model_copy(update={"needs_browser": True})
+
+    async with httpx.AsyncClient(transport=challenged) as client:
+        reached = await DocumentFetcher(client=client).fetch(url, browser_bound)
+
+    assert rendered == [url]
+    assert "Past The Gate" in reached.text
+    assert reached.rendered
+
+
+async def test_a_challenge_a_render_cannot_clear_says_that_is_what_happened() -> None:
+    """The failure has to distinguish "not tried yet" from "nothing left"."""
+    url = f"{FIXTURE_HOST}/research/one"
+    challenged = httpx.MockTransport(
+        lambda request: httpx.Response(200, text=CHALLENGE_HTML.decode())
+    )
+    plain = fixture_declaration()
+
+    async with httpx.AsyncClient(transport=challenged) as client:
+        with pytest.raises(FetchRefused, match="to a plain client"):
+            await DocumentFetcher(client=client).fetch(url, plain)
+
+
+def test_naming_an_inactive_source_sweeps_it_anyway() -> None:
+    """Deactivating parks a source; it does not put it out of reach.
+
+    The whole of what makes ``active`` a safe thing to set. A source held out
+    of the nightly sweep because every page of it refuses is one an operator
+    still has to be able to retry the moment they have a way in, and having
+    to edit the registry to do that would make deactivating a decision nobody
+    takes lightly enough to take at all.
+    """
+    swept_by_default = {entry.key for entry in resolve_sources(())}
+    assert "deepmind" not in swept_by_default
+
+    assert [entry.key for entry in resolve_sources(("deepmind",))] == ["deepmind"]
+    named = resolve_sources(("deepmind", "metr"))
+    assert {entry.key for entry in named} == {"deepmind", "metr"}
+
+
+def test_naming_a_source_that_does_not_exist_says_which_do() -> None:
+    """A typo in a source name is a wasted sweep, so it fails before one."""
+    with pytest.raises(UnknownSource, match="No such source: nosuchlab"):
+        resolve_sources(("nosuchlab",))
+
+
+# ── A gate on the connection, answered by a party that is not behind it ────────
+
+
+def archiving_transport(
+    *, article: bytes, capture: str = "20260819010803", available: bool = True
+) -> httpx.MockTransport:
+    """A host that refuses everything, and an archive that holds the page.
+
+    The shape the fallback exists for: `openai.com` answers `Allow: /` in its
+    robots.txt and then 403s the article, so the document is public and the
+    connection is what was refused.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host == "archive.org":
+            body = (
+                {
+                    "archived_snapshots": {
+                        "closest": {
+                            "url": f"http://web.archive.org/web/{capture}/{ARCHIVED}",
+                            "timestamp": capture,
+                            "available": True,
+                        }
+                    }
+                }
+                if available
+                else {"archived_snapshots": {}}
+            )
+            return httpx.Response(200, json=body)
+        if host == "web.archive.org":
+            return httpx.Response(200, content=article)
+        return httpx.Response(403, text="forbidden")
+
+    return httpx.MockTransport(handler)
+
+
+ARCHIVED = "https://fixture.test/research/one"
+"""The document whose host refuses us in these tests."""
+
+
+async def test_a_gated_document_is_read_from_an_archived_capture() -> None:
+    """The host's refusal is about the connection, and the archive is not on it."""
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    transport = archiving_transport(article=article_html("Pacing model development"))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        document = await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+    assert document.kind == "markdown"
+    assert "Pacing model development" in document.text
+    assert document.url == ARCHIVED
+
+
+async def test_an_archived_document_records_where_it_actually_came_from() -> None:
+    """A capture is weaker evidence than a live fetch, so it never passes as one."""
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    transport = archiving_transport(article=article_html("Preparedness"))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        document = await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+    assert "web.archive.org" in document.via
+    assert "20260819010803" in document.via
+
+
+async def test_a_source_that_declares_no_fallback_never_asks_an_archive() -> None:
+    """Reaching for a copy is a per-source decision about provenance."""
+    declaration = fixture_declaration()
+    transport = archiving_transport(article=article_html("Unwanted"))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+
+async def test_an_archive_holding_nothing_says_what_the_host_refused_with() -> None:
+    """Two things went wrong and an operator has to know which to chase."""
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    transport = archiving_transport(article=b"", available=False)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(FetchRefused, match="no archived capture"):
+            await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+
+async def test_an_archived_interstitial_is_refused_like_a_live_one() -> None:
+    """A capture of a block page is exactly as useless as meeting one directly."""
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    challenge = b"<html><body>Just a moment...</body></html>"
+    transport = archiving_transport(article=challenge)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(FetchRefused, match="anti-bot"):
+            await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+
+async def test_a_live_page_is_never_replaced_by_an_archived_copy() -> None:
+    """The host is asked first and its answer always wins, or the corpus dates
+    itself for no reason."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "fixture.test":
+            raise AssertionError(f"an archive was asked for a live page: {request.url}")
+        return httpx.Response(200, content=article_html("Live"))
+
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        document = await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)
+
+    assert "Live" in document.text
+    assert document.via == ""
+
+
+def test_a_capture_url_is_built_from_the_stamp_and_the_original() -> None:
+    """Assembled from parts rather than edited out of the archive's own reply."""
+    built = raw_capture("https://openai.com/index/preparedness", "20260819010803")
+
+    assert built == (
+        "https://web.archive.org/web/20260819010803id_/"
+        "https://openai.com/index/preparedness"
+    )
+
+
+async def test_an_absent_document_is_never_asked_of_an_archive() -> None:
+    """A 404 is absent for every reader there is, so a second party adds nothing.
+
+    The restriction that keeps the fallback about gates: a page that has moved
+    would otherwise be answered from a capture forever, and the corpus would hold
+    a copy of something the source deliberately took down.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "fixture.test":
+            raise AssertionError(f"an archive was asked about a 404: {request.url}")
+        return httpx.Response(404, text="gone")
+
+    declaration = fixture_declaration().model_copy(update={"archive_fallback": True})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await DocumentFetcher(client=client).fetch(ARCHIVED, declaration)

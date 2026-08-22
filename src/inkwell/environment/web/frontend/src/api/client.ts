@@ -6,9 +6,17 @@ import type {
   ModelOptions,
   ProfileResponse,
   ServerCapabilities,
+  PartNode,
+  QuestionView,
+  ReachedBy,
   SessionDetail,
   SessionSummary,
   SuppliedValues,
+  WorkImport,
+  WorkLoopStatus,
+  WorkSummary,
+  WorkTree,
+  WouldRun,
 } from "../types";
 
 const BASE = `${import.meta.env.BASE_URL}api`;
@@ -276,6 +284,150 @@ export async function authorizeGoogle(
 ): Promise<GoogleStatus> {
   const res = await fetch(
     `${BASE}/profiles/${encodeURIComponent(name)}/google/authorize`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// ── Works ────────────────────────────────────────────────────────────────────
+
+export async function fetchWorks(): Promise<WorkSummary[]> {
+  const res = await fetch(`${BASE}/works`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function fetchWorkTree(work: string): Promise<WorkTree> {
+  const res = await fetch(`${BASE}/works/${encodeURIComponent(work)}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function fetchWorkQuestions(
+  work: string,
+): Promise<QuestionView[]> {
+  const res = await fetch(`${BASE}/works/${encodeURIComponent(work)}/questions`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function answerWorkQuestion(
+  work: string,
+  question: string,
+  value: string,
+): Promise<QuestionView> {
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/questions/${encodeURIComponent(question)}/answer`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// The key is a path down the tree, so it stays a path in the URL rather than
+// being encoded whole — the route reads it with `{key:path}`.
+export async function requestWorkPart(
+  work: string,
+  key: string,
+  reason: string,
+): Promise<PartNode> {
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/parts/${key}/request`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function clearWorkPart(
+  work: string,
+  key: string,
+): Promise<PartNode> {
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/parts/${key}/clear`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function fetchWhatItReaches(
+  work: string,
+  subject: string,
+  kind = "term",
+): Promise<ReachedBy> {
+  const params = new URLSearchParams({ subject, kind });
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/reaches?${params}`,
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function recordWork(request: {
+  work: string;
+  chapters: string;
+  title?: string;
+  target_format?: string;
+  vocabulary?: string;
+  adopt?: boolean;
+}): Promise<WorkImport> {
+  const res = await fetch(`${BASE}/works`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// Asked before the run rather than after: every part a pass picks up is a whole
+// pipeline run, so this is what turns "start" from a blank cheque into a choice.
+export async function previewWorkRun(
+  work: string,
+  limit = 0,
+  parts: string[] = [],
+): Promise<WouldRun> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  for (const key of parts) params.append("part", key);
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/would-run?${params}`,
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function startWorkRun(
+  work: string,
+  request: {
+    passes?: number;
+    limit?: number;
+    parts?: string[];
+    concurrency?: number;
+    reconcile?: boolean;
+  },
+): Promise<WorkLoopStatus> {
+  const res = await fetch(`${BASE}/works/${encodeURIComponent(work)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function stopWorkRun(work: string): Promise<WorkLoopStatus> {
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/run/stop`,
     { method: "POST" },
   );
   if (!res.ok) throw new Error(await res.text());

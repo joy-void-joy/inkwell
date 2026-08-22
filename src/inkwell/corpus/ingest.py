@@ -15,7 +15,7 @@ import asyncio
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from inkwell.corpus.discovery import AvenueFailure, PageCache, discover_avenues
 from inkwell.pdf import page_count
@@ -36,6 +36,7 @@ from inkwell.corpus.registry import (
 from inkwell.corpus.storage import (
     CorpusStore,
     DiscoveredEntry,
+    DocumentAlias,
     SourceShard,
     StoredDocument,
     StoreFailure,
@@ -44,7 +45,7 @@ from inkwell.corpus.storage import (
     now_stamp,
     pending_entries,
 )
-from inkwell.corpus.tagging import DocumentTagger
+from inkwell.corpus.tags import DocumentTags
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +79,11 @@ def abstract_of(document: FetchedDocument) -> str:
     return f"{opening}…" if len(words) > ABSTRACT_WORDS else opening
 
 
-type DocumentStatus = Literal["stored", "unchanged", "failed"]
+type DocumentStatus = Literal["stored", "unchanged", "duplicate", "failed"]
 
 STORED: DocumentStatus = "stored"
 UNCHANGED: DocumentStatus = "unchanged"
+DUPLICATE: DocumentStatus = "duplicate"
 FAILED: DocumentStatus = "failed"
 
 
@@ -94,6 +96,7 @@ class DocumentOutcome(BaseModel):
     url: str
     status: DocumentStatus
     kind: str = ""
+    holder: str = ""
     failure_class: str = ""
     error: str = ""
 
@@ -110,6 +113,7 @@ class SourceReport(BaseModel):
     new: int = 0
     stored: int = 0
     unchanged: int = 0
+    duplicate: int = 0
     skipped: int = 0
     failed: int = 0
     crawl_degraded: bool = False
@@ -133,6 +137,7 @@ class SourceReport(BaseModel):
                 ("new", self.new),
                 ("stored", self.stored),
                 ("unchanged", self.unchanged),
+                ("duplicate", self.duplicate),
                 ("skipped", self.skipped),
                 ("failed", self.failed),
             )
@@ -195,7 +200,6 @@ class SourceIngestor(BaseModel):
     declaration: SourceDeclaration
     store: CorpusStore
     fetcher: DocumentFetcher
-    tagger: DocumentTagger = Field(default_factory=DocumentTagger)
     concurrency: int = DEFAULT_CONCURRENCY
     limit: int = 0
     refresh: bool = False
@@ -231,10 +235,11 @@ class SourceIngestor(BaseModel):
         An unchanged document is recognised by its content hash rather than by
         any timestamp, so re-running over a static source rewrites nothing.
 
-        Tagging happens here, as the document enters, rather than when some
-        later run happens to want it: tags are what a browse navigates by, so a
-        corpus tagged only where someone already looked is one whose gaps are
-        exactly where nobody has looked yet.
+        A document enters carrying only what its declaration settles about it —
+        who published it, which section it came from. What it is *about* is a
+        judgement, and judgements belong to ``retag_source``, which reads
+        bodies off disk: keeping them out of a sweep is what stops the rate a
+        host tolerates from also being a rate of delegated sessions.
         """
         source = self.declaration.key
         try:
@@ -245,11 +250,31 @@ class SourceIngestor(BaseModel):
                 return DocumentOutcome(
                     slug=entry.slug, url=entry.url, status=UNCHANGED, kind=fetched.kind
                 )
+            holder = shard.holder_of(digest, entry.slug)
+            if holder:
+                shard.record_alias(
+                    DocumentAlias(
+                        slug=entry.slug,
+                        url=entry.url,
+                        holder=holder,
+                        content_sha256=digest,
+                        seen_at=now_stamp(),
+                    )
+                )
+                shard.clear_failure(entry.slug)
+                return DocumentOutcome(
+                    slug=entry.slug,
+                    url=entry.url,
+                    status=DUPLICATE,
+                    kind=fetched.kind,
+                    holder=holder,
+                )
             title = fetched.title or entry.title or entry.slug
             written = self.write(entry.slug, fetched, title)
             document = StoredDocument(
                 slug=entry.slug,
                 url=entry.url,
+                via=fetched.via,
                 category=entry.category,
                 title=title,
                 kind=fetched.kind,
@@ -261,11 +286,9 @@ class SourceIngestor(BaseModel):
                 published=fetched.published,
                 fetched_at=now_stamp(),
                 quality=written.quality,
+                tags=DocumentTags(derived=self.declaration.tags_for(entry.category)),
             )
-            assignment = await self.tagger.assign(
-                self.declaration, document, self.store.document_path(source, document)
-            )
-            shard.record_document(assignment.applied_to(document))
+            shard.record_document(document)
             shard.clear_failure(entry.slug)
             return DocumentOutcome(
                 slug=entry.slug, url=entry.url, status=STORED, kind=fetched.kind
@@ -333,6 +356,7 @@ class SourceIngestor(BaseModel):
             new=fresh,
             stored=sum(1 for one in outcomes if one.status == STORED),
             unchanged=sum(1 for one in outcomes if one.status == UNCHANGED),
+            duplicate=sum(1 for one in outcomes if one.status == DUPLICATE),
             skipped=len(work) - len(selected),
             failed=sum(1 for one in outcomes if one.status == FAILED),
             crawl_degraded=shard.crawl_degraded,
@@ -348,7 +372,6 @@ async def ingest_source(
     fetcher: DocumentFetcher,
     *,
     pages: PageCache | None = None,
-    tagger: DocumentTagger | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     limit: int = 0,
     refresh: bool = False,
@@ -359,14 +382,12 @@ async def ingest_source(
     a moved sitemap, a host that no longer resolves — is reported as aborted so
     the run continues and an operator can see which source to look at.
     """
-    cache = (
-        pages if pages is not None else PageCache(reader=HttpPageReader(fetcher.client))
-    )
+    reader = HttpPageReader(fetcher.client, declaration, profile=fetcher.profile)
+    cache = pages if pages is not None else PageCache(reader=reader)
     ingestor = SourceIngestor(
         declaration=declaration,
         store=store,
         fetcher=fetcher,
-        tagger=tagger if tagger is not None else DocumentTagger(),
         concurrency=concurrency,
         limit=limit,
         refresh=refresh,
@@ -388,7 +409,6 @@ async def ingest_with(
     store: CorpusStore,
     fetcher: DocumentFetcher,
     *,
-    tagger: DocumentTagger | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     limit: int = 0,
     refresh: bool = False,
@@ -404,7 +424,6 @@ async def ingest_with(
             declaration,
             store,
             fetcher,
-            tagger=tagger,
             concurrency=concurrency,
             limit=limit,
             refresh=refresh,
@@ -423,7 +442,6 @@ async def ingest_sources(
     store: CorpusStore,
     *,
     profile: str | None = None,
-    tagger: DocumentTagger | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     limit: int = 0,
     refresh: bool = False,
@@ -434,7 +452,6 @@ async def ingest_sources(
             declarations,
             store,
             DocumentFetcher(client=client, profile=profile),
-            tagger=tagger,
             concurrency=concurrency,
             limit=limit,
             refresh=refresh,
@@ -466,7 +483,6 @@ async def sync_corpus(
     *,
     keys: tuple[str, ...] = (),
     profile: str | None = None,
-    tagger: DocumentTagger | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     limit: int = 0,
     refresh: bool = False,
@@ -476,7 +492,6 @@ async def sync_corpus(
         resolve_sources(keys),
         store,
         profile=profile,
-        tagger=tagger,
         concurrency=concurrency,
         limit=limit,
         refresh=refresh,

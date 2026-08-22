@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from inkwell.agent.provenance import DomainVenue, Venue
 from inkwell.corpus.discovery import (
     Avenue,
+    FeedAvenue,
     ListingAvenue,
     SitemapAvenue,
     SweepAvenue,
@@ -43,6 +44,7 @@ from inkwell.corpus.tags import (
     EVALUATIONS,
     GOVERNANCE,
     MODEL_RELEASE,
+    SECURITY,
     SYSTEM_CARD,
     TagTerm,
     TagVocabulary,
@@ -84,9 +86,27 @@ class SourceDeclaration(BaseModel):
         default=True,
         description="Whether a run sweeps this source, or only tracks that it exists",
     )
-    renders_with_javascript: bool = Field(
+    needs_browser: bool = Field(
         default=False,
-        description="Whether its pages need a real browser to produce content",
+        description="Whether its pages need a real browser to reach their content "
+        "— a client-rendered shell, or a host that refuses a plain fetcher",
+    )
+    archive_fallback: bool = Field(
+        default=False,
+        description="Whether a document this host withholds from us may be read "
+        "from the newest capture a public archive holds. For a source whose "
+        "robots.txt permits the read and whose edge refuses it anyway: the gate is "
+        "on the connection, not on the content, and an archive is not behind it. "
+        "Off by default because an archived copy is weaker evidence than a live "
+        "fetch — taken at some past moment, and possibly stale — so a source opts "
+        "in and every document that arrives this way records that it did",
+    )
+    thin_chars: int = Field(
+        default=0,
+        description="How short an extraction has to be before this source's pages "
+        "are worth rendering, where the shared default reads a shell as an "
+        "article; 0 takes the default. A shell's size is a fact about a site, "
+        "so the source that has one says how big it is",
     )
     quality_rules: tuple[QualityRule, ...] = Field(
         default=DEFAULT_RULES,
@@ -136,6 +156,48 @@ class DroppedSource(BaseModel):
 
 ANTHROPIC_CDN = "www-cdn.anthropic.com"
 """Where Anthropic serves the system-card PDFs its own sitemap never lists."""
+
+APOLLO_SITEMAP = "https://www.apolloresearch.ai/sitemap.xml"
+"""The one sitemap Apollo publishes, which every one of its avenues walks.
+
+Named once because four avenues share it: Webflow emits a single sitemap for
+the whole site, so what separates science from governance is the path prefix
+rather than the file, and four copies of this URL would be four places to
+correct the next time the site moves.
+"""
+
+
+AI_HEADLINE_TERMS: tuple[str, ...] = (
+    "ai ",
+    " ai",
+    "a.i.",
+    "artificial intelligence",
+    "machine learning",
+    "llm",
+    "chatbot",
+    "openai",
+    "anthropic",
+    "claude",
+    "chatgpt",
+    "gemini",
+    "deepmind",
+    "hugging face",
+    "gpt-",
+    "copilot",
+    "deepfake",
+    "agentic",
+)
+"""What marks a general-desk headline as being about AI.
+
+Used only where an outlet publishes no AI section of its own and the corpus
+takes its security or technology feed instead. Padded forms for the bare
+acronym, because an unpadded "ai" matches *said*, *maintain*, and *chain*.
+
+A term list is a blunt instrument and this one is deliberately narrow: it is
+the filter that decides what is never fetched, so a miss costs one article
+while a false positive costs a fetch and a tagging pass. Where an outlet does
+maintain an AI section, that section is the filter and this is not used.
+"""
 
 
 DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
@@ -196,27 +258,17 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         authority="lab_publication",
         hosts=("apolloresearch.ai",),
         avenues=(
-            SitemapAvenue(
-                category="science",
-                sitemap="https://www.apolloresearch.ai/science-sitemap.xml",
-            ),
-            SitemapAvenue(
-                category="governance",
-                sitemap="https://www.apolloresearch.ai/governance-sitemap.xml",
-            ),
-            SitemapAvenue(
-                category="blog",
-                sitemap="https://www.apolloresearch.ai/post-sitemap.xml",
-            ),
-            SitemapAvenue(
-                category="products",
-                sitemap="https://www.apolloresearch.ai/products-sitemap.xml",
-            ),
+            SitemapAvenue(category="science", sitemap=APOLLO_SITEMAP),
+            SitemapAvenue(category="governance", sitemap=APOLLO_SITEMAP),
+            SitemapAvenue(category="blog", sitemap=APOLLO_SITEMAP),
+            SitemapAvenue(category="monitoring", sitemap=APOLLO_SITEMAP),
         ),
         notes=(
-            "WordPress with Yoast, so each content type has its own sitemap. The "
-            "page and taxonomy sitemaps are left out on purpose: static pages and "
-            "tag archives carry no document of their own."
+            "Webflow, which publishes one sitemap for the whole site rather "
+            "than one per content type, so every avenue walks the same file and "
+            "the category is the path prefix that separates them. Press, team, "
+            "and testimonials are left out on purpose: they carry announcements "
+            "and profiles rather than documents of Apollo's own."
         ),
     ),
     SourceDeclaration(
@@ -333,6 +385,11 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         authority="lab_publication",
         hosts=("openai.com",),
         avenues=(
+            FeedAvenue(
+                feed="https://openai.com/news/rss.xml",
+                apex="openai.com",
+                category="news",
+            ),
             SweepAvenue(
                 domains=(
                     "https://openai.com",
@@ -342,12 +399,27 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
                 apex="openai.com",
             ),
         ),
-        active=False,
+        needs_browser=True,
+        archive_fallback=True,
+        thin_chars=1500,
         notes=(
-            "Inactive: the published surface is large enough that a first sweep "
-            "should be a deliberate act rather than a side effect of syncing "
-            "everything. The multi-domain shape is declared and proven; PDFs on "
-            "cdn.openai.com need seeds once someone enumerates them."
+            "robots.txt is `Allow: /` with one disallowed path and advertises the "
+            "sitemap, so the read is invited and what refuses it is the edge. The "
+            "refusal is not uniform, which is what an earlier sweep read as a "
+            "blanket one: /index/ articles do answer a rendered browser and "
+            "extract to tens of thousands of characters, while the marketing "
+            "paths — /business/, /academy/ — serve the interstitial to a browser "
+            "too. So the browser reaches the documents worth having, and the "
+            "archive fallback is the backstop for the rest rather than the main "
+            "route; on the gated paths it usually finds a listing page or no "
+            "capture, which the thin floor and the missing-capture failure both "
+            "report rather than store. The news feed is the enumeration that "
+            "needs no gate at all: 1139 items with titles, categories and dates, "
+            "served to our own user agent, with the sitemap sweep listing the "
+            "rest. The thin floor is 1500 because the deployment-safety site "
+            "renders each section client-side from one shell extracting to 1177 "
+            "characters, where the shortest genuine article here is 2620. PDFs on "
+            "cdn.openai.com still need seeds once someone enumerates them."
         ),
     ),
     SourceDeclaration(
@@ -361,7 +433,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
             SweepAvenue(domains=("https://deepmind.google",), apex="deepmind.google"),
         ),
         active=False,
-        renders_with_javascript=True,
+        needs_browser=True,
         notes=(
             "Inactive pending recon: the site is behind a challenge and renders "
             "client-side, so it needs the browser path, and its CDN PDFs need "
@@ -378,8 +450,9 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         avenues=(SweepAvenue(domains=("https://mistral.ai",), apex="mistral.ai"),),
         active=False,
         notes=(
-            "Inactive pending recon. Governance documents live on a separate CMS "
-            "host and render client-side, so they will arrive as seeds."
+            "Inactive pending recon. Governance documents live on "
+            "legal.cms.mistral.ai and render client-side, so they will arrive "
+            "as seeds rather than through the sweep."
         ),
     ),
     SourceDeclaration(
@@ -391,7 +464,7 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         hosts=("x.ai",),
         avenues=(SweepAvenue(domains=("https://x.ai",), apex="x.ai"),),
         active=False,
-        renders_with_javascript=True,
+        needs_browser=True,
         notes=(
             "Inactive pending recon: challenge-gated, and the documents are "
             "likely CDN PDFs a sitemap never lists."
@@ -457,8 +530,9 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         ),
         active=False,
         notes=(
-            "Inactive pending recon: the organization publishes across several "
-            "domains and which one is canonical is not settled."
+            "Inactive pending recon: moonshot.ai, moonshot.cn, and kimi.com all "
+            "carry the organization's writing and which is canonical is not "
+            "settled. Recon is deciding that, not finding a sitemap."
         ),
     ),
     SourceDeclaration(
@@ -472,15 +546,110 @@ DECLARED_SOURCES: tuple[SourceDeclaration, ...] = (
         active=False,
         notes=(
             "Inactive pending recon: as with Moonshot, the canonical publishing "
-            "domain is not settled."
+            "domain is not settled — z.ai, zhipuai.cn, and bigmodel.cn are the "
+            "three it is between."
+        ),
+    ),
+    SourceDeclaration(
+        key="techcrunch",
+        display_name="TechCrunch",
+        organization="TechCrunch",
+        venue="TechCrunch",
+        authority="news",
+        hosts=("techcrunch.com",),
+        avenues=(
+            FeedAvenue(
+                category="ai",
+                feed="https://techcrunch.com/category/artificial-intelligence/feed/",
+                apex="techcrunch.com",
+            ),
+        ),
+        notes=(
+            "Publishes its own AI section as a feed, so the section is the "
+            "filter and no headline matching is needed. Feed verified: "
+            "'AI News & Artificial Intelligence | TechCrunch', RSS 2.0."
+        ),
+    ),
+    SourceDeclaration(
+        key="bleepingcomputer",
+        display_name="BleepingComputer",
+        organization="BleepingComputer",
+        venue="BleepingComputer",
+        authority="news",
+        hosts=("bleepingcomputer.com",),
+        avenues=(
+            FeedAvenue(
+                category="security",
+                tags=(SECURITY,),
+                feed="https://www.bleepingcomputer.com/feed/",
+                apex="bleepingcomputer.com",
+                require_terms=AI_HEADLINE_TERMS,
+            ),
+        ),
+        notes=(
+            "A security desk with no AI section, so the whole feed is walked "
+            "and headlines carry the topic filter. First to report the "
+            "operational detail on the July 2026 Hugging Face intrusion, which "
+            "is why it is declared. Its edge refuses a client claiming to be "
+            "Chrome and serves one that says what it is, so it needs no "
+            "browser and never did — what it needed was an honest user agent, "
+            "and the 403 it answered for months was earned rather than "
+            "arbitrary."
+        ),
+    ),
+    SourceDeclaration(
+        key="cyberscoop",
+        display_name="CyberScoop",
+        organization="CyberScoop",
+        venue="CyberScoop",
+        authority="news",
+        hosts=("cyberscoop.com",),
+        avenues=(
+            FeedAvenue(
+                category="security",
+                tags=(SECURITY,),
+                feed="https://cyberscoop.com/feed/",
+                apex="cyberscoop.com",
+                require_terms=AI_HEADLINE_TERMS,
+            ),
+        ),
+        notes=(
+            "Security desk, same shape as BleepingComputer. Feed verified: "
+            "'CyberScoop', RSS 2.0."
+        ),
+    ),
+    SourceDeclaration(
+        key="bbc",
+        display_name="BBC News",
+        organization="BBC",
+        venue="BBC News",
+        authority="news",
+        hosts=("bbc.co.uk", "bbc.com"),
+        avenues=(
+            FeedAvenue(
+                category="technology",
+                feed="https://feeds.bbci.co.uk/news/technology/rss.xml",
+                apex="bbc.co.uk",
+                require_terms=AI_HEADLINE_TERMS,
+            ),
+        ),
+        notes=(
+            "The technology desk, filtered on headlines: BBC publishes an AI "
+            "topic page but no AI feed. Articles live on bbc.com while the "
+            "feed is served from feeds.bbci.co.uk, which is why the apex is "
+            "declared rather than taken from the feed's own host. Feed "
+            "verified: 'BBC News', RSS 2.0."
         ),
     ),
 )
-"""Every source the ported research database tracked, declared once each.
+"""Every source the corpus tracks, declared once each.
 
 The seven with per-category avenues are the ones whose enumeration was proven
-there; the nine swept lab sources were declared but never wired, and stay
-inactive with the reason in their notes rather than disappearing.
+in the ported research database; the nine swept lab sources were declared but
+never wired, and stay inactive with the reason in their notes rather than
+disappearing. The news desks are the newest group, and the only one where the
+corpus subsets a source rather than taking everything it publishes — a general
+outlet's whole output is not what a writing pipeline wants standing behind it.
 """
 
 

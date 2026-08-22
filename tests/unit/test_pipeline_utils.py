@@ -1,22 +1,33 @@
 """Tests for pipeline utility functions: slugify, voice refs."""
 
 from pathlib import Path
+from typing import Literal
+
+import pytest
 
 from inkwell.agent.content import ContentManifest
-from inkwell.agent.models import ArticlePlan, ReviewFinding
+from inkwell.agent.models import ArticlePlan, ResearchCompilation, ReviewFinding
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     academic_assembly_block,
     add_voice_refs,
+    annotate_draft_with_findings,
+    finding_tag,
     author_context_block,
     brief_block,
     consolidate_findings,
+    corpus_briefing,
+    planning_topic,
     render_brief,
     resolve_writer_mode,
     slugify,
+    suggested_additions_block,
 )
 from inkwell.agent.stages import get_format_guidance
 from inkwell.agent.tools.stage_outputs import PlanCollector, SetPlanHeaderInput
+from inkwell.corpus.semantics import SemanticLayer
+from inkwell.corpus.storage import CorpusStore, SourceShard, StoredDocument
+from inkwell.corpus.tags import DocumentTags
 
 
 class TestSlugify:
@@ -219,3 +230,201 @@ class TestAcademicAssemblyBlock:
         assert "compile_latex" in block
         assert "\\newtheorem" in block
         assert "preamble" in block.lower()
+
+
+class TestSuggestedAdditionsReachTheRefiner:
+    """The channel for material no research question asked for.
+
+    The researcher is told to file anything valuable that emerged outside the
+    original questions. `suggested_additions` had one writer and no readers, so
+    a proposal arriving only that way was collected and dropped — and it is the
+    only route for a development the source predates, which has no claim in the
+    source for a verification question to hang off.
+    """
+
+    def test_nothing_is_rendered_before_research_runs(self, tmp_path: Path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+
+        assert suggested_additions_block(notes) == ""
+
+    def test_a_run_that_suggested_nothing_renders_nothing(self, tmp_path: Path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_artifact("research", ResearchCompilation(findings=[]))
+
+        assert suggested_additions_block(notes) == ""
+
+    def test_every_suggestion_reaches_the_refiner_whole(self, tmp_path: Path) -> None:
+        """Whole, because a suggestion is an argument for a change — a trimmed
+        one reads as a topic the refiner cannot weigh."""
+        notes = PipelineNotes(tmp_path / "notes")
+        first = "An agent breached Hugging Face in July 2026; the draft predates it."
+        second = "The flash-attack term is from Staniford et al. 2002, not Fang."
+        notes.save_artifact(
+            "research",
+            ResearchCompilation(findings=[], suggested_additions=[first, second]),
+        )
+
+        block = suggested_additions_block(notes)
+
+        assert first in block
+        assert second in block
+
+    def test_the_refiner_must_answer_each_one(self, tmp_path: Path) -> None:
+        """Adopt, fold in, or reject with a reason — silence was the old
+        behaviour and is what this block exists to stop."""
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_artifact(
+            "research", ResearchCompilation(findings=[], suggested_additions=["a"])
+        )
+
+        block = suggested_additions_block(notes)
+
+        assert "reject it with a reason" in block
+        assert "Silence" in block
+
+
+class TestCorpusBriefingReachesThePlanner:
+    """What the corpus holds, pushed rather than left to a tool call.
+
+    `corpus_search` was available to the research stage all along. A stage
+    reaches for it once it knows there is something to look for, which is
+    exactly what a piece working from an older draft does not know.
+    """
+
+    async def test_an_empty_corpus_adds_nothing_to_the_task(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_root", lambda: tmp_path / "corpus"
+        )
+
+        assert await corpus_briefing("AI and cyber risk") == ""
+
+    async def test_the_briefing_says_how_its_results_were_ordered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A neighbour query falls back to the structural ordering where the
+        semantic layer cannot answer, and calling the result "nearest" either way
+        would tell the planner these were the closest documents on its subject
+        when they were the most recent ones on any subject."""
+        store = CorpusStore(root=tmp_path / "corpus")
+        store.save(
+            SourceShard(
+                source="aisi",
+                documents=[
+                    StoredDocument(
+                        slug="a-post",
+                        url="https://fixture.test/a-post",
+                        title="A post",
+                        kind="markdown",
+                        abstract="Prose about cyber risk.",
+                        tags=DocumentTags(judged=True),
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_root", lambda: tmp_path / "corpus"
+        )
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_semantics",
+            lambda held: SemanticLayer(store=held, enabled=False),
+        )
+
+        briefing = await corpus_briefing("AI and cyber risk")
+
+        assert "A post" in briefing
+        assert "nearest first" not in briefing
+
+    def test_the_brief_leads_the_subject_where_there_is_one(
+        self, tmp_path: Path
+    ) -> None:
+        """An author's brief says what the piece is meant to be, which is the
+        sharper description of the two, so it goes first."""
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_brief("A textbook chapter on AI and cyber risk.")
+
+        assert planning_topic(notes, "textbook").startswith("A textbook chapter")
+
+    def test_the_material_is_asked_about_as_well_as_the_brief(
+        self, tmp_path: Path
+    ) -> None:
+        """What distinguishes two parts of one work. A brief composed for the
+        run rather than by a person says the same thing about every part it
+        launches, so a corpus asked with the brief alone returns one list for a
+        whole book and the planner cannot tell the parts apart."""
+        notes = PipelineNotes(tmp_path / "notes")
+        notes.save_brief("You are revising one part of a larger work.")
+        path = notes.text_artifact_path("conversation")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("## 2.3.2 Cyber Risk\n\nOffence-defence balance.", "utf-8")
+
+        asked = planning_topic(notes, "textbook")
+
+        assert "revising one part" in asked
+        assert "Offence-defence" in asked
+
+    def test_the_source_stands_in_when_no_brief_was_given(self, tmp_path: Path) -> None:
+        notes = PipelineNotes(tmp_path / "notes")
+        path = notes.text_artifact_path("conversation")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Cyber risk and the offense-defence balance.", "utf-8")
+
+        assert "offense-defence" in planning_topic(notes, "textbook")
+
+    def test_a_run_with_neither_falls_back_rather_than_failing(
+        self, tmp_path: Path
+    ) -> None:
+        """A missing corpus subject is not a reason to end a run."""
+        notes = PipelineNotes(tmp_path / "notes")
+
+        assert planning_topic(notes, "textbook") == "textbook"
+
+
+class TestFindingsCarryATagToAnswerBy:
+    """The rewrite is handed ~70 findings and accounted for them in one
+    sentence. A tag is what lets it answer each one, and what lets the audit
+    read its answer instead of guessing from whether a passage survived."""
+
+    def finding(
+        self,
+        excerpt: str,
+        severity: Literal["critical", "suggestion", "praise"] = "critical",
+    ) -> ReviewFinding:
+        return ReviewFinding(
+            reviewer="factcheck",
+            severity=severity,
+            location="§1",
+            issue="wrong",
+            text_excerpt=excerpt,
+        )
+
+    def test_tags_are_positional_and_stable(self) -> None:
+        """So a resumed run's tag points at the same finding it did before."""
+        assert finding_tag(0) == "F01"
+        assert finding_tag(11) == "F12"
+
+    def test_an_anchored_finding_carries_its_tag_into_the_draft(self) -> None:
+        annotated = annotate_draft_with_findings(
+            "The claim stands here.", [self.finding("The claim stands here.")]
+        )
+
+        assert "[F01:critical:factcheck]" in annotated
+
+    def test_a_finding_that_cannot_anchor_still_carries_its_tag(self) -> None:
+        """It lands in the trailing list, and the rewrite still has to answer
+        it — an unanchorable finding is not an excused one."""
+        annotated = annotate_draft_with_findings(
+            "Some prose.", [self.finding("a passage that is not in the draft")]
+        )
+
+        assert "[F01:critical:factcheck]" in annotated
+
+    def test_praise_carries_no_tag(self) -> None:
+        """There is nothing to answer for beyond not spoiling the passage."""
+        annotated = annotate_draft_with_findings(
+            "Good line.", [self.finding("Good line.", severity="praise")]
+        )
+
+        assert "[PRESERVE:factcheck]" in annotated
+        assert "F01" not in annotated

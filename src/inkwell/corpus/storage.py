@@ -98,6 +98,14 @@ class StoredDocument(BaseModel):
 
     slug: str
     url: str
+    via: str = ""
+    """Where the text came from, when that was not ``url`` itself.
+
+    Empty for everything a host served. An archived capture's URL where the host
+    refused us and a public archive held the page — weaker evidence than a live
+    fetch, so a reader deciding whether to cite it can see that from the index
+    rather than having to know which sources happen to be gated.
+    """
     category: str = ""
     title: str = ""
     kind: DocumentKind = "markdown"
@@ -170,6 +178,30 @@ class StoreFailure(BaseModel):
     last_failed_at: str = ""
 
 
+class DocumentAlias(BaseModel):
+    """One URL serving bytes the corpus already holds under another slug.
+
+    Kept beside the documents rather than among them, so that everything
+    reading ``documents`` keeps meaning one document per entry and needs no
+    filter of its own. A source that publishes one page at many addresses — a
+    section-per-URL app whose sections all render the same shell, an article
+    two listings both reach — would otherwise enter once per address, and each
+    copy would be indistinguishable from a document of its own.
+
+    Recorded rather than dropped, because the next run has to know this URL was
+    reached and decided. Dropping it would leave the entry pending forever, and
+    the sweep would fetch it again every run to reach the same conclusion.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: str
+    url: str
+    holder: str = Field(description="The slug whose stored body these bytes are")
+    content_sha256: str = ""
+    seen_at: str = ""
+
+
 class SourceShard(BaseModel):
     """One source's whole index: what exists, what is stored, what failed.
 
@@ -192,6 +224,7 @@ class SourceShard(BaseModel):
     documents: list[StoredDocument] = Field(default_factory=list)
     discovered: list[DiscoveredEntry] = Field(default_factory=list)
     failures: list[StoreFailure] = Field(default_factory=list)
+    aliases: list[DocumentAlias] = Field(default_factory=list)
 
     def documents_by_slug(self) -> dict[str, StoredDocument]:
         return {document.slug: document for document in self.documents}
@@ -224,6 +257,31 @@ class SourceShard(BaseModel):
     def stored(self, slug: str) -> StoredDocument | None:
         by_slug = self.documents_by_slug()
         return by_slug[slug] if slug in by_slug else None
+
+    def holder_of(self, digest: str, besides: str) -> str:
+        """The slug already holding ``digest``, if one other than ``besides`` is.
+
+        What makes a second copy recognisable at all. The per-slug hash check
+        answers "has *this* document changed"; this answers "do we already hold
+        these exact bytes", which is the question a source serving one page at
+        several URLs turns on.
+        """
+        return next(
+            (
+                document.slug
+                for document in self.documents
+                if document.content_sha256 == digest and document.slug != besides
+            ),
+            "",
+        )
+
+    def aliases_by_slug(self) -> dict[str, DocumentAlias]:
+        return {alias.slug: alias for alias in self.aliases}
+
+    def record_alias(self, alias: DocumentAlias) -> None:
+        """Add or replace one alias, keeping the index one entry per slug."""
+        kept = [existing for existing in self.aliases if existing.slug != alias.slug]
+        self.aliases = sorted([*kept, alias], key=lambda entry: entry.slug)
 
     def record_document(self, document: StoredDocument) -> None:
         """Add or replace one document, keeping the index one entry per slug."""
@@ -356,16 +414,23 @@ def pending_entries(
 
     Incremental by default: an item already stored with a content hash is
     skipped, so a re-run costs only what is new plus whatever failed last time.
+    An item settled as an alias is skipped for the same reason — it was reached
+    and decided, and fetching it again would only reach the same decision.
     ``refresh`` re-fetches everything listed, and the content hash then decides
     whether anything is actually rewritten.
     """
     stored = shard.documents_by_slug()
+    aliased = shard.aliases_by_slug()
     return [
         entry
         for entry in shard.discovered
         if entry.present
         and (
-            refresh or entry.slug not in stored or not stored[entry.slug].content_sha256
+            refresh
+            or (
+                entry.slug not in aliased
+                and (entry.slug not in stored or not stored[entry.slug].content_sha256)
+            )
         )
     ]
 
@@ -436,6 +501,17 @@ class CorpusStore(BaseModel):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(shard.model_dump_json(indent=2) + "\n", encoding="utf-8")
         return path
+
+    def remove_document(self, source: str, document: StoredDocument) -> None:
+        """Delete one document's body, leaving the index to its caller.
+
+        Only the body: what the index should then say differs between removing
+        a copy the corpus keeps elsewhere and removing one that has to be
+        fetched again, and this cannot tell which it is being asked for.
+        """
+        if not document.filename:
+            return
+        self.document_path(source, document).unlink(missing_ok=True)
 
     def store_markdown(self, source: str, slug: str, text: str) -> str:
         """Write one extracted document as Markdown, returning its filename.

@@ -57,6 +57,9 @@ For each input, do three things:
 1. **Route it.** Decide each source's role:
    - `source` — primary content to write FROM (the default for a bare URL or \
 file with no other framing)
+   - `revision_target` — the piece this run REPLACES, when the task tells you \
+the run is a revision. The draft supersedes it; it is not material to write \
+from, and its polish and its existing citations say nothing about which it is
    - `style_reference` — writing whose VOICE to emulate ("in the style of", \
 "write like", "voice of")
    - `context` — background mentioned but not a primary input ("see also", \
@@ -544,6 +547,15 @@ rephrased but intact, and do not flag material the plan deliberately \
 cut. quote the plan/source item in text_excerpt so the rewriter can \
 find and restore it.
 
+## When a source document is the draft being revised
+
+Your inputs say so where it is the case, and then that document is not an \
+inventory of what to keep. This run was launched to replace it: cutting, \
+reordering, and rewriting its passages is the work, not the loss you are \
+here to catch. Judge that draft against the plan alone — a specific the \
+plan meant to carry and the draft lost is still yours to flag — and never \
+report a passage as dropped merely because the piece being replaced had it.
+
 ## Output
 
 Call record_finding for each omission or substitution. Always include \
@@ -634,12 +646,20 @@ input — never conflate them:
 - **The brief**: the author's instructions, deliverables, and comments. \
 This defines what to PRODUCE — scope, setting, format, outputs. It is \
 the contract.
-- **The source material**: conversations and documents to draw FROM. \
-This is reference, not the assignment. When the source is broader than \
-the brief (a whole thesis behind one requested result, a long \
+- **The source material**: transcripts, articles, and documents to draw \
+FROM. This is reference, not the assignment. When the source is broader \
+than the brief (a whole thesis behind one requested result, a long \
 conversation behind one requested post), plan the piece the brief asks \
 for and select from the source — never widen the piece to match the \
 source's generality.
+
+One input is neither of those, and your task names it when it is there: a \
+**draft being revised** is the piece this run REPLACES. Plan its successor. \
+Its sections are your sections and its claims are your research questions, \
+but nothing in it is settled by having been written — it is finished prose, \
+often published, and you were pointed at it precisely to have it rewritten. \
+Reading its polish, or the citations it already carries, as a reason to \
+leave a passage as it stands is the one way to fail this brief.
 
 Build the plan incrementally using your tools:
 
@@ -660,6 +680,16 @@ who only stay consistent through this list), and voice notes
 **Research questions are the real output.** These drive the next stage — \
 be thorough, specific, and include verification questions for claims the \
 author makes. A thin research question list produces thin writing.
+
+Verification questions alone are not enough, and a list made only of them \
+has a blind spot with a shape: it can confirm every claim the source makes \
+and never learn what the source left out. So ask at least one question \
+about the SUBJECT rather than about the source — what has happened in this \
+field that a piece on it now has to account for, what the strongest recent \
+work or most-cited case is, what a well-read reader would notice missing. \
+Where the source is a draft written some time ago, that question is the \
+one carrying the most weight: nothing downstream can introduce a development \
+no question asked about.
 
 **Sections are scaffolding.** Title + summary is enough. They will be \
 restructured after research reveals what the evidence actually supports. \
@@ -701,7 +731,7 @@ the source used informal numbers ("roughly 80%"), verify them but \
 keep the informal framing. Don't add parenthetical academic \
 citations (Author Year) unless the source conversation used them.
 
-## The brief is fixed
+## The brief is fixed; the source's coverage is not
 
 The author's instructions — deliverables, scope, target setting — \
 define what this piece IS. Research informs how to fulfill the brief, \
@@ -710,6 +740,17 @@ more general than the requested piece is a reason to select, not to \
 widen. If you believe the brief itself should change, propose it via \
 note_for_author and still refine the plan within the existing brief; \
 the author can widen scope, you cannot.
+
+What the source happened to cover is a different matter, and it binds \
+nothing. A subject the brief plainly includes but the source never \
+raised is yours to add — that is what "add sections that research \
+revealed as necessary" is for. The case to watch is the event or result \
+that postdates the source, or that the author simply did not know: it \
+arrives with no claim in the source to attach to, so nothing else in \
+this pipeline can introduce it. Adding it is not widening the brief. \
+Leaving a piece silent on the central thing in its own subject, because \
+the draft in front of you was silent first, is the failure this section \
+exists to stop.
 
 ## Trusting findings
 
@@ -737,6 +778,20 @@ paths in your task.
 Write the full article to the output file using the Write tool. After \
 writing, briefly summarize (1-2 sentences) what you changed in your \
 response text.
+
+## Answer for every finding
+
+Each finding in the annotated draft carries a tag. Call \
+record_disposition once for each — applied, folded into another change, \
+or rejected — with one line saying why. The rejections are the ones that \
+matter: a finding you weighed and turned down and a finding you never \
+read leave the piece in exactly the same state, so without this record \
+nobody can tell a reviewer that earned its cost from one that did not, \
+and the answer decides whether it runs again.
+
+Rejecting is a real option and this is not a request to apply \
+everything. A suggestion that fights the author's voice, or that a later \
+finding supersedes, should be rejected and said so.
 
 ## Hierarchy
 
@@ -1541,6 +1596,23 @@ def format_spec(target_format: str) -> OutputFormatSpec | None:
     """
     key = format_key(target_format)
     return next((spec for spec in OUTPUT_FORMATS if spec.key == key), None)
+
+
+def unknown_format(target_format: str) -> str:
+    """One line naming what this codebase knows, where it does not know this.
+
+    Empty for a format that is declared, or for ``auto``, which is not a format
+    but the instruction to pick one. A surface taking a format from a person
+    leads with this: an undeclared format is not refused anywhere downstream, it
+    simply carries no guidance and no checks, so a typo costs a run's worth of
+    rules and says nothing.
+    """
+    if target_format == "auto" or format_spec(target_format) is not None:
+        return ""
+    return (
+        f"{target_format!r} is not a format this installation declares. "
+        f"Use one of: auto, " + ", ".join(spec.key for spec in OUTPUT_FORMATS)
+    )
 
 
 def format_checks_for(

@@ -15,8 +15,10 @@ from inkwell.agent.config import current_settings
 from inkwell.agent.sandbox_image import ensure_sandbox_image
 from inkwell.environment.web.routes import profiles as profiles_route
 from inkwell.environment.web.routes import sessions as sessions_route
+from inkwell.environment.web.routes import works as works_route
 from inkwell.environment.web.routes import ws as ws_route
 from inkwell.environment.web.session_manager import SessionManager
+from inkwell.environment.web.work_loops import WorkLoopManager
 
 FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
 
@@ -93,9 +95,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     manager = SessionManager()
     sessions_route.set_manager(manager)
     ws_route.set_manager(manager)
+    loops = WorkLoopManager()
+    works_route.set_loops(loops)
     try:
         yield
     finally:
+        await loops.shutdown()
         await manager.shutdown()
 
 
@@ -117,6 +122,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions_route.router)
     app.include_router(profiles_route.router)
     app.include_router(profiles_route.callback_router)
+    app.include_router(works_route.router)
     app.include_router(ws_route.router)
 
     @app.get("/ws-diag")

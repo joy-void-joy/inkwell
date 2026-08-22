@@ -784,10 +784,13 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "pydantic-settings" },
     { name = "pyvirtualdisplay" },
+    { name = "pyyaml" },
     { name = "sh" },
     { name = "syntok" },
+    { name = "tqdm" },
     { name = "trafilatura" },
     { name = "typer" },
+    { name = "types-pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -829,11 +832,14 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
     { name = "pyvirtualdisplay", specifier = ">=3.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "sh", specifier = ">=2.2.2" },
     { name = "spacy", marker = "extra == 'pos'", specifier = ">=3.8" },
     { name = "syntok", specifier = ">=1.4.4" },
+    { name = "tqdm", specifier = ">=4.70.0" },
     { name = "trafilatura", specifier = ">=2.0.0" },
     { name = "typer", specifier = ">=0.21.1" },
+    { name = "types-pyyaml", specifier = ">=6.0.12.20260815" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
 provides-extras = ["pos", "embeddings"]
@@ -2193,6 +2199,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f5/24/cb09efec5cc954f7f9b930bf8279447d24618bb6758d4f6adf2574c41780/typer-0.24.1.tar.gz", hash = "sha256:e39b4732d65fbdcde189ae76cf7cd48aeae72919dea1fdfc16593be016256b45", size = 118613, upload-time = "2026-02-21T16:54:40.609Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/91/48db081e7a63bb37284f9fbcefda7c44c277b18b0e13fbc36ea2335b71e6/typer-0.24.1-py3-none-any.whl", hash = "sha256:112c1f0ce578bfb4cab9ffdabc68f031416ebcc216536611ba21f04e9aa84c9e", size = 56085, upload-time = "2026-02-21T16:54:41.616Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260815"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/72/b56089aeee6c496d969bac42376bedb6e3eeab4682e1018fa3137122f94b/types_pyyaml-6.0.12.20260815.tar.gz", hash = "sha256:28764110c9cf35846e733da32d8d734df7473c5dde9ef67c3b7332ec0e819858", size = 18545, upload-time = "2026-08-15T02:41:51.532Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/52/eefeba09be4ef2a1eb989eb92934561e8e502a6ee3c32654996e4be7e399/types_pyyaml-6.0.12.20260815-py3-none-any.whl", hash = "sha256:6f332212b7e191f3afd5016a713c510b6340593b7ebec573c7d5d20aa5386d3b", size = 21148, upload-time = "2026-08-15T02:41:50.555Z" },
 ]
 
 [[package]]

@@ -3,6 +3,8 @@ import { SessionList } from "./pages/SessionList";
 import { SessionDetail } from "./pages/SessionDetail";
 import { NewSession } from "./pages/NewSession";
 import { Settings } from "./pages/Settings";
+import { WorkList } from "./pages/WorkList";
+import { WorkTreeView } from "./pages/WorkTreeView";
 import "./index.css";
 
 function App() {
@@ -13,6 +15,8 @@ function App() {
         <Route path="/new" element={<NewSession />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/session/:sessionId" element={<SessionDetail />} />
+        <Route path="/works" element={<WorkList />} />
+        <Route path="/work/:workId" element={<WorkTreeView />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

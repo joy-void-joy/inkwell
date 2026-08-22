@@ -30,6 +30,9 @@ export function SessionList() {
       <div className="page-header">
         <h1>Sessions</h1>
         <div style={{ display: "flex", gap: "8px" }}>
+          <Link to="/works" className="back-link" style={{ padding: "6px 14px" }}>
+            Works
+          </Link>
           <Link to="/settings" className="back-link" style={{ padding: "6px 14px" }}>
             Settings
           </Link>

@@ -544,6 +544,22 @@ async def merge_voice_analyses(
     return ""
 
 
+def speaker_tagged(text: str) -> bool:
+    """Whether this text is a transcript carrying <user>/<claude> speaker tags.
+
+    Only the claude.ai share-link extractor produces them. A file, a web page,
+    a Google Doc, or a published chapter handed to ``revise`` arrives as
+    untagged prose, and telling the analyst to read its <user> blocks sends it
+    looking for turns the text does not have.
+    """
+    return "<user>" in text or "<claude>" in text
+
+
+def source_type_of(text: str) -> str:
+    """How the analyst should read a sample: an author's turns, or prose."""
+    return "conversation" if speaker_tagged(text) else "prose"
+
+
 def extract_author_text(conversation: str) -> str:
     """Reduce a tagged conversation to the author's own writing.
 
@@ -555,7 +571,7 @@ def extract_author_text(conversation: str) -> str:
     discarded and only a few stray instruction lines survived. Text with no
     speaker tags is returned unchanged.
     """
-    if "<user>" not in conversation and "<claude>" not in conversation:
+    if not speaker_tagged(conversation):
         return conversation
 
     def kept() -> Iterator[str]:
@@ -587,18 +603,23 @@ def extract_author_text(conversation: str) -> str:
 def samples_to_analyze(
     text: str, corpus: list[StyleSample] | None
 ) -> list[StyleSample]:
-    """The conversation plus the corpus, each labelled and typed for analysis."""
+    """The session's source plus the corpus, each labelled and typed for analysis.
+
+    Every sample's type is read off the sample. The session's own source used to
+    be declared a conversation whatever it was, which handed the analyst a
+    transcript's reading instructions for a draft that carries no turns.
+    """
     return [
         StyleSample(
-            label="conversation",
+            label="source",
             text=extract_author_text(text),
-            source_type="conversation",
+            source_type=source_type_of(text),
         ),
         *(
             StyleSample(
                 label=sample.label,
                 text=sample.text,
-                source_type="conversation" if "<user>" in sample.text else "prose",
+                source_type=source_type_of(sample.text),
             )
             for sample in corpus or []
         ),

@@ -19,7 +19,7 @@ src/inkwell/
 │   ├── provenance.py       # Venue, evidential role, and acquisition records
 │   ├── book.py             # Which chapter of which book, and the record it outlives
 │   ├── book_links.py       # A chapter pointing at the book, resolved at the write
-│   ├── glossary.py         # The shared term ledger, per run and across a book
+│   ├── glossary.py         # The shared term ledger: per run, across a book, across a work
 │   ├── diversity.py        # Citation distribution and position-diversity checks
 │   ├── prompts.py          # System prompt for the writing agent
 │   ├── stages.py           # Stage prompts and tool lists, per pipeline stage
@@ -49,7 +49,23 @@ src/inkwell/
 │   ├── retrieval.py        # Browse, narrow, read — field navigation over the index
 │   ├── semantics.py        # The optional vector layer, and the seam that computes it
 │   ├── fetch.py            # Reaching a document, escalating to a browser where declared
+│   ├── archive.py          # Reading a gated document from a public archive's capture
 │   └── ingest.py           # A run: enumerate, fetch what is new, tag, store, report
+├── manuscript/             # A work of many parts, built incrementally rather than written once
+│   ├── tree.py             # The tree a work is, and the key each part keeps across imports
+│   ├── ingest.py           # Reading an mkdocs work: declared order, then headings below the files
+│   ├── vocabulary.py       # The terms a work's own authors declared, and which parts use them
+│   ├── links.py            # The parts one part points at, read out of its prose
+│   ├── facts.py            # What a run read, what it changed, and the ledger between them
+│   ├── state.py            # Declared standings and build stamps — dirtiness is derived, never stored
+│   ├── graph.py            # The dependency pass, and adopting a work as already built
+│   ├── splice.py           # Replacing one part's span, leaving its siblings byte-identical
+│   ├── store.py            # A work's records, outliving every run and outside its own repository
+│   ├── recording.py        # Importing a work: read, declare its vocabulary, adopt what exists
+│   ├── runner.py           # One part through the pipeline and back into its file
+│   ├── mailbox.py          # What a part could not settle, escalated up the tree
+│   ├── reconcile.py        # Reading a wave's rewrites against each other — the link step
+│   └── loop.py             # Passes until nothing is outstanding
 ├── devtools/               # Development CLI, exposed as `lup-devtools`
 │   ├── main.py             # Root Typer app composing the sub-apps
 │   ├── harness/            # Typed harness declarations — this tree's source
@@ -175,6 +191,165 @@ carries the difference as data rather than the code carrying a special case:
 `BoldedSummaries` states the textbook floor and the memo ceiling, and
 `BoldEmphasis` takes the exemption that lets bold be navigation in a format
 whose convention asks for it while staying overuse everywhere else.
+
+## Reaching a source that refuses us
+
+A sweep escalates rather than insisting: the plain client first, then a real
+browser where the source declares one needs it, then the newest capture a public
+archive holds where the source declares that fallback. Each rung answers a
+different reason a fetch failed, and a source declares only the rungs its own
+behaviour has been shown to need.
+
+**The distinction the ladder turns on is who was refused.** A 404, an oversized
+body, a page with no article text in it — those are the same for every reader
+there is, so asking anybody else spends a request to learn the same thing. A
+401, a 403, an anti-bot interstitial: those are about *this connection*, and
+another party may not be behind them. `FetchGated` is that distinction as a
+type, so only the one place that can act on it has to know.
+
+**An archive is asked, never impersonated.** Nothing spoofs a user agent, solves
+a challenge, or pretends to be a browser it is not. Some hosts publish openly
+and refuse automated clients anyway — `openai.com` serves `robots.txt` saying
+`Allow: /`, advertises its sitemap, and then answers an identified crawler with
+an interstitial on some paths — so the gate is on the connection and not on the
+content, and a public archive that already crawled the page is not on it. A
+source whose `robots.txt` disallows a path has no business being declared here at
+all.
+
+**Provenance is recorded rather than smoothed over.** A capture is weaker
+evidence than a live fetch: a copy, taken at a stated time, possibly stale. So
+the host is always asked first and its answer always preferred, and a document
+that did arrive from a capture carries the snapshot URL it came from. A corpus
+whose archived documents were indistinguishable from live ones would be one that
+quietly dated itself.
+
+`corpus probe <url> --source <key>` runs that whole ladder for one document and
+says which rung answered. A source's gate is not a fact that stays settled — an
+edge starts refusing or stops, an archive picks a page up next month — and the
+alternative to a single-document probe was sweeping thousands of URLs to find
+out, which is both slow and, against a host that is refusing, rude.
+
+## A work of many parts
+
+The pipeline writes one piece. A textbook is a tree of them — the AI Safety
+Atlas is nine chapters of seven-or-so section files, each holding several
+subsections, and the subsection is the unit anybody revises: 201 leaf parts.
+Running the pipeline over all of them costs thousands of dollars, and running
+it over all of them *again* whenever one changes is what makes a continuous
+loop unaffordable rather than merely expensive.
+
+So the loop is **an incremental build system whose compile step is the writing
+pipeline**. Parts are targets, what a part leans on is its dependencies,
+feedback dirties a target, reconciliation is the link step. That framing
+answers what re-runs, in what order, what is cached, and when it is done.
+
+**Dirtiness is derived, never stored.** A part is out of date when somebody
+asked for it, when its text moved under it, or when the ledger holds a change
+it consumed and has not seen — every one asked afresh against a *build stamp*
+recording what the last run was built from. What is persisted is only what
+nothing can recompute: a declared standing (`requested`, `running`, `parked`,
+`failed`) and the stamp. A build system that persists dirtiness eventually
+believes something clean is dirty, or worse.
+
+**Propagation keys on what changed, not on who changed.** A run publishes the
+dependencies it moved; a part is reached only where what it consumed and what
+moved intersect. That is why a pass settles: a rewrite that redefines nothing
+reaches nothing however many parts sit downstream, and two chapters that
+depend on each other come to rest because the cycle carries change facts
+rather than nodes.
+
+**The graph is dense before any run**, because a work usually declares one.
+The Atlas ships 239 `*[Term]: meaning` entries in
+`docs/includes/abbreviations.md` that mkdocs substitutes book-wide, so a part
+depends on a term exactly when its prose contains it as a word — the work's
+own semantics read back, not inferred. Markdown links would have given
+nothing: the Atlas has no cross-links, every non-http target being an image.
+
+**The ledger is handed to the run, not reconciled after it.** A part's run
+coins into the work's term ledger directly — one file per part, with the
+authors' declared vocabulary read first — so a writer asking what the book
+already calls something is answered by the book while the prose is being
+written. First-definition-wins then settles at the coining rather than at a
+reconciliation afterwards, when the rival name is already on the page, and the
+authors outrank every run without a rule saying so: the read order is the rule.
+What a part newly coined, or kept the name of while replacing the meaning, is
+what it publishes as having moved.
+
+**Adoption is what makes it affordable.** A work nothing has built is a work
+where every part is out of date. `manuscript import` stamps each part as built
+from the text it already holds — `make -t`, and the same argument — so the
+first useful pass rewrites what somebody asked about rather than the book. The
+full pass stays available and stays expensive; it stops being the entry fee.
+
+**The work declares the format, not the run.** A part handed to the pipeline
+with no format declared falls to `auto`, which asks that part's own extract
+stage to infer the shape of a book it is shown one subsection of — and two
+parts answering differently is how a textbook acquires a chapter that reads
+like a blog post. `manuscript import --format` records it once on the work and
+every run against it inherits it, defaulting to `textbook` because a work read
+as chapters holding sections holding subsections is one. That is what carries
+dependency order, definitions-before-use, and self-containment into a part's
+run; an undeclared format is refused where it is typed rather than downstream,
+since nothing downstream refuses it — it simply carries no rules and says
+nothing.
+
+**A rewrite splices.** One part's span is replaced and its siblings stay
+byte-identical, because a model asked to reassemble the file re-emits prose
+nobody asked it to touch. Over 201 parts revised repeatedly that is the
+difference between converging on the author's book and walking away from it.
+
+**A rewrite that lost its heading is refused, not written.** Spliced in, prose
+without the part's own heading leaves the file holding no part where the tree
+records one: the next sweep reads it as text the author deleted, the standing
+goes unrunnable, and the prose has merged into whichever part precedes it,
+where a later revision of *that* part will rewrite it as its own. Nothing about
+the file looks wrong afterwards, which is why the heading is checked before the
+write — off the parser, so a fenced heading does not count, and a rewrite of
+the wrong part does not either. The part keeps its text and the run fails
+saying what came back.
+
+**Parked is not failed.** A run that cannot settle something asks, its part
+parks, and nothing retries it until somebody answers — through the CLI or the
+work's tree in the web surface. A failed part stays failed with what it said,
+because one that quietly returned to idle would be picked up next pass and
+fail identically forever. Both standings are deliberately sticky, so both need
+a door: `manuscript clear` is somebody saying they have read the failure or
+changed their mind, which is the judgement the loop cannot make for itself.
+
+**A missing checkout is one fact, not two hundred.** A part whose file or
+heading is gone reads `source-gone` rather than as edited prose: the repair is
+a checkout to restore or an import to redo, not a rewrite, so the loop declines
+to schedule those parts instead of spending a turn each to fail, and a sweep
+reports them apart from what is runnable. A work blocked in every part is
+stopped, not settled. Every command that reads a work's prose leads with one
+line naming the directory that is not there.
+
+State lives in inkwell's own store beside the corpus and the book records,
+never in the work's repository: that tree belongs to whoever writes the book,
+and state left there would not survive a fresh clone.
+
+**The browser drives the loop, it does not merely watch it.** A work is a REST
+resource of its own rather than a view of whichever run is open: the tree with
+every part's state, what a run *would* pick up before anybody pays for it, a
+start that runs the loop in the background reporting each pass as it lands, and
+a stop. One loop per work, refused rather than queued, because the loop is the
+single writer of a work's state and two over one book would each lease parts
+the other had leased. The preview is not a convenience — every part a pass
+picks up is a whole pipeline run, so a start button offered without one would
+be offering to spend an unknown amount on a click.
+
+**A pass can be kept to the parts somebody named**, which is the thing an
+author asks for most and the one thing a limit cannot express: a limit takes
+the first parts in tree order, so cutting a pass to one runs whichever part
+comes first in the book rather than the one being asked about. `--part` on the
+command line and a row's own *run this part* in the browser narrow the sweep
+instead. Narrowing rather than overriding is what keeps one way to ask for a
+revision: a named part still has to be outstanding, carrying the reasons it
+would have carried in its turn, so `request` remains the door to a part that is
+already up to date — and a named part the sweep passes over is reported with
+what is keeping it, because up to date, held by another run, parked on a
+question, and not a part of this work are four different things to do next that
+all look like a settled book from a pass that ran nothing.
 
 ## Test principles
 

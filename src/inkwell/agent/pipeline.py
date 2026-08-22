@@ -64,6 +64,8 @@ from inkwell.agent.book import (
 from inkwell.agent.book_links import pointing
 from inkwell.agent.config import (
     book_store,
+    corpus_root,
+    corpus_semantics,
     current_settings,
     load_settings,
     stage_model,
@@ -76,6 +78,7 @@ from inkwell.agent.models import (
     ClassifiedComment,
     MergedDraft,
     PipelineSnapshot,
+    SourceRole,
     ResearchCompilation,
     RestartQueue,
     RestartStrategy,
@@ -152,6 +155,8 @@ from inkwell.agent.glossary import (
 )
 from inkwell.agent.segmenter import reader
 from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
+from inkwell.corpus.retrieval import CorpusQuery, search_corpus
+from inkwell.corpus.storage import CorpusStore
 from inkwell.pdf import reads_by_page
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
 from inkwell.agent.tools.extract import (
@@ -215,6 +220,7 @@ from inkwell.agent.tools.research.wikipedia import WIKIPEDIA_TOOLS
 from inkwell.agent.tools.stage_outputs import (
     AssumptionsCollector,
     BookCollector,
+    DispositionCollector,
     FormatCheckCollector,
     PlanCollector,
     PlanFile,
@@ -223,6 +229,7 @@ from inkwell.agent.tools.stage_outputs import (
     load_declared_checks,
     make_assumptions_tools,
     make_book_tools,
+    make_disposition_tools,
     make_format_check_tools,
     make_glossary_tools,
     make_note_tool,
@@ -582,6 +589,10 @@ def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
             instruction=(
                 f"authoritative source document ({doc.kind}{pages}) — verify "
                 "claims against it via consult_source or Read"
+                if doc.authoritative
+                else f"the draft this run replaces ({doc.kind}{pages}) — read it "
+                "via consult_source or Read to see what a passage said, never "
+                "as the authority your own draft is answerable to"
             ),
         )
     for notes_file in sorted(reading_notes_dir(notes.artifacts_dir).glob("*.md")):
@@ -746,6 +757,132 @@ def add_reader_section_refs(manifest: ContentManifest, notes: PipelineNotes) -> 
         )
     add_reader_chapter_ref(manifest, reader)
     add_reader_unrouted_ref(manifest, reader)
+
+
+TOPIC_QUERY_CHARS = 2000
+"""How much of each side of a subject description a query carries.
+
+A hard input limit rather than a display one: this is what gets embedded, and
+an embedding takes a bounded string. Per side rather than in total, because the
+brief and the material answer different halves of "what is this about" and a
+shared bound would let a long brief crowd the material out of its own query.
+Nothing is lost by it — both are mounted whole for the planner beside the
+briefing this query produces.
+"""
+
+
+def planning_topic(notes: PipelineNotes, target_format: str) -> str:
+    """What to ask the corpus for, before a plan exists to ask from.
+
+    The brief and the material both, rather than whichever of the two looks
+    better. A brief an author wrote is the sharper subject description, and
+    preferring it was right for as long as every brief had an author. A brief
+    composed for the run says the same thing about every piece it launches — a
+    revision of one part of a work is handed what that part is *for*, which is
+    near enough identical to what its siblings are handed — and asking the
+    corpus with it returns one list for the whole book. The material is what
+    tells those parts apart. Taking both means neither case has to be
+    recognised, and the two together are still a bounded query.
+
+    The format stands in where there is neither, so the corpus is always asked
+    something rather than asked nothing.
+    """
+
+    def bounded(text: str) -> str:
+        """One side of the query, cut to what an embedding takes."""
+        # lup: ignore[silent-truncation] — an embedding takes a bounded string,
+        # and this is a query rather than content: the brief and the source are
+        # both mounted whole for the planner beside the briefing it produces
+        return text[:TOPIC_QUERY_CHARS]
+
+    source = notes.text_artifact_path("conversation")
+    material = source.read_text(encoding="utf-8") if source.exists() else ""
+    asked = (bounded(notes.load_brief()), bounded(material))
+    return "\n\n".join(held for held in asked if held) or target_format
+
+
+CORPUS_BRIEFING_LIMIT = 30
+"""How many corpus documents the planner is shown before it writes a question.
+
+Titles and dates only, so the ceiling is about what a planner can hold rather
+than what a context window can take.
+"""
+
+
+async def corpus_briefing(topic: str, *, limit: int = CORPUS_BRIEFING_LIMIT) -> str:
+    """What the corpus already holds on this subject, newest first.
+
+    Pushed rather than left to a tool call. `corpus_search` has been available
+    to the research stage all along, and a stage only reaches for it once it
+    knows there is something to look for — which is exactly what a piece
+    working from an older draft does not know. Handing the planner the recent
+    material before it writes a single research question is what lets a
+    question be *about* a development instead of about a claim in the source.
+
+    Titles, dates and venues, not bodies: the planner is deciding what to ask,
+    and the stages after it can read any of these in full.
+    """
+    store = CorpusStore(root=corpus_root())
+    answer = await search_corpus(
+        CorpusQuery(tier="browse", like=topic, limit=limit),
+        store,
+        semantics=corpus_semantics(store),
+    )
+    if not answer.documents:
+        return ""
+
+    def lines() -> Iterator[str]:
+        # Asked of the layer rather than of the query: `mode` is which way this
+        # was asked, and a neighbour query falls back to the structural ordering
+        # where the layer cannot answer. A briefing that called the result
+        # "nearest" either way would tell the planner these were the closest
+        # documents on its subject when they were the most recent ones on any
+        # subject — and the planner cannot tell the difference from the list.
+        placed = "nearest first" if answer.semantic.available else answer.ordering
+        yield (
+            f"## What the corpus already holds on this subject\n\n"
+            f"{answer.matched} document(s) matched; {len(answer.documents)} "
+            f"are below, {placed}. These are already fetched — "
+            f"corpus_search reads any of them in full, at no search cost.\n"
+        )
+        for hit in answer.documents:
+            dated = f" ({hit.published})" if hit.published else ""
+            yield f"- **{hit.title}**{dated} — {hit.venue or hit.organization}"
+        yield (
+            "\nRead this list for what the source material does not mention. "
+            "A development here that the source predates is the strongest "
+            "candidate there is for a research question, because no question "
+            "derived from the source can reach it."
+        )
+
+    return "\n".join(lines()) + "\n\n"
+
+
+def suggested_additions_block(notes: PipelineNotes) -> str:
+    """What research proposed that no research question had asked for.
+
+    The researcher is told to file these, and until they were rendered here
+    nothing read them: one writer, no readers, so a proposal that arrived only
+    this way was collected and dropped. They reach the refiner because it is
+    the one stage licensed to add a section — a writer holds only its own, and
+    by the rewrite the shape is settled.
+    """
+    research_path = notes.artifact_path("research")
+    if not research_path.exists():
+        return ""
+    research = ResearchCompilation.model_validate_json(
+        research_path.read_text(encoding="utf-8")
+    )
+    if not research.suggested_additions:
+        return ""
+    items = "\n\n".join(f"- {s}" for s in research.suggested_additions)
+    return (
+        f"Research also proposed {len(research.suggested_additions)} addition(s) "
+        f"that no research question had asked for. Judge each on the merits and "
+        f"say what you did with it: adopt it as a section, fold it into one, or "
+        f"reject it with a reason. Silence is the one answer that is not "
+        f"available.\n\n{items}\n\n"
+    )
 
 
 def reader_feedback_block(manifest: ContentManifest) -> str:
@@ -1493,9 +1630,26 @@ async def add_format_check_report(
 # ---------------------------------------------------------------------------
 
 
+def finding_tag(index: int) -> str:
+    """The handle a finding is marked with, and answered by.
+
+    Positional, so the tag a rewrite cites points at the same finding when the
+    same run is resumed. Findings have no identity of their own — a reviewer
+    records what it saw, not a key — and inventing one per finding would put
+    the burden on every reviewer to keep it unique.
+    """
+    return f"F{index + 1:02d}"
+
+
 def annotate_draft_with_findings(draft: str, findings: list[ReviewFinding]) -> str:
-    """Inject review findings inline at matching text_excerpt locations."""
+    """Inject review findings inline at matching text_excerpt locations.
+
+    Each actionable finding carries its tag into the annotation, which is what
+    the rewrite answers it by. Praise carries none: there is nothing to do
+    about it beyond not spoiling the passage.
+    """
     annotated = draft
+    tags = {id(f): finding_tag(i) for i, f in enumerate(findings)}
 
     anchorable = [
         f
@@ -1515,7 +1669,7 @@ def annotate_draft_with_findings(draft: str, findings: list[ReviewFinding]) -> s
                 annotation = f"\n[PRESERVE:{f.reviewer}] {f.issue}\n"
             else:
                 annotation = (
-                    f"\n[FINDING:{f.severity}:{f.reviewer}] {f.issue}\n"
+                    f"\n[{tags[id(f)]}:{f.severity}:{f.reviewer}] {f.issue}\n"
                     f"  → {f.suggestion}\n"
                 )
             after = annotated.index(f.text_excerpt) + len(f.text_excerpt)
@@ -1532,7 +1686,8 @@ def annotate_draft_with_findings(draft: str, findings: list[ReviewFinding]) -> s
         annotated += "\n\n## Additional Review Findings\n"
         for f in remaining:
             annotated += (
-                f"- [{f.severity}:{f.reviewer}] {f.location}: {f.issue}\n"
+                f"- [{tags[id(f)]}:{f.severity}:{f.reviewer}] "
+                f"{f.location}: {f.issue}\n"
                 f"  → {f.suggestion}\n"
             )
 
@@ -1671,6 +1826,7 @@ async def plan_article(
     *,
     target_format: str = "auto",
     assignment: ChapterAssignment | None = None,
+    material_role: SourceRole = "source",
     voice_file_paths: list[str] | None = None,
     source_file_paths: list[str] | None = None,
     author_notes: list[AuthorNote] | None = None,
@@ -1717,12 +1873,18 @@ async def plan_article(
     format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
     conversation_path = notes.text_artifact_path("conversation")
 
+    revising = material_role == "revision_target"
     manifest = ContentManifest()
     manifest.add(
         conversation_path,
         "source",
-        "Source material",
-        instruction="extract article plan from this",
+        "Draft being revised" if revising else "Source material",
+        instruction=(
+            "the piece this run replaces — plan its successor, section by "
+            "section, and question every claim it rests on"
+            if revising
+            else "extract article plan from this"
+        ),
     )
     for p in source_file_paths or []:
         if p != str(conversation_path):
@@ -1740,6 +1902,7 @@ async def plan_article(
         f"Extract a structured article plan from the source material.\n"
         f"{format_hint}\n\n"
         f"{manifest.render()}\n\n"
+        f"{await corpus_briefing(planning_topic(notes, target_format))}"
     )
     if author_directions:
         task += (
@@ -1830,6 +1993,7 @@ async def refine_plan(
         f"Refine the article plan using the research findings.\n\n"
         f"{manifest.render()}\n"
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
+        f"{suggested_additions_block(notes)}"
         f"{reader_feedback_block(manifest)}"
         f"Read the plan, then build the refined plan using "
         f"set_plan_header, add_section, add_research_question, and add_source_quote."
@@ -2851,7 +3015,14 @@ async def review_all(
             "coverage": coverage,
         }
     )
-    if load_source_registry(registry_path_for(notes.artifacts_dir)):
+    # Only a document the finished draft answers to earns a fidelity check. A
+    # run that has nothing but the piece it replaces gets none: every change it
+    # was asked to make would read there as a departure from the source.
+    if [
+        d
+        for d in load_source_registry(registry_path_for(notes.artifacts_dir))
+        if d.authoritative
+    ]:
         passes = {**passes, "source": fidelity}
 
     # Each pass stays uncalled until its address is admitted, so a reviewer
@@ -3073,15 +3244,19 @@ async def rewrite_final(
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
     note_collector = author_notes if author_notes is not None else []
-    note_group = build_note_server("rewrite", note_collector)
-    note_servers, note_tool_names = note_group.servers, note_group.tool_names
+    dispositions = DispositionCollector(notes.artifact_path("dispositions"))
+    stage_tools = build_note_server("rewrite", note_collector).merged(
+        build_output_server("output", make_disposition_tools(dispositions))
+    )
     rewrite_servers = {
-        **note_servers,
+        **stage_tools.servers,
         **(source_servers or {}),
         **(compute_servers or {}),
     }
     rewrite_tools = (
-        note_tool_names + (source_tool_names_list or []) + (compute_tool_names or [])
+        stage_tools.tool_names
+        + (source_tool_names_list or [])
+        + (compute_tool_names or [])
     )
     plan_path = notes.artifact_path("plan")
 
@@ -3091,14 +3266,23 @@ async def rewrite_final(
     annotated_path.write_text(annotated, encoding="utf-8")
 
     review_summary_path = notes.artifacts_dir / "review_summary.md"
-    n_critical = sum(1 for f in findings if f.severity == "critical")
-    n_suggestion = sum(1 for f in findings if f.severity == "suggestion")
-    n_total = n_critical + n_suggestion
+    actionable = [
+        (finding_tag(i), f)
+        for i, f in enumerate(findings)
+        if f.severity in ("critical", "suggestion")
+    ]
+    n_critical = sum(1 for _, f in actionable if f.severity == "critical")
+    n_suggestion = len(actionable) - n_critical
     summary_lines = [
-        "# Review Summary\n",
+        "# Review Summary\n\n",
         f"**{n_critical} critical** (mandatory), **{n_suggestion} suggestions** "
-        f"({n_total} total findings)\n",
-        "Review findings are annotated inline in the draft file.\n",
+        f"({len(actionable)} findings to answer for)\n\n",
+        "Each is annotated inline in the draft at the passage it quotes. Call "
+        "record_disposition once per tag below — every one, including the ones "
+        "you decide against.\n\n",
+    ] + [
+        f"- **{tag}** [{f.severity}:{f.reviewer}] {f.location}: {f.issue}\n"
+        for tag, f in actionable
     ]
     review_summary_path.write_text("".join(summary_lines), encoding="utf-8")
 
@@ -3167,7 +3351,10 @@ async def rewrite_final(
         f"Read the annotated draft — review findings are marked inline. "
         f"Passages marked [PRESERVE:] were praised by reviewers: protect "
         f"their quality while editing around them. "
-        f"Apply all critical findings and worthwhile suggestions. "
+        f"Apply all critical findings and worthwhile suggestions. Each is "
+        f"tagged; call record_disposition once per tag, including every one "
+        f"you decide against — a finding rejected on the merits and one never "
+        f"read produce the same draft, and only this record tells them apart. "
         f"Use list_research + read_finding to verify corrections against research findings. "
         f"{diversity_note}"
         f"If a style rules file is available, read it and enforce every "
@@ -3436,9 +3623,11 @@ class PipelineRunner:
         self,
         *,
         sources: list[str],
+        material_role: SourceRole = "source",
         refs: list[str] | None = None,
         target_format: str = "auto",
         assignment: ChapterAssignment | None = None,
+        glossary: GlossaryScope | None = None,
         existing_doc_id: str | None = None,
         session_state: WritingSessionState | None = None,
         notes: PipelineNotes | None = None,
@@ -3450,11 +3639,14 @@ class PipelineRunner:
         skipped_stages: list[str] | None = None,
     ) -> None:
         self.sources = sources
+        self.material_role: SourceRole = material_role
+        self.revision_target_paths: list[str] = []
         self.refs = refs or []
         self.style_refs: list[str] = []
         self.context_refs: list[str] = list(self.refs)
         self.target_format = target_format
         self.launched_assignment = assignment
+        self.launched_glossary = glossary
         self.existing_doc_id = existing_doc_id
         self.state = session_state or WritingSessionState()
         self.notes = notes
@@ -3540,7 +3732,15 @@ class PipelineRunner:
         stage that hands writers a glossary — writing, merging, rewriting after
         a restart — is reaching into the same scope, and a chapter's coinages
         cannot reach the merge that assembles it only for one of the three.
+
+        A launch that named the scope outranks anything derived here, for the
+        same reason a launch that named the chapter does: the composer that
+        knows this run is one part of a work knows which ledger that part shares
+        with its siblings, and a run handed one subsection could not work it out
+        from a plan of its own.
         """
+        if self.launched_glossary is not None:
+            return self.launched_glossary
         return glossary_scope_for(self.ensure_notes(), self.placement)
 
     @property
@@ -4583,6 +4783,7 @@ class PipelineRunner:
             source_dir,
             source_servers=self.source_servers,
             source_tool_names=self.source_tool_names,
+            material_role=self.material_role,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -4600,7 +4801,13 @@ class PipelineRunner:
         self.style_refs = [
             e.raw_input for e in manifest.sources if e.role == "style_reference"
         ]
-        routed = [e.raw_input for e in manifest.sources if e.role == "source"]
+        revising = [e for e in manifest.sources if e.role == "revision_target"]
+        self.revision_target_paths = [e.local_path for e in revising if e.local_path]
+        routed = [
+            e.raw_input
+            for e in manifest.sources
+            if e.role in ("source", "revision_target")
+        ]
         self.sources = (routed or agent_inputs) + self_doc_sources
         context = [e.raw_input for e in manifest.sources if e.role == "context"]
         self.context_refs = list(dict.fromkeys(self.context_refs + context))
@@ -4655,8 +4862,14 @@ class PipelineRunner:
         ] + assembled.documents
         if conversation.strip():
             registry_candidates.append(str(output_path))
+        superseded = list(self.revision_target_paths)
+        if self.material_role == "revision_target":
+            # The assembled text is the draft itself here, so registering it as
+            # an authority would point the fidelity check at what this run
+            # replaces.
+            superseded.append(str(output_path))
         registered = await build_source_registry_async(
-            registry_candidates, notes.artifacts_dir
+            registry_candidates, notes.artifacts_dir, superseded
         )
         if registered:
             await self.hooks.on_progress(
@@ -4980,6 +5193,7 @@ class PipelineRunner:
                 notes,
                 target_format=self.target_format,
                 assignment=self.assignment,
+                material_role=self.material_role,
                 voice_file_paths=self.snapshot.voice_file_paths,
                 source_file_paths=self.snapshot.source_file_paths,
                 author_notes=self.author_notes,
@@ -6394,9 +6608,11 @@ class PipelineRunner:
 async def run_pipeline(
     *,
     sources: list[str],
+    material_role: SourceRole = "source",
     refs: list[str] | None = None,
     target_format: str = "auto",
     assignment: ChapterAssignment | None = None,
+    glossary: GlossaryScope | None = None,
     existing_doc_id: str | None = None,
     session_state: WritingSessionState | None = None,
     notes: PipelineNotes | None = None,
@@ -6410,9 +6626,11 @@ async def run_pipeline(
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
         sources=sources,
+        material_role=material_role,
         refs=refs,
         target_format=target_format,
         assignment=assignment,
+        glossary=glossary,
         existing_doc_id=existing_doc_id,
         session_state=session_state,
         notes=notes,

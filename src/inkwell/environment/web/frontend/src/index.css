@@ -1243,3 +1243,206 @@ textarea { resize: none; }
     grid-template-columns: 1fr;
   }
 }
+
+/* ── A work of many parts ─────────────────────────────────────────────────── */
+
+/* The tree's whole job is letting an author find the few parts that are
+   outstanding among the two hundred that are not, so state is carried on the
+   left edge where the eye scans rather than in text it has to read. */
+
+.work-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.work-part {
+  padding: 4px 8px;
+  border-left: 3px solid transparent;
+  font-size: 0.88rem;
+}
+
+.work-part-key {
+  font-family: var(--mono, monospace);
+  color: var(--text-dim);
+}
+
+.work-part-state {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.work-part-questions {
+  font-size: 0.8rem;
+}
+
+.work-part-reason {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding-left: 16px;
+}
+
+.part-fresh {
+  border-left-color: transparent;
+}
+
+.part-stale {
+  border-left-color: #c58b28;
+}
+
+.part-running {
+  border-left-color: #2f7fd0;
+}
+
+.part-parked {
+  border-left-color: #8a63c9;
+}
+
+.part-failed {
+  border-left-color: #c0392b;
+}
+
+.work-question {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+}
+
+.work-question input {
+  width: 60%;
+  margin-right: 8px;
+}
+
+/* The loop over a work: what it would do, what it is doing, how to stop it. */
+
+.run-panel,
+.work-import {
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.run-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.run-settings label,
+.work-import label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+  gap: 4px;
+}
+
+.run-settings input[type="number"] {
+  width: 6rem;
+}
+
+.work-import input {
+  min-width: 22rem;
+}
+
+.run-settings small,
+.work-import small {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+}
+
+.run-checkbox {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+/* Starting a loop spends money in proportion to what is outstanding, so the
+   one button that does it is the one button that looks like it. */
+.run-start {
+  font-weight: 600;
+}
+
+.run-preview,
+.run-progress {
+  margin-top: 12px;
+  font-size: 0.85rem;
+}
+
+.run-preview-part,
+.run-pass {
+  padding: 4px 0;
+}
+
+.run-pass {
+  border-top: 1px solid var(--border, #333);
+}
+
+.run-error {
+  color: #c0392b;
+  font-size: 0.85rem;
+}
+
+.run-blocked {
+  color: #c58b28;
+  font-size: 0.85rem;
+}
+
+.run-conflict {
+  color: #c58b28;
+  padding-left: 16px;
+}
+
+.run-result-rewritten { color: #2f9e56; padding-left: 16px; }
+.run-result-parked { color: #8a63c9; padding-left: 16px; }
+.run-result-failed { color: #c0392b; padding-left: 16px; }
+
+/* A part whose text is gone is not stale prose — it is a missing checkout, and
+   the colour says so rather than sharing the one that means "needs a rewrite". */
+.part-gone {
+  border-left-color: #c0392b;
+}
+
+.work-fold {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.work-part-rollup,
+.work-part-session {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.work-part-session {
+  margin-left: 8px;
+}
+
+.work-part-ask input {
+  min-width: 20rem;
+  margin-right: 6px;
+}
+
+.work-recorded {
+  color: #2f9e56;
+  font-size: 0.85rem;
+}

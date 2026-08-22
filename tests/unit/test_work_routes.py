@@ -1,0 +1,439 @@
+"""The tree an author watches, and the one place a parked question is answered.
+
+Every other route over a work reports what a command line already reports.
+This one does something a terminal cannot: it takes an answer, and taking an
+answer is what lets a part that parked run again. So what is worth pinning is
+the state the routes leave behind rather than the shapes they return — that an
+answered question stops being open, that its part becomes runnable, and that a
+part still waiting on something else does not.
+"""
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
+
+from inkwell.agent.glossary import DECLARED_VOCABULARY, write_chapter_glossary
+from inkwell.environment.web.routes import works
+from inkwell.environment.web.work_loops import WorkLoopManager
+from inkwell.manuscript.graph import adopted, readings
+from inkwell.manuscript.ingest import read_manuscript
+from inkwell.manuscript.mailbox import PartMailbox, PartQuestion, question_id
+from inkwell.manuscript.store import ManuscriptStore
+from inkwell.manuscript.vocabulary import abbreviations_in, as_glossary
+
+CHAPTER_PAGES = """\
+nav:
+- 2.3 - Misuse Risks: 03.md
+title: 02 - Risks
+"""
+
+MISUSE = """\
+# 2.3 Misuse Risks
+
+## 2.3.1 Bio Risk
+
+Prose about engineered pathogens and biosecurity.
+
+## 2.3.2 Cyber Risk
+
+Prose about ASI and offensive capability in cyber operations.
+"""
+
+ABBREVIATIONS = "*[ASI]: Artificial Superintelligence.\n"
+
+CYBER = "02/03/2.3.2"
+
+
+@pytest.fixture(autouse=True)
+def no_loops_left_running() -> Iterator[None]:
+    """Leave the loop holder as each test found it.
+
+    The holder is the app's, set once at startup, so a test that wires one in
+    would otherwise decide what the next test sees — and the routes answer
+    differently depending on whether a loop could be running.
+    """
+    yield
+    works.holder.loops = None
+
+
+@pytest.fixture
+def recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ManuscriptStore:
+    """A work imported, adopted, and reachable through the routes."""
+    chapters = tmp_path / "chapters"
+    chapter = chapters / "02"
+    chapter.mkdir(parents=True)
+    (chapter / ".pages.yml").write_text(CHAPTER_PAGES, encoding="utf-8")
+    (chapter / "03.md").write_text(MISUSE, encoding="utf-8")
+
+    store = ManuscriptStore(root=tmp_path / "manuscripts")
+    tree = read_manuscript(chapters, title="A Work")
+    store.publish_tree("work", tree)
+    vocabulary = abbreviations_in(ABBREVIATIONS)
+    path = store.glossary_path("work", DECLARED_VOCABULARY)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_chapter_glossary(path, as_glossary(vocabulary))
+    store.publish_state(
+        "work", adopted(store.load_state("work"), readings(tree, vocabulary))
+    )
+
+    monkeypatch.setattr(works, "manuscript_store", lambda: store)
+    return store
+
+
+class TestTheTreeShowsEveryPartAndItsState:
+    def test_a_settled_work_reports_nothing_outstanding(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        tree = works.work_tree("work")
+
+        assert tree.settled
+        assert tree.outstanding == 0
+        assert CYBER in [node.key for node in tree.nodes]
+
+    def test_parts_above_the_leaves_are_shown_but_never_stale(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """A chapter is never out of date; the parts under it are."""
+        tree = works.work_tree("work")
+        section = next(node for node in tree.nodes if node.key == "02/03")
+
+        assert not section.leaf
+        assert section.staleness == "fresh"
+
+    def test_a_part_carries_the_part_above_it(self, recorded: ManuscriptStore) -> None:
+        tree = works.work_tree("work")
+        cyber = next(node for node in tree.nodes if node.key == CYBER)
+
+        assert cyber.parent == "02/03"
+        assert cyber.leaf
+
+    def test_a_work_nobody_imported_is_a_clear_404(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        with pytest.raises(HTTPException) as raised:
+            works.work_tree("nothing")
+
+        assert raised.value.status_code == 404
+        assert "import it first" in raised.value.detail
+
+
+class TestAskingForAPartMakesItOutstanding:
+    def test_a_requested_part_shows_why(self, recorded: ManuscriptStore) -> None:
+        node = works.request_part(
+            "work", CYBER, works.RequestRevision(reason="the July intrusion")
+        )
+
+        assert node.staleness == "requested"
+        assert node.standing == "requested"
+        assert "the July intrusion" in node.reasons
+        assert not works.work_tree("work").settled
+
+    def test_asking_for_a_part_that_is_not_there_is_a_404(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        with pytest.raises(HTTPException) as raised:
+            works.request_part("work", "02/03/9.9.9", works.RequestRevision())
+
+        assert raised.value.status_code == 404
+
+
+class TestAnsweringIsWhatLetsAParkedPartRunAgain:
+    def parked(self, store: ManuscriptStore, *prompts: str) -> PartMailbox:
+        """A part parked on however many questions were given."""
+        mailbox = PartMailbox(root=store.work_dir("work"))
+        for prompt in prompts:
+            mailbox.ask(
+                PartQuestion(
+                    id=question_id(CYBER, prompt),
+                    work="work",
+                    asker=CYBER,
+                    addressed_to="02/03",
+                    prompt=prompt,
+                )
+            )
+        store.publish_state(
+            "work", store.load_state("work").declared(CYBER, "parked", prompts[0])
+        )
+        return mailbox
+
+    def test_an_open_question_shows_which_part_waits_on_it(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        self.parked(recorded, "Update the 2024 figure?")
+        waiting = works.open_questions("work")
+
+        assert [held.asker for held in waiting] == [CYBER]
+        assert waiting[0].addressed_to == "02/03"
+
+    def test_answering_the_last_question_makes_the_part_runnable(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        mailbox = self.parked(recorded, "Update the 2024 figure?")
+        identifier = mailbox.open()[0].id
+
+        works.answer_question("work", identifier, works.AnswerRequest(value="yes"))
+
+        assert works.open_questions("work") == []
+        assert recorded.load_state("work").standing(CYBER) == "requested"
+
+    def test_a_part_with_another_question_open_stays_parked(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """Otherwise it runs, parks on the second, and pays a run to re-ask."""
+        mailbox = self.parked(recorded, "Which figure?", "And which framing?")
+        first = mailbox.open()[0].id
+
+        works.answer_question("work", first, works.AnswerRequest(value="the 2026 one"))
+
+        assert len(works.open_questions("work")) == 1
+        assert recorded.load_state("work").standing(CYBER) == "parked"
+
+    def test_answering_twice_is_refused_rather_than_overwriting(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        mailbox = self.parked(recorded, "Which figure?")
+        identifier = mailbox.open()[0].id
+        works.answer_question("work", identifier, works.AnswerRequest(value="2026"))
+
+        with pytest.raises(HTTPException) as raised:
+            works.answer_question("work", identifier, works.AnswerRequest(value="2024"))
+
+        assert raised.value.status_code == 404
+
+
+class TestAskingWhatAChangeWouldReach:
+    def test_a_declared_term_names_the_parts_that_use_it(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        reached = works.reaches("work", subject="ASI", kind="term")
+
+        assert reached.parts == (CYBER,)
+
+    def test_a_term_nothing_uses_reaches_nothing(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        assert works.reaches("work", subject="Nothing", kind="term").parts == ()
+
+    def test_a_kind_that_is_not_one_is_refused(self, recorded: ManuscriptStore) -> None:
+        with pytest.raises(HTTPException) as raised:
+            works.reaches("work", subject="ASI", kind="vibes")
+
+        assert raised.value.status_code == 400
+
+
+class TestRecordingAWorkFromTheBrowser:
+    def test_an_import_records_the_work_and_adopts_it(
+        self, recorded: ManuscriptStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Adopting is what makes the first useful pass small rather than total."""
+        monkeypatch.setattr(works, "manuscript_store", lambda: recorded)
+
+        result = works.record_work(
+            works.ImportRequest(
+                work="second",
+                chapters=str(tmp_path / "chapters"),
+                title="Another Work",
+            )
+        )
+
+        assert result.parts == 2
+        assert result.adopted == 2
+        assert works.work_tree("second").settled
+
+    def test_declining_to_adopt_leaves_every_part_unbuilt(
+        self, recorded: ManuscriptStore, tmp_path: Path
+    ) -> None:
+        works.record_work(
+            works.ImportRequest(
+                work="unbuilt", chapters=str(tmp_path / "chapters"), adopt=False
+            )
+        )
+        tree = works.work_tree("unbuilt")
+
+        assert tree.outstanding == 2
+        assert all(node.staleness == "never-built" for node in tree.nodes if node.leaf)
+
+    def test_a_directory_that_is_not_there_is_refused(
+        self, recorded: ManuscriptStore, tmp_path: Path
+    ) -> None:
+        with pytest.raises(HTTPException) as raised:
+            works.record_work(
+                works.ImportRequest(work="nowhere", chapters=str(tmp_path / "absent"))
+            )
+
+        assert raised.value.status_code == 422
+
+    def test_a_work_id_that_could_leave_the_store_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The id names a directory, so the type refuses what a path would not."""
+        with pytest.raises(ValidationError):
+            works.ImportRequest(work="../escaped", chapters=str(tmp_path))
+
+
+class TestSayingWhatARunWouldCostBeforeItRuns:
+    def test_a_settled_work_would_run_nothing(self, recorded: ManuscriptStore) -> None:
+        assert works.preview_run("work").parts == ()
+
+    def test_a_requested_part_is_what_would_run(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.request_part("work", CYBER, works.RequestRevision(reason="why"))
+
+        would = works.preview_run("work")
+
+        assert [verdict.key for verdict in would.parts] == [CYBER]
+        assert would.outstanding == 1
+
+    def test_a_limit_cuts_the_preview_the_way_it_cuts_the_pass(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.request_part("work", CYBER, works.RequestRevision())
+        works.request_part("work", "02/03/2.3.1", works.RequestRevision())
+
+        would = works.preview_run("work", limit=1)
+
+        assert len(would.parts) == 1
+        assert would.outstanding == 2
+
+    def test_naming_a_part_previews_that_part_rather_than_the_first_one(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """What a limit cannot express. A limit takes the first parts in tree
+        order, so a row offering to run itself has to be able to name itself."""
+        works.request_part("work", CYBER, works.RequestRevision())
+        works.request_part("work", "02/03/2.3.1", works.RequestRevision())
+
+        would = works.preview_run("work", part=[CYBER])
+
+        assert [verdict.key for verdict in would.parts] == [CYBER]
+
+    def test_a_named_part_that_would_not_run_says_why(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """The browser shows this instead of starting a pass that runs nothing
+        and reads back as a finished book."""
+        would = works.preview_run("work", part=[CYBER])
+
+        assert would.parts == ()
+        assert [held.key for held in would.passed_over] == [CYBER]
+        assert would.passed_over[0].reason == "up to date"
+
+
+class TestALoopIsRefusedWhereItCouldNotHelp:
+    def test_a_work_whose_checkout_is_gone_is_refused(
+        self, recorded: ManuscriptStore, tmp_path: Path
+    ) -> None:
+        """The answer is about a directory, not about two hundred rewrites."""
+        works.set_loops(WorkLoopManager())
+        tree = recorded.load_tree("work")
+        assert tree is not None
+        recorded.publish_tree(
+            "work", tree.model_copy(update={"root": str(tmp_path / "moved")})
+        )
+
+        with pytest.raises(HTTPException) as raised:
+            works.start_run("work", works.RunRequest())
+
+        assert raised.value.status_code == 409
+        assert "which is not there" in raised.value.detail
+
+    def test_a_second_loop_over_one_work_is_refused(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The loop is the single writer of state; two would lease the same parts."""
+        loops = WorkLoopManager()
+        works.set_loops(loops)
+        monkeypatch.setattr(loops, "running", lambda work: True)
+
+        with pytest.raises(HTTPException) as raised:
+            works.start_run("work", works.RunRequest())
+
+        assert raised.value.status_code == 409
+
+    def test_a_work_with_no_loop_reports_one_that_is_not_running(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.set_loops(WorkLoopManager())
+
+        assert not works.run_status("work").running
+
+
+class TestClearingIsTheWayOutOfAStickyStanding:
+    def test_a_requested_part_can_be_taken_back(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.set_loops(WorkLoopManager())
+        works.request_part("work", CYBER, works.RequestRevision(reason="changed mind"))
+
+        node = works.clear_part("work", CYBER)
+
+        assert node.standing == "idle"
+        assert node.staleness == "fresh"
+        assert works.work_tree("work").settled
+
+    def test_a_failed_part_can_be_tried_again(self, recorded: ManuscriptStore) -> None:
+        """A failed part stays failed on its own, which is why this has to exist."""
+        works.set_loops(WorkLoopManager())
+        recorded.publish_state(
+            "work", recorded.load_state("work").declared(CYBER, "failed", "it broke")
+        )
+
+        assert works.clear_part("work", CYBER).standing == "idle"
+
+    def test_clearing_is_refused_while_a_loop_holds_the_work(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loops = WorkLoopManager()
+        works.set_loops(loops)
+        monkeypatch.setattr(loops, "running", lambda work: True)
+
+        with pytest.raises(HTTPException) as raised:
+            works.clear_part("work", CYBER)
+
+        assert raised.value.status_code == 409
+
+
+class TestTheTreeCarriesWhatARowNeedsToBeReadable:
+    def test_a_chapter_rolls_up_what_is_outstanding_beneath_it(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """The question an author opens a two-hundred-part tree with."""
+        works.request_part("work", CYBER, works.RequestRevision())
+        tree = works.work_tree("work")
+
+        chapter = next(node for node in tree.nodes if node.key == "02")
+
+        assert chapter.below == 2
+        assert chapter.outstanding_below == 1
+
+    def test_a_part_names_the_run_that_last_held_it(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        recorded.publish_state(
+            "work",
+            recorded.load_state("work").declared(CYBER, "failed", "broke", "abc123"),
+        )
+        tree = works.work_tree("work")
+
+        assert (
+            next(node for node in tree.nodes if node.key == CYBER).session == "abc123"
+        )
+
+    def test_a_work_read_from_a_missing_checkout_says_so_once(
+        self, recorded: ManuscriptStore, tmp_path: Path
+    ) -> None:
+        held = recorded.load_tree("work")
+        assert held is not None
+        recorded.publish_tree(
+            "work", held.model_copy(update={"root": str(tmp_path / "moved")})
+        )
+
+        tree = works.work_tree("work")
+
+        assert not tree.rooted
+        assert tree.blocked == 2
+        assert not tree.settled

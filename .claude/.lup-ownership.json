@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generator_version": "0.2.0",
-  "source_digest": "dc08a52af6a99944ddd6e73c1fcda902b4ef98c9d9d156eac6a90760bc0f7405",
+  "source_digest": "6e8ae00d46a91c18f5dce00a11a9a0629af74e832ef19370510473558149c70d",
   "target_requirements": [
     "claude-code"
   ],
@@ -9,7 +9,7 @@
     {
       "path": ".claude/CLAUDE.md",
       "category": "generated",
-      "sha256": "676d4dd4e99192c5a0f36c9bb60c52406066dd88fba331b038394a5a09fb160b",
+      "sha256": "55bd3f19179fc456cc889774517931268475fcc6d9a8f51b3f4439f86c92a7b5",
       "semantic_id": "harness.guidance",
       "executable": false
     },
@@ -345,7 +345,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/policy_data.py",
       "category": "generated",
-      "sha256": "b9a7f904d6e7b46a77ebe7bdc78ae4be58e5bb8cd94360728bf7eaafe7dbf580",
+      "sha256": "d53a787c5b80c91bfe25d132c64bab5adb82df6aae4aa3df6825985529022d07",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },
@@ -366,7 +366,7 @@
     {
       "path": ".claude/settings.json",
       "category": "generated",
-      "sha256": "df9eedd7406ff2cda79bf284ff8b7dfc349959a49e546d16795a378a601e7ad2",
+      "sha256": "0acaf71cc41f797336031988097a712cdc5d9e77f413029e2b53f5b56b441ebf",
       "semantic_id": "harness.project-settings",
       "executable": false
     },
@@ -401,7 +401,7 @@
     {
       "path": "docs/inkwell.md",
       "category": "generated",
-      "sha256": "e3ca8db689c8c4d4fdf8c3125cabe42ae63d92f7d78f5bbedb280d44baebfde8",
+      "sha256": "1edee76cdacc3426e35416a3d6cdbd5c0713525d9d4a823f40b0d41dce929aa7",
       "semantic_id": "docs.inkwell",
       "executable": false
     },

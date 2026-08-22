@@ -144,6 +144,37 @@ async def persistent_context(
             await context.close()
 
 
+class BrowserRefused(Exception):
+    """A URL the browser context was turned away from as well.
+
+    Raised rather than returned so the escalation has an end: a caller that
+    reached for the browser because a plain client was refused has nothing
+    further to try, and a body it would have to test for refusal is what the
+    plain path already failed at.
+    """
+
+
+async def fetched_through_browser(
+    url: str, *, profile: str | None = None, timeout_ms: int = 30_000
+) -> bytes:
+    """One URL's bytes, fetched over the profile's own browser connection.
+
+    For a host that answers a browser and refuses a plain client. The request
+    goes through the context's network stack, so it carries the browser's
+    headers, its TLS handshake, and whatever cookies the profile holds — which
+    is the whole of what such a host is discriminating on.
+
+    Deliberately not :func:`rendered_html`: that returns what the DOM became,
+    and a syndication feed put through a DOM comes back as the browser's XML
+    viewer wrapped in HTML rather than as the XML a parser was promised.
+    """
+    async with persistent_context(profile, headless=True) as context:
+        response = await context.request.fetch(url, method="GET", timeout=timeout_ms)
+        if not response.ok:
+            raise BrowserRefused(f"{url} answered {response.status} to a browser")
+        return await response.body()
+
+
 async def rendered_html(
     url: str,
     *,

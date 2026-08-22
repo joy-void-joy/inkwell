@@ -30,7 +30,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from inkwell.corpus.storage import CorpusStore, StoredDocument, now_stamp
+from inkwell.corpus.storage import CorpusStore, SourceShard, StoredDocument, now_stamp
 
 logger = logging.getLogger(__name__)
 
@@ -462,3 +462,44 @@ async def embed_source(
         embedded=len(computed.vectors),
         skipped=len(shard.documents) - len(readable),
     )
+
+
+def awaiting_judgement(shard: SourceShard) -> tuple[str, ...]:
+    """Documents this source holds that a vector cannot yet be computed for.
+
+    Not the same set as the one embedding skips. A document nothing can be
+    read from *and* nothing has judged is one a re-tag would rescue; one that
+    has been judged and still reads empty is as good as it will get, and
+    blocking on it would mean a corpus that can never finish. Only the first
+    kind is named here, which is what lets a caller refuse and still converge.
+    """
+    return tuple(
+        document.slug
+        for document in shard.documents
+        if not document.abstract and not document.summary and not document.tags.judged
+    )
+
+
+DEFAULT_EMBED_CONCURRENCY = 4
+"""How many sources are embedded at once. One source is a single batched call
+into whichever embedder is loaded, so this parallelises across sources and
+never within one: what it is worth therefore depends on who is embedding — a
+local static model is bound by the CPU it is already using, an API-backed one
+by round trips it can overlap."""
+
+
+async def embed_sources(
+    sources: tuple[str, ...],
+    store: CorpusStore,
+    embedder: CorpusEmbedder,
+    *,
+    concurrency: int = DEFAULT_EMBED_CONCURRENCY,
+) -> tuple[EmbedReport, ...]:
+    """Embed several sources, one source's failure costing only itself."""
+    limiter = asyncio.Semaphore(concurrency)
+
+    async def guarded(source: str) -> EmbedReport:
+        async with limiter:
+            return await embed_source(source, store, embedder)
+
+    return tuple(await asyncio.gather(*(guarded(source) for source in sources)))

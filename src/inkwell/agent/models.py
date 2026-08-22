@@ -22,6 +22,16 @@ from inkwell.agent.book import BookOutline, ChapterPlacement
 from inkwell.agent.provenance import SourceProvenance, Venue
 
 
+type SourceRole = Literal["source", "revision_target", "style_reference", "context"]
+"""What one input is to the run that was handed it.
+
+The distinction the pipeline cannot recover on its own is 'source' against
+'revision_target': one is content to write from, the other is the piece the
+run replaces, and finished prose carrying its own citations looks the same
+either way. It is declared by the entry point, which already knows.
+"""
+
+
 class AuthorNote(BaseModel):
     """A note from any pipeline stage addressed to the author."""
 
@@ -303,6 +313,40 @@ class ReviewOutput(BaseModel):
     """Structured output from a reviewer agent."""
 
     findings: list[ReviewFinding] = Field(description="All findings from this reviewer")
+
+
+class FindingDisposition(BaseModel):
+    """What the rewrite did about one review finding, and why."""
+
+    tag: str = Field(description="The finding's tag, as the annotated draft marks it")
+    action: Literal["applied", "folded", "rejected"] = Field(
+        description=(
+            "'applied': the draft now does what the finding asked. 'folded': "
+            "handled as part of another change rather than on its own terms. "
+            "'rejected': deliberately not done"
+        )
+    )
+    reason: str = Field(
+        description=(
+            "Why, in one line. Required for every action, because 'applied' "
+            "with no account of what changed is the same silence as no entry"
+        )
+    )
+
+
+class RewriteDispositions(BaseModel):
+    """Every finding the rewrite answered for, as it answered.
+
+    The record exists so that whether a reviewer earned its cost is a fact on
+    disk rather than an inference from whether a quoted passage survived. A
+    rewrite that silently drops half its findings and one that considers and
+    rejects them look identical in the finished draft, and until now the
+    pipeline could not tell them apart either.
+    """
+
+    dispositions: list[FindingDisposition] = Field(
+        default_factory=list, description="One entry per finding the rewrite saw"
+    )
 
 
 class MergedDraft(BaseModel):

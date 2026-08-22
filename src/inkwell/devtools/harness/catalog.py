@@ -230,7 +230,6 @@ def portable_harness(version: str = "0.2.0", root: Path | None = None) -> Harnes
                 HookPathRole(root=Path("tests"), role="test"),
                 HookPathRole(root=Path("tmp"), role="scratch"),
             ],
-            human_owned_files=[Path("README.md")],
             rules=RETIRED_RULES,
             shell_rules=SHELL_RULES,
             runner_targets=runner_target_rules(

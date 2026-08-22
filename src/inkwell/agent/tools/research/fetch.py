@@ -108,10 +108,24 @@ def extract_page(
 DOWNLOADS_DIR = Path("tmp/downloads")
 MAX_PDF_BYTES = 100 * 1024 * 1024
 
-USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
+USER_AGENT = "inkwell-corpus/0.2 (+https://github.com/joy-void-joy/inkwell)"
+"""How this project identifies itself when it fetches something.
+
+Honestly, and that is load-bearing rather than principled. A spoofed Chrome
+string was worse at the one job a user agent has: BleepingComputer's edge
+served this header 200 and a claimed ``Chrome/131`` 403, from the same client,
+seconds apart. Anti-bot scoring is not looking for non-browsers — it is
+looking for clients *pretending* to be browsers, and a UA claiming Chrome
+without Chrome's TLS fingerprint, client hints, or header order is the
+clearest possible signal of exactly that. Headless Chrome scores the same way,
+which is why reaching for the browser did not rescue it either.
+
+Checked against the corpus's own sources before it was adopted: identical
+responses from AISI, Anthropic, Apollo, Epoch, CyberScoop, and the BBC, and
+the one source that had been unreachable became reachable. A contact URL is
+included because a source deciding whether to serve this can then find out
+what it is.
+"""
 
 
 GITHUB_HOST = "github.com"

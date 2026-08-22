@@ -40,6 +40,7 @@ from lup.types import StringMap
 
 from inkwell.agent.book import ChapterAssignment
 from inkwell.agent.config import PIPELINE_STAGES, PipelineStage
+from inkwell.agent.models import SourceRole
 from inkwell.agent.stages import OUTPUT_FORMATS
 
 type SuppliedValue = str | bool | Sequence[str] | StringMap | None
@@ -685,6 +686,17 @@ class EntryPoint(BaseModel):
         ),
     )
 
+    material_role: SourceRole = Field(
+        default="source",
+        description=(
+            "What this entry point's material is to the run. Declared because "
+            "the command already knows — a draft handed to `revise` is the "
+            "piece being replaced — where a stage downstream could only guess "
+            "from prose that reads the same either way. 'source' for the "
+            "entry points whose material really is content to write from."
+        ),
+    )
+
     @model_validator(mode="after")
     def skips_name_real_stages(self) -> "EntryPoint":
         """Refuse a skip naming no stage, which would silently skip nothing."""
@@ -1115,16 +1127,31 @@ class RestartEntryPoint(ContinuedEntryPoint):
 
 
 REVISE_INSTRUCTION = """\
-Revise the draft above. Rewrite it for clarity and currency: sharpen what is \
+Revise the draft above. It is the piece this run REPLACES: what you produce \
+stands in its place, so rewrite it for clarity and currency — sharpen what is \
 vague, cut what does not earn its place, and bring every fact, figure, and \
-reference up to date. Keep the author's voice, argument, and structure — this is \
-a revision of their piece, not a new one.
+reference up to date. Keep the author's voice and the argument they are making; \
+everything else about the draft is yours to change.
+
+The draft being finished prose is not a reason to tread lightly. Published \
+text, a textbook chapter, something already carrying its own citations — that \
+is the ordinary case for a revision, and it is what you were pointed at. \
+Leaving a passage alone because a reader could already look it up elsewhere is \
+the one outcome this run has no use for.
 
 Plan it as the piece it already is: its sections are the draft's sections, and \
-its research questions are the draft's own claims asked again — for every fact, \
-figure, and citation the draft rests on, ask whether it still holds and whether \
-anything has superseded it. A revision that only re-proses a stale claim has \
-failed at the thing it was for."""
+its research questions start from the draft's own claims asked again — for \
+every fact, figure, and citation the draft rests on, ask whether it still holds \
+and whether anything has superseded it. A revision that only re-proses a stale \
+claim has failed at the thing it was for.
+
+Then ask what the draft does not raise at all. A draft is fixed at the moment \
+it was written, so the gap that matters most is usually not a stale claim but a \
+missing one: the case, result, or event that arrived afterwards and that a \
+reader of this piece today would expect it to cover. Ask for those directly, by \
+subject rather than by claim, because no question derived from the draft can \
+reach them and nothing later in this pipeline can add what research never went \
+looking for."""
 """What the revise entry point always asks for, beside the draft it is given.
 
 Carrying the currency check here rather than in a stage is what keeps revise a
@@ -1133,6 +1160,11 @@ had to learn which entry point launched the run. The research questions follow
 from the draft's own citations because this says to derive them that way —
 which is also why revise skips no stage, since research is where that check is
 actually spent.
+
+What the instruction cannot do alone is stop the preservation reviewers
+scoring the rewrite as damage — a cut reads as a dropped specific and a
+departure reads as infidelity to the source. That is why the draft also
+travels under its own role: see ``material_role`` and ``revision_target``.
 """
 
 
@@ -1198,17 +1230,7 @@ Examples:
     inkwell revise chapter4.md --chapter atlas:4   # one chapter of a book
     inkwell revise "https://docs.google.com/document/d/abc123/edit\"""",
     standing_instruction=REVISE_INSTRUCTION,
-    # lup: solved: revise skips no stage yet. Its concern asks for extraction
-    # and planning-from-scratch to be skipped, but a draft may be a Doc, a
-    # URL, or a file — `stage_extract` is what turns those into text — and
-    # `stage_research` raises without a plan, so skipping both leaves a run
-    # that cannot complete. What a revision should do instead of planning
-    # afresh is the open question; the standing instruction already tells the
-    # planner to keep the author's structure.
-    # Settled: revise skips nothing, and the standing instruction is what
-    # makes it a revision — it reaches the planner through the ordinary
-    # source path, telling it to keep the author's structure and to question
-    # the draft's own claims for currency.
+    material_role="revision_target",
     parameters=[
         DRAFT,
         REFS,

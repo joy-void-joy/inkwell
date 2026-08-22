@@ -5,11 +5,13 @@ something is *called* has to live outside any one writer and outside any one
 run. That is this ledger: a writer coins into it, every other writer reads it,
 and the first definition of a term is the one that binds.
 
-Two scopes, one shape. A standalone article's ledger is one file in the run's
+Three scopes, one shape. A standalone article's ledger is one file in the run's
 own notes and dies with them, because no later run needs the terms it settled.
 A book chapter's ledger is a file per chapter under the book's record, read in
 chapter order — see :mod:`inkwell.agent.book` for the partition and why it
-needs no lock. A row measures a draft against the same reading a writer gets,
+needs no lock. An imported work's ledger is that partition taken down to the
+part, and reads the vocabulary its authors declared before anything a run
+coined. A row measures a draft against the same reading a writer gets,
 through :func:`read_glossary` and :meth:`BookGlossary.canon`, so what the
 writer is handed and what the draft is checked against cannot disagree.
 
@@ -26,6 +28,14 @@ from pydantic import BaseModel, Field
 from lup.channels.models import publish_atomic
 
 from inkwell.agent.book import BookStore, ChapterPlacement
+from inkwell.manuscript.store import ManuscriptStore
+
+DECLARED_VOCABULARY = "declared"
+"""The key the authors' own vocabulary is filed under.
+
+Not a part's key — no part of a work is called this, so nothing a run coins
+can land on the file, and the read order can name it without a lookup.
+"""
 
 
 class GlossaryEntry(BaseModel):
@@ -171,8 +181,45 @@ class BookGlossary(BaseModel, frozen=True):
         return read_glossary(self)
 
 
-GlossaryScope = RunGlossary | BookGlossary
-"""Where one run's glossary lives — its own notes, or its book's record."""
+class NodeGlossary(BaseModel, frozen=True):
+    """A work's glossary, partitioned one file per part.
+
+    The book partition taken down to the unit anybody revises, and with one
+    addition the book has no equivalent of: an imported work arrives with a
+    vocabulary its authors already declared, and that file is read *first*.
+    First-definition-wins then makes the authors' spelling the one that binds,
+    without a rule anywhere saying the authors outrank a run — the read order
+    is the rule.
+
+    Sorting the rest by filename is what keeps the order deterministic between
+    two parts that coined the same term without seeing each other. It is not
+    reading order, and deliberately not: reading order changes when a work is
+    rearranged, and a term would then change meaning because a chapter moved.
+    """
+
+    store: ManuscriptStore
+    work: str
+    key: str
+
+    def own(self) -> Path:
+        """The one file this part coins into, and the only one it writes."""
+        return self.store.glossary_path(self.work, self.key)
+
+    def read_order(self) -> tuple[Path, ...]:
+        """The authors' declared vocabulary, then every part's own file."""
+        declared = self.store.glossary_path(self.work, DECLARED_VOCABULARY)
+        directory = self.store.glossary_dir(self.work)
+        coined = sorted(path for path in directory.glob("*.json") if path != declared)
+        return (declared, *coined)
+
+    def canon(self) -> GlossaryView | None:
+        """Every name this work has settled, whoever settled it."""
+        return read_glossary(self)
+
+
+GlossaryScope = RunGlossary | BookGlossary | NodeGlossary
+"""Where one run's glossary lives — its own notes, its book's record, or the
+work whose part it is revising."""
 
 
 def load_chapter_glossary(path: Path) -> ChapterGlossary:

@@ -43,8 +43,10 @@ from inkwell.corpus.semantics import (
     LocalEmbedder,
     SemanticLayer,
     VectorShard,
+    awaiting_judgement,
     cosine,
     embed_source,
+    embed_sources,
     write_vectors,
 )
 from inkwell.corpus.storage import (
@@ -89,6 +91,7 @@ def written(
     summary: str = "",
     body: str = "",
     pages: int = 0,
+    judged: bool = True,
 ) -> Written:
     """One stored document, described in the terms a retrieval test asks in."""
     return Written(
@@ -105,7 +108,7 @@ def written(
             published=published,
             fetched_at=fetched_at,
             quality=QualityReport(score=quality, assessed=kind != "pdf"),
-            tags=DocumentTags(core=tags, judged=True),
+            tags=DocumentTags(core=tags, judged=judged),
         ),
         body=body,
     )
@@ -803,3 +806,61 @@ def test_no_stage_prompt_enumerates_the_research_tools() -> None:
     """A prompt that lists tools goes stale the next time one is added."""
     for prompt in (RESEARCHER_PROMPT, SECTION_WRITER_PROMPT, SINGLE_WRITER_PROMPT):
         assert "arXiv, FRED" not in prompt
+
+
+# ── The layer is computed after the judging, never before it ─────────────────
+
+
+def test_a_pdf_nothing_has_judged_yet_is_named_as_awaiting_one(
+    tmp_path: Path,
+) -> None:
+    """The one document a premature embed loses entirely, rather than thins.
+
+    A PDF has no abstract by construction — the corpus stores it without
+    extracting it — so until a judgement writes its summary there is no text
+    for a vector at all.
+    """
+    store = write_source(
+        tmp_path,
+        "aisi",
+        [
+            written("judged-pdf", kind="pdf", pages=9, summary="What it argues."),
+            written("swept-pdf", kind="pdf", pages=9, judged=False),
+            written("swept-page", abstract="Its opening.", body="x", judged=False),
+        ],
+    )
+    shard = store.load_by_name("aisi")
+    assert shard is not None
+    assert awaiting_judgement(shard) == ("swept-pdf",)
+
+
+def test_a_document_read_and_found_empty_is_waiting_on_nothing(
+    tmp_path: Path,
+) -> None:
+    """Blocking on what a re-tag cannot fix is a corpus that never finishes."""
+    store = write_source(
+        tmp_path, "aisi", [written("read-and-empty", kind="pdf", pages=4)]
+    )
+    shard = store.load_by_name("aisi")
+    assert shard is not None
+    assert awaiting_judgement(shard) == ()
+
+
+async def test_embedding_several_sources_reports_each_of_them(
+    tmp_path: Path,
+) -> None:
+    """One source is the unit, so one source's failure costs only itself."""
+    write_source(tmp_path, "aisi", [written("one", abstract="First.", body="x")])
+    store = write_source(
+        tmp_path, "epoch", [written("two", abstract="Second.", body="x")]
+    )
+    embedder = FixtureEmbedder(
+        KnownVector(text="one\nFirst.", values=(1.0,)),
+        KnownVector(text="two\nSecond.", values=(0.0,)),
+    )
+
+    reports = await embed_sources(("aisi", "epoch", "absent"), store, embedder)
+
+    assert [report.source for report in reports] == ["aisi", "epoch", "absent"]
+    assert [report.embedded for report in reports] == [1, 1, 0]
+    assert reports[2].failure == "nothing ingested for it yet"

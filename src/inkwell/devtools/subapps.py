@@ -37,6 +37,8 @@ APPLICATION_SPECS = [
     SubAppSpec(name="dev", help="Worktrees, branches, and pre-flight checks"),
     SubAppSpec(name="feedback", help="Feedback state, metrics, and commits"),
     SubAppSpec(name="harness", help="Generate and launch the native harness"),
+    SubAppSpec(name="manuscript", help="Read a work of many parts into its tree"),
+    SubAppSpec(name="report", help="Report everything left to implement"),
     SubAppSpec(name="setup", help="Interactive setup wizard"),
 ]
 """The sub-apps only inkwell has, because only it has their subject."""

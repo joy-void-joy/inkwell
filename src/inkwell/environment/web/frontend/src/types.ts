@@ -4,6 +4,134 @@ export interface FormatOption {
   accepts_description: boolean;
 }
 
+// ── A work of many parts, and what the loop over it has left to do ───────────
+
+export type Staleness =
+  | "fresh"
+  | "never-built"
+  | "requested"
+  | "source-gone"
+  | "source-moved"
+  | "upstream";
+
+export type NodeStanding =
+  | "idle"
+  | "requested"
+  | "running"
+  | "parked"
+  | "failed";
+
+export interface WorkSummary {
+  id: string;
+  title: string;
+  parts: number;
+  outstanding: number;
+}
+
+// Flat with a parent rather than nested, because the tree is re-rendered on
+// every state change and a flat list diffs cheaply. Nesting is rebuilt here.
+export interface PartNode {
+  key: string;
+  title: string;
+  kind: string;
+  parent: string;
+  depth: number;
+  path: string;
+  leaf: boolean;
+  staleness: Staleness;
+  standing: NodeStanding;
+  reasons: string[];
+  questions: number;
+  session: string;
+  below: number;
+  outstanding_below: number;
+}
+
+export interface PartResult {
+  key: string;
+  outcome: "rewritten" | "parked" | "failed";
+  detail: string;
+}
+
+export interface PassReport {
+  work: string;
+  scheduled: string[];
+  results: PartResult[];
+  conflicts: string[];
+  remaining: number;
+  blocked: number;
+}
+
+export interface WorkLoopStatus {
+  work: string;
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  passes: PassReport[];
+  stopped: boolean;
+  failure: string;
+}
+
+export interface WorkTree {
+  id: string;
+  title: string;
+  root: string;
+  target_format: string;
+  rooted: boolean;
+  nodes: PartNode[];
+  outstanding: number;
+  blocked: number;
+  settled: boolean;
+  loop: WorkLoopStatus | null;
+}
+
+export interface WouldRun {
+  work: string;
+  parts: { key: string; staleness: Staleness; reasons: string[] }[];
+  outstanding: number;
+  blocked: { key: string; staleness: Staleness; reasons: string[] }[];
+  passed_over: { key: string; reason: string }[];
+}
+
+export interface WorkImport {
+  work: string;
+  title: string;
+  root: string;
+  target_format: string;
+  parts: number;
+  vocabulary: number;
+  dependencies: number;
+  adopted: number;
+}
+
+export interface QuestionView {
+  id: string;
+  asker: string;
+  addressed_to: string;
+  prompt: string;
+}
+
+export interface ReachedBy {
+  kind: string;
+  subject: string;
+  parts: string[];
+}
+
+// Why a part is outstanding, in the words an author reads rather than the
+// literal the API sends.
+const STALENESS_LABELS: Record<Staleness, string> = {
+  fresh: "up to date",
+  "never-built": "never built",
+  requested: "revision asked for",
+  "source-gone": "its text is not where the work was imported from",
+  "source-moved": "edited since it was built",
+  upstream: "something it leans on changed",
+};
+
+export function stalenessLabel(staleness: Staleness): string {
+  return STALENESS_LABELS[staleness] ?? staleness;
+}
+
 export interface ModelOptions {
   stages: string[];
   suggested_models: string[];

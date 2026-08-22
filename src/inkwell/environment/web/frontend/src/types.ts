@@ -83,6 +83,22 @@ export interface WorkTree {
   blocked: number;
   settled: boolean;
   loop: WorkLoopStatus | null;
+  in_flight: PartInFlight[];
+}
+
+// What is being written right now. A pass reports once it is over, so this is
+// the only account of a long one while it is still going.
+export interface PartInFlight {
+  work: string;
+  key: string;
+  title: string;
+  session: string;
+  since: string;
+  stage: string;
+  status: string;
+  cost_usd: number;
+  doc_url: string;
+  reason: string;
 }
 
 export interface WouldRun {

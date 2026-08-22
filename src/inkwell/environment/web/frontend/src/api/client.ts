@@ -6,6 +6,7 @@ import type {
   ModelOptions,
   ProfileResponse,
   ServerCapabilities,
+  PartInFlight,
   PartNode,
   QuestionView,
   ReachedBy,
@@ -386,6 +387,15 @@ export async function recordWork(request: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// Every part of every work being written right now. One page for the question
+// an author with two books open actually has, rather than one page per work to
+// be visited in turn.
+export async function fetchEverythingInFlight(): Promise<PartInFlight[]> {
+  const res = await fetch(`${BASE}/works/in-flight`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

@@ -40,7 +40,12 @@ from inkwell.manuscript.mailbox import (
     question_id,
 )
 from inkwell.manuscript.reconcile import reconcile
-from inkwell.manuscript.runner import PartOutcome, TurnEnding, run_part
+from inkwell.manuscript.runner import (
+    PartOutcome,
+    PartRunWatch,
+    TurnEnding,
+    run_part,
+)
 from inkwell.manuscript.state import (
     STALENESS_PHRASING,
     UNRUNNABLE_STALENESS,
@@ -311,12 +316,18 @@ async def run_pass(
     only: tuple[str, ...] = (),
     concurrency: int = DEFAULT_CONCURRENCY,
     reconciling: bool = True,
+    watching: PartRunWatch | None = None,
 ) -> PassReport:
     """Run every part a pass may pick up, and record what each one did.
 
     ``only`` keeps the pass to the parts named, for an author revising one
     subsection rather than taking the whole work to rest.
+
+    ``watching`` hears each part run open and close while the pass is still
+    going, which is the only way anything outside can say what is being
+    worked on right now — the report exists once there is nothing left to see.
     """
+    watch = watching if watching is not None else PartRunWatch()
     mailbox = PartMailbox(root=store.work_dir(work))
     held = readings(manuscript, vocabulary)
     opening = store.load_state(work)
@@ -333,17 +344,36 @@ async def run_pass(
     sessions = {verdict.key: uuid.uuid4().hex[:16] for verdict in picked}
 
     async def attempt(verdict: NodeVerdict) -> PartOutcome:
-        """One part's turn, with the concurrency cap held for its duration."""
+        """One part's turn, with the concurrency cap held for its duration.
+
+        The watch opens inside the cap rather than outside it, so what it
+        reports as running is what is actually running: a part queued behind
+        the cap has not started, and saying it had would make the concurrency
+        the author set invisible in the one place they look for it.
+        """
         async with gate:
-            return await run_part(
-                store,
-                work,
-                manuscript,
-                by_key[verdict.key].node,
-                session_id=sessions[verdict.key],
-                reasons=verdict.reasons,
-                vocabulary=vocabulary,
+            session = sessions[verdict.key]
+            # Closed in a finally because the ways a run ends without an
+            # outcome are the ways that matter here: it raised, or the loop
+            # was stopped under it. Either way something watching has been
+            # told this part is running, and nothing else will correct it.
+            ending = PartOutcome(
+                key=verdict.key, session=session, failure="the run did not return"
             )
+            try:
+                ending = await run_part(
+                    store,
+                    work,
+                    manuscript,
+                    by_key[verdict.key].node,
+                    session_id=session,
+                    reasons=verdict.reasons,
+                    vocabulary=vocabulary,
+                    observers=watch.opening(verdict.key, session),
+                )
+                return ending
+            finally:
+                watch.closed(verdict.key, session, ending)
 
     leased = opening
     for verdict in picked:
@@ -413,6 +443,7 @@ async def run_loop(
     concurrency: int = DEFAULT_CONCURRENCY,
     reconciling: bool = True,
     reporting: Callable[[PassReport], None] | None = None,
+    watching: PartRunWatch | None = None,
 ) -> tuple[PassReport, ...]:
     """Pass over a work until it settles, or until the cap says to stop.
 
@@ -429,6 +460,10 @@ async def run_loop(
     of two hundred parts takes long enough that something watching wants to be
     told on the way, and the return value only exists once there is nothing
     left to watch.
+
+    ``watching`` is finer than that again, and for the same reason: a pass over
+    a long work is itself long, so what is being written *now* is a question
+    nobody can answer from a report that arrives once the pass is over.
     """
 
     async def taken() -> AsyncIterator[PassReport]:
@@ -443,6 +478,7 @@ async def run_loop(
                 only=only,
                 concurrency=concurrency,
                 reconciling=reconciling,
+                watching=watching,
             )
             logger.info("Pass %d of %s: %s", number, work, report.render())
             if reporting is not None:

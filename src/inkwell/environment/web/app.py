@@ -95,7 +95,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     manager = SessionManager()
     sessions_route.set_manager(manager)
     ws_route.set_manager(manager)
-    loops = WorkLoopManager()
+    # Given the session manager, so a part run this loop starts is a session
+    # every other surface can already show rather than an anonymous stretch of
+    # time in which a work quietly changes.
+    loops = WorkLoopManager(manager)
     works_route.set_loops(loops)
     try:
         yield

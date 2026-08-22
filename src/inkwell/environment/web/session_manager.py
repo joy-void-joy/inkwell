@@ -79,7 +79,10 @@ class SessionHandle(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     session_id: str
-    task: asyncio.Task[AgentSessionResult]
+    # Absent for a run this manager did not launch. A work's loop starts a run
+    # per part and owns when each ends, so the handle for one is a way to watch
+    # it rather than a way to end it — stopping the loop is what stops those.
+    task: asyncio.Task[AgentSessionResult] | None = None
     state: WritingSessionState
     cost: CostAccumulator
     listener: WebListener
@@ -208,6 +211,43 @@ class SessionManager:
         )
 
         return session_id
+
+    def adopt(self, session_id: str) -> SessionHandle:
+        """Register a run something else is driving, and hand back its handle.
+
+        A work's loop starts a run per part, and those runs were sessions in
+        every respect except that this manager had never heard of them: the
+        list read them back off their unfinished records and called every one
+        interrupted, which is what a run that stopped mid-pipeline looks like
+        from the outside and is the opposite of what was happening. Adopting
+        one gives the pipeline somewhere to publish, so a part run reports its
+        stage and its spend while it runs rather than after.
+
+        The instruments come back on the handle rather than being passed in,
+        because the listener has to name the session it broadcasts for and
+        nothing outside can build one before the handle exists.
+        """
+        handle = SessionHandle(
+            session_id=session_id,
+            state=WritingSessionState(),
+            cost=CostAccumulator(),
+            listener=WebListener(session_id, self),
+            trace=SessionTrace(),
+        )
+        self.sessions[session_id] = handle
+        return handle
+
+    def retire(self, session_id: str, status: SessionStatus) -> None:
+        """Record how an adopted run ended, so it stops reading as running.
+
+        Nothing calls back for a run this manager did not launch, so without
+        this the handle would say running for as long as the server was up.
+        """
+        handle = self.handle_for(session_id)
+        if handle is None:
+            return
+        handle.status = status
+        self.save_events(handle)
 
     async def on_session_done(
         self, session_id: str, task: asyncio.Task[AgentSessionResult]
@@ -497,6 +537,10 @@ class SessionManager:
             case "done":
                 await handle.listener.revision_queue.put(None)
             case "quit":
+                # A part run's life belongs to the loop that started it, so
+                # there is nothing here to cancel and saying so is the answer.
+                if handle.task is None:
+                    return False
                 handle.task.cancel()
             case "feedback":
                 if text:
@@ -596,9 +640,9 @@ class SessionManager:
 
     async def shutdown(self) -> None:
         for handle in self.sessions.values():
-            if handle.status == "running":
+            if handle.status == "running" and handle.task is not None:
                 handle.task.cancel()
-        tasks = [h.task for h in self.sessions.values() if not h.task.done()]
+        tasks = [h.task for h in self.sessions.values() if h.task and not h.task.done()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for handle in self.sessions.values():

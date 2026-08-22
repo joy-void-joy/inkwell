@@ -41,7 +41,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from inkwell.agent.core import run_session
+from inkwell.agent.client import CostAccumulator
+from inkwell.agent.core import SessionTrace, run_session
+from inkwell.agent.pipeline import PipelineListener
+from inkwell.agent.session import WritingSessionState
 from inkwell.agent.glossary import (
     GlossaryEntry,
     NodeGlossary,
@@ -80,6 +83,53 @@ Named rather than worked out from an outcome's fields by whoever is asking,
 so a fourth way to end costs a literal here instead of a stale condition at
 every reader.
 """
+
+
+class PartRunObservers(BaseModel):
+    """What a part run publishes through, where something is watching it.
+
+    The pipeline already takes all four for an ordinary run — this is only the
+    set of them, so a part run can be handed the same instruments instead of
+    running blind because it was started by a loop rather than by a person.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    listener: PipelineListener | None = Field(
+        default=None, description="Where the run's stages and progress are published"
+    )
+    state: WritingSessionState = Field(
+        default_factory=WritingSessionState,
+        description="What the run has settled so far — its title, its document",
+    )
+    cost: CostAccumulator = Field(
+        default_factory=CostAccumulator, description="What the run has spent"
+    )
+    trace: SessionTrace = Field(
+        default_factory=SessionTrace, description="Where its turns are recorded"
+    )
+
+
+class PartRunWatch:
+    """Something following each part run of a pass while it is still going.
+
+    A pass reports when it has finished, and for a book-length work that is
+    long after whoever is watching wanted to know anything: the interesting
+    question — what is being worked on right now — is answerable only from
+    inside the pass. Told which run holds which part as it opens, asked what
+    that run should publish through, and told how it ended.
+
+    Defaults do nothing and hand back instruments nobody reads, so a caller
+    that does not care about any of this passes nothing and a part run behaves
+    as it always did.
+    """
+
+    def opening(self, key: str, session: str) -> PartRunObservers:
+        """What the run about to take this part on should publish through."""
+        return PartRunObservers()
+
+    def closed(self, key: str, session: str, outcome: PartOutcome) -> None:
+        """That run is over, whether it wrote prose, parked, or failed."""
 
 
 class PartOutcome(BaseModel):
@@ -272,6 +322,7 @@ async def run_part(
     reasons: tuple[str, ...] = (),
     vocabulary: tuple[Abbreviation, ...] = (),
     scratch: Path | None = None,
+    observers: PartRunObservers | None = None,
 ) -> PartOutcome:
     """Take one part through the pipeline and hand back what it produced.
 
@@ -300,12 +351,17 @@ async def run_part(
     shared.own().parent.mkdir(parents=True, exist_ok=True)
     settled = named_in(shared)
 
+    watched = observers if observers is not None else PartRunObservers()
     result = await run_session(
         sources=[str(material), part_instruction(manuscript, node, reasons)],
         material_role="revision_target",
         target_format=manuscript.target_format,
         glossary=shared,
         session_id=session_id,
+        listener=watched.listener,
+        trace=watched.trace,
+        session_state=watched.state,
+        cost_accumulator=watched.cost,
     )
     produced = result.output.content if result.output else ""
     if not produced:

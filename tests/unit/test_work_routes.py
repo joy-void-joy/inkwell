@@ -19,8 +19,10 @@ from pydantic import ValidationError
 from inkwell.agent.glossary import DECLARED_VOCABULARY, write_chapter_glossary
 from inkwell.environment.web import work_loops
 from inkwell.environment.web.routes import works
+from inkwell.environment.web.session_manager import SessionManager
 from inkwell.environment.web.work_loops import WorkLoopManager
 from inkwell.manuscript.loop import PassReport
+from inkwell.manuscript.runner import PartOutcome
 from inkwell.manuscript.graph import adopted, readings
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.mailbox import PartMailbox, PartQuestion, question_id
@@ -141,6 +143,23 @@ class TestAskingForAPartMakesItOutstanding:
             works.request_part("work", "02/03/9.9.9", works.RequestRevision())
 
         assert raised.value.status_code == 404
+
+    def test_a_part_a_run_is_holding_is_refused(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """The standing this would write over is the lease, and the run named
+        in it is the only way back to what is happening to the part."""
+        recorded.publish_state(
+            "work",
+            recorded.load_state("work").declared(CYBER, "running", "picked up", "run1"),
+        )
+
+        with pytest.raises(HTTPException) as raised:
+            works.request_part("work", CYBER, works.RequestRevision(reason="sharpen"))
+
+        assert raised.value.status_code == 409
+        assert "run1" in raised.value.detail
+        assert works.one_part(recorded, "work", CYBER).session == "run1"
 
 
 class TestAnsweringIsWhatLetsAParkedPartRunAgain:
@@ -363,6 +382,128 @@ class TestALoopIsRefusedWhereItCouldNotHelp:
         works.set_loops(WorkLoopManager())
 
         assert not works.run_status("work").running
+
+
+class TestAPartRunIsASessionLikeAnyOther:
+    """It always was one — a trace, a stage, a document, a spend — but one the
+    web layer had never been told about, so the list read it back off its own
+    unfinished record and called it interrupted for as long as it ran."""
+
+    def test_an_opened_part_run_is_a_live_session(self) -> None:
+        sessions = SessionManager()
+
+        work_loops.WatchedByTheBrowser(sessions).opening(CYBER, "run1")
+
+        held = sessions.handle_for("run1")
+        assert held is not None
+        assert held.status == "running"
+        assert [held.session_id for held in sessions.list_sessions()[:1]] == ["run1"]
+
+    def test_the_run_is_handed_the_instruments_it_publishes_through(self) -> None:
+        """Without these the pipeline runs blind and the handle stays empty,
+        which is the whole difference between adopting one and listing it."""
+        sessions = SessionManager()
+
+        observers = work_loops.WatchedByTheBrowser(sessions).opening(CYBER, "run1")
+
+        held = sessions.handle_for("run1")
+        assert held is not None
+        assert observers.listener is held.listener
+        assert observers.state is held.state
+        assert observers.cost is held.cost
+
+    def test_a_finished_part_run_stops_reading_as_running(self) -> None:
+        sessions = SessionManager()
+        watch = work_loops.WatchedByTheBrowser(sessions)
+        watch.opening(CYBER, "run1")
+
+        watch.closed(CYBER, "run1", PartOutcome(key=CYBER, text="prose"))
+
+        held = sessions.handle_for("run1")
+        assert held is not None
+        assert held.status == "completed"
+
+    def test_a_parked_part_run_reads_as_paused_rather_than_broken(self) -> None:
+        """It asked the author something and is waiting, which is the standing
+        the surface already knows how to offer a way back into."""
+        parked = PartOutcome(key=CYBER, text="prose", questions=("which figure?",))
+
+        assert work_loops.ended_as(parked) == "paused"
+
+    def test_a_failed_part_run_says_so(self) -> None:
+        broken = PartOutcome(key=CYBER, failure="no prose")
+
+        assert work_loops.ended_as(broken) == "failed"
+
+
+class TestWhatIsBeingWrittenRightNow:
+    """The question a pass report cannot answer, because it arrives too late.
+
+    A pass over a book is long, and until it ends the only public account of
+    it was a spinner: an author who started one could not tell which
+    subsection was being written, by which run, or whether anything at all was
+    happening. These read the lease, which is recorded per part as the pass
+    takes it and therefore says so while it is still true.
+    """
+
+    def held(self, store: ManuscriptStore, holder: str = "run1") -> None:
+        """One part leased by a run, the way a pass leases it."""
+        store.publish_state(
+            "work",
+            store.load_state("work").declared(CYBER, "running", "picked up", holder),
+        )
+
+    def test_a_leased_part_is_reported_as_in_flight(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        self.held(recorded)
+
+        flying = works.in_flight(recorded, "work")
+
+        assert [held.key for held in flying] == [CYBER]
+        assert flying[0].session == "run1"
+        assert flying[0].title == "2.3.2 Cyber Risk"
+        assert flying[0].reason == "picked up"
+
+    def test_the_tree_carries_it_so_one_fetch_answers_both(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """Carried on the tree rather than beside it: a page that fetched them
+        separately could render a settled work over a run in progress."""
+        works.set_loops(WorkLoopManager())
+        self.held(recorded)
+
+        assert [held.key for held in works.work_tree("work").in_flight] == [CYBER]
+
+    def test_a_part_held_by_a_run_that_is_gone_reads_as_orphaned(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """The case worth surfacing rather than hiding: it looks exactly like
+        work in progress and will never finish on its own."""
+        works.set_loops(WorkLoopManager(SessionManager()))
+        self.held(recorded)
+
+        assert works.in_flight(recorded, "work")[0].status == "orphaned"
+
+    def test_a_live_run_reports_its_own_stage_and_spend(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        """What adoption bought: the run answers for itself instead of being
+        read back off an unfinished record and called interrupted."""
+        sessions = SessionManager()
+        works.set_loops(WorkLoopManager(sessions))
+        self.held(recorded, "run2")
+        sessions.adopt("run2").state.stage = "research"
+
+        flying = works.in_flight(recorded, "work")
+
+        assert flying[0].status == "running"
+        assert flying[0].stage == "research"
+
+    def test_a_work_at_rest_has_nothing_in_flight(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        assert works.in_flight(recorded, "work") == ()
 
 
 class TestAPostedRunActuallySchedulesThePass:

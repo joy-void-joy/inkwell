@@ -182,17 +182,6 @@ Use `/lup:merge` (with no argument) for guided conflict resolution. See the comm
 | `meta` | Harness content and the trees it generates: guidance, settings, skills, hooks |
 | `data` | Generated data and outputs |
 
-| Type | Use |
-| --- | --- |
-| `feat` | New feature or capability |
-| `fix` | Bug fix |
-| `refactor` | Neither fixes a bug nor adds a feature |
-| `docs` | Documentation only |
-| `test` | Adding or updating tests |
-| `chore` | Maintenance — dependencies, build config |
-| `meta` | The harness declaration and what it generates |
-| `data` | Generated data and outputs |
-
 ---
 
 ## Code Conventions

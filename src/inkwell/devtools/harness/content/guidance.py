@@ -167,18 +167,7 @@ Work in a **git worktree**, not a branch switched in place, and never commit _co
         ),
         *conventions.COMMIT_GUIDELINES,
         models.TextPart(
-            text=r"""| Type | Use |
-| --- | --- |
-| `feat` | New feature or capability |
-| `fix` | Bug fix |
-| `refactor` | Neither fixes a bug nor adds a feature |
-| `docs` | Documentation only |
-| `test` | Adding or updating tests |
-| `chore` | Maintenance — dependencies, build config |
-| `meta` | The harness declaration and what it generates |
-| `data` | Generated data and outputs |
-
----
+            text=r"""---
 
 ## Code Conventions
 

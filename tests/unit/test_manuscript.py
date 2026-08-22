@@ -53,9 +53,11 @@ from inkwell.manuscript.runner import (
     PartOutcome,
     PartRunObservers,
     PartRunWatch,
+    around,
     coinages,
     ledger,
     named_in,
+    part_instruction,
     run_part,
 )
 from inkwell.manuscript.splice import (
@@ -843,6 +845,57 @@ class TestAnUndeclaredFormatIsRefusedWhereItIsTyped:
         refusal = unknown_format("textbok")
 
         assert "textbok" in refusal and "textbook" in refusal
+
+
+class TestAPartRunCanReadTheWorkItIsIn:
+    """A run was told it sat "among others that readers reach before and after
+    it" and asked not to repeat them — a rule about text it had no way to see.
+    It had its own span, the ancestors' titles, and the term ledger, and nothing
+    else of the book. What that produces is a run which goes looking for the
+    work where it can reach it: the published site, a different edition of the
+    book it is holding one page of, whose chapters are numbered differently."""
+
+    def test_the_neighbouring_parts_are_named_with_their_files(
+        self, tmp_path: Path
+    ) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        near = around(work, node)
+
+        assert "02/03/2.3.1" in near
+        assert "02/03/2.3.3" in near
+        assert str(Path(work.root)) in near
+
+    def test_the_first_part_has_only_what_follows_it(self, tmp_path: Path) -> None:
+        """No part before it, and a run told about one would go looking."""
+        work = read_manuscript(atlas_like(tmp_path))
+        first = next(held for held in work.leaves() if held.path)
+
+        near = around(work, first)
+
+        assert first.key not in near
+        assert len(near.splitlines()) == 1
+
+    def test_the_instruction_says_the_work_is_readable(self, tmp_path: Path) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        said = part_instruction(work, node)
+
+        assert "you can read any of it" in said
+        assert str(Path(work.root)) in said
+
+    def test_a_part_the_work_does_not_hold_names_no_neighbours(
+        self, tmp_path: Path
+    ) -> None:
+        """Rather than naming whichever parts happen to sit at index zero."""
+        work = read_manuscript(atlas_like(tmp_path))
+        stranger = ManuscriptNode(key="09/09/9.9.9", kind="section", title="Nowhere")
+
+        assert around(work, stranger) == ""
 
 
 class TestAPartRunSharesTheWorksTermLedger:

@@ -315,6 +315,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    max_parallel_agents: int | None = Field(
+        default=None,
+        validation_alias="AGENT_MAX_PARALLEL",
+        description=(
+            "How many of a run's agents work at once, across every stage. "
+            "Unset means no cap, which is what the gathers this replaced "
+            "did: every section started the moment the stage began. A cap "
+            "belongs to the population rather than to each fan-out, so an "
+            "agent still waiting on it has opened no session and been "
+            "recorded nowhere — which is what leaves an interrupted wave "
+            "exactly as the stage found it"
+        ),
+    )
+
     def model_for(self, stage: PipelineStage) -> str:
         """Model for a pipeline stage: stage override, else the default model."""
         return self.stage_models[stage] if stage in self.stage_models else self.model

@@ -15,11 +15,14 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from lup.actors.cohort import ActorCohort
+from lup.actors.refs import ActorRef
 from lup.runtime.models import SessionId, TurnId, TurnIdentifiers, TurnResult
 from lup.types import Usage
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from inkwell.agent import config as config_mod
+from inkwell.agent.cohort import run_cohort
 from inkwell.agent.book import (
     BookCitations,
     BookStore,
@@ -139,10 +142,10 @@ def planned(*questions: ResearchQuestion, sections: list[str]) -> ArticlePlan:
     )
 
 
-def finished_turn() -> TurnResult[None]:
-    """A stage agent that ran and returned no text of its own."""
+def finished_turn[T: BaseModel | None](output: T = None) -> TurnResult[T]:
+    """A stage agent that ran, submitting whatever it was asked for."""
     return TurnResult(
-        output=None,
+        output=output,
         messages=[],
         blocks=[],
         usage=Usage(),
@@ -151,6 +154,36 @@ def finished_turn() -> TurnResult[None]:
             session=SessionId(value="session"), turn=TurnId(value="turn")
         ),
     )
+
+
+@pytest.fixture
+def cohort(tmp_path: Path) -> ActorCohort:
+    """The population the judges are members of, rooted in this test's tree."""
+    return run_cohort(tmp_path / "artifacts")
+
+
+def judging(
+    cohort: ActorCohort,
+    monkeypatch: pytest.MonkeyPatch,
+    verdict: OneSidedVerdict | None = None,
+    error: Exception | None = None,
+) -> None:
+    """Stand in for every judge's turn, with one verdict or one failure.
+
+    Replaces the ask rather than the session beneath it, which is the seam a
+    caller of the cohort actually has: what these tests are about is what the
+    check does with a verdict, a missing verdict, and a judge that died.
+    """
+
+    async def asked(
+        actor: ActorRef, *_args: object, **_kwargs: object
+    ) -> TurnResult[OneSidedVerdict | None]:
+        cohort.spawn(actor, "judge")
+        if error is not None:
+            raise error
+        return finished_turn(verdict)
+
+    monkeypatch.setattr(cohort, "ask", asked)
 
 
 BOOK = "textbook"
@@ -686,7 +719,7 @@ def test_the_book_is_measured_from_records_rather_than_from_research(
 
 
 async def test_the_check_weighs_the_book_the_run_is_placed_in(
-    notes: PipelineNotes, store: BookStore
+    notes: PipelineNotes, store: BookStore, cohort: ActorCohort
 ) -> None:
     for ordinal in (1, 2, 3):
         record_citations(
@@ -698,6 +731,7 @@ async def test_the_check_weighs_the_book_the_run_is_placed_in(
         compiled(finding(*chapter_sources(3))),
         placement=CHAPTER_3,
         judge=False,
+        cohort=cohort,
     )
     artifact = notes.text_artifact_path(CITATION_DIVERSITY_ARTIFACT)
 
@@ -708,7 +742,7 @@ async def test_the_check_weighs_the_book_the_run_is_placed_in(
 
 
 async def test_a_run_placed_nowhere_is_weighed_against_no_book(
-    notes: PipelineNotes, store: BookStore
+    notes: PipelineNotes, store: BookStore, cohort: ActorCohort
 ) -> None:
     record_citations(
         ChapterPlacement(book=BOOK, chapter=1),
@@ -722,7 +756,7 @@ async def test_a_run_placed_nowhere_is_weighed_against_no_book(
         ),
     )
     report = await check_citation_diversity(
-        notes, compiled(finding(*chapter_sources(3))), judge=False
+        notes, compiled(finding(*chapter_sources(3))), judge=False, cohort=cohort
     )
 
     assert {tally.scope for tally in report.tallies} == {WHOLE_WORK}
@@ -730,17 +764,20 @@ async def test_a_run_placed_nowhere_is_weighed_against_no_book(
 
 
 async def test_a_leaning_book_never_fails_the_check_and_stays_off_the_document(
-    notes: PipelineNotes, store: BookStore, monkeypatch: pytest.MonkeyPatch
+    notes: PipelineNotes,
+    store: BookStore,
+    cohort: ActorCohort,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A book-wide lean is a row for the rewrite, exactly as a chapter's is; the
     author is asked only about the side nobody cited."""
-
-    async def one_sided(*_args: object, **_kwargs: object) -> OneSidedVerdict:
-        return OneSidedVerdict(
+    judging(
+        cohort,
+        monkeypatch,
+        verdict=OneSidedVerdict(
             one_sided=True, missing_side="the other camp", reason="All one way."
-        )
-
-    monkeypatch.setattr("inkwell.agent.pipeline.query", one_sided)
+        ),
+    )
     for ordinal in (1, 2, 3):
         record_citations(
             ChapterPlacement(book=BOOK, chapter=ordinal),
@@ -750,6 +787,7 @@ async def test_a_leaning_book_never_fails_the_check_and_stays_off_the_document(
         notes,
         compiled(finding(*chapter_sources(3), confidence=0.2)),
         placement=CHAPTER_3,
+        cohort=cohort,
     )
     reported = {row.scope for row in report.rows}
 
@@ -1014,16 +1052,16 @@ def test_a_computed_lean_is_not_worth_the_authors_attention() -> None:
 
 
 async def test_a_leaning_citation_set_never_fails_the_check(
-    notes: PipelineNotes, monkeypatch: pytest.MonkeyPatch
+    notes: PipelineNotes, cohort: ActorCohort, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every row at once, and the check still returns a report."""
-
-    async def one_sided(*_args: object, **_kwargs: object) -> OneSidedVerdict:
-        return OneSidedVerdict(
+    judging(
+        cohort,
+        monkeypatch,
+        verdict=OneSidedVerdict(
             one_sided=True, missing_side="the other camp", reason="All one way."
-        )
-
-    monkeypatch.setattr("inkwell.agent.pipeline.query", one_sided)
+        ),
+    )
     research = compiled(
         finding(
             *(unrecorded(f"https://arxiv.org/abs/{n}") for n in range(4)),
@@ -1031,7 +1069,7 @@ async def test_a_leaning_citation_set_never_fails_the_check(
         )
     )
 
-    report = await check_citation_diversity(notes, research)
+    report = await check_citation_diversity(notes, research, cohort=cohort)
 
     assert report.rows
     assert report.judged == 1
@@ -1039,12 +1077,13 @@ async def test_a_leaning_citation_set_never_fails_the_check(
 
 
 async def test_a_judge_that_dies_costs_its_row_and_nothing_more(
-    notes: PipelineNotes, monkeypatch: pytest.MonkeyPatch
+    notes: PipelineNotes, cohort: ActorCohort, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def collapse(*_args: object, **_kwargs: object) -> OneSidedVerdict:
-        raise RuntimeError("Agent error: You've hit your limit")
-
-    monkeypatch.setattr("inkwell.agent.pipeline.query", collapse)
+    judging(
+        cohort,
+        monkeypatch,
+        error=RuntimeError("Agent error: You've hit your limit"),
+    )
     research = compiled(
         finding(
             *(
@@ -1056,7 +1095,7 @@ async def test_a_judge_that_dies_costs_its_row_and_nothing_more(
         )
     )
 
-    report = await check_citation_diversity(notes, research)
+    report = await check_citation_diversity(notes, research, cohort=cohort)
 
     assert "domain concentration" in {row.check for row in report.rows}
     assert "position diversity" not in {row.check for row in report.rows}
@@ -1064,32 +1103,25 @@ async def test_a_judge_that_dies_costs_its_row_and_nothing_more(
 
 
 async def test_a_judge_reaching_no_verdict_leaves_the_computed_rows(
-    notes: PipelineNotes, monkeypatch: pytest.MonkeyPatch
+    notes: PipelineNotes, cohort: ActorCohort, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def no_verdict(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr("inkwell.agent.pipeline.query", no_verdict)
+    judging(cohort, monkeypatch)
     research = compiled(finding(unrecorded("https://a/b"), confidence=0.2))
 
-    report = await check_citation_diversity(notes, research)
+    report = await check_citation_diversity(notes, research, cohort=cohort)
 
     assert report.rows
     assert report.judged == 0
 
 
 async def test_the_judged_pass_is_what_a_cheap_run_turns_off(
-    notes: PipelineNotes, monkeypatch: pytest.MonkeyPatch
+    notes: PipelineNotes, cohort: ActorCohort, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The distribution costs only the counting, so it runs either way."""
-
-    async def unreachable(*_args: object, **_kwargs: object) -> OneSidedVerdict:
-        raise AssertionError("no judge should be spent")
-
-    monkeypatch.setattr("inkwell.agent.pipeline.query", unreachable)
+    judging(cohort, monkeypatch, error=AssertionError("no judge should be spent"))
     research = compiled(finding(unrecorded("https://a/b"), confidence=0.1))
 
-    report = await check_citation_diversity(notes, research, judge=False)
+    report = await check_citation_diversity(notes, research, judge=False, cohort=cohort)
 
     assert report.judged == 0
     assert report.rows
@@ -1101,12 +1133,8 @@ async def test_the_judged_pass_is_what_a_cheap_run_turns_off(
 
 
 async def test_the_rewrite_stage_reads_the_rows(
-    notes: PipelineNotes, monkeypatch: pytest.MonkeyPatch
+    notes: PipelineNotes, cohort: ActorCohort, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def skip_judging(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr("inkwell.agent.pipeline.query", skip_judging)
     await check_citation_diversity(
         notes,
         compiled(
@@ -1119,6 +1147,7 @@ async def test_the_rewrite_stage_reads_the_rows(
             )
         ),
         judge=False,
+        cohort=cohort,
     )
 
     draft_path = notes.draft_path("merged")

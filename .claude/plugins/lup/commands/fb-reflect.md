@@ -33,7 +33,7 @@ Common gaps:
 
 ### 4. Prompt health
 
-Read the full system prompt (`src/lup_template/agent/prompts.py`). Is it accumulating patches? Count conditional exceptions added since the last rewrite. If >3, flag for structural rewrite.
+Read the full system prompt (`src/inkwell/agent/prompts.py`). Is it accumulating patches? Count conditional exceptions added since the last rewrite. If >3, flag for structural rewrite.
 
 ### 5. Subcommand assessment
 
@@ -41,4 +41,4 @@ Were the `/fb-*` subcommands helpful? Anything confusing, missing, or redundant?
 
 ### 6. Devtools assessment
 
-Any repetitive analysis that should be automated as a devtools command? Add it to `packages/lup/src/lup/devtools/` when another project on lup would want it, to `src/lup_template/devtools/` when only this one would.
+Any repetitive analysis that should be automated as a devtools command? Add it to `src/inkwell/devtools/` when only this project would want it. When another project on lup would want it, it belongs to the library instead — `docs/library.md` carries the criterion and how to reach lup's own source in whichever mode this project obtains it.

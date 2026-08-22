@@ -110,20 +110,36 @@ class AntiPatternRow(TypedDict):
     pattern: str
     message: str
     context: str
-    refiner: str
-    """The exemption function this rule declares, or ``""`` where it declares none.
+    matcher: str
+    """The AST selector this rule declares, or ``""`` where it declares none.
 
     Named rather than carried, because a row crossing into the hermetic
     runtime is primitive and a callable is not. The association lives at the
-    declaration and travels here, so the gate resolves a rule's refiner from
+    declaration and travels here, so the gate resolves a rule's selector from
     the row it is already matching on instead of from a second list of ids
-    that has to be kept in step with it.
+    that has to be kept in step with it. Where a row names one and the source
+    parses, the selector decides the rule and ``pattern`` is not consulted;
+    where the source will not parse, the pattern is all there is and it
+    decides alone.
     """
     strength: str
     """"strong" when no directive may silence this rule, "soft" when one may.
 
     The audit refuses a directive on a strong rule; the hook has to refuse the
     same one, or an edit the hook admits is an edit `dev check` then rejects.
+    """
+    resolution: str
+    """"required" when this rule's verdict turns on a resolved declaration.
+
+    The tree is wider than the defect for these, and what settles the
+    difference is what a receiver's declaration resolves to. The kernel never
+    resolves anything itself — it is a pure function of its inputs — so the
+    answer arrives as an input, from whatever the dispatcher was able to run.
+    This flag is what tells the dispatcher an answer is worth paying for, and
+    almost no edit trips a rule carrying it. Denying one unresolved states a
+    verdict the audit then contradicts, and the two block on opposite states
+    with no version of the file passing both. So the gate says what it knows:
+    resolved, it decides; unresolved, it asks.
     """
 
 
@@ -202,4 +218,42 @@ class ShellRuleRow(TypedDict):
     allow_flags: list[str]
     read_verbs: list[str]
     value_flags: list[str]
+    reason: str
+
+
+type EditOperation = Literal["create", "overwrite", "modify", "delete"]
+"""What a change does to the file it names.
+
+Carried from the adapter rather than inferred, because the two whole-file
+operations are indistinguishable once a preimage is resolved: a ``Write`` over
+an existing file and an ``Edit`` that happens to replace every line both
+arrive as one whole document replacing another. The native call knows which it
+was, so it says.
+"""
+
+
+class EditRuleRow(TypedDict):
+    """One erased edit rule: which changes it speaks about, and what it says.
+
+    ``gates``, ``suffixes``, ``roles`` and ``operations`` are the axes a rule
+    may constrain, each empty where the rule is silent about it — so matching
+    a row is four containment tests and nothing composed. Unlike
+    :class:`ShellRuleRow`, which is matched by name and answers alone, these
+    rows overlap deliberately and the *last* one matching decides, the way
+    `.gitignore` reads: a broad statement first, its exceptions after it.
+
+    ``effect`` is ``""`` where a rule moves only the threshold, and
+    ``maximum_added_lines`` is ``None`` where it moves only the verdict. The
+    two are separate fields because a rule may state either without the other,
+    and a single optional verdict could not say "leave who decides alone, but
+    count differently here".
+    """
+
+    name: str
+    gates: list[str]
+    suffixes: list[str]
+    roles: list[str]
+    operations: list[str]
+    effect: str
+    maximum_added_lines: int | None
     reason: str

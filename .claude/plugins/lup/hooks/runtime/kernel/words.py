@@ -48,6 +48,7 @@ DANGEROUS_ENV_NAMES = (
     "HOME",
     "XDG_CONFIG_HOME",
     "PAGER",
+    "MANPAGER",
     "EDITOR",
     "VISUAL",
     "NODE_OPTIONS",
@@ -101,7 +102,8 @@ def effective_command(segment: list[str]) -> EffectiveCommand:
 
     Wrappers that take values (``timeout 5``, ``nice -n 10``) consume them, so
     the returned words start at the command the shell finally executes. A bare
-    ``env`` with nothing to wrap is itself the command.
+    ``env`` with nothing to wrap is itself the command, and ``command -v`` asks
+    where a program is rather than running one, so it is the command too.
     """
     dangerous = False
     position = 0
@@ -114,6 +116,11 @@ def effective_command(segment: list[str]) -> EffectiveCommand:
             continue
         executable = posixpath.basename(word)
         if executable == "env" and position + 1 == len(segment):
+            return EffectiveCommand(words=segment[position:], dangerous=dangerous)
+        if executable == "command" and segment[position + 1 : position + 2] in (
+            ["-v"],
+            ["-V"],
+        ):
             return EffectiveCommand(words=segment[position:], dangerous=dangerous)
         if executable in PASS_THROUGH_WORDS:
             position += 1

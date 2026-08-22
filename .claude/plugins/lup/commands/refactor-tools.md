@@ -11,18 +11,36 @@ Review all MCP servers, tools, and subagents. Draw an outline of the pipeline an
 
 Before cataloging individual tools, map the **end-to-end flow**:
 
-1. Read `src/lup_template/agent/core.py` to understand:
-   - How a request enters the agent
-   - Which MCP servers are configured and how they're launched
-   - How tools are exposed to the agent (in-process vs remote)
-   - How subagents are spawned and what tools they receive
+1. Read `src/inkwell/agent/toolsets.py` first. It is the tool-group
+   registry — the one place a group is added — so it, not `core.py`, is the
+   inventory of what exists. Each group becomes one MCP server, which is also
+   the unit the permission policy can withhold whole.
+
+2. Read `src/inkwell/agent/core.py` to understand:
+   - How a session is opened: which `SessionFactory` is built, and which
+     wrapper layers `decorated_session_factory` puts around it (budget,
+     timeout, correction, display, persistence, tracing)
+   - How the registered groups become servers, and which run in-process
+     versus in a subprocess
+   - What one turn asks for — the `TurnRequest`, its `output_type`, and the
+     `effort` and `autonomy` it carries
    - How the final output is produced and returned
 
-2. Read `src/lup_template/agent/tool_policy.py` to understand:
+3. Read `src/inkwell/agent/tool_policy.py` to understand:
    - Which tools are gated by conditions (API keys, modes, etc.)
    - Are there tools registered but conditionally unavailable?
 
-3. Draw a pipeline diagram (ASCII or markdown) showing:
+4. Read `src/inkwell/agent/subagents.py` and
+   `src/inkwell/agent/tools/nested.py`. Delegation comes in four
+   shapes that are not interchangeable, and an audit that conflates them
+   cannot say whether a job is in the right one: a **native subagent** the
+   harness dispatches inside this session, a **nested agent** opened inside a
+   tool handler and invisible to the harness, a **background agent**
+   coalescing state changes into debounced turns, and a **persistent** agent
+   that lives over time and wakes on events. `docs/orchestration.md` carries
+   the catalog.
+
+5. Draw a pipeline diagram (ASCII or markdown) showing:
    ```
    Input → Agent → [MCP Servers / Tools / Subagents] → Output
    ```
@@ -30,17 +48,23 @@ Before cataloging individual tools, map the **end-to-end flow**:
 
 ## Phase 2: Tool Inventory
 
-Read every file in `src/lup_template/agent/tools/` and build a **tool outline** — not just a table, but a readable summary of each tool's purpose.
+Read every file in `src/inkwell/agent/tools/` and build a **tool outline** — not just a table, but a readable summary of each tool's purpose.
 
 For each tool file:
 1. Read the file
-2. List every `@tool`-decorated function with its name and a one-line description
-3. Note which MCP server it belongs to (look for `create_mcp_server` calls)
-4. Note external dependencies (APIs, config keys, packages)
+2. List every `@lup_tool`-decorated handler with its name and a one-line
+   description. The input and output models are the contract — read the
+   `Field(description=...)` on each, because that text is the agent's only
+   documentation for the field
+3. Note which group it belongs to, from the registry read in Phase 1
+4. Note whether a recoverable failure raises `ToolError` with something the
+   agent can act on, or returns prose describing the problem
+5. Note external dependencies (APIs, config keys, packages)
 
 For remote/external MCP servers:
-- Read `src/lup_template/agent/core.py` for `McpServerConfig` or server lists
-- Read `src/lup_template/agent/config.py` for MCP-related settings
+- Read `src/inkwell/agent/core.py` for `LupMcpServerConfig` values and
+  the server list they are assembled into
+- Read `src/inkwell/agent/config.py` for MCP-related settings
 - Check `pyproject.toml` for MCP server dependencies
 - Search with `grep` for `npx`, `uvx`, or other MCP server launch patterns
 

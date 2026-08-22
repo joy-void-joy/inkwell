@@ -5,27 +5,34 @@
 Three layers guard the repository. Each runs at a different moment and
 catches a class of problem the others cannot.
 
-## Commit and push time: the git guards
+## Commit time: the git guard
 
 `uv run lup-devtools dev git-hooks install` writes one hook per moment a
-project declares. Two come declared: a `pre-commit` hook running
+project declares. One comes declared: a `pre-commit` hook running
 `uv run lup-devtools harness check all`, so a commit is refused while any
-generated artifact differs from what its source renders, and a `pre-push`
-hook running `uv run lup-devtools dev check`, so a branch meets the whole
-gate before it leaves the checkout rather than minutes later on a runner.
+generated artifact differs from what its source renders. It reads back in
+about a second, which is what a check standing between somebody and their
+next keystroke has to cost.
+
+The whole gate is not among them. It belongs to the pipeline below, where a
+runner spends the two minutes rather than the person who is still working: a
+hook charging that to every push would buy only the interval between pushing
+and the pipeline answering, and would charge it against the loop that has to
+stay tight.
 
 Which hooks a project arms is its own declaration, so one that guards a
-third moment — or runs its gate under another name — says so instead of
+second moment — or runs its gate under another name — says so instead of
 forking the module that writes them.
 
 `dev worktree create` arms them, re-running install refreshes a body left by
-an older library, `dev git-hooks status` says what a clone would run at each
-moment, and `uninstall` removes them. A hook written by anything else is
-reported rather than replaced.
+an older library and clears any this wrote at a moment nothing declares any
+more, `dev git-hooks status` says what a clone would run at each moment, and
+`uninstall` removes them. A hook written by anything else is reported rather
+than replaced.
 
-Both commands are the ones the pipeline runs, and the drift one is the same
-verdict `dev check` reports, so the places that can refuse the same work
-reach one computation instead of several that can disagree.
+The command it runs is one the pipeline runs too, and the same verdict
+`dev check` reports, so the places that can refuse the same work reach one
+computation instead of several that can disagree.
 
 The check reads every generated artifact every time, with no path pattern
 deciding when it applies. It costs well under a second, and the alternative
@@ -37,8 +44,8 @@ either does.
 Unique catch: a canonical harness edit committed without its regenerated
 artifacts, or a hand-edit to an owned artifact, is refused before the commit
 exists instead of minutes later in CI. Formatting, lint, type, and test
-problems are deliberately not duplicated at commit time; the per-push gate
-below owns them. Two things a hook cannot refuse: a partial stage — canonical
+problems are deliberately not duplicated at commit time; the pipeline below
+owns them. Two things a hook cannot refuse: a partial stage — canonical
 source staged while its regenerated artifacts sit unstaged in an otherwise
 current worktree — because it reads the worktree rather than the index, and a
 `--no-verify` commit, which skips every hook by asking to. Both are the layer
@@ -51,7 +58,8 @@ below's, which is why both layers exist.
 the commit hook installs, spelled from the same constant — and its second is
 `dev check`: `ruff format --check`, `ruff check`, `pyright`, both `pytest`
 suites, the review-note report, the anti-pattern rules, the native seam
-boundaries, library placement, generated-tree drift, and the guidance budget.
+boundaries, library placement, hook reachability, generated-tree drift, and
+the guidance budget.
 
 Unique catch: this is the authoritative gate. It binds whether or not a
 contributor armed the git guards, and it is what the push guard runs
@@ -70,7 +78,7 @@ CLIs.
 Unique catch: breakage observable only through a real native CLI boundary —
 installed-version drift against the evidence ledger, and live hook, plugin,
 and session behavior — which is too slow and credential-bound for the
-per-push gate. Release-evidence rules for this lane are in
+quality lane above. Release-evidence rules for this lane are in
 [contributing.md](contributing.md).
 
 ## What a project built on lup runs in CI
@@ -83,9 +91,9 @@ One command:
 
 That is deliberately the whole of the gate. `dev check` is the same bar a
 checkout runs locally — format, lint, types, tests, review notes,
-anti-patterns, seam boundaries, library placement, generated-tree drift, and
-the guidance budget — so a green local run and a green pipeline cannot mean
-different things. Putting `harness check all` in a step ahead of it, as this
+anti-patterns, seam boundaries, library placement, hook reachability,
+generated-tree drift, and the guidance budget — so a green local run and a
+green pipeline cannot mean different things. Putting `harness check all` in a step ahead of it, as this
 repository does, buys a faster and more specific refusal of the one failure
 a contributor can produce without running anything; it reads the same verdict
 either way.

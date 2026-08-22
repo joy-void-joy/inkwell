@@ -18,10 +18,12 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Coroutine,
     Iterator,
 )
 from contextlib import asynccontextmanager
 from functools import partial
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -29,6 +31,7 @@ from markdown_it import MarkdownIt
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.client import (
+    BlockCallback,
     HeartbeatCallback,
     SessionPolicy,
     active_block_callback,
@@ -37,9 +40,12 @@ from inkwell.agent.client import (
     result_text,
     session_policy,
 )
+from inkwell.agent.cohort import run_cohort, stage_recipe
+from lup.actors.cohort import ActorCohort
+from lup.actors.refs import ActorRef
 from lup.mcp import LupMcpTool, McpServerEntry, create_mcp_server
 from lup.types import StringMap
-from lup.runtime.models import AnyTurnBlock
+from lup.runtime.models import AnyTurnBlock, turn_request
 from lup.runtime.usage import CostAccumulator
 from lup.workspace.paths import find_project_root
 from lup.sandbox.container import Sandbox
@@ -503,10 +509,28 @@ so that runs of them collapse with the surrounding whitespace."""
 
 SLUG_MAX_CHARS = 80
 
+SLUG_DIGEST_CHARS = 8
+"""How much of a long label's digest rides along to keep its slug its own."""
+
 
 def slugify(label: str) -> str:
-    """Turn a section title or label into a filesystem-safe slug."""
-    return "-".join(label.lower().translate(SLUG_CHAR_MAP).split())[:SLUG_MAX_CHARS]
+    """Turn a section title or label into a filesystem-safe slug.
+
+    A label longer than the filename bound keeps a digest of the whole, so two
+    labels agreeing for eighty characters still name two files. Cutting alone
+    gave them one, and the second draft written there replaced the first with
+    nothing said — the one truncation here that could actually lose a section.
+
+    Short labels are untouched by that, so a slug already on disk keeps its
+    name. What a reader is shown is the title either way: the snapshot keys
+    drafts by it, and this names the working file.
+    """
+    slug = "-".join(label.lower().translate(SLUG_CHAR_MAP).split())
+    if len(slug) <= SLUG_MAX_CHARS:
+        return slug
+    digest = sha256(label.encode("utf-8")).hexdigest()[:SLUG_DIGEST_CHARS]
+    kept = SLUG_MAX_CHARS - SLUG_DIGEST_CHARS - 1
+    return f"{slug[:kept]}-{digest}"
 
 
 ASSUMPTION_TAG_PREFIX: dict[AssumptionTag, str] = {
@@ -2007,8 +2031,18 @@ async def write_section(
     glossary_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    cohort: ActorCohort,
+    actor: ActorRef,
+    block_callback: BlockCallback | None = None,
 ) -> SectionDraft:
-    """Write a single section using built-in Write. Called in parallel."""
+    """Write a single section, as one addressable member of the run's cohort.
+
+    The turn is taken on a session the cohort holds rather than one opened and
+    closed here, which is what makes the writer reachable while it works: the
+    author's redirection lands in front of its next tool call, and the rewrite
+    round reaches the agent that wrote this draft rather than a stranger
+    handed its text.
+    """
     if servers is None:
         servers = build_research_servers()
 
@@ -2069,18 +2103,23 @@ async def write_section(
     )
 
     try:
-        await query(
-            task,
-            model=stage_model("write"),
-            system_prompt=SECTION_WRITER_PROMPT,
-            tools=BUILTIN_WRITE_TOOLS,
-            max_thinking_tokens=128_000 - 1,
-            autonomy="unattended",
-            mcp_servers=all_servers,
-            allowed_tools=all_tools,
-            trace_logger=trace_logger,
-            prefix=f"[write:{section_title}] ",
-            cost_accumulator=cost_accumulator,
+        await cohort.round(
+            actor,
+            turn_request(task),
+            stage_recipe(
+                prefix=f"[write:{section_title}] ",
+                model=stage_model("write"),
+                system_prompt=SECTION_WRITER_PROMPT,
+                tools=BUILTIN_WRITE_TOOLS,
+                max_thinking_tokens=128_000 - 1,
+                autonomy="unattended",
+                mcp_servers=all_servers,
+                allowed_tools=all_tools,
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+                block_callback=block_callback,
+            ),
+            task=f"Write section: {section_title}",
         )
     except (
         Exception
@@ -2103,6 +2142,11 @@ async def write_section(
         content = draft_path.read_text(encoding="utf-8")
     else:
         raise PipelineError(f"Section writer for '{section_title}' produced no output")
+
+    # Said here rather than left to the round, because only this knows the
+    # writing succeeded: a turn that raised after the draft landed was still
+    # this section's work done, and the round recorded it as a failure.
+    await cohort.finish(actor, summary=f"{len(content.split())} words")
 
     return SectionDraft(
         title=section_title,
@@ -2322,6 +2366,56 @@ def load_review(review_path: Path) -> ReviewOutput:
     return ReviewOutput.model_validate_json(review_path.read_text(encoding="utf-8"))
 
 
+type ReviewPass = Callable[[], Coroutine[None, None, ReviewOutput]]
+"""One reviewer's whole pass, uncalled until the population admits its address."""
+
+
+async def reviewed(
+    *,
+    cohort: ActorCohort,
+    name: str,
+    task: str,
+    system_prompt: str,
+    review_path: Path,
+    mcp_servers: dict[str, McpServerEntry],
+    allowed_tools: list[str],
+    trace_logger: TraceLogger | None = None,
+    cost_accumulator: CostAccumulator | None = None,
+    block_callback: BlockCallback | None = None,
+) -> ReviewOutput:
+    """One reviewer's pass, taken as an addressable member of the run's cohort.
+
+    Every reviewer differs in its prompt, its task, and the tools it is given,
+    and in nothing else — so the five of them shared a `query` call spelled
+    five times, and a change to how a reviewer is run had five places to
+    reach. What each one still says for itself is what it is *for*.
+
+    Asked rather than started, because the caller wants the findings and the
+    wave around it is what keeps every reviewer reachable meanwhile: a member
+    is addressable while it runs whether or not the caller that spawned it is
+    free, since the mail is on disk and the hook is in the session either way.
+    """
+    await cohort.ask(
+        cohort.actor("reviewer", name),
+        turn_request(task),
+        stage_recipe(
+            prefix=f"[review:{name}] ",
+            model=stage_model("review"),
+            system_prompt=system_prompt,
+            tools=BUILTIN_READ_TOOLS,
+            max_thinking_tokens=128_000 - 1,
+            autonomy="unattended",
+            mcp_servers=mcp_servers,
+            allowed_tools=allowed_tools,
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+            block_callback=block_callback,
+        ),
+        task=f"Review: {name}",
+    )
+    return load_review(review_path)
+
+
 async def review_narrative(
     notes: PipelineNotes,
     draft_path: Path,
@@ -2334,6 +2428,8 @@ async def review_narrative(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    cohort: ActorCohort,
+    block_callback: BlockCallback | None = None,
 ) -> ReviewOutput:
     """Review for narrative coherence."""
     plan_path = notes.artifact_path("plan")
@@ -2372,20 +2468,18 @@ async def review_narrative(
         f"don't trade the author's self-implication, hedges, or asides for "
         f"conventional momentum. Call record_finding for each issue."
     )
-    await query(
-        task,
-        model=stage_model("review"),
+    return await reviewed(
+        cohort=cohort,
+        name="narrative",
+        task=task,
         system_prompt=NARRATIVE_REVIEWER_PROMPT,
-        tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        autonomy="unattended",
+        review_path=review_path,
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
-        prefix="[review:narrative] ",
         cost_accumulator=cost_accumulator,
+        block_callback=block_callback,
     )
-    return load_review(review_path)
 
 
 async def review_facts(
@@ -2400,6 +2494,8 @@ async def review_facts(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    cohort: ActorCohort,
+    block_callback: BlockCallback | None = None,
 ) -> ReviewOutput:
     """Review for factual accuracy (needs research tools to verify)."""
     if servers is None:
@@ -2438,20 +2534,18 @@ async def review_facts(
         f"the draft against research findings, then verify remaining claims "
         f"with your research tools. Call record_finding for each issue."
     )
-    await query(
-        task,
-        model=stage_model("review"),
+    return await reviewed(
+        cohort=cohort,
+        name="facts",
+        task=task,
         system_prompt=FACT_CHECKER_PROMPT,
-        tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        autonomy="unattended",
+        review_path=review_path,
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
-        prefix="[review:facts] ",
         cost_accumulator=cost_accumulator,
+        block_callback=block_callback,
     )
-    return load_review(review_path)
 
 
 async def review_style(
@@ -2466,6 +2560,8 @@ async def review_style(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    cohort: ActorCohort,
+    block_callback: BlockCallback | None = None,
 ) -> ReviewOutput:
     """Review for writing quality and voice consistency."""
     review_path = notes.artifacts_dir / "review_style.json"
@@ -2499,20 +2595,18 @@ async def review_style(
         f"Read each voice and style reference file, then read the draft. "
         f"Call record_finding for each issue."
     )
-    await query(
-        task,
-        model=stage_model("review"),
+    return await reviewed(
+        cohort=cohort,
+        name="style",
+        task=task,
         system_prompt=STYLE_REVIEWER_PROMPT,
-        tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        autonomy="unattended",
+        review_path=review_path,
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
-        prefix="[review:style] ",
         cost_accumulator=cost_accumulator,
+        block_callback=block_callback,
     )
-    return load_review(review_path)
 
 
 async def review_source_fidelity(
@@ -2526,6 +2620,8 @@ async def review_source_fidelity(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    cohort: ActorCohort,
+    block_callback: BlockCallback | None = None,
 ) -> ReviewOutput:
     """Verify the draft against the registered source documents."""
     review_path = notes.artifacts_dir / "review_source_fidelity.json"
@@ -2558,20 +2654,18 @@ async def review_source_fidelity(
         f"structure, and argument outline against the document itself. "
         f"Call record_finding for each issue."
     )
-    await query(
-        task,
-        model=stage_model("review"),
+    return await reviewed(
+        cohort=cohort,
+        name="source",
+        task=task,
         system_prompt=SOURCE_FIDELITY_REVIEWER_PROMPT,
-        tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        autonomy="unattended",
+        review_path=review_path,
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
-        prefix="[review:source] ",
         cost_accumulator=cost_accumulator,
+        block_callback=block_callback,
     )
-    return load_review(review_path)
 
 
 async def review_coverage(
@@ -2586,6 +2680,8 @@ async def review_coverage(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    cohort: ActorCohort,
+    block_callback: BlockCallback | None = None,
 ) -> ReviewOutput:
     """Flag the author's concrete specifics that the draft dropped or replaced."""
     review_path = notes.artifacts_dir / "review_coverage.json"
@@ -2624,20 +2720,18 @@ async def review_coverage(
         f"record_finding for each specific that was dropped, substituted with "
         f"a generic version, or hollowed out."
     )
-    await query(
-        task,
-        model=stage_model("review"),
+    return await reviewed(
+        cohort=cohort,
+        name="coverage",
+        task=task,
         system_prompt=COVERAGE_REVIEWER_PROMPT,
-        tools=BUILTIN_READ_TOOLS,
-        max_thinking_tokens=128_000 - 1,
-        autonomy="unattended",
+        review_path=review_path,
         mcp_servers=all_servers,
         allowed_tools=all_tools,
         trace_logger=trace_logger,
-        prefix="[review:coverage] ",
         cost_accumulator=cost_accumulator,
+        block_callback=block_callback,
     )
-    return load_review(review_path)
 
 
 async def review_all(
@@ -2654,81 +2748,124 @@ async def review_all(
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
     light: bool = False,
+    cohort: ActorCohort,
+    block_callback: BlockCallback | None = None,
 ) -> list[ReviewFinding]:
-    """Stage 5: Run the reviewers in parallel. The full pass runs narrative,
-    fact-check, style, and coverage (the author's dropped specifics); a light
-    pass runs only the fact-checker. Source fidelity is added either way when
-    source documents are registered."""
-    facts_task = review_facts(
-        notes,
-        draft_path,
-        servers=servers,
-        author_notes=author_notes,
-        source_servers=source_servers,
-        source_tool_names_list=source_tool_names_list,
-        compute_servers=compute_servers,
-        compute_tool_names=compute_tool_names,
-        trace_logger=trace_logger,
-        cost_accumulator=cost_accumulator,
-    )
-    if light:
-        review_tasks = [facts_task]
-    else:
-        review_tasks = [
-            review_narrative(
-                notes,
-                draft_path,
-                voice_file_paths=voice_file_paths,
-                author_notes=author_notes,
-                source_servers=source_servers,
-                source_tool_names_list=source_tool_names_list,
-                compute_servers=compute_servers,
-                compute_tool_names=compute_tool_names,
-                trace_logger=trace_logger,
-                cost_accumulator=cost_accumulator,
-            ),
-            facts_task,
-            review_style(
-                notes,
-                draft_path,
-                voice_file_paths=voice_file_paths,
-                author_notes=author_notes,
-                source_servers=source_servers,
-                source_tool_names_list=source_tool_names_list,
-                compute_servers=compute_servers,
-                compute_tool_names=compute_tool_names,
-                trace_logger=trace_logger,
-                cost_accumulator=cost_accumulator,
-            ),
-            review_coverage(
-                notes,
-                draft_path,
-                voice_file_paths=voice_file_paths,
-                author_notes=author_notes,
-                source_servers=source_servers,
-                source_tool_names_list=source_tool_names_list,
-                compute_servers=compute_servers,
-                compute_tool_names=compute_tool_names,
-                trace_logger=trace_logger,
-                cost_accumulator=cost_accumulator,
-            ),
-        ]
-    if load_source_registry(registry_path_for(notes.artifacts_dir)):
-        review_tasks.append(
-            review_source_fidelity(
-                notes,
-                draft_path,
-                author_notes=author_notes,
-                source_servers=source_servers,
-                source_tool_names_list=source_tool_names_list,
-                compute_servers=compute_servers,
-                compute_tool_names=compute_tool_names,
-                trace_logger=trace_logger,
-                cost_accumulator=cost_accumulator,
-            )
+    """Stage 5: Run the reviewers as one wave of the run's cohort.
+
+    The full pass runs narrative, fact-check, style, and coverage (the
+    author's dropped specifics); a light pass runs only the fact-checker.
+    Source fidelity is added either way when source documents are registered.
+
+    Each reviewer is named rather than anonymous, so the author reading the
+    document while they work can address one of them — and so a reader of the
+    roster can tell which reviewer is still going.
+    """
+
+    async def facts() -> ReviewOutput:
+        return await review_facts(
+            notes,
+            draft_path,
+            servers=servers,
+            author_notes=author_notes,
+            source_servers=source_servers,
+            source_tool_names_list=source_tool_names_list,
+            compute_servers=compute_servers,
+            compute_tool_names=compute_tool_names,
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+            cohort=cohort,
+            block_callback=block_callback,
         )
 
-    results = await asyncio.gather(*review_tasks, return_exceptions=True)
+    async def narrative() -> ReviewOutput:
+        return await review_narrative(
+            notes,
+            draft_path,
+            voice_file_paths=voice_file_paths,
+            author_notes=author_notes,
+            source_servers=source_servers,
+            source_tool_names_list=source_tool_names_list,
+            compute_servers=compute_servers,
+            compute_tool_names=compute_tool_names,
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+            cohort=cohort,
+            block_callback=block_callback,
+        )
+
+    async def style() -> ReviewOutput:
+        return await review_style(
+            notes,
+            draft_path,
+            voice_file_paths=voice_file_paths,
+            author_notes=author_notes,
+            source_servers=source_servers,
+            source_tool_names_list=source_tool_names_list,
+            compute_servers=compute_servers,
+            compute_tool_names=compute_tool_names,
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+            cohort=cohort,
+            block_callback=block_callback,
+        )
+
+    async def coverage() -> ReviewOutput:
+        return await review_coverage(
+            notes,
+            draft_path,
+            voice_file_paths=voice_file_paths,
+            author_notes=author_notes,
+            source_servers=source_servers,
+            source_tool_names_list=source_tool_names_list,
+            compute_servers=compute_servers,
+            compute_tool_names=compute_tool_names,
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+            cohort=cohort,
+            block_callback=block_callback,
+        )
+
+    async def fidelity() -> ReviewOutput:
+        return await review_source_fidelity(
+            notes,
+            draft_path,
+            author_notes=author_notes,
+            source_servers=source_servers,
+            source_tool_names_list=source_tool_names_list,
+            compute_servers=compute_servers,
+            compute_tool_names=compute_tool_names,
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+            cohort=cohort,
+            block_callback=block_callback,
+        )
+
+    passes: dict[str, ReviewPass] = (
+        {"facts": facts}
+        if light
+        else {
+            "narrative": narrative,
+            "facts": facts,
+            "style": style,
+            "coverage": coverage,
+        }
+    )
+    if load_source_registry(registry_path_for(notes.artifacts_dir)):
+        passes = {**passes, "source": fidelity}
+
+    # Each pass stays uncalled until its address is admitted, so a reviewer
+    # waiting on the population's cap has started nothing — which is what
+    # leaves an interrupted wave exactly as the stage found it.
+    async def review_for(opened: ActorRef) -> ReviewOutput:
+        """This address's reviewer, run under the population's own cap."""
+        return await passes[opened.id]()
+
+    results = await cohort.work_all(
+        review_for,
+        [cohort.actor("reviewer", name) for name in passes],
+        task="review draft",
+    )
 
     def reported() -> Iterator[ReviewFinding]:
         """Findings from the reviewers that returned; a failure is logged, not raised,
@@ -2751,36 +2888,57 @@ async def judge_positions(
     *,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    cohort: ActorCohort,
+    block_callback: BlockCallback | None = None,
 ) -> list[JudgedClaim]:
     """Ask, per contested claim, whether every source cited for it argues one side.
 
-    One judge per claim and all of them at once: a claim's own citation set is
-    everything a verdict needs, so they share no context. A judge that fails or
-    reaches no verdict costs its own row and nothing else — the check is advisory,
-    so a missing verdict makes the report quieter rather than breaking the stage.
+    One judge per claim: a claim's own citation set is everything a verdict
+    needs, so they share no context. A judge that fails or reaches no verdict
+    costs its own row and nothing else — the check is advisory, so a missing
+    verdict makes the report quieter rather than breaking the stage.
+
+    They run under the population's cap rather than all at once. There is one
+    judge per contested claim and nothing bounds how many that is, so this was
+    the fan-out most able to open more sessions at once than anything wanted.
     """
 
-    async def judged(claim: ContestedClaim) -> JudgedClaim | None:
+    async def judged(claim: ContestedClaim, actor: ActorRef) -> JudgedClaim | None:
         """One claim's verdict, or nothing where the judge reached none."""
-        verdict = await query(
-            f"Judge whether the sources cited for this claim all argue the same "
-            f"side of it.\n\n{claim.render()}",
-            output_type=OneSidedVerdict,
-            model=stage_model("review"),
-            system_prompt=POSITION_DIVERSITY_PROMPT,
-            max_thinking_tokens=128_000 - 1,
-            autonomy="unattended",
-            prefix="[review:diversity] ",
-            trace_logger=trace_logger,
-            cost_accumulator=cost_accumulator,
+        result = await cohort.ask(
+            actor,
+            turn_request(
+                f"Judge whether the sources cited for this claim all argue the "
+                f"same side of it.\n\n{claim.render()}",
+                OneSidedVerdict,
+            ),
+            stage_recipe(
+                prefix="[review:diversity] ",
+                model=stage_model("review"),
+                system_prompt=POSITION_DIVERSITY_PROMPT,
+                max_thinking_tokens=128_000 - 1,
+                autonomy="unattended",
+                trace_logger=trace_logger,
+                cost_accumulator=cost_accumulator,
+                block_callback=block_callback,
+            ),
+            task=f"Judge citations: {claim.finding.question}",
         )
-        if verdict is None:
+        if result.output is None:
             return None
-        return JudgedClaim(claim=claim, verdict=verdict)
+        return JudgedClaim(claim=claim, verdict=result.output)
 
-    verdicts = await asyncio.gather(
-        *(judged(claim) for claim in claims), return_exceptions=True
-    )
+    judges = [
+        cohort.actor("judge", slugify(f"{claim.scope} {claim.finding.question}"))
+        for claim in claims
+    ]
+    by_id = {actor.id: claim for claim, actor in zip(claims, judges)}
+
+    async def judge_for(opened: ActorRef) -> JudgedClaim | None:
+        """This address's claim, weighed on its own citation set."""
+        return await judged(by_id[opened.id], opened)
+
+    verdicts = await cohort.work_all(judge_for, judges, task="judge citations")
 
     def reached() -> Iterator[JudgedClaim]:
         """Every verdict that came back; a judge that failed is logged, not raised."""
@@ -2805,6 +2963,8 @@ async def check_citation_diversity(
     judge: bool = True,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    cohort: ActorCohort,
+    block_callback: BlockCallback | None = None,
 ) -> DiversityReport:
     """Both citation checks, saved where the rewrite reads them.
 
@@ -2827,7 +2987,11 @@ async def check_citation_diversity(
     )
     claims = contested_claims(research, plan=plan, rules=rules) if judge else []
     judged = await judge_positions(
-        claims, trace_logger=trace_logger, cost_accumulator=cost_accumulator
+        claims,
+        trace_logger=trace_logger,
+        cost_accumulator=cost_accumulator,
+        cohort=cohort,
+        block_callback=block_callback,
     )
     report = merge_reports(computed, judged_report(judged))
     notes.save_text_artifact(CITATION_DIVERSITY_ARTIFACT, report.render())
@@ -2868,7 +3032,11 @@ def consolidate_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
             if f.severity in ("critical", "praise"):
                 continue
             if f.text_excerpt:
-                key = f.text_excerpt[:200]
+                # The whole excerpt, not a prefix of it. Keying on the first
+                # 200 characters folded two reviewers who quoted different
+                # passages sharing an opening, and the second one's anchor
+                # went with it — the fold keeps a suggestion, not an excerpt.
+                key = f.text_excerpt
                 if key in seen:
                     first = seen[key]
                     first.suggestion = (
@@ -3328,6 +3496,9 @@ class PipelineRunner:
         self.source_watcher: PollingWatcher | None = None
         self.source_is_extracted_gdoc = False
 
+        self.block_callback: BlockCallback | None = None
+        self.population: ActorCohort | None = None
+
     @property
     def assignment(self) -> ChapterAssignment | None:
         """Which book this run writes a chapter of, where it writes one at all.
@@ -3662,13 +3833,45 @@ class PipelineRunner:
         await self.hooks.on_stage(stage, description)
 
     def install_block_callback(self) -> None:
-        """Set the contextvar so all query() calls forward blocks to the listener."""
+        """Set the contextvar so all query() calls forward blocks to the listener.
+
+        Kept on the run as well as set on the contextvar, because a cohort
+        member's session is opened when the population's cap admits it rather
+        than where its stage stood — so a recipe reading ambient state at that
+        moment would read whichever task happened to be current.
+        """
 
         async def forward_block(block: AnyTurnBlock, prefix: str) -> None:
             info = extract_block_info(block.telemetry_block)
             await self.hooks.on_block(info.label, info.content, prefix)
 
+        self.block_callback = forward_block
         active_block_callback.set(forward_block)
+
+    def writer_actor(self, section_title: str, round: int = 1) -> ActorRef:
+        """The address that writes this section, on the attempt named.
+
+        Derived from the title rather than minted, which is what makes it the
+        same agent twice: a resumed run reattaches to the conversation the
+        interrupted one left, and the rewrite round reaches the writer that
+        drafted the section instead of opening a fresh conversation with
+        somebody who has never seen it.
+        """
+        return self.cohort().actor("writer", slugify(section_title), round=round)
+
+    def cohort(self) -> ActorCohort:
+        """The agents this run holds, opened once and kept for its whole length.
+
+        One population across every stage rather than one per fan-out, which
+        is what lets the rewrite round reach the writer that drafted the
+        section instead of a stranger handed its text.
+        """
+        if self.population is None:
+            self.population = run_cohort(
+                self.ensure_notes().artifacts_dir,
+                parallel=current_settings().max_parallel_agents,
+            )
+        return self.population
 
     def session_policy_for_run(self) -> SessionPolicy:
         """Route nested agents through resumable, persisted SDK sessions.
@@ -3823,7 +4026,7 @@ class PipelineRunner:
 
                 await self.standby_loop()
             finally:
-                await self.stop_watcher()
+                await self.release()
         except PipelineStopRequested as stop:
             return await self.handle_pause(stop.stage, stop.message)
         finally:
@@ -3911,7 +4114,7 @@ class PipelineRunner:
                 )
                 await self.finalize_on_interrupt()
             finally:
-                await self.stop_watcher()
+                await self.release()
         finally:
             session_policy.reset(policy_token)
 
@@ -3953,6 +4156,21 @@ class PipelineRunner:
             await self.watcher.stop()
             self.watcher = None
             logger.info("Comment watcher stopped")
+
+    async def release(self) -> None:
+        """Let go of everything this run held open, however it ended.
+
+        The cohort holds a session per member until something closes it, so a
+        run that returned without doing so leaves them open. Closing also
+        records what was still queued for an agent nobody read — outstanding
+        across a pause, and never read at all on a run that ended — which is
+        the difference between a message the mailbox accepted and a message
+        that arrived.
+        """
+        await self.stop_watcher()
+        if self.population is not None:
+            await self.population.close()
+            self.population = None
 
     async def setup_doc(self) -> None:
         if self.existing_doc_id:
@@ -4957,7 +5175,9 @@ class PipelineRunner:
 
         completed = already
 
-        async def write_and_publish(section: SectionPlan) -> SectionDraft:
+        async def write_and_publish(
+            section: SectionPlan, actor: ActorRef
+        ) -> SectionDraft:
             nonlocal completed
             tid = tab_id_for(self.tab_ids, section.title)
             draft_path = self.get_draft_path(section.title)
@@ -4993,6 +5213,9 @@ class PipelineRunner:
                         glossary_tool_names=glossary_tool_names,
                         trace_logger=self.trace_logger,
                         cost_accumulator=self.cost_accumulator,
+                        cohort=self.cohort(),
+                        actor=actor,
+                        block_callback=self.block_callback,
                     )
                 finally:
                     if syncer is not None:
@@ -5020,9 +5243,22 @@ class PipelineRunner:
             await self.hooks.on_state_change()
             return draft
 
-        results = await asyncio.gather(
-            *(write_and_publish(s) for s in pending),
-            return_exceptions=True,
+        # The population's own wave rather than one gathered here. How many
+        # writers run at once, which of them are running, and what a close
+        # reaches are three facts about the cohort, and a stage that fanned
+        # out for itself answered the last two differently from the roster
+        # every door reads.
+        writers = {
+            section.title: self.writer_actor(section.title) for section in pending
+        }
+        by_id = {actor.id: section for section, actor in zip(pending, writers.values())}
+
+        async def write_for(opened: ActorRef) -> SectionDraft:
+            """This address's section, carried through its whole work."""
+            return await write_and_publish(by_id[opened.id], opened)
+
+        results = await self.cohort().work_all(
+            write_for, list(writers.values()), task="write section"
         )
 
         for section, result in zip(pending, results):
@@ -5211,6 +5447,8 @@ class PipelineRunner:
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
                 light=self.light,
+                cohort=self.cohort(),
+                block_callback=self.block_callback,
             )
         await self.check_diversity()
         await self.post_author_notes()
@@ -5248,6 +5486,8 @@ class PipelineRunner:
             judge=not self.light,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
+            cohort=self.cohort(),
+            block_callback=self.block_callback,
         )
         self.author_notes.extend(report.author_notes())
         await self.hooks.on_progress(
@@ -5655,7 +5895,9 @@ class PipelineRunner:
         glossary = self.glossary_server
         glossary_servers, glossary_tool_names = glossary.servers, glossary.tool_names
 
-        async def rewrite_coro(section_plan: SectionPlan) -> SectionDraft:
+        async def rewrite_coro(
+            section_plan: SectionPlan, actor: ActorRef
+        ) -> SectionDraft:
             draft_path = self.get_draft_path(section_plan.title)
             async with self.stage_compute(f"rewrite:{section_plan.title}") as sc:
                 draft = await write_section(
@@ -5679,14 +5921,29 @@ class PipelineRunner:
                     glossary_tool_names=glossary_tool_names,
                     trace_logger=self.trace_logger,
                     cost_accumulator=self.cost_accumulator,
+                    cohort=self.cohort(),
+                    actor=actor,
+                    block_callback=self.block_callback,
                 )
             draft_path.write_text(draft.content, encoding="utf-8")
             return draft
 
         all_plans = [task.section_plan for task in queue.rewrites] + queue.additions
-        all_coros = [rewrite_coro(sp) for sp in all_plans]
 
-        results = await asyncio.gather(*all_coros, return_exceptions=True)
+        # Round two on the addresses that wrote round one, so a revision
+        # reaches the agent holding the draft's context rather than a fresh
+        # conversation handed its text. An addition has no round one, and the
+        # address it mints here is simply its first.
+        revisers = [self.writer_actor(plan.title, round=2) for plan in all_plans]
+        by_id = {actor.id: plan for plan, actor in zip(all_plans, revisers)}
+
+        async def rewrite_for(opened: ActorRef) -> SectionDraft:
+            """This address's section, carried through its whole revision."""
+            return await rewrite_coro(by_id[opened.id], opened)
+
+        results = await self.cohort().work_all(
+            rewrite_for, revisers, task="rewrite section"
+        )
         for i, result in enumerate(results):
             if isinstance(result, BaseException):
                 logger.error("Rewrite/add failed: %s", result)

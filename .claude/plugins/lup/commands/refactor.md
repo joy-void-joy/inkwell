@@ -86,7 +86,10 @@ Present prompt content changes as a review with findings — prompt changes affe
 
 After rewriting:
 
-- Run `uv run lup-devtools dev check` to verify types, lint, and tests
+- Verify types, lint, and tests:
+
+Start a `Monitor` over `uv run lup-devtools dev check` and leave it live. Each line it emits arrives as an event, and the watch ends when the command does. Do not run it through `Bash`, whose long timeout returns once at the end, and do not read a backgrounded session on a loop — both are polling, however patient
+
 - Report any issues found and fix them
 
 ### 7. Summary

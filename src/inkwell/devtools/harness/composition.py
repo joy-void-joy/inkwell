@@ -22,7 +22,7 @@ from inkwell.devtools.harness.catalog import (
     declared_hook_set,
     portable_harness,
 )
-from inkwell.devtools.harness.content.docs.catalog import DOCUMENTS
+from inkwell.devtools.harness.content.docs.catalog import documents
 from inkwell.devtools.harness.content.settings import project_settings
 from inkwell.environment.cli.compile import render_entry_point_commands
 
@@ -34,7 +34,7 @@ def project_content(root: Path) -> ProjectContent:
     harness = portable_harness(root=root)
     return ProjectContent(
         harness=harness,
-        documents=DOCUMENTS,
+        documents=documents(),
         assets=[CONTENT_ROOT / "assets" / "file_suggest.sh"],
         settings=project_settings(harness.plugins[0]),
     )

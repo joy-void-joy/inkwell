@@ -19,7 +19,12 @@ from pathlib import Path
 
 import pytest
 
+from lup.actors.cohort import ActorCohort
+from lup.actors.refs import ActorRef
+from lup.runtime.models import TurnRequest
+
 from inkwell.agent.book import ChapterPlacement, SectionAddress, ordinal_prefix
+from inkwell.agent.cohort import run_cohort
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.models import ArticlePlan, SectionPlan
 from inkwell.agent.notes import PipelineNotes
@@ -75,6 +80,32 @@ def placed_plan(chapter: int, *titles: str) -> ArticlePlan:
     return plan_with(*titles).model_copy(
         update={"placement": ChapterPlacement(book="adaptation", chapter=chapter)}
     )
+
+
+def capture_turns(
+    cohort: ActorCohort,
+    monkeypatch: pytest.MonkeyPatch,
+    into: list[str],
+    draft_path: Path,
+    body: str,
+) -> None:
+    """Stand in for this cohort's turn, keeping what the writer was asked.
+
+    The task reaches a member as the turn request's input rather than as a
+    positional argument, so what a prompt assembled is read off the request
+    the cohort was handed.
+    """
+
+    async def taken(
+        _actor: ActorRef,
+        request: TurnRequest[None],
+        _recipe: object,
+        task: str = "",
+    ) -> None:
+        into.append(request.input.text)
+        draft_path.write_text(body, encoding="utf-8")
+
+    monkeypatch.setattr(cohort, "round", taken)
 
 
 @pytest.fixture
@@ -723,17 +754,18 @@ class TestStagePromptsCarryThePath:
         draft_path = notes.draft_path("intelligence")
         tasks: list[str] = []
 
-        async def capture(task: str, **_kwargs: object) -> None:
-            tasks.append(task)
-            draft_path.write_text("# Intelligence\n\nDrafted.", encoding="utf-8")
-
-        monkeypatch.setattr("inkwell.agent.pipeline.query", capture)
+        cohort = run_cohort(notes.artifacts_dir)
+        capture_turns(
+            cohort, monkeypatch, tasks, draft_path, "# Intelligence\n\nDrafted."
+        )
 
         await write_section(
             "1.3 Intelligence",
             notes=notes,
             draft_path=draft_path,
             reader_feedback_path=section_file,
+            cohort=cohort,
+            actor=cohort.actor("writer", "intelligence"),
         )
 
         assert str(section_file) in tasks[0]
@@ -745,14 +777,16 @@ class TestStagePromptsCarryThePath:
     ) -> None:
         draft_path = notes.draft_path("risks")
         tasks: list[str] = []
+        cohort = run_cohort(notes.artifacts_dir)
+        capture_turns(cohort, monkeypatch, tasks, draft_path, "# Risks\n\nDrafted.")
 
-        async def capture(task: str, **_kwargs: object) -> None:
-            tasks.append(task)
-            draft_path.write_text("# Risks\n\nDrafted.", encoding="utf-8")
-
-        monkeypatch.setattr("inkwell.agent.pipeline.query", capture)
-
-        await write_section("2.1 Risks", notes=notes, draft_path=draft_path)
+        await write_section(
+            "2.1 Risks",
+            notes=notes,
+            draft_path=draft_path,
+            cohort=cohort,
+            actor=cohort.actor("writer", "risks"),
+        )
 
         assert "[reader_feedback]" not in tasks[0]
 

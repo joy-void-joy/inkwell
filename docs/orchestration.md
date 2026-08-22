@@ -4,7 +4,7 @@
 
 How work is delegated across agents in this project — what runs where, and who sees it. The recurring *code* shapes live in [docs/patterns.md](patterns.md); daily development guidance is in the agent guidance document your runtime loads.
 
-**Model selection:** every pattern below — subagents, reviewers, nested and background agents — defaults to Opus 5 (`claude-opus-5`) or Fable (`claude-fable-5`). Drop to a cheaper model only with an explicit, justified reason (see § Model Selection in the agent guidance).
+**Model selection:** every pattern below — subagents, reviewers, nested and background agents — defaults to the **strongest** tier. Drop to `balanced` or `fast` only with an explicit, justified reason (see § Model Selection in the agent guidance). A declaration states the tier and each runtime spells whichever model it can honor, so naming a model id here would pin one provider's lineup into a library that is provider-neutral, and pin it to a lineup that moves.
 
 **Vocabulary:** two kinds of delegated agents look alike and must not be conflated:
 
@@ -34,7 +34,7 @@ For agents that exist over time — maintaining conversations, monitoring system
 
 **Two wirings, one pattern:** On Claude, tools run in-process — `sleep` blocks on the Scheduler directly and a Stop hook keeps the single turn open forever. On backends whose tools run in a subprocess (Codex, OpenAI-compatible), the loop inverts: **each wake is one SDK turn**. The served tools (`lup.realtime.relay`) relay through files in `session_dir/realtime/`: `reply` and the timing tools append events a parent-side watcher applies mid-turn, `sleep` records a request and the agent ends its turn, and the parent loop (`run_relay_session`) consumes the request, sleeps on the Scheduler, and opens the next turn with a wake message. An agent that ends a turn without sleeping gets bounded corrective turns — the relay counterpart of the Stop hook. Enforcement is in-handler on both wirings (meta-before-sleep, unread-events guard), so no hooks are required.
 
-**Library support:** `packages/lup/src/lup/realtime/scheduler.py` provides the `Scheduler` class and hook factories (`create_stop_guard`, `create_pending_event_guard`); `packages/lup/src/lup/realtime/relay.py` provides the subprocess wiring (`RealtimeMailbox`, `create_realtime_relay_tools`, `run_relay_session`), sharing the tool I/O models in `packages/lup/src/lup/realtime/models.py`. Construction goes through the engine seam: `run_persistent_agent` in `agent/core.py` serves the `session` tool group into the subprocess engine, builds the parent-side session mailbox itself, and drives it via `run_relay_session` — the engine never touches the relay. See example tools in `src/lup_template/agent/tools/realtime.py`.
+**Library support:** `lup.realtime.scheduler` provides the `Scheduler` class and hook factories (`create_stop_guard`, `create_pending_event_guard`); `lup.realtime.relay` provides the subprocess wiring (`RealtimeMailbox`, `create_realtime_relay_tools`, `run_relay_session`), sharing the tool I/O models in `lup.realtime.models`. Construction goes through the engine seam: `run_persistent_agent` in `agent/core.py` serves the `session` tool group into the subprocess engine, builds the parent-side session mailbox itself, and drives it via `run_relay_session` — the engine never touches the relay. See example tools in `src/inkwell/agent/tools/realtime.py`.
 
 ---
 
@@ -44,7 +44,7 @@ Agents produce better output when forced to self-assess before committing. Three
 
 1. **Reflection tool** (`agent/tools/reflect.py`): Domain-customizable self-assessment — confidence, uncertainties, tool audit, process reflection. Runs a nested reviewer agent that returns a structured `ReviewResult` verdict (skippable per call; a skip or reviewer failure records an approval so availability never deadlocks).
 2. **Review gate** (`lup.reflect`): `ReviewGate`, a verdict-aware `ReflectionGate` — in-memory, or file-backed (fail counter included) when tools run in a subprocess. Approve and warn open the gate; fail keeps it closed so the agent revises and re-reviews; after 3 consecutive fails it opens anyway (escape hatch). Enforced primarily *inside* the `submit_output` handler (`lup.runtime.output`), which rejects submission with a retriable error until the gate opens; `create_reflection_gate()` adds a PreToolUse hook as hardening where the backend supports it. The plain `ReflectionGate` base remains for act-of-reflecting gates (the realtime `sleep` meta-gate).
-3. **Wiring**: The gate rides inside submission — `reflection_submission_gate` (`agent/core.py`) adapts the `ReviewGate` to the `SubmissionGate` carried by the turn's `TurnToolBinding`, so a gated submission is rejected with a retriable message until the reviewer passes (persistent agents gate `sleep` instead). Final output always flows through the turn-bound submission tool — registered by the adapter on every SDK backend — whose `submit_output` handler validates against the turn's output model and persists through the bound `SubmittedOutputStore` (in-memory, or file-backed when tools run in a subprocess). Completion is enforced by the logical turn itself: `ResilientTurn` sends bounded corrective cycles (`CorrectionConfig`, `lup.runtime.wrappers`) when a turn ends without a submission, and a turn that still produces none raises `StructuredOutputError` for the orchestration layer — the one-shot counterpart of the relay's missing-sleep message. `create_completion_guard` (`lup.hooks`) remains as optional Stop-hook hardening on backends that expose stop hooks.
+3. **Wiring**: The gate rides inside submission — `reflection_submission_gate` (`agent/core.py`) adapts the `ReviewGate` to the `SubmissionGate` carried by the turn's `TurnToolBinding`, so a gated submission is rejected with a retriable message until the reviewer passes (persistent agents gate `sleep` instead). Final output always flows through the turn-bound submission tool — registered by the adapter on every SDK backend — whose `submit_output` handler validates against the turn's output model and persists through the bound `SubmittedOutputStore` (in-memory, or file-backed when tools run in a subprocess). Completion is enforced by the logical turn itself: `ResilientTurn` sends bounded corrective cycles (`CorrectionConfig`, `lup.runtime.wrappers`) when a turn ends without a submission, and a turn that still produces none raises `StructuredOutputError` for the orchestration layer — the one-shot counterpart of the relay's missing-sleep message. Those cycles advance on the turn's own task rather than on whichever caller awaits it, so a resilient turn's event stream — one logical stream over every cycle, closing when the result settles — may be consumed before, during, or after `result()`, and a caller that watches a turn as it happens is not thereby waiting on itself. `create_completion_guard` (`lup.hooks`) remains as optional Stop-hook hardening on backends that expose stop hooks.
 
 **Customizing:** The gate in `lup.reflect` is domain-neutral and parametric. The reflection tool and `ReflectInput` in `agent/tools/reflect.py` are domain-specific — add fields for your domain. The reviewer prompt should target your domain's common failure modes.
 
@@ -95,7 +95,7 @@ accepts a `TurnInput` or a prepared `turn_request(...)` in place of the prompt. 
 tools, limits, and compatible endpoints are validated when the application
 constructs the factory; unsupported settings are never silently dropped.
 
-**Example:** `src/lup_template/agent/tools/nested.py` is the dedicated copyable template — a minimal `critique` tool (input model → `query()` → augmented output, exported as `NESTED_TOOLS`, unwired by default). For organic usages, see the reviewer inside `agent/tools/reflect.py` (`run_reviewer`, called from the `review` tool) — an independent one-shot `query()` whose critique the tool folds into its structured output — and the `extract` path of `fetch_example` in `agent/tools/example.py` (`extract_answer`), the same shape applied to data augmentation.
+**Example:** `src/inkwell/agent/tools/nested.py` is the dedicated copyable template — a minimal `critique` tool (input model → `query()` → augmented output, exported as `NESTED_TOOLS`, unwired by default). For organic usages, see the reviewer inside `agent/tools/reflect.py` (`run_reviewer`, called from the `review` tool) — an independent one-shot `query()` whose critique the tool folds into its structured output — and the `extract` path of `fetch_example` in `agent/tools/example.py` (`extract_answer`), the same shape applied to data augmentation.
 
 **Routing whole tool families:** there is a standing tension between the bitter-lesson instinct — give the agent every tool and let the model decide — and context economy: every schema wired into the main agent occupies its context, and a large enough surface starts deferring schemas on Claude harnesses (see [Deferred Tool Schemas](#deferred-tool-schemas-tool-search)). The settled middle ground is **one delegating tool per family**: instead of serving every data tool to the main agent, expose a single `research` tool whose handler runs a nested agent holding the whole data-gathering family (search, fetch, markets, news). The main context carries one schema and receives structured findings; the specialist schemas — and the reasoning that used them — stay in the nested agent's context. Accept a batch of questions in one call so the handler can fan them out in parallel, and persist findings when later tasks will reuse them. The aib downstream repo (`refs/aib` when linked) carries a full-scale reference: its `research` tool moves ~35 data tools off the main agent, batches questions, resumes prior research sessions for follow-ups, and persists findings to a worldview store.
 
@@ -132,11 +132,91 @@ session context cleanup aborts an unfinished native turn.
 **Library support:** `lup.runtime.background.BackgroundAgent` composes only a
 `SessionFactory`, `state_to_request`, typed result/error callbacks, and
 `BackgroundConfig`. See the observer example in
-`src/lup_template/agent/tools/realtime.py`.
+`src/inkwell/agent/tools/realtime.py`.
 
 **Customizing:** The `state_to_request` callback is the main extension point.
 It translates immutable application state into a typed request without knowing
 which provider owns the injected factory.
+
+---
+
+## Actor Cohort Pattern
+
+The three patterns above all end the same way: the delegated agent runs, and
+whatever anyone learns while it runs has nowhere to go. A subagent's task is
+fixed at dispatch, a nested agent is unreachable inside its tool call, and a
+background agent takes state on a wake rather than a sentence mid-turn. When
+several agents work at once and the facts move under them, that is the whole
+problem — an agent verifying a statement you have since disproved, or working
+a branch you closed, keeps going because nothing can tell it.
+
+An **actor cohort** (`lup.actors.cohort.ActorCohort`) is a population of
+agents that stay in contact while they work. Each holds one session across
+every turn it takes; anything addressed to one lands in front of its next tool
+call through a hook it never chooses to check; and the spawner is itself an
+address, so an agent can say something back.
+
+| Aspect | Actor Cohort |
+| --- | --- |
+| Lifetime | As long as the population is held; each member across many turns |
+| Runtime | One held session per member, from a recipe the cohort configures |
+| Initiation | `ask` (awaited), `start` (detached), or `work_all` (a whole wave) |
+| Communication | Mail both ways, mid-turn; questions through a `QuestionMailbox` |
+| Use case | Several agents at once, over work whose facts move under them |
+
+**`ask` versus `start` is the load-bearing distinction.** A caller blocked
+inside an awaited call cannot make another, so a cohort whose members are all
+`ask`ed has steering tools that can never fire. `start` returns immediately
+and the caller keeps its turn — which is what makes saying anything possible
+at all.
+
+**Fan out with `work_all`, not with a gather of your own.** How many agents
+run at once, which of them are running, and what a close reaches are three
+facts about the population; a caller that assembles its own wave from
+`start_work` and `asyncio.gather` gets the cap right and the other two wrong.
+`work_all` runs one piece of work per address and hands back each answer
+positionally — a result or the exception it raised, faithfully, so a caller
+that classifies failures can still tell a park from a host fault from a
+cancellation.
+
+**A raise does not always finish an agent.** A raise usually settles the agent
+it came out of, but work can stop because it was suspended — parked on a
+question, drained at a boundary, stopped by a failing host — and every one of
+those expects the same agent to carry on. `settles` is how a consumer says
+which of its own failures suspend; recorded finished instead, the resume opens
+a fresh conversation rather than reattaching to the one holding the context,
+and every door reads a waiting agent as a stopped one.
+
+It belongs to the cohort, passed once at construction, rather than to each
+wave. A suspension is raised in both places a raise can happen — a drain
+checked between rounds comes out of the work, a host fault out of the turn
+itself — so a judgement held by the wave answers for one and not the other,
+and the turn's own failure path finishes the agent before the wave is ever
+consulted. Which failures suspend is a fact about the consumer's vocabulary,
+and a consumer has one.
+
+**The cohort owns the wiring.** Delivery works only if the inbox hook is in
+the options the session opened with, so callers pass an `ActorRecipe`
+(`(ActorRef, LupHooksConfig) -> SessionFactory`) and the cohort hands it the
+hooks. A recipe that had to fetch them could be written once without them,
+producing an agent that looks spawned and reads nothing anyone sends it.
+
+**Addresses are supplied or minted.** `cohort.actor(kind, id)` with an id
+derived from durable state is stable across a restart, which is what lets a
+resumed run reattach to conversations rather than open new ones;
+`cohort.actor(kind)` mints one for a spawn nobody declared. That is the only
+difference between the two cases.
+
+**The population is a record, not a dict.** `live()`, `members()` and
+`reaching()` fold `roster.jsonl`, so a console in another process resolves the
+same address the cohort's own tools do, and a restart rebuilds the roster.
+
+**Library support:** `lup.actors.tools.create_cohort_tools` serves the three
+verbs an agent needs — list what I spawned, say something to one of them, say
+something back to whoever spawned me. `lup.actors.mailbox.QuestionMailbox`
+adds decisions that park a run, on the same storage; messages ride a stream
+and never park anything, which is why "a message stalled the run" is not
+expressible rather than merely avoided.
 
 ---
 
@@ -182,6 +262,6 @@ Tools that fetch external data should **enrich it inside the tool** before retur
 2. **Null-filling** — Multi-source fallback pipelines that recover missing fields from alternative endpoints or sibling records (e.g., primary API withholds fields → fallback endpoint fills the gaps).
 3. **Extraction** — Nested agent calls that distill large text blocks into focused answers (see [Nested Agent Pattern](#nested-agent-pattern)).
 
-**Example:** `src/lup_template/agent/tools/example.py` is the template for all three forms — `fetch_example` routes known hosts to a specialized handler (`fetch_wiki_article`, domain dispatch) and distills fetched pages through a nested `query()` call (`extract_answer`, extraction); `search_example` recovers missing snippet fields from a fallback source (`fill_missing_snippets`, null-filling).
+**Example:** `src/inkwell/agent/tools/example.py` is the template for all three forms — `fetch_example` routes known hosts to a specialized handler (`fetch_wiki_article`, domain dispatch) and distills fetched pages through a nested `query()` call (`extract_answer`, extraction); `search_example` recovers missing snippet fields from a fallback source (`fill_missing_snippets`, null-filling).
 
 **Customizing:** Domain dispatch routes belong in `agent/tools/`. Build them lazily to avoid circular imports. Null-filling logic lives in API wrappers. Extraction uses `query(factory, request)` (see [Nested Agent Pattern](#nested-agent-pattern)).

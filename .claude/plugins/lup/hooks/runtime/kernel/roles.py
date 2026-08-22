@@ -74,6 +74,9 @@ def role_pattern_covers(pattern: str, path: str) -> bool:
 
 def normalized_path(path: str) -> str:
     """Normalize one portable path without resolving against the filesystem."""
+    # lup: ignore[string-replace] — a posix parser cannot read a Windows path,
+    # so settling the separator convention is what makes the string parseable
+    # at all, rather than something the parser below could have done instead
     return posixpath.normpath(path.replace("\\", "/"))
 
 

@@ -577,13 +577,6 @@ def resolve_redirection(
         return Redirection(decision=None, resume=target + 1)
     if tokens[target].text in (recoverable_targets or []):
         return Redirection(decision=None, resume=target + 1)
-    # lup: solved: This asks too often too. "file redirection is never
-    # auto-allowed" fires on the everyday `2>&1` / `>/dev/null` shapes that
-    # carry no write a reviewer would care about; auto-allow those the way the
-    # rest of the read-only vocabulary is meant to be.
-    # Landing review-fixes added the recoverable/inert target handling above:
-    # `ls -la >/dev/null` and `uv run pytest -q 2>&1|tail -3` both classify
-    # allow now, verified with `lup-devtools hooks classify`.
     return Redirection(
         decision=KernelDecision("ask", "file redirection is never auto-allowed"),
         resume=target + 1,

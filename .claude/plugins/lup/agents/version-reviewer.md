@@ -2,7 +2,7 @@
 name: version-reviewer
 description: "Independently review a proposed version change"
 tools: Read, Bash
-model: sonnet
+model: opus
 color: yellow
 ---
 
@@ -38,7 +38,7 @@ git log --oneline v<VERSION> -1
 This is the most important step. Read the full system prompt that was active for this version:
 
 ```bash
-git show v<VERSION>:src/lup_template/agent/prompts.py
+git show v<VERSION>:src/inkwell/agent/prompts.py
 ```
 
 Read it carefully. Note:

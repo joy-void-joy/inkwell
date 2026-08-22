@@ -50,9 +50,10 @@ Classify each entry:
 
 ### 4. Run checks
 
-```bash
-uv run lup-devtools dev check
-```
+Start a `Monitor` over `uv run lup-devtools dev check` and leave it live. Each line it emits arrives as an event, and the watch ends when the command does. Do not run it through `Bash`, whose long timeout returns once at the end, and do not read a backgrounded session on a loop — both are polling, however patient
+
+It runs ruff, pyright, and the test suite, and reports as it goes rather than
+only at the end.
 
 Fix any failure this branch introduced. A failure the base already carries is not this branch's to fix: confirm it by running the same check on `<base>`, name it and its origin when reporting, and continue. Fixing it here buries an unrelated change in this PR; staying silent about it lets the next run inherit it as though it were yours.
 

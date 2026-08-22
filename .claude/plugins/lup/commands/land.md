@@ -1,6 +1,6 @@
 ---
 description: "Land every branch that has not reached the integration branch, and clear the ones that have"
-allowed-tools: Bash(uv run lup-devtools:*), AskUserQuestion, EnterWorktree, Skill(lup:commit), Skill(lup:rebase), Skill(lup:merge)
+allowed-tools: Bash(uv run lup-devtools:*, git:*), AskUserQuestion, EnterWorktree, Skill(lup:commit), Skill(lup:rebase), Skill(lup:merge)
 argument-hint: "[branch-name ...]"
 ---
 
@@ -43,7 +43,7 @@ Report which case it is and what the comparison showed, and let the user settle 
 uv run lup-devtools dev survey --json
 ```
 
-Every branch arrives with a `disposition` and a `reason` already computed. **Do not re-derive them** — the classifier is shared with `dev status`, so a judgement made here would drift from the one made there.
+Every branch arrives with a `disposition` and a `reason` already computed. **Do not re-derive them** — the classifier is shared with `dev survey`, so a judgement made here would drift from the one made there.
 
 ### 3. Reconcile against the runs holding branches
 
@@ -57,15 +57,32 @@ Do not present a dead run's branches as a to-do list. One decision about the run
 
 One table covering every branch, ordered `LAND` first (that is the work at risk), then the `KEEP` rows an open PR is driving (work already asked for, waiting on nothing but an order to merge in), then `DELETE`/`STALE`, then the rest of `KEEP`/`CURRENT`:
 
-| Branch | Disposition | Unique | Diff | Dirt | PR | Proposed action |
+| Branch | Disposition | Unique | Rewr | Diff | Dirt | PR | Proposed action |
 
 `Dirt` is the survey's `changes` — what that branch's worktree holds uncommitted. It never changes a disposition, only what carrying one out costs: a dirty worktree makes a delete refuse until forced, and forcing discards those files, so a dirty row is one to read before proposing anything.
+
+`Rewr` is the survey's `rewritten` — how many of that branch's unique commits already name a subject in the integration branch. Containment is decided by patch-id, which a rewrite changes, so a commit that landed rebased, reworded, or squashed reads as unlanded ever after and a pre-rewrite snapshot presents its whole history as work at risk. **It is a signal, never a verdict**: a shared subject is not proof, so where it is set, go and check — `git cherry -v <integration> <branch>` marks with `-` what patch-id already matches, and comparing the remaining subjects against `git log <integration>` finds the rewrites it cannot see. Report what the comparison showed; never subtract it from `Unique` and never let it retire work on its own.
 
 **Group the `LAND` rows by the run holding them**, where `runs` gives one, and label the group with the run rather than repeating it per row. Branches from one run are one situation; listed flat they read as unrelated work that happens to share a prefix.
 
 **Report each group's union, not the sum of its rows.** Branches from a run are stacked, so a branch's `unique_commits` counts commits its siblings also carry — summing them multiplies the same work by how many branches contain it. `git rev-list --count ^<integration> <branch>...` over the group is the real figure, and the two can differ by more than a factor of two.
 
 **Offer only the branches no sibling contains.** A branch listed in another's `contained_in` lands when that one does, so proposing both asks for a decision that has already been made. Name the ones riding along under the branch that carries them, so nothing looks dropped.
+
+### 4b. The branches that exist only on a remote
+
+`remote_branches` is every branch a remote carries that no local branch corresponds to. Read it as part of the sweep, not as an appendix: a branch whose local copy went when its work landed leaves nothing in `branches` to classify, so without this list nothing mentions it again and the remote keeps it for good. That is the silent bucket this command exists to empty, one clone removed.
+
+Each row carries the same `disposition` the local classifier gave it, so it means what it means everywhere else. What differs is the verb — a push, not a local delete — and that a remote branch has no worktree, no lease, and no dirt to weigh:
+
+| Disposition | What it means here | Action |
+| --- | --- | --- |
+| `DELETE` | Its PR merged, or the integration branch already contains it | Offer `git push <remote> --delete <branch>`. Nothing is lost: the commits are in the integration branch, and where a PR exists GitHub keeps its head at `refs/pull/<number>/head` after the branch, the local copy, and the remote copy are all gone |
+| `LAND` | Holds commits the integration branch lacks, with nothing driving them | **Never delete it.** The work exists only on the remote, and no local branch names it. Report it and ask whether to fetch it into a local branch — `git fetch <remote> <branch>:<branch>` — and take it through step 6 from there |
+| `KEEP` | Protected, or an open PR is driving it | Leave it. An open PR is step 7's business, and it will be driving a local branch too where one exists |
+| `UNRELATED` | Shares no history with the integration branch | Report it and ask, exactly as for a local one. A default branch still holding an initial import is the usual cause, and replacing it is a decision about the repository rather than a step in a sweep |
+
+**A remote delete is a push, so it takes the same explicit approval as everything else in step 8** — per branch, naming the branch and the PR that merged it. Nothing here is carried out because the disposition says so.
 
 ## Acting on Dispositions (both modes)
 
@@ -76,7 +93,8 @@ One table covering every branch, ordered `LAND` first (that is the work at risk)
 | `LAND` | Holds commits the integration branch lacks, with no PR driving it | Land it — step 6 |
 | `DELETE` | Reached the integration branch, or its PR merged | `uv run lup-devtools dev delete <branch>`; where `Dirt` is set it refuses, so compare that worktree against the integration branch and report what forcing would discard before asking |
 | `STALE` | Every commit already cherry-picked into the integration branch | Confirm, then delete |
-| `KEEP` | Protected, an open PR is already driving it, or a resolver run holds its lease | Read which of the three it is: protected leaves it alone; an open PR offers it — step 7; a resolver run is step 3, and one with `alive: false` holds it forever |
+| `KEEP` | Protected, an open PR is already driving it, a resolver run holds its lease, or it is a worktree reserved at the integration tip | Read which of the four it is: protected leaves it alone; an open PR offers it — step 7; a resolver run is step 3, and one with `alive: false` holds it forever; a reserved workspace is somebody's next session, so leave it |
+| `UNRELATED` | Shares no history with the integration branch | Never rebase or merge it — both would replay an unrelated tree. Report it and ask; an adopted subtree or a wrongly-pushed branch are the usual causes, and neither is this sweep's to settle |
 | `CURRENT` | The branch checked out here | Never delete; warn if it would otherwise qualify |
 
 ### 6. Landing a LAND branch
@@ -87,9 +105,13 @@ Ask the user, per branch, which route to take:
 
 - **Open a PR** — relocate into that branch's worktree: `EnterWorktree(path=<the survey's worktree field>)`, returning afterwards with `ExitWorktree(action="keep")`. Create one first via `uv run lup-devtools dev worktree create <branch>` when `worktree` is null. Then run `/lup:rebase`.
 - **Merge directly** — take the same route into the worktree and through `/lup:rebase`, then merge from the integration checkout with `/lup:merge <branch>`. `sync-base` has already pulled the integration branch in, so the merge is a fast-forward, and pushing it closes the PR the rebase opened. Suits small, uncontroversial work that needs no review.
-- **Drop it** — the work is not worth landing. Requires explicit confirmation, then delete.
+- **Retire it** — the work is not worth landing. After explicit confirmation, `uv run lup-devtools dev retire <branch> --reason "<why>"`, which pushes, opens a pull request, closes it without merging, and only then deletes.
 
 Never choose a route on the user's behalf: a `LAND` branch by definition carries no PR expressing intent, so the intent has to come from them.
+
+**Retiring is how a `LAND` branch ends, and `dev delete` is not.** A branch the integration branch never absorbed, deleted with no copy on the remote, leaves its commits reachable from nothing and a collector free to take them — and `dev delete` says so only at the moment it does it, which is too late to be a choice. Opening a request and closing it unmerged leaves a copy that outlives the branch: GitHub writes the head of every request to `refs/pull/<number>/head` and keeps it there after the request is closed and after both the branch and origin's copy are deleted. The work survives, and the reason it was dropped sits beside the commits rather than in a session nobody will read again.
+
+**It is only for work the integration branch does not hold.** `dev retire` refuses a branch holding nothing new, because there the commits are already in history, the branch is only a pointer, and `dev delete` is the verb — which is every `DELETE` and `STALE` row. Where a request already exists it reuses it only if it is still open: one that merged or closed cannot be closed again, so anything else gets a fresh request over the same head.
 
 ### 7. Merging an open-PR branch
 
@@ -113,12 +135,12 @@ Request explicit user approval before deleting a branch, merging a PR, or pushin
 
 ### 9. Report results
 
-What landed, what merged, what was deleted, and what was deliberately left alone.
+What landed, what merged, what was deleted locally, what was cleared from a remote, and what was deliberately left alone.
 
 ## Guidelines
 
 - Never force-delete without explicit user approval for that specific branch
-- **Never delete a `LAND` branch unless the user explicitly chose to drop it** — it holds the only copy of that work
+- **Never delete a `LAND` branch unless the user explicitly chose to drop it** — and then retire it rather than deleting it, so the choice ends the branch and not the work
 - Skip the current branch — warn the user instead
 - Containment counts as landed only against the integration branch; riding inside a sibling that has not landed either is no reason to drop work
 - For rebased branches, content may have reached the integration branch via a rebase PR even though `--is-ancestor` is false — the `DELETE` disposition already accounts for merged PRs

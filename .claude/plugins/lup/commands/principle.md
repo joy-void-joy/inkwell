@@ -39,9 +39,9 @@ Read every relevant file and categorize findings into three buckets:
 
 ### Layer A: Documentation & Meta
 
-1. **Guidance** (`src/lup_template/devtools/harness/content/guidance.py`, plus
+1. **Guidance** (`src/inkwell/devtools/harness/content/guidance.py`, plus
    the portable blocks it composes from
-   `packages/lup/src/lup/devtools/harness/content/conventions.py`)
+   `lup.devtools.harness.content.conventions`)
    - Check every section: does it align with or contradict the principle?
    - A convention every reader needs identically belongs in the shared
      blocks, so fixing one there fixes the guidance, the downstream template,
@@ -49,22 +49,24 @@ Read every relevant file and categorize findings into three buckets:
    - Look for existing principles that overlap or conflict
    - .claude/CLAUDE.md under Claude Code, AGENTS.md under Codex are generated from this module — read them for the rendered result, never edit them
 
-2. **Template guidance** (`src/lup_template/devtools/harness/content/template_sections.py`)
+2. **Template guidance** (`src/inkwell/devtools/harness/content/template_sections.py`)
    - Same checks — this is what new projects inherit; the portable sections render into every flavor of .claude/plugins/lup/TEMPLATE_CLAUDE.md under Claude Code, .codex/plugins/lup/TEMPLATE_AGENTS.md under Codex from this one source
 
 ### Layer B: Commands & Workflows
 
-3. **All skill modules** (`packages/lup/src/lup/devtools/harness/content/skills/*.py`
-   and `src/lup_template/devtools/harness/content/skills/*.py` — both halves,
-   or the sweep misses the twenty-five the library holds)
+3. **All skill modules** (`src/inkwell/devtools/harness/content/skills/*.py`,
+   and `lup.devtools.harness.content.skills` for the library's own — both
+   halves, or the sweep misses every skill the library holds. Where lup is
+   not vendored here, reach its modules with `uv run lup-devtools py source`
+   rather than a path; `dev library status` says which mode this project is in)
    - Read each skill's instructions, guidelines, and anti-patterns
    - Check if a skill encodes a workflow that violates the principle
    - .claude/plugins/lup/commands/*.md under Claude Code, .codex/plugins/lup/skills/*/SKILL.md under Codex are generated from these — never edit them
 
 ### Layer C: Semantic Policy & Enforcement
 
-4. **Canonical policy** (`packages/lup/src/lup/policy/` plus the `HookSet` in
-   `src/lup_template/devtools/harness/catalog.py`; everything under .claude/plugins/lup/hooks/ under Claude Code, .codex/plugins/lup/hooks/ under Codex is generated from these — never edit it directly)
+4. **Canonical policy** (the library's `lup.policy` plus the `HookSet` in
+   `src/inkwell/devtools/harness/catalog.py`; everything under .claude/plugins/lup/hooks/ under Claude Code, .codex/plugins/lup/hooks/ under Codex is generated from these — never edit it directly)
    - Check if any policy rule contradicts the principle
    - Consider if a new policy rule could enforce the principle mechanically
 
@@ -72,7 +74,7 @@ Read every relevant file and categorize findings into three buckets:
 
 The `src/` directory IS the template — when someone forks this repo, this code is their starting point. The principle should be visible in how the template code is written.
 
-5. **Agent code** (`src/lup_template/agent/`)
+5. **Agent code** (`src/inkwell/agent/`)
    - `core.py` — orchestration patterns, how the agent is structured
    - `prompts.py` — system prompts, instructions to the SDK agent
    - `subagents.py` — how subagents are defined and used
@@ -80,16 +82,18 @@ The `src/` directory IS the template — when someone forks this repo, this code
    - `tools/*.py` — example tool implementations
    - `models.py`, `config.py` — data modeling patterns
 
-6. **Library code** (`packages/lup/src/lup/`)
+6. **Library code** (the `lup` package)
    - Reusable abstractions — do they embody or contradict the principle?
    - Patterns that downstream users will copy
+   - Only sweepable where this project carries lup's source; otherwise the
+     finding belongs upstream rather than in this checkout
 
-7. **Environment code** (`src/lup_template/environment/`)
+7. **Environment code** (`src/inkwell/environment/`)
    - CLI structure, how the agent is invoked
    - Any scaffolding patterns
 
-8. **Devtools** (`packages/lup/src/lup/devtools/` and
-   `src/lup_template/devtools/`)
+8. **Devtools** (`lup.devtools` and
+   `src/inkwell/devtools/`)
    - CLI commands for development and analysis, most of them the library's
    - Patterns encoded in automation
 
@@ -123,7 +127,7 @@ Present findings and proposed changes one layer at a time. For each layer:
 - Agent orchestration (`core.py`, `subagents.py`) — does the structure reflect the principle?
 - Prompts (`prompts.py`) — does the SDK agent's system prompt embody the principle?
 - Tools (`tools/*.py`, `tool_policy.py`) — do the example tools demonstrate the principle?
-- Library (`packages/lup/`) — do shared abstractions follow the principle?
+- Library (the `lup` package) — do shared abstractions follow the principle?
 - Consider: refactoring patterns, adding/removing code, changing defaults, updating examples.
 
 **Group 4: Hook scripts & enforcement**
@@ -132,7 +136,7 @@ Present findings and proposed changes one layer at a time. For each layer:
 - If an existing hook contradicts the principle, propose modifications.
 - Not every principle needs a hook — only propose one if mechanical enforcement makes sense.
 
-**Group 5: Devtools & automation** (`packages/lup/src/lup/devtools/` and `src/lup_template/devtools/`)
+**Group 5: Devtools & automation** (`lup.devtools` and `src/inkwell/devtools/`)
 
 - Do the devtools commands (agent, py, dev, feedback, setup, sync, trace, usage, version) reflect the principle?
 - Are there devtools commands that should exist to support the principle but don't?
@@ -142,9 +146,12 @@ Present findings and proposed changes one layer at a time. For each layer:
 For each approved group, make the edits. Every layer above is Python source, so regenerate both native plugins afterwards to bring the artifacts back in step:
 
 ```bash
-uv run lup-devtools harness claude
-uv run lup-devtools harness codex
+uv run lup-devtools harness generate all
 ```
+
+`generate all` is the regenerating command. `harness claude` and `harness codex`
+regenerate one target and then *launch* it, which from inside a session starts a
+second one rather than finishing this one's work.
 
 After all changes:
 

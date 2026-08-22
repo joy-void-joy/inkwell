@@ -12,7 +12,7 @@ nobody can see. Thresholds live on the rule instances, so a source that needs
 different ones declares its own tuple rather than editing this module.
 """
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from itertools import groupby
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -168,7 +168,7 @@ def measure(content: str, *, title: str = "") -> DocumentMetrics:
     )
 
 
-class QualityRule(BaseModel):
+class QualityRule(BaseModel, ABC):
     """One thing that can be wrong with a capture, and what it costs.
 
     A rule carries its own thresholds, so overriding a threshold means

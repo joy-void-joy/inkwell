@@ -33,27 +33,40 @@ Analyze the changes and group them into logical commits:
 For each group:
 
 1. Stage the relevant files: `git add <files>`
-2. Create the commit with conventional format:
+2. Create the commit with conventional format. A subject and a body are two
+   `-m` arguments, which the shell passes through untouched:
 
 ```bash
-git commit -m "$(cat <<'EOF'
-type(scope): description
-
-Optional body with more details.
-EOF
-)"
+git commit -m "type(scope): description" -m "Optional body with more details."
 ```
+
+A body long enough to want headings, code spans, or blank lines goes in a file
+instead, for the reason `rebase` writes a pull-request body to one: every
+apostrophe and backtick in an inline argument is yours to escape, and a missed
+one truncates the message into a shell parse error naming an offset.
+
+```bash
+git commit -F <path>
+```
+
+Never wrap the message in a command substitution — `git commit -m "$(cat …)"`
+and its heredoc form are denied by the permission policy, because a
+substitution's result could expand into a guarded flag. The two spellings above
+are the whole vocabulary; neither needs an escape hatch.
 
 ### Commit Types
 
-- `feat` — New feature or capability
-- `fix` — Bug fix
-- `refactor` — Code restructuring without behavior change
-- `docs` — Documentation only
-- `test` — Adding or updating tests
-- `chore` — Maintenance (deps, config)
-- `meta` — Changes to harness content and the native trees it generates
-- `data` — Generated outputs
+| Type | Use |
+| --- | --- |
+| `feat` | New feature or capability |
+| `fix` | Bug fix |
+| `refactor` | Neither fixes a bug nor adds a feature |
+| `docs` | Documentation only |
+| `test` | Adding or updating tests |
+| `chore` | Maintenance — dependencies, build config |
+| `meta` | Harness content and the trees it generates: guidance, settings, skills, hooks |
+| `data` | Generated data and outputs |
+
 
 ### Examples
 

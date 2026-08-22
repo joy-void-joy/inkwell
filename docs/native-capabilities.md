@@ -7,30 +7,34 @@ versions are evidence boundaries, not branches in shared orchestration. A
 capability not proven here is absent from the portable handle or fails before
 input; it is never represented by an unsupported-operation stub.
 
-Evidence was refreshed on 2026-08-05 against Claude Code 2.1.222, Claude Agent
-SDK 0.2.89, and Codex CLI/app-server 0.145.0.
+Evidence was refreshed on 2026-08-20 against Claude Code
+2.1.237, Claude Agent SDK 0.2.89, and Codex CLI/app-server
+0.148.0. Those three versions and the digests below are read from
+`lup.devtools.harness.evidence`, which is also what
+`uv run lup-devtools harness doctor all` compares an installed CLI against —
+so this page cannot come to name a version nothing was probed on.
 
 | Contract | Version | Evidence | Accepted fact |
 |---|---:|---|---|
-| Claude plugin package | Claude Code 2.1.222 | `claude plugin validate .claude/plugins/lup` passed; [Claude plugin documentation](https://docs.anthropic.com/en/docs/claude-code/plugins) | The generated manifest, commands, agents, and bundled hooks are loadable. |
-| Claude runtime | Claude Agent SDK 0.2.89 | Lazy option construction plus direct SDK block, usage, cost, hook, partial-event, fork, and subagent fixtures in `tests/unit/test_adapter_runtime.py`; [Claude SDK documentation](https://platform.claude.com/docs/en/agent-sdk/overview) | Live partial events, interruption, and latest-turn transcript forking are exposed. Steering is absent. Turn output uses only Lup's MCP `submit_output` tool. **Resume is offered but not honoured**: verified on Claude Code 2.1.223, `claude --session-id <uuid> -p` exits 0 and writes no transcript under `~/.claude/projects`, and `--resume` on the id the run reports answers `No conversation found`. So a session holds one live connection across every turn that does not change its submission schema, and treats a refused resume as losing that turn's context rather than the run. |
-| Codex plugin package | Codex CLI 0.145.0 | Generated manifest/marketplace fixtures and cache-digest tests; [Codex plugin structure](https://developers.openai.com/codex/plugins/build#plugin-structure) | Skills, project agents, hooks, marketplace metadata, and installed-cache separation use documented locations. |
-| Codex hooks | Codex CLI 0.145.0 | `codex --enable hooks features list` reported hooks stable; hermetic dispatcher fixtures in `tests/unit/test_harness_compilation.py`; [Codex hooks](https://developers.openai.com/codex/hooks) | Plugin hook commands receive `PLUGIN_ROOT`. Non-allow policy decisions fail closed because the command-hook boundary has no portable ask effect. Hook trust is never *generated*, but a worktree-scoped home seeds it from the account. Seeding is confirmed to work and is **not** sufficient: a live `codex exec` in a scoped home whose config carries `lup@...:hooks/hooks.json:pre_tool_use:0:0` as trusted and enabled, against an installed plugin, ran a command the policy denies. The same installed dispatcher fed that command as a `PreToolUse` payload denies it and exits 2, so the gap is that `codex exec` does not reach the hook, not the dispatcher or the seeding. `exec` also reports `approval: never`, which alone means the `PermissionRequest` half can never fire. **Treat a non-interactive Codex session as ungoverned until this is resolved.** |
-| Codex blocked edit | Codex CLI 0.145.0 | Scheduled `test_codex_plugin_blocks_a_forbidden_apply_patch` installs the generated plugin in an isolated home and requests an anti-pattern edit through the real CLI | The `apply_patch` call is rejected, the target file remains unchanged, and the native session stays alive to report the rejection. A CLI version drift makes the nightly doctor fail until this observation is repeated. |
-| Codex app-server lifecycle | Codex CLI 0.145.0 | Version-generated JSON Schema plus routed-notification fixtures; [Codex app server](https://developers.openai.com/codex/app-server) | `thread/start`, `thread/resume`, `thread/fork`, `turn/start`, `turn/steer`, and `turn/interrupt` exist; live notifications are distinct from completed replay. |
-| Codex turn tool binding | Codex CLI 0.145.0 | Version-generated `ThreadStartParams`, `TurnStartParams`, `ThreadResumeParams`, and dynamic-tool call/response schemas | `dynamicTools` exists only on `thread/start`. A typed resume or schema transition that would need a new handler is rejected before input to preserve conversation identity. Native `outputSchema` is not enabled alongside Lup submission. |
-| Codex custom agents | Codex CLI 0.145.0 | Generated TOML fixture parsing; [custom-agent documentation](https://developers.openai.com/codex/agent-configuration/subagents) | Portable agents render as project-scoped `.codex/agents/*.toml`, outside the plugin. |
-| Codex project guidance | Codex CLI 0.145.0 | Generated root fixture; [AGENTS.md documentation](https://developers.openai.com/codex/agent-configuration/agents-md) | Portable repository guidance renders to root `AGENTS.md`. |
+| Claude plugin package | Claude Code 2.1.237 | `claude plugin validate .claude/plugins/lup` passed, warning only that the manifest declares no author; [Claude plugin documentation](https://docs.anthropic.com/en/docs/claude-code/plugins) | The generated manifest, commands, agents, and bundled hooks are loadable. |
+| Claude runtime | Claude Agent SDK 0.2.89 | Lazy option construction plus direct SDK block, usage, cost, hook, partial-event, fork, and subagent fixtures in `packages/lup/tests/unit/test_adapter_runtime.py`; [Claude SDK documentation](https://platform.claude.com/docs/en/agent-sdk/overview) | Live partial events, interruption, and latest-turn transcript forking are exposed. Steering is absent. Turn output uses only Lup's MCP `submit_output` tool. **Resume is offered but not honoured**: re-verified on Claude Code 2.1.237, `claude --session-id <uuid> -p` exits 0 and writes no transcript under `~/.claude/projects`, and `--resume` on that same id answers `No conversation found with session ID`. So a session holds one live connection across every turn that does not change its submission schema, and treats a refused resume as losing that turn's context rather than the run. |
+| Codex plugin package | Codex CLI 0.148.0 | Generated manifest/marketplace fixtures and cache-digest tests; [Codex plugin structure](https://developers.openai.com/codex/plugins/build#plugin-structure) | Skills, project agents, hooks, marketplace metadata, and installed-cache separation use documented locations. |
+| Codex hooks | Codex CLI 0.148.0 | `codex --enable hooks features list` reported hooks stable; hermetic dispatcher fixtures in `tests/unit/test_harness_compilation.py`; [Codex hooks](https://developers.openai.com/codex/hooks) | Plugin hook commands receive `PLUGIN_ROOT`. Non-allow policy decisions fail closed because the command-hook boundary has no portable ask effect. Hook trust is never *generated*, but a worktree-scoped home seeds it from the account. Seeding is confirmed to work and is **not** sufficient: a live `codex exec` in a scoped home whose config carries `lup@...:hooks/hooks.json:pre_tool_use:0:0` as trusted and enabled, against an installed plugin, ran a command the policy denies. The same installed dispatcher fed that command as a `PreToolUse` payload denies it and exits 2, so the gap is that `codex exec` does not reach the hook, not the dispatcher or the seeding. `exec` also reports `approval: never`, which alone means the `PermissionRequest` half can never fire. **Treat a non-interactive Codex session as ungoverned until this is resolved.** |
+| Codex blocked edit | Codex CLI 0.148.0 | Scheduled `test_codex_plugin_blocks_a_forbidden_apply_patch` installs the generated plugin in an isolated home and requests an anti-pattern edit through the real CLI | The `apply_patch` call is rejected, the target file remains unchanged, and the native session stays alive to report the rejection. A CLI version drift makes the nightly doctor fail until this observation is repeated. |
+| Codex app-server lifecycle | Codex CLI 0.148.0 | Version-generated JSON Schema plus routed-notification fixtures; [Codex app server](https://developers.openai.com/codex/app-server) | `thread/start`, `thread/resume`, `thread/fork`, `turn/start`, `turn/steer`, and `turn/interrupt` exist; live notifications are distinct from completed replay. |
+| Codex turn tool binding | Codex CLI 0.148.0 | Version-generated `ThreadStartParams`, `TurnStartParams`, `ThreadResumeParams`, and dynamic-tool call/response schemas | `dynamicTools` exists only on `thread/start`. A typed resume or schema transition that would need a new handler is rejected before input to preserve conversation identity. Native `outputSchema` is not enabled alongside Lup submission. |
+| Codex custom agents | Codex CLI 0.148.0 | Generated TOML fixture parsing; [custom-agent documentation](https://developers.openai.com/codex/agent-configuration/subagents) | Portable agents render as project-scoped `.codex/agents/*.toml`, outside the plugin. |
+| Codex project guidance | Codex CLI 0.148.0 | Generated root fixture; [AGENTS.md documentation](https://developers.openai.com/codex/agent-configuration/agents-md) | Portable repository guidance renders to root `AGENTS.md`. |
 
-The accepted Codex 0.145.0 schema hashes are:
+The accepted Codex 0.148.0 schema hashes are:
 
 | Schema | SHA-256 |
-|---|---|
-| `v2/ThreadStartParams.json` | `b3685411ceb8ad264a1920e8facd66301e5280948ef9c2a6871b95d4c19da639` |
-| `v2/TurnStartParams.json` | `f23021c02d28b60fccb6dcaaace9ff676127065f8254537265d6622656860dca` |
-| `v2/ThreadResumeParams.json` | `2e1d4b62bc09b46ebc54ef9f84fcdd6ca8d37cabb98dedc34b49761ee764c84d` |
-| `DynamicToolCallParams.json` | `e36242b331ca665c74993e55abbea381b1c8a961b29a42579029cff1ad26b20d` |
-| `DynamicToolCallResponse.json` | `b5fd10c265be9023f038fe3e4c937a8e215906c8ab31e35d61d28bbc0b755af9` |
+| --- | --- |
+| `v2/ThreadStartParams.json` | `18e546303ecfe878b179a50da73e6fb99f634be4bc3f7650d5870f31787079b2` |
+| `v2/TurnStartParams.json` | `95f35a9f01beea390cc4e478b4030e46ef37e5d769438d50f40b7aeabbf1ad74` |
+| `v2/ThreadResumeParams.json` | `f0ffd32fbe09750f27d1c27d7e815db7389167dba4e4b438c8411095cdff5d92` |
+| `DynamicToolCallParams.json` | `401bba20cfbd95762bef0467d840430c46be53369093ad9f26425ba757e34efc` |
+| `DynamicToolCallResponse.json` | `abb082cad67f11fcc98ba75f2eff75d7d1723af0c657655329b83ff160451a02` |
 
 Regenerate those schemas with:
 
@@ -38,13 +42,16 @@ Regenerate those schemas with:
 codex app-server generate-json-schema --experimental --out <temporary-directory>
 ```
 
+`uv run lup-devtools harness doctor all` runs exactly that into a temporary
+directory and reports any file whose hash has moved, so a schema change is
+found by the doctor rather than by a reader comparing this table by eye.
 Review any digest change together with the typed app-server models, captured
 fixtures, capability matrix, and this ledger. Do not update the user's CLI as
 part of probing.
 
 ## Explicit release gaps
 
-- Codex 0.145.0 cannot pass the persistent typed-schema transition acceptance
+- Codex 0.148.0 cannot pass the persistent typed-schema transition acceptance
   sequence `None -> A -> A -> B -> None` while preserving one thread: the
   native schema offers no dynamic-tool field on `turn/start` or
   `thread/resume`. One-shot typed turns and repeated same-schema turns are

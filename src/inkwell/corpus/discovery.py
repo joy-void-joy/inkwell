@@ -482,7 +482,7 @@ def url_slug(url: str, prefix: str) -> str:
 # ── Avenues ───────────────────────────────────────────────────────────────────
 
 
-class Avenue(BaseModel):
+class Avenue(BaseModel, ABC):
     """One publishing surface of one source, and how to walk it.
 
     Every avenue is a declaration: its fields say where to look and what

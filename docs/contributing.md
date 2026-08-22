@@ -33,7 +33,7 @@ uv run lup-devtools harness codex
 | If you are changing… | It belongs in | And you should read |
 | --- | --- | --- |
 | Anything another project built on lup would want | `packages/lup/` | [library.md](library.md) |
-| Anything only this application needs | `src/lup_template/` | [template.md](template.md) |
+| Anything only this application needs | `src/inkwell/` | [template.md](template.md) |
 | A skill, agent, guidance, permission policy, or a page under `docs/` | the `devtools/harness/content/` of whichever half owns its subject | [harness.md](harness.md) |
 | Repeated shell incantations | a new `lup-devtools` command | [template.md](template.md) |
 | A one-off computation | `lup-devtools py eval`, or a new command | below |
@@ -42,7 +42,7 @@ The placement question between the first two rows is the one that matters, and
 it has a single test: *would another project built on lup want this?* If yes,
 it goes in the library even if only this application uses it today. The
 library never imports the application, so a utility placed wrongly in
-`src/lup_template/` is unreachable from `packages/lup/` and will have to move
+`src/inkwell/` is unreachable from the library and will have to move
 later.
 
 `tmp/` is scratch: gitignored, so nothing written there reaches a diff, a
@@ -70,9 +70,28 @@ decision where no workflow surfaces it again. Deferred work lives as a
 `# lup: defer: <text>` note at the site it concerns — where `dev comments`
 lists it in its own parked section and `dev check` keeps it visible until
 somebody wakes it. That bare spelling is the
-default: nothing evaluates a wake condition mechanically, so a bracketed
-`defer[<gate>]: <text>` is for a real, externally-checkable gate ("until the
-v2 API ships"), never for restating that this code might change again.
+default, and a bracketed `defer[<gate>]: <text>` states a real,
+externally-checkable gate — never a restatement that this code might change
+again.
+
+Some gates this checkout can resolve, and those it does. `dev check` asks them
+every run, reports them among the other deferrals while the answer is no, and
+fails the run the answer turns yes. `defer[gone:<path>]` wakes once that path
+stops existing.
+
+`defer[branch:<name>]` wakes for whoever is standing on that branch, and again
+if the branch lands with nobody having acted. The first is the point. A note
+about a branch is written by somebody standing somewhere else, and the person
+it concerns is on the branch it names, in a checkout that carries no copy of
+it — so the check reads the integration branch as well as the working tree,
+for the notes naming the branch in hand. Write one where you are, aimed at the
+branch that has to act, and it reaches them without waiting for a merge.
+
+A gate the checkout cannot see — "until the v2 API ships" — stays prose and
+stays advisory, which is the whole of what a stated gate ever did before.
+Prefer a resolvable spelling where one fits, because a deferral is dormant
+exactly as long as nobody has reason to read it, and the moment it stops being
+dormant is the moment nothing else announces.
 
 A note is right when the subject is the code: a bug worth remarking on, an
 idea for a feature, anything the site it concerns can hold. Work whose
@@ -109,6 +128,7 @@ Commit early, commit often, and keep commits atomic — if the message needs an
 | `chore` | Maintenance — dependencies, build config |
 | `meta` | Harness content and the trees it generates: guidance, settings, skills, hooks |
 | `data` | Generated data and outputs |
+
 
 A `data` commit of generated outputs may go straight to `dev`; code never
 does. Session data under `notes/` is gitignored here, so such commits arise

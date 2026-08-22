@@ -70,7 +70,7 @@ Structure your report as:
 **If logs are insufficient:**
 
 - State exactly what logging to add and where, so the error is captured next time
-- Be specific: "Add `logger.exception(...)` at `src/lup_template/agent/core.py:42` inside the `except` block"
+- Be specific: "Add `logger.exception(...)` at `src/inkwell/agent/core.py:42` inside the `except` block"
 
 ## Rules
 

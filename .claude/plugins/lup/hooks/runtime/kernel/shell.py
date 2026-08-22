@@ -924,16 +924,28 @@ def decide_shell(
 
     def resolve(decision: KernelDecision) -> KernelDecision:
         if sandboxed and not escapable and decision.sandbox == "outside":
-            return KernelDecision("deny", SANDBOX_TRAPPED_REASON)
+            return KernelDecision(
+                "deny", SANDBOX_TRAPPED_REASON, escalated=decision.escalated
+            )
         match decision.effect:
             case "allow":
                 return decision
             case "ask" if interactive:
                 return decision
             case "defer" | "ask" if confined:
-                return KernelDecision("defer", decision.reason)
+                return KernelDecision(
+                    "defer", decision.reason, escalated=decision.escalated
+                )
             case _:
-                return KernelDecision("deny", decision.reason + hint)
+                # The stated intent outlives the refusal. A host with no human
+                # to ask still has somewhere to send this, and the marker's
+                # whole purpose is reaching whoever can act on it — denied
+                # with the reason dropped, the agent's escalation summoned
+                # nobody, which is the documented escape hatch having no
+                # effect in the one context that most needs one.
+                return KernelDecision(
+                    "deny", decision.reason + hint, escalated=decision.escalated
+                )
 
     marker = ESCALATE_RE.match(command)
     if marker is not None:
@@ -959,7 +971,9 @@ def decide_shell(
         if inner.effect == "allow":
             return inner
         return resolve(
-            KernelDecision("ask", f"escalated ({why}): {inner.reason}", inner.sandbox)
+            KernelDecision(
+                "ask", f"escalated ({why}): {inner.reason}", inner.sandbox, why
+            )
         )
     return resolve(
         classify_shell(

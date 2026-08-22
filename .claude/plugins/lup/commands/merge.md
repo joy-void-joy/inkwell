@@ -1,6 +1,6 @@
 ---
 description: "Merge a branch or resolve existing merge conflicts"
-allowed-tools: Bash(git:*, uv run lup-devtools:*, .venv/bin/lup-devtools:*), Read, Edit, Write, AskUserQuestion, Skill(lup:commit)
+allowed-tools: Bash(git:*, uv run lup-devtools:*, .venv/bin/lup-devtools:*, lup-devtools:*), Read, Edit, Write, AskUserQuestion, Skill(lup:commit)
 argument-hint: "[target]"
 ---
 
@@ -184,7 +184,9 @@ Summarize:
 
 When invoked without a target branch, detect and resolve conflicts from an in-progress merge, rebase, or cherry-pick.
 
-These commands are spelled without `uv run` — and must stay that way — because `uv` parses `pyproject.toml` before it runs anything, so an integration merge that conflicts the manifest takes the whole conflict toolchain down with it. `.venv/bin/lup-devtools` is the console script in this project's environment: it imports the package directly and starts whatever the manifest currently says.
+These commands are spelled without `uv run` — and must stay that way — because `uv` parses `pyproject.toml` before it runs anything, so an integration merge that conflicts the manifest takes the whole conflict toolchain down with it. What replaces it is the console script in this project's own environment, which imports the package directly and starts whatever the manifest currently says.
+
+Where that script is depends on where the environment is, so the commands below spell the `uv` default and you substitute if yours differs. An environment inside the checkout — `uv sync` writes `.venv` — is named by path, because a bare name would let a sibling worktree's environment answer for this one. An environment outside it — conda, pyenv, a system install, `UV_PROJECT_ENVIRONMENT` — is reached as plain `lup-devtools` once activated, and has no per-checkout copy for the lookup to confuse. `lup-devtools dev conflict status --json` will tell you which you have: if it starts, use the bare name throughout.
 
 ### 1. Assess the situation
 

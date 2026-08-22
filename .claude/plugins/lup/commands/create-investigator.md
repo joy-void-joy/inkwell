@@ -1,5 +1,5 @@
 ---
-description: "Create a new diagnostic/investigator command (like /debug)"
+description: "Create a new diagnostic command that traces pasted output to a root cause, like the debug skill"
 allowed-tools: Write, Read, AskUserQuestion
 argument-hint: "[command-name] [brief description of what it investigates]"
 ---
@@ -16,14 +16,17 @@ This is distinct from `/lup:add-command` which creates general-purpose commands.
 
 The first word is the **command name**. Everything after is a **brief description** of what the command investigates.
 
-If `$ARGUMENTS` is empty, ask the user what the command should be called and what it investigates.
+If `$ARGUMENTS` is empty, Ask the user with the AskUserQuestion tool, offering concrete options plus a free-text choice: what the command should be called and what it investigates
 
 ## Step 1: Understand the domain
 
 Before writing anything, understand what this investigator needs to do:
 
-1. **Read existing investigator declarations** as reference:
-   - `src/lup_template/devtools/harness/content/skills/debug.py` — traces errors through logs
+1. **Read existing investigator declarations** as reference. `debug` is the worked example — it traces errors through logs, and it is the library's, so read it through the package rather than through a path that only resolves when lup is vendored:
+
+   ```bash
+   uv run lup-devtools py source lup.devtools.harness.content.skills.debug
+   ```
 
 2. **Explore the codebase** to understand the domain. Based on the description, identify:
    - What specific content will appear in the pasted trace? (tool calls, thinking blocks, error messages, subagent output, etc.)
@@ -57,7 +60,9 @@ Based on your exploration and the user's input, design the command. Existing inv
 
 ## Step 3: Declare the skill
 
-Write the declaration to `content/skills/<command_name>.py` as a `models.Skill` — under `packages/lup/src/lup/devtools/harness/` when the investigation is one any project on lup would run, under `src/lup_template/devtools/harness/` when only this one would. Register it in that half's `content/catalog.py` (import `SKILL as SKILL_<NAME>`, add it to `LIBRARY_SKILLS` or `PROJECT_SKILLS`) and regenerate with `uv run lup-devtools harness generate all`. The artifacts under.claude/plugins/lup/commands/ under Claude Code, .codex/plugins/lup/skills/ under Codex are generated from this — never write them by hand.
+Write the declaration to `content/skills/<command_name>.py` as a `models.Skill`. It belongs to this project — `src/inkwell/devtools/harness/` — unless the investigation is one *any* project on lup would run, in which case it belongs to the library and `docs/library.md` carries how to reach lup's own source in whichever mode this project obtains it. Register it in that half's `content/catalog.py` beside its siblings, and regenerate with `uv run lup-devtools harness generate all`.
+
+A declaration that names a path inside this project's package exports `skill(layout)` and spells the path through the layout, rather than exporting a bare `SKILL` with the path written in — a literal is correct in exactly one repository and misdirects every other. One that names no such path exports `SKILL` directly. The artifacts under.claude/plugins/lup/commands/ under Claude Code, .codex/plugins/lup/skills/ under Codex are generated from this — never write them by hand.
 
 **Tools**: Choose the `tools` list based on what the investigator needs. Every
 grant is a `ToolGrant` from `packages/lup/src/lup/types.py` — read that closed

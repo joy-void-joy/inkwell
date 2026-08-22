@@ -287,6 +287,16 @@ authors outrank every run without a rule saying so: the read order is the rule.
 What a part newly coined, or kept the name of while replacing the meaning, is
 what it publishes as having moved.
 
+**The work is readable, not merely referred to.** A part run has its own span
+as its material, and is asked not to reintroduce what the book has already
+established — a rule about text it can only follow if it can read that text.
+So the instruction names the work's root and the files of the parts a reader
+reaches either side of this one, and the run reads them with the tool it
+already has. What this replaces is a run that went looking for the work where
+it *could* reach it: the published edition, which on a book mid-revision is a
+different version with different chapter numbers, so what came back was a
+revision measured against a book this is not.
+
 **Adoption is what makes it affordable.** A work nothing has built is a work
 where every part is out of date. `manuscript import` stamps each part as built
 from the text it already holds — `make -t`, and the same argument — so the

@@ -21,6 +21,13 @@ coin into, so the authors' declared vocabulary answers a writer's lookup during
 the run rather than being reconciled against its prose afterwards, when the
 name is already on the page.
 
+**The work is readable, not merely referred to.** A part told it sits among
+others and asked not to repeat them has been given a rule about text it cannot
+see, and what that produces is a run which finds the work where it *can* reach
+it — the published edition, a different version of the book it is holding one
+page of. So the instruction names the work's root and the files either side of
+this part, and the run reads them.
+
 **The format comes from the work, not from the part.** A run handed one
 subsection and asked to infer its own format is guessing at a book it can see a
 page of, and two parts of one work guessing differently is how a textbook
@@ -193,6 +200,25 @@ def placed(manuscript: Manuscript, node: ManuscriptNode) -> str:
     return f"{node.title} — {within} — of {manuscript.title}" if within else node.title
 
 
+def around(manuscript: Manuscript, node: ManuscriptNode) -> str:
+    """The parts a reader reaches just before and just after this one.
+
+    Named with their files, because the point is that they can be read. A run
+    told only that it sits "among others" and asked not to repeat them has been
+    given a rule about text it cannot see, and the way that comes out is a run
+    which goes looking for the work somewhere it can reach — the published
+    site, which is a different edition of a book it is holding a page of.
+    """
+    order = [held for held in manuscript.leaves() if held.path]
+    keys = [held.key for held in order]
+    if node.key not in keys:
+        return ""
+    at = keys.index(node.key)
+    near = order[max(0, at - 1) : at] + order[at + 1 : at + 2]
+    root = Path(manuscript.root)
+    return "\n".join(f"- {held.key} {held.title} — {root / held.path}" for held in near)
+
+
 def part_instruction(
     manuscript: Manuscript, node: ManuscriptNode, reasons: tuple[str, ...] = ()
 ) -> str:
@@ -213,15 +239,28 @@ def part_instruction(
         if reasons
         else ""
     )
+    neighbours = around(manuscript, node)
+    reachable = (
+        "\n\nThe rest of the work is on disk under "
+        f"{manuscript.root}, and you can read any of it. The parts a reader "
+        f"reaches either side of this one are:\n{neighbours}\n"
+        "Read them before deciding what this part has to establish, and read "
+        "further into the work whenever you are about to assert what it says "
+        "elsewhere. What the work holds is what is in these files: a published "
+        "edition of it is a different version, and checking against that one "
+        "instead will have you revising against a book this is not."
+        if neighbours
+        else ""
+    )
     return (
-        f"You are revising one part of a larger work: {placed(manuscript, node)}.\n\n"
-        "Keep the author's structure, voice, and argument. This part sits among "
-        "others that readers reach before and after it, so do not reintroduce "
-        "what the work has already established, and do not rename anything the "
-        "shared glossary already settles — look it up and adopt it. Revise for "
-        "clarity and for currency, questioning the part's own claims where they "
-        "have dated. Return this part alone, opening with its own heading "
-        "exactly as it stands." + because
+        f"You are revising one part of a larger work: {placed(manuscript, node)}."
+        + reachable
+        + "\n\nKeep the author's structure, voice, and argument. Do not "
+        "reintroduce what the work has already established, and do not rename "
+        "anything the shared glossary already settles — look it up and adopt "
+        "it. Revise for clarity and for currency, questioning the part's own "
+        "claims where they have dated. Return this part alone, opening with "
+        "its own heading exactly as it stands." + because
     )
 
 

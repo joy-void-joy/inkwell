@@ -74,11 +74,19 @@ export function WorkTreeView() {
     };
   }, [workId, reloads]);
 
+  // Recorded rather than run, which is what an author revising several parts
+  // wants: say what each needs, then take one loop over the work instead of a
+  // pass per part. Reported when it fails, because a row that silently stayed
+  // as it was reads exactly like one nothing was asked of.
   const askFor = async (key: string) => {
-    await requestWorkPart(workId, key, reason);
-    setAsking("");
-    setReason("");
-    reload();
+    try {
+      await requestWorkPart(workId, key, reason);
+      setAsking("");
+      setReason("");
+      reload();
+    } catch (failure) {
+      setError(String(failure));
+    }
   };
 
   // One part, one pass. A loop narrowed to a single part would only ever pick
@@ -90,26 +98,29 @@ export function WorkTreeView() {
   // Asked before started, the way the run panel asks before its own button: a
   // part the sweep will not pick up is reported here rather than starting a
   // pass that runs nothing and reads as a finished book.
-  const runOne = async (key: string) => {
+  const runNow = async (node: PartNode, reason: string) => {
     try {
-      const would = await previewWorkRun(workId, 0, [key]);
+      // A pass picks up what is out of date, so a part that is already up to
+      // date has to be asked for before it can be run at all — and "run it
+      // again" is a thing an author wants without wanting anything in
+      // particular changed, so nothing here is a reason. A part that is
+      // outstanding already carries the reason it is outstanding, which is
+      // worth more on its row than an empty one written over the top.
+      if (reason || node.staleness === "fresh")
+        await requestWorkPart(workId, node.key, reason);
+      const would = await previewWorkRun(workId, 0, [node.key]);
       const [skipped] = would.passed_over;
       if (skipped) {
         setError(`${skipped.key} is not being run: ${skipped.reason}`);
         return;
       }
-      await startWorkRun(workId, { passes: 1, parts: [key] });
+      await startWorkRun(workId, { passes: 1, parts: [node.key] });
+      setAsking("");
+      setReason("");
       reload();
     } catch (failure) {
       setError(String(failure));
     }
-  };
-
-  const askAndRun = async (key: string) => {
-    await requestWorkPart(workId, key, reason);
-    setAsking("");
-    setReason("");
-    await runOne(key);
   };
 
   const clear = async (key: string) => {
@@ -291,20 +302,24 @@ export function WorkTreeView() {
                 run {node.session.slice(0, 8)}
               </Link>
             )}
-            {node.leaf && asking !== node.key && (
-              <button onClick={() => setAsking(node.key)}>Revise</button>
-            )}
             {node.leaf &&
-              node.staleness !== "fresh" &&
               node.staleness !== "source-gone" &&
               node.standing === "idle" && (
                 <button
-                  onClick={() => runOne(node.key)}
+                  onClick={() => runNow(node, "")}
                   title="Take this part through the pipeline now, and nothing else"
                 >
-                  Run this part
+                  {node.staleness === "fresh" ? "Run it again" : "Run this part"}
                 </button>
               )}
+            {node.leaf && asking !== node.key && (
+              <button
+                onClick={() => setAsking(node.key)}
+                title="Run it with something particular to change"
+              >
+                Revise…
+              </button>
+            )}
             {node.leaf && node.standing !== "idle" && (
               <button onClick={() => clear(node.key)} title="Return it to idle">
                 Clear
@@ -315,16 +330,21 @@ export function WorkTreeView() {
                 <input
                   autoFocus
                   value={reason}
-                  placeholder={`What should change in ${node.key}?`}
+                  placeholder={`What should change in ${node.key}? Empty runs it as it stands`}
                   onChange={(event) => setReason(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") askFor(node.key);
+                    if (event.key === "Enter") runNow(node, reason);
                     if (event.key === "Escape") setAsking("");
                   }}
                 />
-                <button onClick={() => askFor(node.key)}>Ask</button>
-                <button onClick={() => askAndRun(node.key)}>
-                  Ask and run it now
+                <button onClick={() => runNow(node, reason)}>
+                  Revise it now
+                </button>
+                <button
+                  onClick={() => askFor(node.key)}
+                  title="Record it and leave it for the next loop over the work"
+                >
+                  Queue it
                 </button>
                 <button onClick={() => setAsking("")}>Cancel</button>
               </span>

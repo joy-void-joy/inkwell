@@ -17,7 +17,14 @@ from typing import Awaitable, Callable, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from lup.mcp import LupMcpTool, ToolError, ToolResponse, mcp_response
+from lup.mcp import (
+    LupMcpTool,
+    McpServerEntry,
+    ToolError,
+    ToolResponse,
+    create_mcp_server,
+    mcp_response,
+)
 from lup.telemetry.metrics import collector as metrics_collector
 from lup.types import JsonObject
 
@@ -1202,3 +1209,37 @@ def make_glossary_tools(scope: GlossaryScope) -> list[LupMcpTool]:
             handle_lookup,
         ),
     ]
+
+
+class ToolServers(BaseModel):
+    """MCP servers a stage is given, and the tool names they expose.
+
+    The two travel together everywhere: a session needs the servers to reach
+    the tools and the names to allow them, and a stage that merged one without
+    the other would be handed tools it may not call.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    servers: dict[str, McpServerEntry]
+    tool_names: list[str]
+
+    def merged(self, *others: "ToolServers") -> "ToolServers":
+        """This set of servers and tool names, plus every other, as one."""
+        groups = [self, *others]
+        return ToolServers(
+            servers={
+                name: server
+                for group in groups
+                for name, server in group.servers.items()
+            },
+            tool_names=[name for group in groups for name in group.tool_names],
+        )
+
+
+def build_output_server(server_name: str, tools: list[LupMcpTool]) -> ToolServers:
+    """MCP server + allowed tool names for stage output tools."""
+    return ToolServers(
+        servers={server_name: create_mcp_server(name=server_name, tools=tools)},
+        tool_names=[f"mcp__{server_name}__{t.name}" for t in tools],
+    )

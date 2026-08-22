@@ -24,6 +24,8 @@ from inkwell.agent.tools.voice import (
     speaker_tagged,
     voice_cache_dir,
     voice_cache_key,
+    voice_output_server,
+    voice_output_tool,
 )
 
 
@@ -369,6 +371,36 @@ class TestVoiceCaching:
         one = await analyze_single_source(StyleSample(label="test-sample", text=text))
         assert "dry humor" in one.analysis
         assert not one.prescriptive
+
+    @pytest.mark.asyncio
+    async def test_the_analyst_hands_its_guide_back_rather_than_writing_it(
+        self, style_dir: Path
+    ) -> None:
+        """It ran with no write tool at all, which is why this has to work: an
+        analyst told to write a file was refused one — a whole-file write is an
+        approval, and an unattended run has nobody to ask — and every caller
+        drops an empty analysis, so the piece was written with no voice guide
+        and nothing said so."""
+        target = voice_cache_dir() / "handed.md"
+
+        await voice_output_tool(target).handler({"guide": "Dry humor, short."})
+
+        assert target.read_text() == "Dry humor, short."
+        assert voice_output_server(target, "voice_analysis").tool_names == [
+            "mcp__voice_analysis__submit_voice_analysis"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_guide_is_refused_rather_than_kept(
+        self, style_dir: Path
+    ) -> None:
+        """Kept, it would read downstream as a sample with no voice in it."""
+        target = voice_cache_dir() / "empty.md"
+
+        answered = await voice_output_tool(target).handler({"guide": "   "})
+
+        assert answered.get("is_error")
+        assert not target.exists()
 
     @pytest.mark.asyncio
     async def test_analyze_single_source_caches_prescriptive(

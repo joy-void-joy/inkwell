@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 
 from fastapi import WebSocket
@@ -79,10 +79,14 @@ class SessionHandle(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     session_id: str
-    # Absent for a run this manager did not launch. A work's loop starts a run
-    # per part and owns when each ends, so the handle for one is a way to watch
-    # it rather than a way to end it — stopping the loop is what stops those.
+    # Absent for a run this manager did not launch: a work's loop starts a run
+    # per part, and what this manager holds for one of those is a way to watch
+    # it. How to end it is `stopping`, which every run has.
     task: asyncio.Task[AgentSessionResult] | None = None
+    # Named apart from the task because a part run has no task here and can
+    # still be stopped — a run somebody cannot stop is one they have to take
+    # the whole loop down to be rid of, or wait out.
+    stopping: Callable[[], object] | None = None
     state: WritingSessionState
     cost: CostAccumulator
     listener: WebListener
@@ -194,6 +198,7 @@ class SessionManager:
         handle = SessionHandle(
             session_id=session_id,
             task=task,
+            stopping=task.cancel,
             state=state,
             cost=cost,
             listener=listener,
@@ -212,7 +217,9 @@ class SessionManager:
 
         return session_id
 
-    def adopt(self, session_id: str) -> SessionHandle:
+    def adopt(
+        self, session_id: str, *, stopping: Callable[[], object] | None = None
+    ) -> SessionHandle:
         """Register a run something else is driving, and hand back its handle.
 
         A work's loop starts a run per part, and those runs were sessions in
@@ -229,6 +236,7 @@ class SessionManager:
         """
         handle = SessionHandle(
             session_id=session_id,
+            stopping=stopping,
             state=WritingSessionState(),
             cost=CostAccumulator(),
             listener=WebListener(session_id, self),
@@ -537,11 +545,9 @@ class SessionManager:
             case "done":
                 await handle.listener.revision_queue.put(None)
             case "quit":
-                # A part run's life belongs to the loop that started it, so
-                # there is nothing here to cancel and saying so is the answer.
-                if handle.task is None:
+                if handle.stopping is None:
                     return False
-                handle.task.cancel()
+                handle.stopping()
             case "feedback":
                 if text:
                     await handle.listener.feedback_queue.put([text])

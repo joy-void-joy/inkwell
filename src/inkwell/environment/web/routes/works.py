@@ -30,6 +30,7 @@ from inkwell.agent.config import manuscript_store
 from inkwell.agent.glossary import DECLARED_VOCABULARY, load_chapter_glossary
 from inkwell.agent.stages import unknown_format
 from inkwell.environment.web.models import SessionStatus
+from inkwell.environment.web.session_manager import SessionHandle
 from inkwell.environment.web.work_loops import (
     LoopAlreadyRunning,
     WorkLoopManager,
@@ -123,6 +124,15 @@ class WorkSummary(BaseModel):
     outstanding: int = Field(description="How many of them have work left")
 
 
+type FlightStanding = SessionStatus | Literal["queued", "orphaned"]
+"""What is happening to a leased part, beyond what its run would say.
+
+Two standings no session has: one whose turn has not come, and one whose run
+is gone. Both look identical in the state — the part is leased — and they want
+opposite things done about them.
+"""
+
+
 class PartInFlight(BaseModel):
     """One part being worked on right now, as something surveying it reads.
 
@@ -140,10 +150,8 @@ class PartInFlight(BaseModel):
     session: str = Field(description="The run holding it")
     since: datetime = Field(description="When it was picked up")
     stage: str = Field(default="", description="Where in the pipeline it has got to")
-    status: SessionStatus | Literal["orphaned"] = Field(
-        default="running",
-        description="What the run says it is doing, or ``orphaned`` where the "
-        "part is still leased and the run holding it is gone",
+    status: FlightStanding = Field(
+        default="running", description="What is actually happening to the part"
     )
     cost_usd: float = Field(default=0.0, description="What it has spent so far")
     doc_url: str = Field(default="", description="The document it is writing into")
@@ -536,6 +544,19 @@ def work_tree(work: str) -> WorkTree:
     )
 
 
+def standing_of(handle: SessionHandle | None, looping: bool) -> FlightStanding:
+    """What a leased part is actually doing, in one word somebody can act on.
+
+    Three cases and they need different doors: a run is publishing through its
+    handle and can be stopped; a pass holds the lease but this part's turn has
+    not come, so there is nothing to stop and nothing wrong; or nobody is
+    running it at all and the lease wants clearing.
+    """
+    if handle is not None:
+        return handle.status
+    return "queued" if looping else "orphaned"
+
+
 def in_flight(store: ManuscriptStore, work: str) -> tuple[PartInFlight, ...]:
     """Every part of one work being written right now, with what its run says.
 
@@ -544,10 +565,17 @@ def in_flight(store: ManuscriptStore, work: str) -> tuple[PartInFlight, ...]:
     held by a run that is gone reads as ``orphaned`` here, which is the case
     worth surfacing rather than the one worth hiding — it looks exactly like
     work in progress and will never finish on its own.
+
+    Whether a lease is honoured is answered by the loop and not by the session,
+    because a pass leases every part it means to run before running any of
+    them: a part waiting its turn behind the concurrency cap has no run yet and
+    is not lost, and calling it orphaned would send somebody to clear a lease
+    that is about to be used.
     """
     tree = tree_of(store, work)
     state = store.load_state(work)
     sessions = holder.loops.sessions if holder.loops else None
+    looping = holder.running(work)
 
     def held() -> Iterator[PartInFlight]:
         """One entry per part a run has taken and not yet given back."""
@@ -564,7 +592,7 @@ def in_flight(store: ManuscriptStore, work: str) -> tuple[PartInFlight, ...]:
                 since=record.changed_at,
                 reason=record.reason,
                 stage=handle.state.stage if handle else "",
-                status=handle.status if handle else "orphaned",
+                status=standing_of(handle, looping),
                 cost_usd=handle.cost.total.cost_usd if handle else 0.0,
                 doc_url=handle.state.doc_url if handle else "",
             )

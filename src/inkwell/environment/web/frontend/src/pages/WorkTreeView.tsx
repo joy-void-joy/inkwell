@@ -210,7 +210,7 @@ export function WorkTreeView() {
         onChanged={reload}
       />
 
-      <InFlight parts={tree.in_flight} />
+      <InFlight parts={tree.in_flight} onChanged={reload} />
 
       {questions.length > 0 && (
         <section>

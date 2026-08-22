@@ -18,6 +18,9 @@ export function AgentsAtWork() {
   const [parts, setParts] = useState<PartInFlight[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // Bumped by an action on a row, so clearing a lease shows up now rather than
+  // on the next poll — the point of a door is that using it does something.
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -39,7 +42,7 @@ export function AgentsAtWork() {
       live = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [reloads]);
 
   const orphaned = parts.filter((part) => part.status === "orphaned").length;
 
@@ -66,13 +69,14 @@ export function AgentsAtWork() {
           <p>
             {parts.length} part(s) in flight
             {orphaned > 0 &&
-              ` · ${orphaned} held by a run that is gone — clear those on the work's page`}
+              ` · ${orphaned} held by a run that is gone — clear the lease to free the part`}
           </p>
           {parts.map((part) => (
             <InFlightPart
               key={`${part.work}/${part.key}`}
               part={part}
               naming
+              onChanged={() => setReloads((held) => held + 1)}
             />
           ))}
         </>

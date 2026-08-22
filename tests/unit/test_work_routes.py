@@ -8,6 +8,7 @@ answered question stops being open, that its part becomes runnable, and that a
 part still waiting on something else does not.
 """
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -389,7 +390,7 @@ class TestAPartRunIsASessionLikeAnyOther:
     web layer had never been told about, so the list read it back off its own
     unfinished record and called it interrupted for as long as it ran."""
 
-    def test_an_opened_part_run_is_a_live_session(self) -> None:
+    async def test_an_opened_part_run_is_a_live_session(self) -> None:
         sessions = SessionManager()
 
         work_loops.WatchedByTheBrowser(sessions).opening(CYBER, "run1")
@@ -399,7 +400,9 @@ class TestAPartRunIsASessionLikeAnyOther:
         assert held.status == "running"
         assert [held.session_id for held in sessions.list_sessions()[:1]] == ["run1"]
 
-    def test_the_run_is_handed_the_instruments_it_publishes_through(self) -> None:
+    async def test_the_run_is_handed_the_instruments_it_publishes_through(
+        self,
+    ) -> None:
         """Without these the pipeline runs blind and the handle stays empty,
         which is the whole difference between adopting one and listing it."""
         sessions = SessionManager()
@@ -412,7 +415,30 @@ class TestAPartRunIsASessionLikeAnyOther:
         assert observers.state is held.state
         assert observers.cost is held.cost
 
-    def test_a_finished_part_run_stops_reading_as_running(self) -> None:
+    async def test_a_part_run_can_be_stopped_on_its_own(self) -> None:
+        """Without this the only way to be rid of one stuck part run was to
+        take the whole loop down, or wait it out."""
+        sessions = SessionManager()
+        watch = work_loops.WatchedByTheBrowser(sessions)
+        stopped: list[bool] = []
+
+        async def running() -> None:
+            watch.opening(CYBER, "run1")
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                stopped.append(True)
+                raise
+
+        turn = asyncio.create_task(running())
+        await asyncio.sleep(0)
+        assert await sessions.send_action("run1", "quit")
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+        assert stopped == [True]
+
+    async def test_a_finished_part_run_stops_reading_as_running(self) -> None:
         sessions = SessionManager()
         watch = work_loops.WatchedByTheBrowser(sessions)
         watch.opening(CYBER, "run1")
@@ -484,6 +510,19 @@ class TestWhatIsBeingWrittenRightNow:
         self.held(recorded)
 
         assert works.in_flight(recorded, "work")[0].status == "orphaned"
+
+    def test_a_part_waiting_its_turn_is_queued_and_not_orphaned(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pass leases every part it means to run before running any of them,
+        so a part behind the concurrency cap is leased with no run yet. Calling
+        that orphaned sends somebody to clear a lease about to be used."""
+        loops = WorkLoopManager(SessionManager())
+        works.set_loops(loops)
+        monkeypatch.setattr(loops, "running", lambda work: True)
+        self.held(recorded)
+
+        assert works.in_flight(recorded, "work")[0].status == "queued"
 
     def test_a_live_run_reports_its_own_stage_and_spend(
         self, recorded: ManuscriptStore

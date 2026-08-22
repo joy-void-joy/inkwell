@@ -1499,3 +1499,13 @@ textarea { resize: none; }
 .in-flight-orphaned .in-flight-detail {
   color: #c58b28;
 }
+
+/* A part whose turn has not come is fine and needs no attention drawn to it. */
+.in-flight-queued .in-flight-detail {
+  opacity: 0.75;
+}
+
+.in-flight-failure {
+  font-size: 0.8rem;
+  color: #c0392b;
+}

@@ -95,6 +95,8 @@ export interface PartInFlight {
   session: string;
   since: string;
   stage: string;
+  // A session's own status, plus the two only a lease has: waiting its turn in
+  // a pass, and held by a run that is gone.
   status: string;
   cost_usd: number;
   doc_url: string;

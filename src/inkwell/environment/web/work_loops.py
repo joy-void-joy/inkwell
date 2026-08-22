@@ -74,8 +74,17 @@ class WatchedByTheBrowser(PartRunWatch):
         self.sessions = sessions
 
     def opening(self, key: str, session: str) -> PartRunObservers:
-        """Adopt this part's run and hand it the manager's instruments."""
-        handle = self.sessions.adopt(session)
+        """Adopt this part's run and hand it the manager's instruments.
+
+        The task cancelled to stop it is this one — ``opening`` is called from
+        inside the part's own turn, so the running task *is* that turn. Taken
+        here rather than passed in, because a run nobody can stop is one an
+        author has to take the whole loop down to be rid of.
+        """
+        running = asyncio.current_task()
+        handle = self.sessions.adopt(
+            session, stopping=running.cancel if running else None
+        )
         logger.info("Part %s is running as session %s", key, session)
         return PartRunObservers(
             listener=handle.listener,

@@ -122,20 +122,22 @@ export function RunPanel({
 
       <div className="run-actions">
         <button onClick={preview} disabled={busy || running || !rooted}>
-          What would run?
+          {busy && !would ? "Working it out…" : "What would run?"}
         </button>
         <button
           className="run-start"
           onClick={start}
           disabled={busy || running || !would || would.parts.length === 0}
         >
-          {would
-            ? `Run ${would.parts.length} part(s)`
-            : "Run — preview it first"}
+          {busy && would
+            ? "Starting…"
+            : would
+              ? `Run ${would.parts.length} part(s)`
+              : "Run — preview it first"}
         </button>
         {running && (
           <button onClick={stop} disabled={busy}>
-            Stop
+            {busy ? "Stopping…" : "Stop"}
           </button>
         )}
       </div>

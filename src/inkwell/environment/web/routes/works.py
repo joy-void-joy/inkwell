@@ -18,9 +18,10 @@ here reports; this one is the reason the loop can run unattended at all.
 
 import logging
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -28,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from inkwell.agent.config import manuscript_store
 from inkwell.agent.glossary import DECLARED_VOCABULARY, load_chapter_glossary
 from inkwell.agent.stages import unknown_format
+from inkwell.environment.web.models import SessionStatus
 from inkwell.environment.web.work_loops import (
     LoopAlreadyRunning,
     WorkLoopManager,
@@ -121,6 +123,33 @@ class WorkSummary(BaseModel):
     outstanding: int = Field(description="How many of them have work left")
 
 
+class PartInFlight(BaseModel):
+    """One part being worked on right now, as something surveying it reads.
+
+    The question a work page could not answer: a pass over a long book reports
+    when it is over, so an author who started one had a spinner and a settled
+    tree and no way to tell which subsection was being written, by which run,
+    or whether anything was happening at all. Joined from the two halves that
+    each hold some of it — the work's state knows which part is leased and by
+    whom, the session knows how far in it is and what it has spent.
+    """
+
+    work: str = Field(description="The work it belongs to")
+    key: str = Field(description="The part being written")
+    title: str = Field(description="How the work names that part")
+    session: str = Field(description="The run holding it")
+    since: datetime = Field(description="When it was picked up")
+    stage: str = Field(default="", description="Where in the pipeline it has got to")
+    status: SessionStatus | Literal["orphaned"] = Field(
+        default="running",
+        description="What the run says it is doing, or ``orphaned`` where the "
+        "part is still leased and the run holding it is gone",
+    )
+    cost_usd: float = Field(default=0.0, description="What it has spent so far")
+    doc_url: str = Field(default="", description="The document it is writing into")
+    reason: str = Field(default="", description="Why it was picked up")
+
+
 class PartNode(BaseModel):
     """One part of a work as the tree renders it.
 
@@ -183,6 +212,12 @@ class WorkTree(BaseModel):
     settled: bool = Field(default=True, description="Whether the work is at rest")
     loop: WorkLoopStatus | None = Field(
         default=None, description="Where a loop over this work stands, if one has run"
+    )
+    in_flight: tuple[PartInFlight, ...] = Field(
+        default=(),
+        description="What is being written right now. Carried on the tree "
+        "rather than fetched beside it, so the page that shows the work "
+        "cannot show it as quiet while a run is halfway through a part",
     )
 
 
@@ -417,6 +452,27 @@ def list_works() -> list[WorkSummary]:
     return list(summarised())
 
 
+@router.get("/in-flight")
+def everything_in_flight() -> list[PartInFlight]:
+    """Every part of every work being written right now, longest-running first.
+
+    One page for the question an author with two books open actually has —
+    what is being worked on — rather than one page per work to be checked in
+    turn. Declared above ``/{work}`` so the literal path wins the match; a
+    work slugged ``in-flight`` would be unreachable, which is a better trade
+    than this being a work's tree.
+    """
+    store = manuscript_store()
+
+    def everywhere() -> Iterator[PartInFlight]:
+        """Each work's in-flight parts, works with none contributing nothing."""
+        for name in store.works():
+            if store.load_tree(name) is not None:
+                yield from in_flight(store, name)
+
+    return sorted(everywhere(), key=lambda held: held.since)
+
+
 @router.post("", status_code=201)
 def record_work(request: ImportRequest) -> WorkImport:
     """Record a work, so the browser is not a reader of what a terminal set up.
@@ -476,7 +532,44 @@ def work_tree(work: str) -> WorkTree:
         blocked=len(found.blocked()),
         settled=found.settled(),
         loop=holder.status_of(work),
+        in_flight=in_flight(store, work),
     )
+
+
+def in_flight(store: ManuscriptStore, work: str) -> tuple[PartInFlight, ...]:
+    """Every part of one work being written right now, with what its run says.
+
+    Read off the work's own state rather than off the loop, because the state
+    is what the lease is recorded in and it outlives the process: a part left
+    held by a run that is gone reads as ``orphaned`` here, which is the case
+    worth surfacing rather than the one worth hiding — it looks exactly like
+    work in progress and will never finish on its own.
+    """
+    tree = tree_of(store, work)
+    state = store.load_state(work)
+    sessions = holder.loops.sessions if holder.loops else None
+
+    def held() -> Iterator[PartInFlight]:
+        """One entry per part a run has taken and not yet given back."""
+        for node in tree.walk():
+            record = state.record(node.key)
+            if record is None or record.standing != "running":
+                continue
+            handle = sessions.handle_for(record.holder) if sessions else None
+            yield PartInFlight(
+                work=work,
+                key=node.key,
+                title=node.title,
+                session=record.holder,
+                since=record.changed_at,
+                reason=record.reason,
+                stage=handle.state.stage if handle else "",
+                status=handle.status if handle else "orphaned",
+                cost_usd=handle.cost.total.cost_usd if handle else 0.0,
+                doc_url=handle.state.doc_url if handle else "",
+            )
+
+    return tuple(held())
 
 
 def would_run(
@@ -633,11 +726,25 @@ def answer_question(work: str, question: str, request: AnswerRequest) -> Questio
 
 @router.post("/{work}/parts/{key:path}/request")
 def request_part(work: str, key: str, request: RequestRevision) -> PartNode:
-    """Ask for one part to be revised, which is what makes it outstanding."""
+    """Ask for one part to be revised, which is what makes it outstanding.
+
+    Refused while a run holds the part, for the reason clearing one is: the
+    standing being written over is the lease, and the run named in it is the
+    only record of who to follow to see what is happening. Overwriting that
+    loses the link to a run which then finishes and writes its prose in
+    anyway, over the top of whatever was asked for here.
+    """
     store = manuscript_store()
     tree = tree_of(store, work)
     if tree.node(key) is None:
         raise HTTPException(status_code=404, detail=f"{work} has no part {key!r}")
+    running = store.load_state(work).record(key)
+    if running is not None and running.standing == "running":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{key} is being run right now by {running.holder} — "
+            "wait for that run, or stop the work's loop first",
+        )
     store.publish_state(
         work, store.load_state(work).declared(key, "requested", request.reason)
     )

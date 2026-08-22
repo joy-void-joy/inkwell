@@ -1446,3 +1446,56 @@ textarea { resize: none; }
   color: #2f9e56;
   font-size: 0.85rem;
 }
+
+/* Being written now. Loud on purpose: a run in progress was the one thing the
+   work page could not say, and a panel nobody notices would not have fixed
+   that. */
+.in-flight {
+  border: 1px solid var(--accent-dim);
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin: 12px 0;
+}
+
+.in-flight h2 {
+  font-size: 0.95rem;
+  margin: 0 0 8px;
+}
+
+.in-flight-part {
+  padding: 6px 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.in-flight-part:first-of-type {
+  border-top: none;
+}
+
+.in-flight-work {
+  color: var(--text-dim);
+}
+
+.in-flight-key {
+  font-family: monospace;
+}
+
+.in-flight-title {
+  font-weight: 600;
+}
+
+.in-flight-detail {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.in-flight-reason {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding-left: 16px;
+}
+
+/* A lease nobody is honouring looks exactly like work in progress, so it is
+   the one that has to look different. */
+.in-flight-orphaned .in-flight-detail {
+  color: #c58b28;
+}

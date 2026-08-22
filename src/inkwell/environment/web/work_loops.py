@@ -27,7 +27,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lup.channels.models import utc_now
 
+from inkwell.environment.web.models import SessionStatus
+from inkwell.environment.web.session_manager import SessionManager
 from inkwell.manuscript.loop import PassReport, run_loop
+from inkwell.manuscript.runner import PartOutcome, PartRunObservers, PartRunWatch
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript
 from inkwell.manuscript.vocabulary import Abbreviation
@@ -35,8 +38,55 @@ from inkwell.manuscript.vocabulary import Abbreviation
 logger = logging.getLogger(__name__)
 
 
+def ended_as(outcome: PartOutcome) -> SessionStatus:
+    """How a finished part run reads as a session.
+
+    A part that parked is not finished and not broken: it asked the author
+    something and is waiting, which is the same standing as a run that stopped
+    at a checkpoint, and the surface already knows how to offer that one a way
+    back in.
+    """
+    match outcome.ended():
+        case "rewritten":
+            return "completed"
+        case "parked":
+            return "paused"
+        case "failed":
+            return "failed"
+
+
 class LoopAlreadyRunning(Exception):
     """Raised where a work already has a loop over it."""
+
+
+class WatchedByTheBrowser(PartRunWatch):
+    """Registers each part run as a session, so the browser can watch it.
+
+    A part run was always a session — a trace, a stage, a document, a spend —
+    but one the web layer had never been told about, so it was read back off
+    its own unfinished record and reported as interrupted for as long as it
+    ran. What was missing was not a screen but the introduction: told when a
+    run opens, this hands it somewhere to publish and lets every surface that
+    already renders a session render this one.
+    """
+
+    def __init__(self, sessions: SessionManager) -> None:
+        self.sessions = sessions
+
+    def opening(self, key: str, session: str) -> PartRunObservers:
+        """Adopt this part's run and hand it the manager's instruments."""
+        handle = self.sessions.adopt(session)
+        logger.info("Part %s is running as session %s", key, session)
+        return PartRunObservers(
+            listener=handle.listener,
+            state=handle.state,
+            cost=handle.cost,
+            trace=handle.trace,
+        )
+
+    def closed(self, key: str, session: str, outcome: PartOutcome) -> None:
+        """Record how it ended, in the words the outcome already answers in."""
+        self.sessions.retire(session, ended_as(outcome))
 
 
 class WorkLoopStatus(BaseModel):
@@ -101,8 +151,14 @@ class WorkLoop(BaseModel):
 class WorkLoopManager:
     """Every work with a loop over it in this process."""
 
-    def __init__(self) -> None:
+    def __init__(self, sessions: SessionManager | None = None) -> None:
         self.loops: dict[str, WorkLoop] = {}
+        # Every part run this manager starts is registered with the session
+        # manager, so the pages that render a session render a part run too,
+        # and a route can ask what one is doing. Optional because a test of
+        # the loop's own bookkeeping has no browser to publish to.
+        self.sessions = sessions
+        self.watching = WatchedByTheBrowser(sessions) if sessions else PartRunWatch()
 
     def loop_for(self, work: str) -> WorkLoop | None:
         """The loop over one work, where this process is running one."""
@@ -153,6 +209,7 @@ class WorkLoopManager:
                     concurrency=concurrency,
                     reconciling=reconciling,
                     reporting=lambda report: self.recorded(work, report),
+                    watching=self.watching,
                 ),
                 name=f"inkwell-work-loop-{work}",
             ),

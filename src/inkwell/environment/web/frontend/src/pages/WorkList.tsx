@@ -95,6 +95,9 @@ export function WorkList() {
     <div className="page work-list">
       <div className="page-header">
         <h1>Works</h1>
+        <Link to="/in-flight" className="back-link">
+          Being written now
+        </Link>
         <Link to="/" className="back-link">
           Sessions
         </Link>

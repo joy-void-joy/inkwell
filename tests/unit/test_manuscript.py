@@ -34,7 +34,7 @@ from inkwell.manuscript.graph import (
     readings,
     sweep,
 )
-from inkwell.manuscript.loop import narrowed, schedulable, unpicked
+from inkwell.manuscript.loop import narrowed, run_pass, schedulable, unpicked
 from inkwell.manuscript.mailbox import (
     PartAnswer,
     PartMailbox,
@@ -49,7 +49,15 @@ from inkwell.manuscript.ingest import (
     read_manuscript,
 )
 from inkwell.manuscript import runner as runner_module
-from inkwell.manuscript.runner import coinages, ledger, named_in, run_part
+from inkwell.manuscript.runner import (
+    PartOutcome,
+    PartRunObservers,
+    PartRunWatch,
+    coinages,
+    ledger,
+    named_in,
+    run_part,
+)
 from inkwell.manuscript.splice import (
     HeadingLost,
     PartNotFound,
@@ -1057,6 +1065,76 @@ class TestARewriteThatLostItsHeadingIsRefused:
         assert outcome.ended() == "failed"
         assert "2.3.2 Cyber Risk" in outcome.failure
         assert (chapters / "02" / "03.md").read_text(encoding="utf-8") == before
+
+
+class TestAPassSaysWhatItIsDoingWhileItIsDoingIt:
+    """A pass over a book is long, and its report exists once it is over, so
+    anything that wanted to show what was being written had nothing to show.
+    The watch is that signal, and what matters about it is that it closes: a
+    run reported as open and never closed reads as running for good."""
+
+    def watcher(self) -> tuple[PartRunWatch, list[str]]:
+        """A watch that writes down what it was told, in order."""
+        said: list[str] = []
+
+        class Noting(PartRunWatch):
+            def opening(self, key: str, session: str) -> PartRunObservers:
+                said.append(f"open {key}")
+                return PartRunObservers()
+
+            def closed(self, key: str, session: str, outcome: PartOutcome) -> None:
+                said.append(f"closed {key} {outcome.ended()}")
+
+        return Noting(), said
+
+    @pytest.mark.asyncio
+    async def test_a_part_run_is_opened_and_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        watch, said = self.watcher()
+
+        async def record(**passed: object) -> AgentSessionResult:
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        store, work = self.staged(tmp_path)
+
+        await run_pass(store, "atlas", work, only=("02/03/2.3.2",), watching=watch)
+
+        assert said == ["open 02/03/2.3.2", "closed 02/03/2.3.2 rewritten"]
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_raises_is_still_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The case that would otherwise leave a session reading as running
+        for as long as the server was up, having ended in the first minute."""
+        watch, said = self.watcher()
+
+        async def broken(**passed: object) -> AgentSessionResult:
+            raise RuntimeError("the model went away")
+
+        monkeypatch.setattr(runner_module, "run_session", broken)
+        store, work = self.staged(tmp_path)
+
+        await run_pass(store, "atlas", work, only=("02/03/2.3.2",), watching=watch)
+
+        assert said == ["open 02/03/2.3.2", "closed 02/03/2.3.2 failed"]
+
+    def staged(self, tmp_path: Path) -> tuple[ManuscriptStore, Manuscript]:
+        """A work with one part asked for, ready for a pass to pick it up."""
+        work = read_manuscript(atlas_like(tmp_path))
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        store.publish_tree("atlas", work)
+        state = adopted(WorkState(), readings(work))
+        store.publish_state(
+            "atlas", state.declared("02/03/2.3.2", "requested", "sharpen it")
+        )
+        return store, work
 
 
 class TestAPassCanBeKeptToOnePart:

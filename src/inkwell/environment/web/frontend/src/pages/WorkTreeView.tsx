@@ -10,6 +10,7 @@ import {
   requestWorkPart,
   startWorkRun,
 } from "../api/client";
+import { InFlight } from "../components/InFlight";
 import { stalenessLabel } from "../types";
 import type { PartNode, QuestionView, ReachedBy, WorkTree } from "../types";
 import { RunPanel } from "./RunPanel";
@@ -209,6 +210,8 @@ export function WorkTreeView() {
         onChanged={reload}
       />
 
+      <InFlight parts={tree.in_flight} />
+
       {questions.length > 0 && (
         <section>
           <h2>Waiting on an answer</h2>
@@ -312,7 +315,10 @@ export function WorkTreeView() {
                   {node.staleness === "fresh" ? "Run it again" : "Run this part"}
                 </button>
               )}
-            {node.leaf && asking !== node.key && (
+            {/* Not offered while a run holds the part: what asking would write
+                over is the lease, and the run named in it is the only way back
+                to what is being done to the part. */}
+            {node.leaf && node.standing !== "running" && asking !== node.key && (
               <button
                 onClick={() => setAsking(node.key)}
                 title="Run it with something particular to change"

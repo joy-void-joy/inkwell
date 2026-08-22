@@ -32,7 +32,7 @@ between an agent and the corpus.
 """
 
 import logging
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from datetime import date, datetime
 from itertools import islice
@@ -322,7 +322,7 @@ enough for a bounded 0-to-1 score to read the same width every time, which is
 what makes letter-by-letter order numeric order."""
 
 
-class OrderKey(BaseModel):
+class OrderKey(BaseModel, ABC):
     """One axis results may be placed along.
 
     ``place`` answers in strings rather than in each axis's own type because a
@@ -450,7 +450,7 @@ type TierName = Literal["browse", "narrow", "read"]
 """One depth of reading. Adding a tier means a class below and its name here."""
 
 
-class RetrievalTier(BaseModel):
+class RetrievalTier(BaseModel, ABC):
     """One depth the index answers a question at.
 
     Independently callable, and cumulative only in the sense that a caller

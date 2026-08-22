@@ -213,7 +213,7 @@ def share(part: int, whole: int) -> float:
     return part / whole if whole else 0.0
 
 
-class FormatCheck(BaseModel):
+class FormatCheck(BaseModel, ABC):
     """One check a format declares beside its guidance.
 
     The base declares `run` and every row answers it, so a new kind of row is

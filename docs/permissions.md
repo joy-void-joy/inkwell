@@ -16,10 +16,15 @@ canonical source and regenerate.
 
 ## Shell classification
 
-The policy classifies each shell command against the vocabulary in
-`devtools/harness/content/shell_vocabulary.py`, every URL scope, and each edit
-in a batch. `lup.policy.shell_rules` owns the shape that table takes and its
-erasure into the rows the kernel reads, never the words. The shell
+The policy classifies each shell command against
+`lup.policy.vocabulary.default_vocabulary` as
+`devtools/harness/content/shell_vocabulary.py` selects it, every URL scope,
+and each edit in a batch. `lup.policy.shell_rules` owns the shape that table
+takes and its erasure into the rows the kernel reads, never the words; the
+project states only where it differs from what the library offers — a
+downstream toolchain to add, a command it judges differently, one it drops —
+so declaring `lake` costs one entry rather than a copy of every command the
+library already judged. The shell
 lattice reserves ask for judged risk; unjudged work denies, hinting the
 escalation recipe. Under a launcher-verified OS sandbox
 (`LUP_SANDBOX_ACTIVE`), unjudged work defers to that boundary, and a
@@ -108,6 +113,30 @@ question the gate exists to raise has no content to answer it. One carrying
 anything else is the module it became, and asks. The anti-pattern audit runs
 before any auto-allow, so keeping an edit small cannot outrun it.
 
+Every verdict above is what the kernel reaches when a project says nothing,
+and every one of them is nameable. `HookSet.edit_rules` is a `Selection` of
+`EditRule`, each naming the axes an edit has — the gate it speaks about, the
+file suffixes, the path roles, and whether the change creates, overwrites,
+modifies, or deletes — plus the effect it hands that class and the size
+threshold it counts by. The two move independently: a rule may widen how much
+counts as small for one suffix without restating who decides when it trips.
+
+Overlapping rules resolve **last-match-wins**, the way `.gitignore` reads, so
+a project writes the broad statement first and carves its exceptions after
+it. A repository whose conventions are Python conventions says so in two
+entries — the content gates allow, then `.py`/`.pyi` ask — and leaves prose,
+data, and other toolchains to be reviewed in the diff rather than at the
+hook. Most-specific-wins was rejected: it makes a table's meaning depend on a
+specificity ordering nobody wrote down, and has no answer at all for two
+rules of equal reach.
+
+The gate ids include the two that deny removing review feedback. A gate a
+project cannot reach is one whose rightness this library asserted on that
+project's behalf, and an escape hatch stated in a declaration somebody
+reviews is better than the fork it would otherwise take. Moving one gate
+moves nothing adjacent: softening `feedback-removed` leaves `claim-removed`
+denying, because the two are about different things.
+
 A project that declares an **acceptance guard** adds one gate ahead of all
 of those, over every root it gave the `test` role. An ordinary session is
 asked before it edits a test, because a test that encodes the wrong
@@ -167,15 +196,37 @@ The guidance spells both; this is what each one does.
 Each rule id is shown in the deny message that cites it, and indexed in
 [rules.md](rules.md).
 
+## Asking before spending a turn on it
+
+A denial is the ordinary way to learn a verdict, and it costs a turn. Two
+commands answer the same question up front, against the declared policy
+rather than a reading of this page:
+
+```bash
+uv run lup-devtools dev policy '<the command as you would run it>'
+uv run lup-devtools dev vocabulary --provenance
+```
+
+`dev policy` prints the decision and the sentence explaining it — the same
+sentence the hook would have shown — for a shell command, and takes the same
+lattice through the same segments, so a pipeline or a `$(...)` answers as it
+actually would. `dev vocabulary` prints every shell form the vocabulary
+judges and where each rule came from, which is the one to reach for when the
+question is "what *would* be allowed here" rather than "is this".
+
 ## How one decision reaches two runtimes
 
 The generated plugins enforce permissions without importing lup, yet decide
 identically to the library.
 
 1. **Canonical sources** — the `HookSet` in `devtools/harness/catalog.py`
-   (protected edit roots, allowed fetch scopes, policy ids, shell-rule
-   extensions), the anti-pattern rule set in `lup.codescan.antipatterns`, and
-   the baseline shell vocabulary in `lup.policy.shell_rules`.
+   (protected edit roots, allowed fetch scopes, policy ids, and the shell and
+   edit selections), the anti-pattern rule set in `lup.codescan.antipatterns`,
+   and the offered shell vocabulary in `lup.policy.vocabulary`. Each selection
+   is resolved by `HookSet.resolved_shell_rules` and
+   `HookSet.resolved_edit_rules` and nowhere else: a second place that knew
+   which defaults a selection layers over is how a session comes to decide
+   differently from the plugin its own declaration generated.
 2. **Library layer** — `lup.policy.rules` validates those inputs as Pydantic
    surfaces and erases them into primitive rows; `lup.policy.kernel` — the
    hermetic, stdlib-only decision core — interprets those rows to reach every

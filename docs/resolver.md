@@ -74,6 +74,27 @@ actor reads it later, `say` and `redirect` report what a message is queued
 for rather than that it sent, `actors` lists what each actor has not read
 yet, and anything still queued when a session closes is recorded.
 
+**Who a run holds is `roster.jsonl`, not the journal.** Every round a run
+opens announces itself there, so `resolve actors` prints each agent with
+what it was asked and how it ended — working, or the summary or error it
+finished on — and resolves an address without reading the journal at all.
+That matters at the size these reach: the population is asked for on every
+status line, and the journal it used to be folded from runs to tens of
+megabytes. A worker is finished when its concern settles; its reviewer is
+not, because a join asks that reviewer again over the merged tree.
+
+**The run is an address, and it is where a worker reports.** `send_message`
+with no target reaches `run:<run-id>`, whose inbox `resolve actors` prints
+first, under "said to you by this run's actors". That is the channel for
+anything that is not a decision — a consequence for whoever merges, or a
+worker blocked on something a human would simply fix. It never parks anyone,
+which is the difference from a question: two workers in one run each spent a
+human round trip parked on housekeeping because the question queue was the
+only route they had been taught. Reaching *every* actor is `--to '*'`, which
+is the default for `say` and `redirect`; leaving the target empty reaches
+nobody rather than everybody, because a blank that meant "everyone" is what
+delivered a worker's report to its siblings instead of to a person.
+
 **`state.json` lags the mailbox.** The run folds `questions/` and `answers/`
 into `state.questions`/`state.answers` as it promotes, so those copies are
 correct once a run finishes and behind while it moves. The rule: the mailbox

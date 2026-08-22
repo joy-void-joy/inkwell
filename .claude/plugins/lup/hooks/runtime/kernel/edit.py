@@ -7,12 +7,21 @@ import io
 import posixpath
 import re
 import tokenize
-from collections.abc import Callable, Iterator
-from typing import TypedDict
+import difflib
+from collections import Counter
+from collections.abc import Callable, Iterator, Set as AbstractSet
+from functools import cache
+from typing import NotRequired, TypedDict
 
 from .decision import KernelDecision
 from .roles import normalized_path, path_role, root_matches
-from .rows import AcceptanceGuardRow, AntiPatternRow, PathRoleRow, PathRuleRow
+from .rows import (
+    AcceptanceGuardRow,
+    AntiPatternRow,
+    EditRuleRow,
+    PathRoleRow,
+    PathRuleRow,
+)
 
 MARKER_RE = re.compile(r"(#|//)\s*lup\s*:", re.IGNORECASE)
 # A review note is any marker whose keyword is not `ignore`, which is the
@@ -33,6 +42,14 @@ OPEN_NOTE_RE = re.compile(
     r"(#|//)\s*lup\s*:(?!\s*(?:ignore|solved|template)\b)", re.IGNORECASE
 )
 SOLVED_NOTE_RE = re.compile(r"(#|//)\s*lup\s*:\s*solved\b", re.IGNORECASE)
+# Everything before a note's own words: the marker, and the kind keyword where
+# one is present. `defer` carries an optional bracketed gate that belongs to
+# the head rather than the text, so waking a deferral reads as the same note
+# it always was instead of as one deleted and another added.
+NOTE_HEAD_RE = re.compile(
+    r"(#|//)\s*lup\s*:\s*(?:(?:solved|defer(?:\s*\[[^\]]*\])?)\s*:\s*)?",
+    re.IGNORECASE,
+)
 IGNORE_RE = re.compile(
     r"(#|//)\s*lup\s*:\s*ignore\b(?:\s*\[(?P<ids>[^\]]*)\])?",
     re.IGNORECASE,
@@ -61,11 +78,38 @@ this budget exists to avoid. A project whose formatter is configured
 differently passes its own.
 """
 
+# lup: ignore[constant-declaration] — the kernel carries no config, and the
+# hook compiled from it must read the same width the sweep does
+ABBREVIATION_CHARS = 16
+"""The widest prefix that abbreviates an identifier rather than cutting a text.
+
+A git SHA shortens to seven or twelve, a uuid to sixteen, a content hash to
+whatever still collides with nothing; all of them stay the name of the thing
+they came from. Nothing anyone wrote survives being shortened this far, so a
+bound at or under this is read as naming rather than keeping — which is what
+lets `silent-truncation` flag every wider slice without a table of receivers
+it would have to guess from.
+"""
+
 
 def standalone_suppression(line: str) -> re.Match[str] | None:
     """The directive on a line that carries nothing but the directive."""
     match = IGNORE_RE.search(line)
     return None if match is None or line[: match.start()].strip() else match
+
+
+def continues_comment_block(line: str) -> bool:
+    """Whether a line carries a directive's reason onward rather than ending it.
+
+    A plain comment continues the block a directive heads. A directive of its
+    own ends it — two markers cannot share a block, and the nearer takes its
+    lines — and so does anything that is not a comment at all.
+
+    Named rather than spelled twice because it is also what bounds a search
+    for the directive guarding a line: the first line that does not continue
+    the block ends every reach from above it.
+    """
+    return line.lstrip().startswith(("#", "//")) and IGNORE_RE.search(line) is None
 
 
 def suppression_reaches(
@@ -95,8 +139,7 @@ def suppression_reaches(
     if standalone_suppression(lines[directive_line - 1]) is None:
         return False
     return all(
-        lines[number - 1].lstrip().startswith(("#", "//"))
-        and IGNORE_RE.search(lines[number - 1]) is None
+        continues_comment_block(lines[number - 1])
         for number in range(directive_line + 1, violation_line)
     )
 
@@ -279,8 +322,208 @@ def suppression_placement(violation_line: int) -> str:
     return f"line {violation_line}, or line {violation_line - 1} directly above it"
 
 
+@cache
+def python_tree(source: str) -> ast.Module | None:
+    """One file's parsed syntax tree, or ``None`` where it does not parse.
+
+    Every AST reader below asks the same question of the same text, and a
+    parse costs more than the walk that follows it — so the tree is built
+    once per source and handed to each of them rather than rebuilt per
+    caller. A whole-repository sweep runs nine readers over each file, and
+    parsed per caller that is nine parses of every file in the tree.
+
+    Unbounded for the reason the prose map is: the key is text the caller is
+    already holding, so evicting an entry frees nothing it was not keeping.
+    A source that will not parse is remembered as ``None``, which is the same
+    answer every caller had been computing separately.
+    """
+    try:
+        return ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+
+
+@cache
+def python_nodes(tree: ast.Module) -> list[ast.AST]:
+    """Every node under one module, walked once for all of its readers.
+
+    `ast.walk` is a generic breadth-first generator: it allocates a queue and
+    reads each node's fields through `getattr` to find the children, and a
+    whole-repository sweep runs about ten of those over every file — the
+    matchers, the boundary scans and the import readers all asking the same
+    tree for the same nodes. The walk is a pure function of the tree, so it
+    happens once and the list is what each of them reads.
+
+    Keyed on the tree because that is what a reader holds, and `python_tree`
+    above is the only thing that builds one — so an entry lives exactly as
+    long as the tree it belongs to was already going to.
+    """
+    return list(ast.walk(tree))
+
+
+@cache
+def python_nodes_by_type(tree: ast.Module) -> dict[str, list[ast.AST]]:
+    """Every node under one module, grouped by the name of its own type.
+
+    A matcher asks about one shape — subscripts, calls, imports — and a
+    sweep runs forty of them over each file. Scanning the whole node list per
+    matcher is that file walked forty times to answer forty narrow questions;
+    grouped once, each of them is a lookup and a short list.
+
+    Keyed on the tree for the reason the walk above is: `python_tree` is the
+    only thing that builds one, so an entry lives exactly as long as the tree
+    it belongs to already does.
+    """
+    grouped: dict[str, list[ast.AST]] = {}
+    for node in python_nodes(tree):
+        grouped.setdefault(type(node).__name__, []).append(node)
+    return grouped
+
+
+class SitePosition(TypedDict):
+    """Where one symbol sits, in the coordinates `ast` reports.
+
+    A TypedDict rather than a model because this is the hermetic kernel and
+    there is no pydantic here; a pair rather than two loose fields because
+    both halves of a position are meaningless apart.
+    """
+
+    line: int
+    """1-based, as `ast` reports `lineno`."""
+
+    column: int
+    """0-based UTF-8 offset, as `ast` reports `col_offset`."""
+
+
+class MatchSite(TypedDict):
+    """One place a rule fires, in the terms every gate reads it in.
+
+    A rule is about sites, and a site is asked two different questions. The
+    hook and the audit ask *which line does this fire on*, which is ``line``
+    and is all a text-shaped rule ever has. A rule whose verdict turns on a
+    type is also asked *which symbol settles it*, and answering that needs a
+    position rather than a line — so the selector that already found the node
+    reports the positions too, instead of a second selector rediscovering the
+    same nodes to compute them.
+
+    ``member`` is the attribute the site is named for: ``get`` in
+    ``payload.get(key)``. Resolving it reaches the class that declares it,
+    which follows the inheritance chain for free — a receiver can only reach
+    ``dict.get`` by being a dict.
+
+    ``receiver`` is the last name of what the member is read from, and is the
+    fallback for the members no source declares: a ``TypedDict``'s ``get`` is
+    synthesized, so it resolves to nothing while the receiver still resolves
+    to the class. It is absent where the receiver ends in no name at all — a
+    subscript, a call — which is why it is the fallback rather than the
+    question.
+
+    ``subject`` is the unparsed receiver expression, quoted back as the
+    evidence for whatever verdict the resolution reaches.
+    """
+
+    line: int
+    member: NotRequired[SitePosition]
+    receiver: NotRequired[SitePosition]
+    subject: NotRequired[str]
+
+
+def sites_at(lines: AbstractSet[int]) -> list[MatchSite]:
+    """The sites of a rule that names lines and no symbol to resolve.
+
+    Most rules are one of these: a bare ``except``, an ``import re``, a
+    ``# noqa``. Nothing about them turns on what a name means, so they carry
+    no position for a checker to answer about, and a resolution pass finds
+    nothing to ask.
+    """
+    return [MatchSite(line=line) for line in sorted(lines)]
+
+
+def lines_of(sites: list[MatchSite]) -> set[int]:
+    """The lines a selector's sites fire on, which is what both gates grade."""
+    return {site["line"] for site in sites}
+
+
+def name_position(node: ast.expr) -> SitePosition | None:
+    """Where the last name of an expression sits, or None if it ends in none.
+
+    A checker answers about the symbol a position denotes, and only a name
+    denotes one. ``payload`` and ``self.spawned`` end in a name and can be
+    asked about; ``payload['outer']`` and ``make()`` end in a bracket, and
+    the result they stand for has no position of its own to point at.
+    """
+    match node:
+        case ast.Name(id=name):
+            return SitePosition(
+                line=node.lineno, column=(node.end_col_offset or len(name)) - 1
+            )
+        case ast.Attribute(attr=attribute):
+            return SitePosition(
+                line=node.end_lineno or node.lineno,
+                column=(node.end_col_offset or len(attribute)) - 1,
+            )
+    return None
+
+
+def nodes_of[NodeT: ast.AST](tree: ast.Module, kind: type[NodeT]) -> list[NodeT]:
+    """Every node of one type under a module, read off the grouped index.
+
+    The bucket is keyed by the exact type name, so the narrowing below always
+    holds — it is there to say so to the checker rather than to filter.
+    """
+    grouped = python_nodes_by_type(tree)
+    name = kind.__name__
+    found = grouped[name] if name in grouped else []
+    return [node for node in found if isinstance(node, kind)]
+
+
+def attribute_call_site(read: ast.Attribute) -> MatchSite:
+    """One ``receiver.<attribute>(...)`` call, as a site a checker can settle."""
+    line = read.end_lineno or read.value.lineno
+    site = MatchSite(
+        line=line,
+        member=SitePosition(
+            line=line, column=(read.end_col_offset or 0) - len(read.attr)
+        ),
+        subject=ast.unparse(read.value),
+    )
+    position = name_position(read.value)
+    if position is not None:
+        site["receiver"] = position
+    return site
+
+
+def attribute_call_sites(
+    tree: ast.Module,
+    attribute: str,
+    keep: Callable[[ast.Call, ast.Attribute], bool],
+) -> list[MatchSite]:
+    """The sites of every ``receiver.<attribute>(...)`` call a rule keeps.
+
+    The one place the shape "a call on a named member" is spelled. A rule
+    supplies the attribute and the condition that is its own — an arity, a
+    receiver the tree can already rule out — and takes back sites carrying
+    the positions a checker settles them at. Stating the shape once is what
+    keeps a resolution pass from asking about calls the rule discarded.
+    """
+    return [
+        attribute_call_site(node.func)
+        for node in nodes_of(tree, ast.Call)
+        if isinstance(node.func, ast.Attribute)
+        and node.func.attr == attribute
+        and keep(node, node.func)
+    ]
+
+
+@cache
 def python_tokens(source: str) -> list[tokenize.TokenInfo] | None:
-    """Tokenize Python source, returning ``None`` for incomplete syntax."""
+    """Tokenize Python source, returning ``None`` for incomplete syntax.
+
+    Remembered per source for the reason the tree above is: the four maskers
+    and column maps below each tokenize the same text, and one of them
+    tokenizes it twice. Callers read the list and never rewrite it, so the
+    one instance is shared rather than copied.
+    """
     try:
         return list(tokenize.generate_tokens(io.StringIO(source).readline))
     except (tokenize.TokenError, IndentationError, SyntaxError):
@@ -301,12 +544,11 @@ def python_comment_columns(source: str) -> dict[int, int] | None:
 
 def docstring_lines(source: str) -> set[int]:
     """Return lines occupied by bare string-expression documentation."""
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
+    tree = python_tree(source)
+    if tree is None:
         return set()
     lines: set[int] = set()
-    for node in ast.walk(tree):
+    for node in python_nodes(tree):
         if (
             isinstance(node, ast.Expr)
             and isinstance(node.value, ast.Constant)
@@ -399,38 +641,63 @@ def quoted_example(line: str, position: int) -> bool:
     return prefix.count("`") % 2 == 1 or prefix.endswith("`")
 
 
-def count_outside_examples(pattern: re.Pattern[str], text: str) -> int:
-    """Count matches in one chunk of prose, skipping backtick-quoted examples."""
-    return sum(
-        1
-        for line in text.splitlines()
+class LocatedNote(TypedDict):
+    """One marker match: where it sits, and the words it carries.
+
+    The line is what lets a vanished note be paired with the code it
+    annotated; the text is what lets it be recognised in the next revision.
+    A tally supports neither, which is why both are carried rather than
+    counted and discarded.
+    """
+
+    line: int
+    text: str
+
+
+def notes_outside_examples(
+    pattern: re.Pattern[str], text: str, first_line: int = 1
+) -> list[LocatedNote]:
+    """Locate matches in one chunk of prose, skipping backtick-quoted examples.
+
+    ``first_line`` is where this chunk begins in the file, so a match inside a
+    multi-line docstring token reports the line it actually occupies rather
+    than the token's.
+    """
+    return [
+        LocatedNote(line=first_line + offset, text=line[match.start() :].strip())
+        for offset, line in enumerate(text.splitlines())
         for match in pattern.finditer(line)
         if not quoted_example(line, match.start())
-    )
+    ]
 
 
-def count_in_prose(
+def count_outside_examples(pattern: re.Pattern[str], text: str) -> int:
+    """Count matches in one chunk of prose, skipping backtick-quoted examples."""
+    return len(notes_outside_examples(pattern, text))
+
+
+def notes_in_prose(
     source: str, pattern: re.Pattern[str], python_source: bool = False
-) -> int | None:
-    """Count pattern matches where prose belongs, not inside ordinary strings.
+) -> list[LocatedNote] | None:
+    """Locate pattern matches where prose belongs, not inside ordinary strings.
 
     `None` where a Python source does not tokenize, because there is then no
-    way to tell a comment from a string and the honest answer is that the
-    count is unknown for that revision. Returning a whole-text tally instead
-    counts a different population, so differencing it against a tokenised
+    way to tell a comment from a string and the honest answer is that which
+    notes the revision holds is unknown. Scanning the whole text instead
+    gathers a different population, so differencing it against a tokenised
     one measures the change of regime rather than the change of notes: a
     conflicted file mentioning the marker in a string literal counted one
     higher until its last conflict marker went, and that drop read as
     deleted feedback.
     """
     if not python_source:
-        return count_outside_examples(pattern, source)
+        return notes_outside_examples(pattern, source)
     tokens = python_tokens(source)
     if tokens is None:
         return None
     documentation = docstring_lines(source)
-    return sum(
-        count_outside_examples(pattern, token.string)
+    return [
+        note
         for token in tokens
         if token.type == tokenize.COMMENT
         or (
@@ -440,7 +707,16 @@ def count_in_prose(
                 for line in range(token.start[0], token.end[0] + 1)
             )
         )
-    )
+        for note in notes_outside_examples(pattern, token.string, token.start[0])
+    ]
+
+
+def count_in_prose(
+    source: str, pattern: re.Pattern[str], python_source: bool = False
+) -> int | None:
+    """Tally the notes :func:`notes_in_prose` finds, preserving its `None`."""
+    located = notes_in_prose(source, pattern, python_source)
+    return None if located is None else len(located)
 
 
 def review_marker_count(source: str, python_source: bool = False) -> int | None:
@@ -458,9 +734,135 @@ def solved_note_count(source: str, python_source: bool = False) -> int | None:
     return count_in_prose(source, SOLVED_NOTE_RE, python_source)
 
 
+def note_body(text: str) -> str:
+    """The words a note carries, with its marker head and kind keyword removed.
+
+    Conversion is what this exists for: `# lup: is parity gated?` and
+    `# lup: solved: is parity gated?` are the same ask at two stages, and
+    stripping both heads is what lets the second be recognised as the first
+    rather than counted as one note lost and one claim gained.
+    """
+    return NOTE_HEAD_RE.sub("", text, count=1).strip()
+
+
+def note_subject(lines: list[str], line: int) -> int | None:
+    """Which line a note concerns, or `None` where it annotates nothing.
+
+    A note either trails the line it is about or sits above it, so the
+    subject is the note's own line when code precedes the marker there, and
+    otherwise the next line below carrying anything but another note. Blank
+    lines are skipped because a note separated from its subject by one is
+    still about it, and stacked notes are skipped because they share the
+    subject beneath them.
+
+    Deliberately textual. The kernel has `ast`, but :func:`notes_in_prose`
+    already answers `None` for a revision that will not tokenize, and the
+    revision that will not tokenize is the one mid-merge — exactly where a
+    subject has to be resolvable for the completing edit to land.
+    """
+    own = lines[line - 1] if 0 < line <= len(lines) else ""
+    head = NOTE_RE.search(own)
+    if head is None:
+        return None
+    if own[: head.start()].strip():
+        return line
+    for offset, candidate in enumerate(lines[line:], start=line + 1):
+        if not candidate.strip() or NOTE_RE.search(candidate):
+            continue
+        return offset
+    return None
+
+
+def deleted_lines(previous: str, updated: str) -> set[int]:
+    """Which of ``previous``'s lines this edit removed outright, 1-based.
+
+    Removed, not merely absent. A line rewritten in place reads as gone if
+    the revisions are compared as sets, which would make editing the code
+    under a note a way to drop the note with it — so `replace` is excluded
+    and only `delete` counts. What survives that distinction is the case the
+    subject rule is for: code that went away, taking its feedback along.
+    """
+    matcher = difflib.SequenceMatcher(
+        a=previous.splitlines(), b=updated.splitlines(), autojunk=False
+    )
+    return {
+        line
+        for tag, start, end, _, _ in matcher.get_opcodes()
+        if tag == "delete"
+        for line in range(start + 1, end + 1)
+    }
+
+
+def note_bodies(notes: list[LocatedNote]) -> Counter[str]:
+    """How many times each note's words appear in a revision.
+
+    A tally rather than a set because the claims an edit *added* are the
+    difference between two of these, and a difference needs counts to be
+    taken. What reads the result asks only whether a body is present.
+    """
+    return Counter(note_body(note["text"]) for note in notes)
+
+
+def spent_notes(
+    previous: str,
+    updated: str,
+    was_open: list[LocatedNote],
+    is_open: list[LocatedNote],
+    python_source: bool,
+) -> str | None:
+    """The first note this edit dropped while its subject stands, or `None`.
+
+    A note leaves a file honestly three ways: it is still open under the same
+    words, it was converted into a claim this edit added, or the code it
+    annotated went with it. Anything else is feedback stripped off code that
+    is still there, which is the one act the gate exists to refuse.
+
+    Survival is asked of the words, not of each copy of them. A file holding
+    the same note twice holds one piece of feedback written in two places, so
+    a reader who finds either has it — and counting copies would make tidying
+    a duplicate read as a deletion, freezing the code that carried it.
+    """
+    added_claims = note_bodies(
+        notes_in_prose(updated, SOLVED_NOTE_RE, python_source) or []
+    ) - note_bodies(notes_in_prose(previous, SOLVED_NOTE_RE, python_source) or [])
+    survived = note_bodies(is_open) + added_claims
+    lines = previous.splitlines()
+    removed = deleted_lines(previous, updated)
+    for note in was_open:
+        body = note_body(note["text"])
+        if survived[body] > 0:
+            continue
+        subject = note_subject(lines, note["line"])
+        # A note annotating nothing in particular is about the file, so only
+        # the file's own deletion spends it.
+        spent = (
+            not updated.strip()
+            if subject is None
+            else note["line"] in removed and subject in removed
+        )
+        if not spent:
+            return note["text"]
+    return None
+
+
+class MarkerVerdict(TypedDict):
+    """One marker-gate verdict, and the gate id a project would move it under.
+
+    The gate travels with the decision because the three verdicts this gate
+    reaches are about different things — feedback lost, a resolution claim
+    lost, feedback added — and a project that moves one of them has said
+    nothing about the other two. Handing back the decision alone would leave
+    the caller re-deriving which of the three it was from the words in its
+    reason.
+    """
+
+    gate: str
+    decision: KernelDecision
+
+
 def marker_decision(
     previous: str, updated: str, python_source: bool
-) -> KernelDecision | None:
+) -> MarkerVerdict | None:
     """Judge what this edit did to the file's review notes.
 
     Deleting feedback is denied rather than asked. An ask is something an
@@ -476,44 +878,71 @@ def marker_decision(
     `--restore`, which touches only `solved:` claims. No session's edits are
     exempt here: an environment cannot carry this authority, so a grant that
     claims to is ignored.
+
+    Notes are matched by their words rather than tallied, because a tally
+    answers only "how many", and four different acts spend a note: dropping
+    the feedback, converting it, deleting the code it annotated, and moving
+    that code elsewhere. Only the first is the act worth denying, and a
+    difference of counts cannot tell them apart — nor can it tell a real
+    deletion from one hidden inside a conversion, where the deltas cancel
+    and the edit reads as though nothing left.
+
+    So a vanished note is judged against its subject: gone with the code it
+    annotated, it was spent by that deletion and nothing is owed. Standing
+    code with the note stripped off it is the deletion this gate exists for.
+    Where the subject merely moved within the file the note should have
+    moved too, so presence anywhere in the revision counts as standing.
     """
-    # A revision whose note count could not be established has not been shown
-    # to have lost anything, and denying on an unmeasurable difference is
-    # what blocked the completing step of every merge resolution: removing a
+    # A revision whose notes could not be established has not been shown to
+    # have lost anything, and denying on an unmeasurable difference is what
+    # blocked the completing step of every merge resolution: removing a
     # file's last conflict marker is what makes it parse for the first time.
-    opened_now = open_note_count(updated, python_source)
-    opened_before = open_note_count(previous, python_source)
-    claimed_now = solved_note_count(updated, python_source)
-    claimed_before = solved_note_count(previous, python_source)
+    was_open = notes_in_prose(previous, OPEN_NOTE_RE, python_source)
+    is_open = notes_in_prose(updated, OPEN_NOTE_RE, python_source)
+    claimed_now = notes_in_prose(updated, SOLVED_NOTE_RE, python_source)
+    claimed_before = notes_in_prose(previous, SOLVED_NOTE_RE, python_source)
     if (
-        opened_now is None
-        or opened_before is None
+        was_open is None
+        or is_open is None
         or claimed_now is None
         or claimed_before is None
     ):
         return None
-    opened = opened_now - opened_before
-    claimed = claimed_now - claimed_before
-    if opened < 0 and opened + claimed == 0:
-        return None
-    if opened < 0:
-        return KernelDecision(
-            "deny",
-            "this edit removes inline review feedback. Resolving a note means "
-            "replacing `# lup:` with `# lup: solved:` and keeping its text, so "
-            "the claim can be checked against what was asked; deleting it "
-            "leaves nothing to check",
+    lost = spent_notes(previous, updated, was_open, is_open, python_source)
+    if lost is not None:
+        return MarkerVerdict(
+            gate="feedback-removed",
+            decision=KernelDecision(
+                "deny",
+                "this edit removes inline review feedback that still has a "
+                f"subject — {lost}. Resolving a note means replacing `# lup:` "
+                "with `# lup: solved:` and keeping its text, so the claim can be "
+                "checked against what was asked; deleting it leaves nothing to "
+                "check. Where the note was mistaken rather than answered, "
+                "withdraw it with `dev comments --withdraw file:line --reason`",
+            ),
         )
-    if claimed < 0:
-        return KernelDecision(
-            "deny",
-            "this edit removes a `# lup: solved:` claim. Only the review pass "
-            "retires one — it either confirms the claim and removes the note "
-            "(`dev comments --retire file:line`), or restores it to open "
-            "feedback (`dev comments --restore file:line`)",
+    # Asked of the words, as survival is for open notes: a claim is lost when
+    # nothing in the revision still carries it. A second copy tidied away
+    # retires nothing, because the review pass still finds the claim standing
+    # and can still check it against what was asked.
+    surviving_claims = note_bodies(claimed_now)
+    if any(surviving_claims[note_body(note["text"])] == 0 for note in claimed_before):
+        return MarkerVerdict(
+            gate="claim-removed",
+            decision=KernelDecision(
+                "deny",
+                "this edit removes a `# lup: solved:` claim. Only the review pass "
+                "retires one — it either confirms the claim and removes the note "
+                "(`dev comments --retire file:line`), or restores it to open "
+                "feedback (`dev comments --restore file:line`)",
+            ),
         )
-    if opened > 0:
-        return KernelDecision("ask", "edit adds inline review feedback")
+    if note_bodies(is_open) - note_bodies(was_open):
+        return MarkerVerdict(
+            gate="feedback-added",
+            decision=KernelDecision("ask", "edit adds inline review feedback"),
+        )
     return None
 
 
@@ -536,9 +965,8 @@ def empty_collection_literal(node: ast.expr | None) -> bool:
 
 def empty_collection_exempt_lines(source: str) -> set[int]:
     """Return empty-collection lines whose AST context makes the seed deliberate."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
+    tree = python_tree(source)
+    if tree is None:
         return set()
 
     def is_self_attribute(node: ast.expr) -> bool:
@@ -585,8 +1013,12 @@ def empty_collection_exempt_lines(source: str) -> set[int]:
         for loop in ast.walk(scope):
             if not is_loop(loop):
                 continue
-            tolerant = any(isinstance(inner, ast.Try) for inner in ast.walk(loop))
-            for inner in ast.walk(loop):
+            # One walk answers both questions the loop is asked — whether it
+            # tolerates a failure, and which names it feeds — and a nested
+            # loop is walked once per ancestor already.
+            inside = list(ast.walk(loop))
+            tolerant = any(isinstance(inner, ast.Try) for inner in inside)
+            for inner in inside:
                 name = mutated_name(inner)
                 if name is not None:
                     feeding.setdefault(name, []).append(tolerant)
@@ -615,7 +1047,7 @@ def empty_collection_exempt_lines(source: str) -> set[int]:
 
         visit(scope, False)
 
-    for node in ast.walk(tree):
+    for node in python_nodes(tree):
         match node:
             case ast.Call(keywords=keywords):
                 for keyword in keywords:
@@ -660,134 +1092,1276 @@ def empty_collection_factory(node: ast.expr) -> bool:
     return False
 
 
-def default_factory_exempt_lines(source: str) -> set[int]:
-    """Return ``default_factory=`` lines an annotated literal could not replace.
+def slice_exempt_lines(source: str) -> set[int]:
+    """Return bounded-prefix-slice lines the tree shows to be something else.
 
-    The rule's replacement is ``items: list[B] = []``: the annotation carries
-    the type and pydantic copies the literal per instance. That says the same
-    thing only where the factory builds an empty collection — a factory that
-    reads another declaration, stamps a value, or constructs a model does work
-    no literal expresses, so its line is cleared rather than suppressed.
+    The pattern reads every ``[:n]``, because what separates an honest prefix
+    from a destroyed tail is what becomes of the remainder, and no character
+    class can see that. Four contexts settle it without types.
+
+    A slice of a digest derives an identifier. ``hexdigest()[:12]`` shortens a
+    hash whose prefix identifies the same thing the whole of it did, and there
+    is no content behind it to lose.
+
+    A bound at or under ``ABBREVIATION_CHARS`` abbreviates rather than cuts.
+    Nothing anyone wrote survives being shortened to sixteen characters, so a
+    slice that narrow is never someone keeping part of a text — it is a git
+    SHA, a uuid, a short key. Reading the width rather than the receiver's
+    name is what makes this decidable: ``commit[:12]`` carries no type saying
+    it is a hash, and a rule that guessed from the identifier would clear a
+    variable called ``commit_message`` for the same reason.
+
+    A line carrying the complementary slice is a split. ``x[:n]`` beside
+    ``x[n:]`` keeps everything it started with, which is this rule's remedy
+    rather than its defect.
+
+    A slice a test reads is sniffing. ``raw[:100].startswith(...)`` asks a
+    question of a prefix and stores nothing, so whatever it came from is still
+    whole wherever it lives.
+
+    Source that does not parse clears nothing. The rule is soft, so the most an
+    unrefined finding costs is a directive carrying a reason.
     """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
+    tree = python_tree(source)
+    if tree is None:
         return set()
+
+    def prefix_slices(node: ast.AST) -> Iterator[ast.Subscript]:
+        """Every ``[:n]`` at or under this node."""
+        for inner in ast.walk(node):
+            match inner:
+                case ast.Subscript(slice=ast.Slice(lower=None, upper=upper)) if (
+                    upper is not None
+                ):
+                    yield inner
+
+    def spanned(node: ast.Subscript) -> range:
+        """Every line the sliced expression covers.
+
+        A chain that opens on one line and closes with its ``[:n]`` on another
+        reports at the bracket while the node starts at the receiver, so
+        clearing only ``lineno`` clears a line the pattern never matched and
+        leaves the one it did.
+        """
+        return range(node.lineno, (node.end_lineno or node.lineno) + 1)
+
+    def derives_a_digest(node: ast.expr) -> bool:
+        """Whether the sliced value came from a hash or a uuid."""
+        return any(
+            isinstance(inner, ast.Attribute) and inner.attr in ("hexdigest", "hex")
+            for inner in ast.walk(node)
+        )
+
+    def abbreviates(bounds: ast.expr | None) -> bool:
+        """Whether the bound is too narrow to be a portion of anything written."""
+        return (
+            isinstance(bounds, ast.Constant)
+            and isinstance(bounds.value, int)
+            and bounds.value <= ABBREVIATION_CHARS
+        )
+
+    split_lines = {
+        node.lineno
+        for node in nodes_of(tree, ast.Subscript)
+        if isinstance(node.slice, ast.Slice)
+        and node.slice.lower is not None
+        and node.slice.upper is None
+    }
+
+    def tested() -> Iterator[int]:
+        """Lines whose prefix slice is read by a comparison rather than kept."""
+        for node in python_nodes(tree):
+            match node:
+                case (
+                    ast.Compare()
+                    | ast.Call(func=ast.Attribute(attr="startswith" | "endswith"))
+                ):
+                    for found in prefix_slices(node):
+                        yield from spanned(found)
+
+    def settled() -> Iterator[int]:
+        """Lines whose prefix slice is a digest, a split, or an abbreviation."""
+        for node in prefix_slices(tree):
+            if (
+                node.lineno in split_lines
+                or derives_a_digest(node.value)
+                or (isinstance(node.slice, ast.Slice) and abbreviates(node.slice.upper))
+            ):
+                yield from spanned(node)
+
+    return set(tested()) | set(settled())
+
+
+def imports_of(tree: ast.Module, modules: AbstractSet[str]) -> set[int]:
+    """Lines importing one of `modules`, by either spelling.
+
+    ``import re``, ``import re as r``, ``from re import sub`` and
+    ``from re.x import y`` all name ``re``, and a dotted module is named by
+    its root as well as by itself — ``rich.progress`` is reached by importing
+    ``rich`` and by importing ``rich.progress``, and a rule about the latter
+    means both. A relative import names no module and is never one of these.
+    """
+
+    def names(target: str) -> bool:
+        return target in modules or any(
+            target.startswith(f"{module}.") for module in modules
+        )
+
+    def found() -> Iterator[int]:
+        for node in python_nodes(tree):
+            match node:
+                case ast.Import(names=aliases):
+                    if any(names(alias.name) for alias in aliases):
+                        yield node.lineno
+                case ast.ImportFrom(module=str() as module, level=0):
+                    if names(module):
+                        yield node.lineno
+
+    return set(found())
+
+
+def imported_symbols_of(
+    tree: ast.Module, module: str, symbols: AbstractSet[str]
+) -> set[int]:
+    """Lines taking one of `symbols` out of `module` by name."""
     return {
-        keyword.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        for keyword in node.keywords
-        if keyword.arg == "default_factory"
-        and not empty_collection_factory(keyword.value)
+        node.lineno
+        for node in nodes_of(tree, ast.ImportFrom)
+        if node.module == module and any(alias.name in symbols for alias in node.names)
     }
 
 
-def dict_get_exempt_lines(source: str) -> set[int]:
-    """Return `.get(` lines whose AST context makes the call a decorator.
+def dotted_of(node: ast.expr) -> str:
+    """The dotted spelling of a name or attribute chain, or ``""``.
 
-    A decorator is not payload access. ``@app.get("/path")`` names a route on
-    a framework object, and no schema is being read out of a dict. Which
-    lines are decorators is decidable from the tree alone, so this holds for
-    a fragment that carries no types — and that is what lets a suppression
-    here be retired instead of being demanded by the audit and refused by
-    the kernel.
+    ``os.path.join`` reads back as it was written, which is what lets a rule
+    name the function it refuses in the words its diagnostic uses. Anything
+    with a call or a subscript in the chain has no dotted spelling and is not
+    one of these.
     """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return set()
-    exempt: set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            for decorator in node.decorator_list:
-                last = decorator.end_lineno or decorator.lineno
-                exempt.update(range(decorator.lineno, last + 1))
-    return exempt
+    match node:
+        case ast.Name(id=name):
+            return name
+        case ast.Attribute(value=value, attr=attr):
+            root = dotted_of(value)
+            return f"{root}.{attr}" if root else ""
+    return ""
 
 
-def tuple_shape_exempt_lines(source: str) -> set[int]:
-    """Return `tuple[` lines the tree shows to be variadic rather than positional.
+def calls_of(tree: ast.Module, dotted: AbstractSet[str]) -> set[int]:
+    """Lines calling one of `dotted`, by the spelling the call was written in.
 
-    ``tuple[X, ...]`` is not a shape whose positions want names — it is an
-    immutable sequence, and the rule's replacement says nothing about it:
-    ``extra_exceptions: tuple[type[Exception], ...]`` must be a tuple because
-    that is what ``except`` takes, and a list default would be a mutable-default
-    bug. Fixed arity is the defect the rule names, so a line is cleared only
-    when every ``tuple[`` on it is variadic — a line carrying both keeps its
-    finding rather than being cleared by its neighbour.
-
-    Nesting is why this needs the tree and not a wider regex: in
-    ``tuple[dict[str, int], ...]`` the trailing ellipsis sits behind a bracket
-    no character class can step over.
-
-    Source that does not parse clears every line. The rule is strong, so a
-    verdict it cannot justify would be a denial with no escape, and "cannot
-    tell" must fail toward silence — the audit sees the site again as soon as
-    the file parses.
+    The call's own line rather than the enclosing statement's: an argument
+    list spanning lines reports where the callee is, which is where a reader
+    looks and where a directive goes.
     """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return set(range(1, len(source.splitlines()) + 2))
+    return {
+        node.func.lineno
+        for node in nodes_of(tree, ast.Call)
+        if dotted_of(node.func) in dotted
+    }
 
-    def is_ellipsis(node: ast.expr) -> bool:
-        return isinstance(node, ast.Constant) and node.value is Ellipsis
 
-    variadic: set[int] = set()
-    fixed: set[int] = set()
-    for node in ast.walk(tree):
+def methods_of(tree: ast.Module, attrs: AbstractSet[str]) -> set[int]:
+    """Lines calling one of `attrs` as a method on something.
+
+    The receiver is whatever it is — no tree says whether it is a string —
+    so this selects the call shape and leaves the receiver's type to the
+    oracle where a rule asks for one.
+    """
+    return {
+        node.func.end_lineno or node.func.value.lineno
+        for node in nodes_of(tree, ast.Call)
+        if isinstance(node.func, ast.Attribute) and node.func.attr in attrs
+    }
+
+
+def attributes_of(tree: ast.Module, dotted: AbstractSet[str]) -> set[int]:
+    """Lines reaching one of `dotted` as an attribute path, called or not.
+
+    ``os.environ`` is the subject wherever it is written — subscripted,
+    passed, or only read — so this selects the path itself rather than a call
+    around it.
+    """
+    return {
+        node.lineno
+        for node in nodes_of(tree, ast.Attribute)
+        if dotted_of(node) in dotted
+    }
+
+
+# lup: ignore[library-default] — the extraction libraries the rule's own pattern already named; the kernel carries no config
+PDF_LIBRARIES = frozenset(  # lup: ignore[frozenset-shape] — a membership test, no keys
+    {
+        "fitz",
+        "pymupdf",
+        "pypdf",
+        "PyPDF2",
+        "PyPDF4",
+        "pdfplumber",
+        "pdfminer",
+        "pypdfium2",
+    }
+)
+"""Every PDF text-extraction library the rule names, by import root."""
+
+
+# lup: ignore[library-default] — the regex module's own entry points, fixed by what it exports; the kernel carries no config
+RE_FUNCTIONS = frozenset(  # lup: ignore[frozenset-shape] — a membership test, no keys
+    {"compile", "search", "match", "fullmatch", "sub", "findall", "split"}
+)
+"""The regex-module entry points the rule names, unqualified."""
+
+# lup: ignore[library-default] — os's own spellings for handing a command to a shell; the kernel carries no config
+OS_SHELL_CALLS = frozenset(  # lup: ignore[frozenset-shape] — a membership test, no keys
+    {
+        "os.system",
+        "os.popen",
+        "os.execl",
+        "os.execle",
+        "os.execlp",
+        "os.execlpe",
+        "os.execv",
+        "os.execve",
+        "os.execvp",
+        "os.execvpe",
+    }
+)
+"""Every `os` entry point that hands a command to a shell or replaces the process."""
+
+# lup: ignore[library-default] — os's own filesystem calls, fixed by what pathlib re-spells; the kernel carries no config
+OS_FILE_CALLS = frozenset(  # lup: ignore[frozenset-shape] — a membership test, no keys
+    {
+        "getcwd",
+        "chdir",
+        "listdir",
+        "scandir",
+        "walk",
+        "mkdir",
+        "makedirs",
+        "rmdir",
+        "removedirs",
+        "remove",
+        "unlink",
+        "rename",
+        "renames",
+        "replace",
+        "link",
+        "symlink",
+        "readlink",
+        "stat",
+        "lstat",
+        "chmod",
+        "chown",
+    }
+)
+"""Every `os` filesystem call `pathlib` has its own spelling for."""
+
+
+def subscripts_of(tree: ast.Module, names: AbstractSet[str]) -> set[int]:
+    """Lines subscripting one of `names`, however the name was reached.
+
+    ``Generic[T]`` and ``typing.Generic[T]`` are the same declaration, so the
+    terminal name is what decides rather than the path taken to it.
+    """
+    return {
+        node.lineno
+        for node in nodes_of(tree, ast.Subscript)
+        if dotted_of(node.value).rsplit(".", 1)[-1] in names
+    }
+
+
+# lup: ignore[library-default] — the typing aliases PEP 604 and PEP 585 replaced; the kernel carries no config
+CAPITALIZED_GENERICS = frozenset(  # lup: ignore[frozenset-shape] — a membership test
+    {"List", "Dict", "Tuple", "Set"}
+)
+"""The capitalized `typing` aliases the builtin generics replaced."""
+
+# lup: ignore[library-default] — the scalar builtins a payload map's value would be; the kernel carries no config
+SCALAR_TYPES = frozenset(  # lup: ignore[frozenset-shape] — a membership test, no keys
+    {"str", "int", "float", "bool", "bytes", "complex"}
+)
+"""Every builtin whose values carry no fields of their own."""
+
+
+def annotations_of(tree: ast.Module) -> Iterator[ast.expr]:
+    """Every expression written where a type annotation goes.
+
+    A variable's declared type, a parameter's, and a return — the three
+    places a name means "the type of this" rather than a value. Reading them
+    is what separates ``x: object`` from a dict entry keyed ``"x"`` whose
+    value is the builtin, which a colon in a character class cannot do.
+
+    An unused parameter is not one of these. Its annotation belongs to
+    somebody else's callback signature rather than to a value this code was
+    going to narrow, and the leading underscore is this repository's own mark
+    for one — the same convention that exempts it from the privacy rule.
+    """
+    for node in python_nodes(tree):
         match node:
-            case ast.Subscript(
-                value=ast.Name(id="tuple"), slice=ast.Tuple(elts=elts)
-            ) if elts:
-                target = variadic if is_ellipsis(elts[-1]) else fixed
-                target.add(node.lineno)
-            case ast.Subscript(value=ast.Name(id="tuple")):
-                fixed.add(node.lineno)
-    return variadic - fixed
+            case ast.AnnAssign(annotation=annotation):
+                yield annotation
+            case ast.arg(arg=name, annotation=ast.expr() as annotation) if (
+                not name.startswith("_")
+            ):
+                yield annotation
+            case (
+                ast.FunctionDef(returns=ast.expr() as annotation)
+                | ast.AsyncFunctionDef(returns=ast.expr() as annotation)
+            ):
+                yield annotation
 
 
-def refiner_named(name: str) -> Callable[[str], set[int]] | None:
-    """The AST context one row names, where the row names one.
+def annotated_exactly(tree: ast.Module, names: AbstractSet[str]) -> set[int]:
+    """Lines annotating something as exactly one of `names`.
 
-    A rule earns a refiner when its pattern is wider than the defect it names
-    and the difference is decidable without types. Which rule has which lives
-    at the declaration in `lup.codescan.antipatterns` and travels in the row,
-    so this side holds only the functions a row may name — a rule that gains a
-    refiner reaches the gate by construction rather than by someone also
-    remembering to widen a list of ids here.
+    Exactly, so a name that is only a member of the annotation does not
+    count: ``list[object]`` says what it holds, and ``X | BaseModel`` names a
+    union that the bare form does not. That is the reach the patterns bought
+    with a lookahead for a closing bracket or a pipe, said directly.
+    """
+    return {
+        annotation.lineno
+        for annotation in annotations_of(tree)
+        if dotted_of(annotation).rsplit(".", 1)[-1] in names
+    }
+
+
+def any_type_sites(source: str) -> list[MatchSite]:
+    """Lines reaching `Any`, as an annotation, inside one, or by import.
+
+    Every use, because the rule refuses the type rather than one position of
+    it: `list[Any]` and `cast(Any, x)` say exactly what `x: Any` says, and
+    importing it is reaching for it too.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        imported_symbols_of(tree, "typing", {"Any"})
+        | {node.lineno for node in nodes_of(tree, ast.Name) if node.id == "Any"}
+    )
+
+
+def bare_object_sites(source: str) -> list[MatchSite]:
+    """Lines annotating something as bare `object`."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else annotated_exactly(tree, {"object"}))
+
+
+def bare_basemodel_sites(source: str) -> list[MatchSite]:
+    """Lines annotating a parameter or return as exactly `BaseModel`."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else annotated_exactly(tree, {"BaseModel"}))
+
+
+def frozenset_shape_sites(source: str) -> list[MatchSite]:
+    """Lines declaring or constructing a frozenset.
+
+    The annotation, the subscripted shape, and the constructor alike — each
+    one is the declaration the rule is about, and a comprehension handed to
+    the constructor is still a frozenset being declared.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        (
+            annotated_exactly(tree, {"frozenset"})
+            | subscripts_of(tree, {"frozenset"})
+            | calls_of(tree, {"frozenset"})
+        )
+    )
+
+
+def set_shape_sites(source: str) -> list[MatchSite]:
+    """Lines declaring or constructing a `set`.
+
+    The declaration is the subject, so an annotation, a subscripted shape and
+    a call to the constructor all count, while a set comprehension does not —
+    the rule's own remedy is to reach for one of those locally instead of
+    declaring the set as the interface.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        (
+            annotated_exactly(tree, {"set"})
+            | subscripts_of(tree, {"set"})
+            | calls_of(tree, {"set"})
+        )
+    )
+
+
+def bare_except_sites(source: str) -> list[MatchSite]:
+    """Lines opening an `except:` that names no exception."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        {node.lineno for node in nodes_of(tree, ast.ExceptHandler) if node.type is None}
+    )
+
+
+def except_baseexception_sites(source: str) -> list[MatchSite]:
+    """Lines catching `BaseException`, alone or among others."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+
+    def caught(node: ast.expr | None) -> Iterator[str]:
+        match node:
+            case ast.Tuple(elts=elts):
+                for element in elts:
+                    yield from caught(element)
+            case ast.expr():
+                yield dotted_of(node).rsplit(".", 1)[-1]
+
+    return sites_at(
+        {
+            node.lineno
+            for node in nodes_of(tree, ast.ExceptHandler)
+            if "BaseException" in set(caught(node.type))
+        }
+    )
+
+
+def global_statement_sites(source: str) -> list[MatchSite]:
+    """Lines declaring a name `global`."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at({node.lineno for node in nodes_of(tree, ast.Global)})
+
+
+def all_export_sites(source: str) -> list[MatchSite]:
+    """Lines binding `__all__`.
+
+    A module's export list wherever it is bound — assigned, annotated, or
+    appended to — rather than wherever those eight characters sit next to an
+    equals sign.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+
+    def binds(node: ast.AST) -> Iterator[ast.expr]:
+        match node:
+            case ast.Assign(targets=targets):
+                yield from targets
+            case ast.AnnAssign(target=target) | ast.AugAssign(target=target):
+                yield target
+
+    return sites_at(
+        {
+            target.lineno
+            for node in python_nodes(tree)
+            for target in binds(node)
+            if dotted_of(target) == "__all__"
+        }
+    )
+
+
+def model_config_sites(source: str) -> list[MatchSite]:
+    """Lines binding `model_config` in a class body.
+
+    The class body is what makes it pydantic's configuration rather than an
+    ordinary name, and the tree says which statements are in one — where the
+    pattern had to settle for the name sitting at the start of a line.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+
+    def bound(node: ast.stmt) -> Iterator[ast.expr]:
+        match node:
+            case ast.Assign(targets=targets):
+                yield from targets
+            case ast.AnnAssign(target=target):
+                yield target
+
+    return sites_at(
+        {
+            target.lineno
+            for node in nodes_of(tree, ast.ClassDef)
+            for statement in node.body
+            for target in bound(statement)
+            if dotted_of(target) == "model_config"
+        }
+    )
+
+
+def private_function_sites(source: str) -> list[MatchSite]:
+    """Lines defining a function whose name claims to be private.
+
+    A dunder is the language's own protocol rather than a privacy claim, and
+    a lone underscore names something deliberately unused, so neither is one
+    of these.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        {
+            node.lineno
+            for node in [
+                *nodes_of(tree, ast.FunctionDef),
+                *nodes_of(tree, ast.AsyncFunctionDef),
+            ]
+            if node.name.startswith("_")
+            and not node.name.startswith("__")
+            and len(node.name) > 1
+        }
+    )
+
+
+def private_class_sites(source: str) -> list[MatchSite]:
+    """Lines defining a class whose name claims to be private."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        {
+            node.lineno
+            for node in nodes_of(tree, ast.ClassDef)
+            if node.name.startswith("_")
+            and not node.name.startswith("__")
+            and len(node.name) > 1
+        }
+    )
+
+
+def private_variable_sites(source: str) -> list[MatchSite]:
+    """Lines binding a module-level name that claims to be private.
+
+    Module level, because that is the scope a name is published from: a local
+    called ``_seen`` is nobody's interface, and the pattern reached for the
+    same thing by requiring the name to start its line. A tuple unpacking
+    binds several names at once and is not a declaration of any one of them.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+
+    def bound(node: ast.stmt) -> Iterator[ast.expr]:
+        match node:
+            case ast.Assign(targets=[ast.Name() as target]):
+                yield target
+            case ast.AnnAssign(target=ast.Name() as target):
+                yield target
+
+    return sites_at(
+        {
+            target.lineno
+            for statement in tree.body
+            for target in bound(statement)
+            if isinstance(target, ast.Name)
+            and target.id.startswith("_")
+            and not target.id.startswith("__")
+            and len(target.id) > 1
+        }
+    )
+
+
+def namedtuple_sites(source: str) -> list[MatchSite]:
+    """Lines reaching a named tuple, by either spelling.
+
+    `typing.NamedTuple` is subclassed and `collections.namedtuple` is called,
+    so the rule is about the name wherever it is reached — the base, the
+    call, and the import that brings either in.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        (
+            imported_symbols_of(tree, "typing", {"NamedTuple"})
+            | imported_symbols_of(tree, "collections", {"namedtuple"})
+            | {
+                node.lineno
+                for node in nodes_of(tree, ast.Name)
+                if node.id in ("NamedTuple", "namedtuple")
+            }
+        )
+    )
+
+
+def generic_base_sites(source: str) -> list[MatchSite]:
+    """Lines declaring a `Generic[...]` base."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else subscripts_of(tree, {"Generic"}))
+
+
+def typing_union_sites(source: str) -> list[MatchSite]:
+    """Lines spelling a union as `Optional[...]` or `Union[...]`."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(subscripts_of(tree, {"Optional", "Union"}))
+
+
+def typing_generics_sites(source: str) -> list[MatchSite]:
+    """Lines subscripting a capitalized `typing` alias."""
+    tree = python_tree(source)
+    return sites_at(
+        set() if tree is None else subscripts_of(tree, CAPITALIZED_GENERICS)
+    )
+
+
+def mapping_value_lines(source: str, values: AbstractSet[str]) -> set[int]:
+    """Lines declaring a string-keyed mapping whose values are in `values`.
+
+    A union counts as its members: ``dict[str, str | None]`` is the same open
+    map of scalars that ``dict[str, str]`` is, and the annotation reaching a
+    scalar through a union is what the pattern's word boundary happened to
+    catch and what reading the tree states outright.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return set()
+
+    def reaches(node: ast.expr) -> bool:
+        match node:
+            case ast.BinOp(left=left, right=right):
+                return reaches(left) or reaches(right)
+            case ast.Constant(value=None):
+                return False
+        return dotted_of(node).rsplit(".", 1)[-1] in values
+
+    return {
+        node.lineno
+        for node in nodes_of(tree, ast.Subscript)
+        if dotted_of(node.value).rsplit(".", 1)[-1]
+        in ("dict", "Mapping", "MutableMapping")
+        and isinstance(node.slice, ast.Tuple)
+        and len(node.slice.elts) == 2
+        and dotted_of(node.slice.elts[0]).rsplit(".", 1)[-1] == "str"
+        and reaches(node.slice.elts[1])
+    }
+
+
+def dict_str_object_sites(source: str) -> list[MatchSite]:
+    """Lines declaring a string-keyed map of bare `object`."""
+    return sites_at(mapping_value_lines(source, {"object"}))
+
+
+def dict_str_payload_sites(source: str) -> list[MatchSite]:
+    """Lines declaring a string-keyed map of scalars."""
+    return sites_at(mapping_value_lines(source, SCALAR_TYPES))
+
+
+def re_call_sites(source: str) -> list[MatchSite]:
+    """Lines calling a regex-module entry point."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(calls_of(tree, {f"re.{name}" for name in RE_FUNCTIONS}))
+
+
+def cast_sites(source: str) -> list[MatchSite]:
+    """Lines calling `cast`."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else calls_of(tree, {"cast", "typing.cast"}))
+
+
+def eval_exec_sites(source: str) -> list[MatchSite]:
+    """Lines calling `eval` or `exec` as builtins.
+
+    A method of the same name is somebody else's API — a database cursor, a
+    template engine — and never the builtin this refuses.
+    """
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else calls_of(tree, {"eval", "exec"}))
+
+
+def utcnow_sites(source: str) -> list[MatchSite]:
+    """Lines calling `utcnow`, however the module is spelled."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(methods_of(tree, {"utcnow"}) | calls_of(tree, {"utcnow"}))
+
+
+def os_shell_sites(source: str) -> list[MatchSite]:
+    """Lines handing a command to a shell through `os`."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else calls_of(tree, OS_SHELL_CALLS))
+
+
+def os_file_ops_sites(source: str) -> list[MatchSite]:
+    """Lines reaching a filesystem operation `pathlib` already spells."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(calls_of(tree, {f"os.{name}" for name in OS_FILE_CALLS}))
+
+
+def os_path_sites(source: str) -> list[MatchSite]:
+    """Lines reaching `os.path`, called or only named."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else attributes_of(tree, {"os.path"}))
+
+
+def os_environ_sites(source: str) -> list[MatchSite]:
+    """Lines reaching the process environment through `os`."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(attributes_of(tree, {"os.environ", "os.getenv"}))
+
+
+def suppress_sites(source: str) -> list[MatchSite]:
+    """Lines reaching `contextlib.suppress` by its qualified name."""
+    tree = python_tree(source)
+    return sites_at(
+        set() if tree is None else attributes_of(tree, {"contextlib.suppress"})
+    )
+
+
+def comment_directive_lines(source: str, directive: re.Pattern[str]) -> set[int]:
+    """Lines whose own comment opens with one suppression directive.
+
+    A comment is the one construct the parser drops, so the three rules about
+    suppression spellings read the token stream instead. That is the same
+    lexer the parser runs, kept per source here, so it answers what a `#`
+    actually opens: characters inside a string literal are a STRING token and
+    were never a comment to begin with.
+
+    The pattern is anchored at the comment's own opening, which is what tells
+    a suppression from prose about one. `# never write # noqa` is a sentence
+    with the spelling in it and silences nothing; searching the whole line
+    reported it, and the only way past a denial like that was a directive
+    guarding a line that guarded nothing.
+    """
+    tokens = python_tokens(source)
+    if tokens is None:
+        return set()
+    return {
+        token.start[0]
+        for token in tokens
+        if token.type == tokenize.COMMENT and directive.match(token.string) is not None
+    }
+
+
+# The three below bind one directive each to the one-argument shape a matcher
+# is resolved and called through. `functools.partial` would say the same thing
+# and lose the name, which is what a row carries a matcher as.
+TYPE_IGNORE_DIRECTIVE_RE = re.compile(r"#\s*type:\s*ignore\b")
+PYRIGHT_IGNORE_DIRECTIVE_RE = re.compile(r"#\s*pyright:\s*ignore\b")
+NOQA_DIRECTIVE_RE = re.compile(r"#\s*noqa\b")
+
+
+def type_ignore_sites(source: str) -> list[MatchSite]:
+    """Lines carrying a `# type: ignore` suppression.
+
+    Python does model this one — `ast.parse(source, type_comments=True)`
+    reports it as `Module.type_ignores` — and reading it there is worse than
+    reading the comment. That flag makes the parser stricter than the one
+    every other matcher here shares: `class A:  # type: int` parses normally
+    and raises under it, so a single misplaced type comment anywhere would
+    make this rule silently blind for the whole file. The token carries the
+    same answer with nothing to trip over.
+    """
+    return sites_at(comment_directive_lines(source, TYPE_IGNORE_DIRECTIVE_RE))
+
+
+def pyright_ignore_sites(source: str) -> list[MatchSite]:
+    """Lines carrying a `# pyright: ignore` suppression."""
+    return sites_at(comment_directive_lines(source, PYRIGHT_IGNORE_DIRECTIVE_RE))
+
+
+def noqa_sites(source: str) -> list[MatchSite]:
+    """Lines carrying a `# noqa` suppression."""
+    return sites_at(comment_directive_lines(source, NOQA_DIRECTIVE_RE))
+
+
+# lup: ignore[library-default] — Python's own two spellings of a file rename; the kernel carries no config
+RENAME_CALLS = frozenset(  # lup: ignore[frozenset-shape] — a membership test, no keys
+    {"os.replace", "Path.replace", "pathlib.Path.replace", "PurePath.replace"}
+)
+"""The two-argument `replace` spellings that move a file rather than edit text.
+
+A bound rename takes one argument — the destination — so arity tells it from
+string surgery on its own. Only the unbound spellings need naming, because
+``Path.replace(instance, target)`` passes the receiver as the first argument
+and so wears exactly the arity of ``str.replace(old, new)``.
+"""
+
+
+def string_replace_sites(source: str) -> list[MatchSite]:
+    """Sites substituting one piece of text for another inside a string.
+
+    Arity is what separates this from the rename that wears the same name:
+    ``str.replace`` takes the old text and the new, while a bound
+    ``Path.replace`` takes a destination and moves a file. Reading the call's
+    shape decides that for every receiver, where the spelling the rule used
+    to look for — a name not ending in ``path`` — let a genuine string
+    replace through whenever the variable holding the string was called one.
+
+    The unbound spellings in `RENAME_CALLS` are the exception arity cannot
+    reach, and they are named rather than guessed at.
+
+    What arity cannot reach at all is a two-argument ``replace`` on a value
+    that is not text: a dataframe filling missing values, a vendor object
+    with a ``replace`` of its own. Only the receiver's own type says so, and
+    the sites carry the positions `lup.codescan.resolution` asks about.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+
+    def substitutes_text(call: ast.Call, read: ast.Attribute) -> bool:
+        """Whether one ``.replace(`` has the arity and spelling of text surgery."""
+        return len(call.args) >= 2 and dotted_of(read) not in RENAME_CALLS
+
+    return attribute_call_sites(tree, "replace", substitutes_text)
+
+
+def string_split_sites(source: str) -> list[MatchSite]:
+    """Lines splitting or partitioning a string on a separator.
+
+    A bare `.split()` on whitespace is the tokenizing the rule allows, so an
+    empty argument list is not one of these; a separator passed to it is.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        {
+            node.func.end_lineno or node.func.value.lineno
+            for node in nodes_of(tree, ast.Call)
+            if isinstance(node.func, ast.Attribute)
+            and (
+                node.func.attr in ("partition", "rpartition")
+                or (node.func.attr in ("split", "rsplit") and bool(node.args))
+            )
+        }
+    )
+
+
+def string_strip_sites(source: str) -> list[MatchSite]:
+    """Lines stripping named characters off a string.
+
+    A bare `.strip()` takes whitespace off and is what the rule leaves alone;
+    an argument names characters, which is the shape that hides a parser.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        {
+            node.func.end_lineno or node.func.value.lineno
+            for node in nodes_of(tree, ast.Call)
+            if isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("strip", "lstrip", "rstrip")
+            and node.args
+        }
+    )
+
+
+def import_re_sites(source: str) -> list[MatchSite]:
+    """Lines importing the regex module."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else imports_of(tree, {"re"}))
+
+
+def subprocess_sites(source: str) -> list[MatchSite]:
+    """Lines importing the subprocess module."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else imports_of(tree, {"subprocess"}))
+
+
+def argparse_sites(source: str) -> list[MatchSite]:
+    """Lines importing argparse."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else imports_of(tree, {"argparse"}))
+
+
+def pdf_extraction_sites(source: str) -> list[MatchSite]:
+    """Lines importing a PDF text-extraction library."""
+    tree = python_tree(source)
+    return sites_at(set() if tree is None else imports_of(tree, PDF_LIBRARIES))
+
+
+def rich_progress_sites(source: str) -> list[MatchSite]:
+    """Lines importing `rich.progress` or reaching it through `rich`.
+
+    Both spellings, because the module is the subject either way: taken out
+    of `rich` by name, or reached as an attribute of it.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        imports_of(tree, {"rich.progress"})
+        | {
+            node.lineno
+            for node in nodes_of(tree, ast.Attribute)
+            if node.attr == "progress"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "rich"
+        }
+    )
+
+
+def suppress_import_sites(source: str) -> list[MatchSite]:
+    """Lines taking `suppress` out of contextlib."""
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(imported_symbols_of(tree, "contextlib", {"suppress"}))
+
+
+def dataclass_sites(source: str) -> list[MatchSite]:
+    """Lines importing dataclasses, or decorating a class with `@dataclass`.
+
+    Two spellings of one subject: the module a project reaches for, and the
+    decorator that is the whole reason to. The decorator is selected wherever
+    it is written, bare or called, and through an attribute of the module.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+
+    def decorates(node: ast.expr) -> bool:
+        target = node.func if isinstance(node, ast.Call) else node
+        match target:
+            case ast.Name(id="dataclass") | ast.Attribute(attr="dataclass"):
+                return True
+        return False
+
+    return sites_at(
+        imports_of(tree, {"dataclasses"})
+        | {
+            decorator.lineno
+            for node in nodes_of(tree, ast.ClassDef)
+            for decorator in node.decorator_list
+            if decorates(decorator)
+        }
+    )
+
+
+def tuple_shape_sites(source: str) -> list[MatchSite]:
+    """Return the lines carrying a fixed-arity ``tuple[...]`` annotation.
+
+    Fixed arity is the whole of what the rule names: positions with no names
+    on them. ``tuple[X, ...]`` is an immutable sequence and was never the
+    subject, so it is not netted and then cleared — it simply is not selected.
+
+    A line carrying both keeps its finding, which falls out of selecting the
+    fixed ones rather than having to be said: the variadic neighbour is not
+    in the set to begin with, so it cannot clear anything.
+
+    Nesting is why this wants the tree. In ``tuple[dict[str, int], ...]`` the
+    trailing ellipsis sits behind a bracket no character class can step over.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+
+    def variadic(node: ast.Subscript) -> bool:
+        """Whether the last position is the ellipsis that makes it a sequence."""
+        if not isinstance(node.slice, ast.Tuple) or not node.slice.elts:
+            return False
+        last = node.slice.elts[-1]
+        return isinstance(last, ast.Constant) and last.value is Ellipsis
+
+    return sites_at(
+        {
+            node.lineno
+            for node in nodes_of(tree, ast.Subscript)
+            if isinstance(node.value, ast.Name)
+            and node.value.id == "tuple"
+            and not variadic(node)
+        }
+    )
+
+
+def default_factory_sites(source: str) -> list[MatchSite]:
+    """Return ``default_factory=`` lines an annotated literal would replace.
+
+    The rule's replacement is ``items: list[B] = []``: the annotation carries
+    the type and pydantic copies the literal per instance. That says the same
+    thing exactly where the factory builds an empty collection, so those are
+    the lines selected — a factory that reads another declaration, stamps a
+    value, or constructs a model does work no literal expresses and is not a
+    site of this rule at all.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    return sites_at(
+        {
+            keyword.lineno
+            for node in nodes_of(tree, ast.Call)
+            for keyword in node.keywords
+            if keyword.arg == "default_factory"
+            and empty_collection_factory(keyword.value)
+        }
+    )
+
+
+def dict_get_sites(source: str) -> list[MatchSite]:
+    """Return the sites where ``.get(`` reads a key out of a mapping.
+
+    Two shapes the tree alone rules out, both decidable without types — which
+    is what lets a suppression at either be retired rather than demanded by
+    the kernel and reported spurious by the audit that resolves the receiver.
+
+    A decorator is not payload access: ``@app.get("/path")`` names a route on
+    a framework object, and no schema is read out of a dict.
+
+    Neither is a call on a module. ``httpx.get(url)`` reaches a function the
+    module declares, and a module is not a mapping whatever it contains. The
+    receiver has to be the bare imported name for that: ``os.environ.get`` is
+    a genuine keyed lookup reached *through* a module, so only a name bound
+    directly by ``import`` is ruled out, never an attribute of one.
+
+    Both exclusions are made once, here, and the sites that survive them are
+    the sites a type oracle is asked about. A resolution pass that selected
+    its own would be this rule stated twice, and would spend a checker
+    session deciding what the tree has already settled.
+
+    What no tree can settle is what an imported class *is*, and that is what
+    the sites carry positions for: `lup.codescan.resolution` resolves them
+    and refutes a receiver outside the mapping family.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    modules: set[str] = set()
+    decorated: set[int] = set()
+    for node in python_nodes(tree):
+        match node:
+            case ast.Import(names=names):
+                modules.update(
+                    alias.asname or alias.name.partition(".")[0] for alias in names
+                )
+            case (
+                ast.FunctionDef(decorator_list=decorators)
+                | ast.AsyncFunctionDef(decorator_list=decorators)
+                | ast.ClassDef(decorator_list=decorators)
+            ):
+                decorated.update(
+                    line
+                    for decorator in decorators
+                    for line in range(
+                        decorator.lineno, (decorator.end_lineno or decorator.lineno) + 1
+                    )
+                )
+
+    def keyed_lookup(call: ast.Call, read: ast.Attribute) -> bool:
+        """Whether one ``.get(`` is a keyed lookup rather than the two near-misses."""
+        return (
+            not (isinstance(read.value, ast.Name) and read.value.id in modules)
+            and (read.end_lineno or read.value.lineno) not in decorated
+        )
+
+    return attribute_call_sites(tree, "get", keyed_lookup)
+
+
+def empty_collection_sites(source: str) -> list[MatchSite]:
+    """Return the lines seeding an empty collection a loop then fills.
+
+    Every empty-collection binding the tree carries, less the ones
+    :func:`empty_collection_exempt_lines` shows to be deliberate defaults —
+    ``__init__`` state, call keywords, annotated module and class
+    declarations, and a seed whose every feeding loop tolerates a failure.
+
+    Stated as a difference because that is what it is: the defect is a seed
+    the code goes on to append to, and "goes on to append to" is a property
+    of the surrounding scope rather than of the assignment. What the
+    conversion buys is that the first half is now the tree's answer too, so a
+    ``= []`` written inside a string or spelled across a line break is
+    counted exactly as the language reads it.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+    seeded = {
+        node.value.lineno
+        for node in [*nodes_of(tree, ast.Assign), *nodes_of(tree, ast.AnnAssign)]
+        if node.value is not None and empty_collection_literal(node.value)
+    }
+    return sites_at(seeded - empty_collection_exempt_lines(source))
+
+
+def silent_truncation_sites(source: str) -> list[MatchSite]:
+    """Return the prefix slices that keep a chosen size of somebody's content.
+
+    A bound is this rule's subject when it is a size somebody chose: a literal
+    of two digits or more, or a shouty constant naming one. A single digit is
+    a parser bound — ``rest[:1]``, ``data[:2]`` — and a lowercase name is what
+    a caller passed, which makes ``results[:limit]`` a request rather than a
+    cut. Reading the bound is what makes this decidable at all: no type says
+    whether the receiver held content.
+
+    Less what :func:`slice_exempt_lines` settles — a digest, a split, an
+    abbreviation, or a prefix a comparison only asks a question of.
+    """
+    tree = python_tree(source)
+    if tree is None:
+        return []
+
+    def chosen_size(bound: ast.expr | None) -> bool:
+        match bound:
+            case ast.Constant(value=int() as size):
+                return not isinstance(bound.value, bool) and size >= 10
+            case ast.Name(id=name):
+                return len(name) >= 3 and name == name.upper() and name[0].isalpha()
+        return False
+
+    sliced = {
+        line
+        for node in nodes_of(tree, ast.Subscript)
+        if isinstance(node.slice, ast.Slice)
+        and node.slice.lower is None
+        and chosen_size(node.slice.upper)
+        for line in range(node.lineno, (node.end_lineno or node.lineno) + 1)
+    }
+    return sites_at(sliced - slice_exempt_lines(source))
+
+
+def matcher_named(name: str) -> Callable[[str], list[MatchSite]] | None:
+    """The AST selector one row names, where the row names one.
+
+    A rule earns a matcher when the shape it refuses is one the grammar has a
+    word for, which is most of them. Which rule has which lives at the
+    declaration in `lup.codescan.antipatterns` and travels in the row, because
+    a row projected into the hermetic runtime is primitive and cannot carry a
+    callable: this side holds only the functions a row may name, so a rule
+    that gains one reaches the gate by construction rather than by someone
+    also remembering to widen a list of ids here.
     """
     match name:
-        case "default_factory_exempt_lines":
-            return default_factory_exempt_lines
-        case "empty_collection_exempt_lines":
-            return empty_collection_exempt_lines
-        case "dict_get_exempt_lines":
-            return dict_get_exempt_lines
-        case "tuple_shape_exempt_lines":
-            return tuple_shape_exempt_lines
+        case "import_re_sites":
+            return import_re_sites
+        case "subprocess_sites":
+            return subprocess_sites
+        case "argparse_sites":
+            return argparse_sites
+        case "pdf_extraction_sites":
+            return pdf_extraction_sites
+        case "rich_progress_sites":
+            return rich_progress_sites
+        case "suppress_import_sites":
+            return suppress_import_sites
+        case "dataclass_sites":
+            return dataclass_sites
+        case "re_call_sites":
+            return re_call_sites
+        case "cast_sites":
+            return cast_sites
+        case "eval_exec_sites":
+            return eval_exec_sites
+        case "utcnow_sites":
+            return utcnow_sites
+        case "os_shell_sites":
+            return os_shell_sites
+        case "os_file_ops_sites":
+            return os_file_ops_sites
+        case "os_path_sites":
+            return os_path_sites
+        case "os_environ_sites":
+            return os_environ_sites
+        case "suppress_sites":
+            return suppress_sites
+        case "string_replace_sites":
+            return string_replace_sites
+        case "string_split_sites":
+            return string_split_sites
+        case "string_strip_sites":
+            return string_strip_sites
+        case "generic_base_sites":
+            return generic_base_sites
+        case "typing_union_sites":
+            return typing_union_sites
+        case "typing_generics_sites":
+            return typing_generics_sites
+        case "dict_str_object_sites":
+            return dict_str_object_sites
+        case "dict_str_payload_sites":
+            return dict_str_payload_sites
+        case "any_type_sites":
+            return any_type_sites
+        case "bare_object_sites":
+            return bare_object_sites
+        case "bare_basemodel_sites":
+            return bare_basemodel_sites
+        case "frozenset_shape_sites":
+            return frozenset_shape_sites
+        case "set_shape_sites":
+            return set_shape_sites
+        case "bare_except_sites":
+            return bare_except_sites
+        case "except_baseexception_sites":
+            return except_baseexception_sites
+        case "global_statement_sites":
+            return global_statement_sites
+        case "all_export_sites":
+            return all_export_sites
+        case "model_config_sites":
+            return model_config_sites
+        case "private_function_sites":
+            return private_function_sites
+        case "private_class_sites":
+            return private_class_sites
+        case "private_variable_sites":
+            return private_variable_sites
+        case "namedtuple_sites":
+            return namedtuple_sites
+        case "tuple_shape_sites":
+            return tuple_shape_sites
+        case "default_factory_sites":
+            return default_factory_sites
+        case "dict_get_sites":
+            return dict_get_sites
+        case "empty_collection_sites":
+            return empty_collection_sites
+        case "silent_truncation_sites":
+            return silent_truncation_sites
+        case "type_ignore_sites":
+            return type_ignore_sites
+        case "pyright_ignore_sites":
+            return pyright_ignore_sites
+        case "noqa_sites":
+            return noqa_sites
     return None
 
 
-def refined_exempt_lines(
-    source: str, rows: list[AntiPatternRow]
-) -> dict[str, set[int]]:
-    """Where each refined rule is cleared in this source, computed once.
+def matched_lines(source: str, rows: list[AntiPatternRow]) -> dict[str, set[int]]:
+    """Which lines each matched rule selects in this source, computed once.
 
-    A row without the field reads as declaring no refiner, which is what an
-    empty name already means here. The table is generated, so a rule can
-    arrive from a branch older than the field — and this gate is compiled
-    into the dispatcher that decides every edit, whose own recovery is
-    regenerating the table. Raising on the malformed table would take down
-    the one path that repairs it, and the rule then simply runs unrefined,
-    which reports more than it should rather than less.
+    Where a tree can be had, the selector answers and the pattern is not
+    consulted. Where none can — a file caught mid-edit, an indented fragment —
+    what happens next is the rule's own strength, because that is what decides
+    the cost of guessing.
+
+    A soft rule falls back to its pattern. Guessing wide there costs a
+    directive carrying a reason, which is a sentence somebody writes and the
+    audit then grades, so the conservative net is affordable.
+
+    A strong rule fires nowhere, which is what the empty entry says. No
+    directive may silence one, so a verdict from a pattern the tree never
+    confirmed would be a denial with no escape — and "cannot tell" has to
+    fail toward silence. The site is seen again the moment the file parses.
+
+    A row without the field reads as declaring no matcher, which is what an
+    empty name already means here. This gate is compiled into the dispatcher
+    that decides every edit, so a table from an older branch has to leave
+    that dispatcher able to regenerate it rather than taking it down.
     """
+    parses = python_tree(source) is not None
     found: dict[str, set[int]] = {}
     for row in rows:
-        refiner = refiner_named(row["refiner"] if "refiner" in row else "")
-        if refiner is not None:
-            found[row["id"]] = refiner(source)
+        matcher = matcher_named(row["matcher"] if "matcher" in row else "")
+        if matcher is None:
+            continue
+        if parses:
+            found[row["id"]] = lines_of(matcher(source))
+        elif row["strength"] == "strong":
+            found[row["id"]] = set()
     return found
 
 
@@ -834,8 +2408,8 @@ def resites_a_suppression(line: str, gone: list[str]) -> bool:
     `# lup: ignore[a, b]` becoming `# lup: ignore[a]` from a suppression
     appearing out of nowhere, and asks about both. The first is the edit the
     audit *demands* when it reports a directive spurious, so asking to approve
-    it makes one gate request what the other grants — the same split
-    `refined_exempt_lines` exists to avoid.
+    it makes one gate request what the other grants — the same split a
+    matcher stating its rule once exists to avoid.
 
     Moving one is the same shape and was refused for the same reason. Adopting
     a placement policy necessarily rewrites the markers the old policy allowed,
@@ -894,11 +2468,10 @@ def non_real_lines(source: str) -> set[int]:
         for number, line in enumerate(code, start=1)
         if not line or line.isspace()
     }
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
+    tree = python_tree(source)
+    if tree is None:
         return excluded
-    for node in ast.walk(tree):
+    for node in python_nodes(tree):
         if isinstance(node, ast.Import | ast.ImportFrom) and node.end_lineno:
             excluded.update(range(node.lineno, node.end_lineno + 1))
         if isinstance(node, ast.ClassDef) and is_record_class(node):
@@ -976,14 +2549,15 @@ def file_ignore(source: str) -> FileIgnore:
 def suppression_site(number: int, line: str) -> str:
     """One suppression, located, named, and quoted before it is approved.
 
-    The rules are named rather than left to be read back out of the quote,
-    because the quote is a preview: a long line is cut, and a directive is
-    written at the end of the line it guards — the end being what a cut takes.
+    The rules are named rather than left to be read back out of the quote, so
+    an approval states what it approves without anyone parsing the line again.
+    The line itself is quoted whole: a directive is written at the end of what
+    it guards, which is the end a cut would take first.
     """
     match = IGNORE_RE.search(line)
     named = ignore_rule_ids(match) if match is not None else None
     silenced = ", ".join(named) if named else "every rule"
-    return f"line {number} silences {silenced}: {line.strip()[:160]}"
+    return f"line {number} silences {silenced}: {line.strip()}"
 
 
 def suppression_reason(sites: list[str], creation: bool = False) -> str:
@@ -1024,23 +2598,35 @@ def anti_pattern_hits(
     scanned_lines: list[str],
     exempt: dict[str, set[int]],
     tokenized: bool,
+    matched: dict[str, set[int]] | None = None,
 ) -> Iterator[AntiPatternHit]:
     """Every added line and the rule it matches, before suppressions apply.
 
     Separating matching from deciding is what lets the strong rules be
     consulted ahead of the suppression gate without the match logic existing
     twice — two copies being how a gate starts disagreeing with itself.
+
+    A rule the caller resolved a selector for is decided by that selector and
+    its pattern is not consulted: the tree already said which lines carry the
+    shape, and re-reading the text could only disagree with it. ``matched``
+    carries no entry for a rule whose source would not parse, which is what
+    puts that rule back on its pattern.
     """
+    selected = matched or {}
     for number in added:
         masked = scanned_lines[number - 1].strip()
         if not tokenized and masked.startswith("#") and "type:" not in masked:
             continue
         code = code_lines[number - 1].strip()
         for row in rows:
+            if row["id"] in exempt and number in exempt[row["id"]]:
+                continue
+            if row["id"] in selected:
+                if number in selected[row["id"]]:
+                    yield AntiPatternHit(line=number, row=row)
+                continue
             stripped = code if tokenized and row["context"] == "code" else masked
             if not stripped:
-                continue
-            if row["id"] in exempt and number in exempt[row["id"]]:
                 continue
             if re.search(row["pattern"], stripped) is not None:
                 yield AntiPatternHit(line=number, row=row)
@@ -1058,6 +2644,63 @@ def anti_pattern_denial(number: int, row: AntiPatternRow) -> KernelDecision:
         "deny",
         f"line {number}: {row['message']}{placement} "
         f"(rule {row['id']} — see docs/rules.md)",
+    )
+
+
+def awaits_resolution(
+    before: str | None, after: str, rows: list[AntiPatternRow], python_source: bool
+) -> bool:
+    """Whether this edit trips a rule whose verdict turns on a declaration.
+
+    The one question a caller needs answered before paying for a checker
+    session, and it is answerable without one: the regex and the tree already
+    say which lines are candidates, and only those can be decided differently
+    once a receiver is resolved. Every other edit — most of them — is judged
+    exactly as before and costs nothing.
+
+    A line a directive already covers still counts. Resolving it is not waste:
+    if the declaration turns out to be outside the rule's family, the audit
+    calls that directive dead, and a gate that skipped the lookup would admit
+    a marker `dev check` immediately reports.
+    """
+    if not python_source:
+        return False
+    original_lines = after.splitlines()
+    return any(
+        hit["row"]["resolution"] == "required"
+        for hit in anti_pattern_hits(
+            added_line_numbers(before, after),
+            rows,
+            python_code_lines(after),
+            mask_python_string_literals(after),
+            {},
+            python_comment_columns(after) is not None,
+            matched_lines(after, rows),
+        )
+        if hit["line"] <= len(original_lines)
+    )
+
+
+def unresolved_anti_pattern_ask(number: int, row: AntiPatternRow) -> KernelDecision:
+    """Ask about a line whose rule needs a resolution this gate did not get.
+
+    The message the rule carries tells an author to add a directive on an open
+    mapping and to add nothing on a typed non-mapping receiver, because the
+    audit resolves that one and reports a marker there as spurious. Repeating
+    it under a denial is what closed the recovery in both directions: a
+    directive the audit calls dead, or a line this gate will not admit.
+
+    So the question says what is not known rather than what to write, and
+    leaves the answer to whoever can see the receiver's type. Approving is not
+    approving a defect — it admits a line the audit still judges, on evidence
+    this gate did not have.
+    """
+    return KernelDecision(
+        "ask",
+        f"line {number}: {row['message']} — this gate could not resolve what the"
+        " receiver is declared on, so it cannot tell the defect from the"
+        " shape the rule permits; approve if the receiver is typed and not a"
+        f" mapping, and `dev check` will confirm it (rule {row['id']})",
     )
 
 
@@ -1093,6 +2736,7 @@ def antipattern_decision(
     rows: list[AntiPatternRow],
     python_source: bool,
     allowances: list[str] | None = None,
+    refuted: dict[str, list[int]] | None = None,
 ) -> KernelDecision | None:
     """Reject newly added unsuppressed anti-patterns and ask on suppressions.
 
@@ -1130,7 +2774,12 @@ def antipattern_decision(
         mask_python_string_literals(after) if python_source else original_lines
     )
     code_lines = python_code_lines(after) if python_source else original_lines
-    exempt = refined_exempt_lines(after, rows) if python_source else {}
+    exempt: dict[str, set[int]] = {}
+    matched = matched_lines(after, rows) if python_source else {}
+    for rule_id, lines in (refuted or {}).items():
+        exempt[rule_id] = (
+            exempt[rule_id] | set(lines) if rule_id in exempt else set(lines)
+        )
     comment_columns = python_comment_columns(after) if python_source else None
     file_level = file_ignore(after)
     has_file_ignore = file_level["present"]
@@ -1156,10 +2805,10 @@ def antipattern_decision(
     # Which of them this gate may judge for suppressing nothing. The
     # whole-file form governs lines an edit's own text need not contain, so it
     # is asked about like any other and judged by none of what follows.
-    # Judging the rest rests on the refiners, and a refiner reads a tree:
-    # where the document has none, `tuple_shape_exempt_lines` clears every
-    # line by design, and reading a clearance as proof would refuse a
-    # directive for this gate's own blindness.
+    # Judging the rest rests on reading the tree: where the document has none
+    # a matched rule is answering from its pattern or not at all, and calling
+    # a directive dead on either would refuse it for this gate's own
+    # blindness.
     decidable = not declared or not python_source or python_parses(after)
     whole_file = file_level_line(after)
     judged = [
@@ -1167,7 +2816,9 @@ def antipattern_decision(
     ]
     tokenized = comment_columns is not None
     hits = list(
-        anti_pattern_hits(added, rows, code_lines, scanned_lines, exempt, tokenized)
+        anti_pattern_hits(
+            added, rows, code_lines, scanned_lines, exempt, tokenized, matched
+        )
     )
 
     def guarded_hits(number: int) -> list[AntiPatternHit]:
@@ -1191,7 +2842,7 @@ def antipattern_decision(
         }
         return list(
             anti_pattern_hits(
-                guarded, rows, code_lines, scanned_lines, exempt, tokenized
+                guarded, rows, code_lines, scanned_lines, exempt, tokenized, matched
             )
         )
 
@@ -1249,6 +2900,13 @@ def antipattern_decision(
                     continue
                 covering[holder] = True
                 continue
+        # A verdict this gate cannot support is asked about rather than
+        # stated. The regex is wider than the defect for a resolution-required
+        # rule, and what settles the difference is a declaration nothing here
+        # resolved — so a denial would be the audit's opposite, and the two
+        # would block on states no version of the file satisfies at once.
+        if refuted is None and hit["row"]["resolution"] == "required":
+            return unresolved_anti_pattern_ask(number, hit["row"])
         return anti_pattern_denial(number, hit["row"])
 
     def sites_at(numbers: list[int]) -> list[str]:
@@ -1326,9 +2984,8 @@ def documentation_only(source: str) -> bool:
     Source that does not parse is not a marker either: what it says is exactly
     what could not be established.
     """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
+    tree = python_tree(source)
+    if tree is None:
         return False
     match tree.body:
         case [] | [ast.Expr(value=ast.Constant(value=str()))]:
@@ -1353,6 +3010,82 @@ def acceptance_guard_decision(
     if autonomous:
         return KernelDecision("deny", guard["autonomous_reason"])
     return KernelDecision("ask", guard["ask_reason"])
+
+
+def edit_rule_matches(
+    row: EditRuleRow, gate: str, suffix: str, role: str, operation: str
+) -> bool:
+    """Whether one declared rule speaks about this change at this gate.
+
+    An empty axis means the rule is silent about it and matches every value,
+    so a rule constrains exactly what it names and a table of one rule saying
+    nothing but ``effect`` moves every gate at once — which is the shortest
+    way to state a project that reviews nothing at the hook.
+    """
+    return (
+        (not row["gates"] or gate in row["gates"])
+        and (not row["suffixes"] or suffix in row["suffixes"])
+        and (not row["roles"] or role in row["roles"])
+        and (not row["operations"] or operation in row["operations"])
+    )
+
+
+def edit_verdict(
+    rows: list[EditRuleRow],
+    gate: str,
+    suffix: str,
+    role: str,
+    operation: str,
+    default: KernelDecision,
+) -> KernelDecision:
+    """What one gate decides here: the last rule that moves it, or the kernel's own.
+
+    Last match rather than first, and rather than most specific, because these
+    rules overlap on purpose: a project states the broad case and then carves
+    exceptions out of it, exactly as `.gitignore` is written and read. Most
+    specific would make a table's meaning depend on a specificity ordering
+    nobody wrote down, and would have no answer at all for two rules of equal
+    reach.
+
+    A rule that states no effect is not a match here however well its axes fit
+    — it moves the threshold and nothing else, so it must not shadow a rule
+    behind it that does decide.
+    """
+    stated = [
+        row
+        for row in rows
+        if row["effect"] and edit_rule_matches(row, gate, suffix, role, operation)
+    ]
+    if not stated:
+        return default
+    decided = stated[-1]
+    effect = decided["effect"]
+    if effect not in ("allow", "ask", "deny", "defer"):
+        return default
+    return KernelDecision(effect, decided["reason"] or default.reason)
+
+
+def edit_threshold(
+    rows: list[EditRuleRow],
+    suffix: str,
+    role: str,
+    operation: str,
+    default: int,
+) -> int:
+    """How many added lines count as small here, by the same last-match rule.
+
+    Separate from :func:`edit_verdict` because the two move independently: a
+    project widening the size gate for one suffix is not restating who decides
+    when it trips, and one that redirects the verdict has said nothing about
+    how much is too much.
+    """
+    stated = [
+        row["maximum_added_lines"]
+        for row in rows
+        if row["maximum_added_lines"] is not None
+        and edit_rule_matches(row, "size", suffix, role, operation)
+    ]
+    return stated[-1] if stated else default
 
 
 # lup: Editing `.claude/` or `.codex/` should be auto-deny here, carrying the
@@ -1383,6 +3116,10 @@ def decide_edit(
     python_source: bool = False,
     acceptance_guard: AcceptanceGuardRow | None = None,
     marker_files: tuple[str, ...] = PACKAGE_MARKER_FILES,
+    refuted: dict[str, list[int]] | None = None,
+    suffix: str = "",
+    operation: str = "modify",
+    edit_rules: list[EditRuleRow] | None = None,
 ) -> KernelDecision:
     """Apply anti-pattern, path, marker, full-write, deletion, and size gates.
 
@@ -1398,8 +3135,8 @@ def decide_edit(
     about — while retiring one needs no gate at all: the same decision
     re-reads the uncovered line, allows it where nothing trips, and denies
     where the violation is still live. What makes that verdict trustworthy is
-    :func:`refined_exempt_lines`, without which a rule broader than the defect
-    it names holds its own suppression in place forever.
+    a matcher subtracting its own excess, without which a rule broader than
+    the defect it names holds its own suppression in place forever.
 
     ``acceptance_guard`` is the one gate that answers before the relaxations
     below rather than through them, because it asks whether the file may be
@@ -1422,24 +3159,38 @@ def decide_edit(
     previous = before or ""
     updated = after or ""
     role = path_role(path, path_roles or [])
+    rows = edit_rules or []
+
+    def judged(gate: str, default: KernelDecision) -> KernelDecision:
+        """This gate's verdict, as the project's declared table resolved it.
+
+        Every gate below states the verdict the kernel reaches on its own and
+        hands it here, so an empty table decides exactly what this function
+        decided before a table existed — and a project moving one gate has to
+        name it, rather than inheriting a shift it never asked for.
+        """
+        return edit_verdict(rows, gate, suffix, role, operation, default)
+
     # Whether this file may be edited at all is prior to how the edit reads,
     # so the guard answers ahead of every gate below — including pure
     # deletion, which would otherwise allow removing the test outright, and
     # the protected-path rules, whose autonomous release must not survive a
     # refusal aimed at exactly that caller.
     if role == "test" and acceptance_guard is not None:
-        return acceptance_guard_decision(acceptance_guard, autonomous)
+        return judged(
+            "acceptance-guard", acceptance_guard_decision(acceptance_guard, autonomous)
+        )
     # The conventions describe how production code should read. A test's
     # subject is production's behaviour, and scratch is disposable, so
     # neither is judged against them.
     if after is not None and role == "production":
         antipattern = antipattern_decision(
-            before, after, antipattern_rows, python_source, granted
+            before, after, antipattern_rows, python_source, granted, refuted
         )
         # A granted suppression answers this gate and no other, so an allow
         # falls through to the rest of the lattice rather than ending it.
         if antipattern is not None and antipattern.effect != "allow":
-            return antipattern
+            return judged("anti-pattern", antipattern)
     protected = next(
         (
             row
@@ -1450,7 +3201,7 @@ def decide_edit(
         None,
     )
     if protected is not None and not (autonomous and protected["allow_autonomous"]):
-        return KernelDecision("ask", protected["reason"])
+        return judged("protected-path", KernelDecision("ask", protected["reason"]))
     # Feedback is feedback wherever it is left, so this gate follows the file
     # rather than the conventions: a note on a test still names work somebody
     # owes. Scratch is the exception, and only because nothing there persists
@@ -1458,20 +3209,40 @@ def decide_edit(
     if role != "scratch":
         marker = marker_decision(previous, updated, python_source)
         if marker is not None:
-            return marker
-    if before is None and role == "production":
+            return judged(marker["gate"], marker["decision"])
+    # A whole-file write is one the caller named as such, or one that arrived
+    # with no preimage at all. Both spellings are kept because they answer
+    # different callers: an adapter that knows the native call says so, and
+    # one that only has the documents falls back to the absence that used to
+    # be the whole test. Keying on the operation is what survives an adapter
+    # learning to carry a file's current text as the preimage — without it,
+    # teaching `Write` to do that would silently move every overwrite from
+    # this gate to the size gate below.
+    whole_file = operation in ("create", "overwrite") or before is None
+    if whole_file and role == "production":
         if autonomous:
-            return KernelDecision("allow", "reviewed autonomous full write")
+            return judged(
+                "autonomous-full-write",
+                KernelDecision("allow", "reviewed autonomous full write"),
+            )
         if posixpath.basename(path) in marker_files and documentation_only(updated):
-            return KernelDecision("allow", "a package marker states nothing to review")
-        return KernelDecision("ask", "full-file writes require approval")
+            return judged(
+                "package-marker",
+                KernelDecision("allow", "a package marker states nothing to review"),
+            )
+        return judged(
+            "full-write", KernelDecision("ask", "full-file writes require approval")
+        )
     if after is None or after == "":
-        return KernelDecision("allow", "pure deletion")
-    if (
-        role == "production"
-        and real_added_line_count(before, after, python_source) > maximum_added_lines
-    ):
+        return judged("pure-deletion", KernelDecision("allow", "pure deletion"))
+    if role == "production" and real_added_line_count(
+        before, after, python_source
+    ) > edit_threshold(rows, suffix, role, operation, maximum_added_lines):
         if autonomous:
-            return KernelDecision("allow", "reviewed autonomous edit")
-        return KernelDecision("defer", "edit exceeds the small-change gate")
-    return KernelDecision("allow", "small safe edit")
+            return judged(
+                "autonomous-edit", KernelDecision("allow", "reviewed autonomous edit")
+            )
+        return judged(
+            "size", KernelDecision("defer", "edit exceeds the small-change gate")
+        )
+    return judged("small-edit", KernelDecision("allow", "small safe edit"))

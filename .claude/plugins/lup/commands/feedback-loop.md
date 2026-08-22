@@ -12,7 +12,7 @@ Run the full feedback loop by invoking subcommands in sequence. Each subcommand 
 
 **If the user pasted trace content as an argument**: $ARGUMENTS
 
-When trace content is provided, run a focused single-trace deep analysis using the `/fb-investigate` process (Steps 1-5) on the pasted content, then stop. Do not proceed to the full loop.
+When trace content is provided, run a focused single-trace deep analysis using the /lup:fb-investigate process (Steps 1-5) on the pasted content, then stop. Do not proceed to the full loop.
 
 ## Three Levels of Analysis
 
@@ -37,23 +37,23 @@ A good feedback loop session produces changes at multiple levels. If you only ma
 
 ## Sequence
 
-### 1. `/fb-status` — State + targets
+### 1. /lup:fb-status — State + targets
 
 Pass $ARGUMENTS through. Ends with a gate — confirm targets before proceeding.
 
-### 2. `/fb-investigate` — Deep trace reading
+### 2. /lup:fb-investigate — Deep trace reading
 
 Read and analyze the selected sessions deeply. Ends with a gate — confirm findings before proceeding.
 
-### 3. `/fb-analyze` — Tool health + capability gaps + patterns
+### 3. /lup:fb-analyze — Tool health + capability gaps + patterns
 
 Aggregate findings from metrics and traces to identify systemic patterns.
 
-### 4. `/fb-reflect` — Meta + meta-meta reflection
+### 4. /lup:fb-reflect — Meta + meta-meta reflection
 
 Is the agent tracking enough data? Is this feedback loop working? Update subcommands and devtools as needed.
 
-### 5. `/fb-implement` — Make changes + queue evaluation
+### 5. /lup:fb-implement — Make changes + queue evaluation
 
 Implement prioritized changes (tools first, prompts last). Bump version. Queue evaluation sessions.
 

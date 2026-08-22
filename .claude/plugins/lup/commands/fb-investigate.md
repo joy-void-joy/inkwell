@@ -1,6 +1,6 @@
 ---
 description: "Deep trace reading and error classification for selected sessions"
-allowed-tools: Bash(uv run lup-devtools:*), Read, Task, AskUserQuestion
+allowed-tools: Bash(uv run lup-devtools:*), Read, Agent, AskUserQuestion
 argument-hint: "<session_id1> [session_id2 ...]"
 ---
 
@@ -43,9 +43,9 @@ uv run lup-devtools trace show <session_id> --tool-calls
 ### 2. Tool use audit
 
 - **Tool call inventory**: List every tool call — what the agent tried to learn, whether it succeeded, whether the result was useful.
-- **Tool errors**: For each failure — what happened (quote the error), why it failed (read the tool source in `src/lup_template/agent/tools/`), was recovery reasonable.
+- **Tool errors**: For each failure — what happened (quote the error), why it failed (read the tool source in `src/inkwell/agent/tools/`), was recovery reasonable.
 - **Subtle bugs**: Cases where a tool *succeeded* but returned misleading or incomplete data.
-- **Missing tool calls**: Tools the agent *should* have called but didn't. Check available tools in `src/lup_template/agent/tools/`.
+- **Missing tool calls**: Tools the agent *should* have called but didn't. Check available tools in `src/inkwell/agent/tools/`.
 
 ### 3. Workflow assessment
 

@@ -25,7 +25,7 @@ $ARGUMENTS
   (`antipatterns.py`), boundary/spelling seams (`boundaries.py`), capability
   architecture (`capabilities.py`) — indexed by `registry.py` and rendered
   into `docs/rules.md` by `uv run lup-devtools dev rules`.
-- `src/lup_template/devtools/harness/catalog.py` owns application URL scopes,
+- `src/inkwell/devtools/harness/catalog.py` owns application URL scopes,
   protected roots, policy IDs, and other composition inputs; the readable
   shell table it declares is `content/shell_vocabulary.py`.
 - `tests/unit/test_semantic_policy.py` is the shared canonical/bundled fixture
@@ -43,7 +43,14 @@ generated artifacts. Never edit them as the source of a policy change.
 1. Classify the request as a semantic rule, an application policy input, or a
    native decoding/rendering capability.
 2. Read the relevant canonical source and its cross-native fixtures.
-3. Show the current behavior and propose the smallest semantic change. When
+3. Show the current behavior — `uv run lup-devtools dev policy '<command>'`
+   prints the live verdict and the sentence explaining it, and
+   `uv run lup-devtools dev vocabulary --provenance` prints every form the
+   vocabulary judges with the rule each came from. Read the verdict from
+   those rather than from the declaration, so what you show the user is what
+   a session would actually meet. Then propose the smallest semantic change,
+   and re-run `dev policy` on the same command afterwards so the before and
+   the after are the same measurement. When
    the request did not already settle the decision, Request explicit user approval before changing policy behavior. Reason: a policy change alters what every later session may do.
 4. Edit the canonical source and add fixtures for safe, denied, approval, and
    malformed variants as applicable.
@@ -51,7 +58,16 @@ generated artifacts. Never edit them as the source of a policy change.
    doc source above; a verdict that moved without its page moving leaves the
    page describing a policy nobody runs.
 6. Run `uv run pytest -q tests/unit/test_semantic_policy.py`.
-7. Run `uv run lup-devtools harness generate all` and
+7. Sweep the commands this project actually runs, because the fixtures cover
+   what the change was aimed at and say nothing about what it caught by
+   accident. `uv run lup-devtools hooks sweep <file>` classifies a list one
+   per line and exits non-zero on anything not allowed, so a rule that
+   tightened something it did not mean to tighten fails here instead of in
+   somebody's session. Keep that list in a file rather than retyping it, and
+   when the sweep newly denies an everyday command, decide whether the denial
+   was intended before moving on — then pin the answer as a fixture either
+   way.
+8. Run `uv run lup-devtools harness generate all` and
    `uv run lup-devtools harness check all`.
 
 Denial must win over approval across batches and shell segments. Unsupported

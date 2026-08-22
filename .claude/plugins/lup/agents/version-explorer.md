@@ -2,7 +2,7 @@
 name: version-explorer
 description: "Inventory version-impact evidence across the repository"
 tools: Read, Bash
-model: sonnet
+model: opus
 color: green
 ---
 
@@ -18,16 +18,16 @@ These are the files that matter most for version comparison. Check these by defa
 
 | File | What It Contains |
 |------|-----------------|
-| `src/lup_template/agent/prompts.py` | System prompt — the single most important file |
-| `src/lup_template/agent/core.py` | Agent orchestration (tool selection, hooks, output processing) |
-| `src/lup_template/agent/tool_policy.py` | Which tools are available and their documentation |
-| `src/lup_template/agent/models.py` | Structured output models |
-| `src/lup_template/agent/subagents.py` | Subagent definitions |
-| `src/lup_template/agent/config.py` | Configuration settings |
+| `src/inkwell/agent/prompts.py` | System prompt — the single most important file |
+| `src/inkwell/agent/core.py` | Agent orchestration (tool selection, hooks, output processing) |
+| `src/inkwell/agent/tool_policy.py` | Which tools are available and their documentation |
+| `src/inkwell/agent/models.py` | Structured output models |
+| `src/inkwell/agent/subagents.py` | Subagent definitions |
+| `src/inkwell/agent/config.py` | Configuration settings |
 | `pyproject.toml` | `[tool.lup] agent_version` — the version being tagged |
 | `uv run lup-devtools version changelog` | Version history (classified from git log; not a file) |
 
-Tool implementations live in `src/lup_template/agent/tools/*.py` — diff these when the caller asks about tool changes.
+Tool implementations live in `src/inkwell/agent/tools/*.py` — diff these when the caller asks about tool changes.
 
 ## Git Commands
 
@@ -42,16 +42,16 @@ git show v<VERSION>:<path>
 git diff v<A> v<B> -- <path>
 
 # Diff all agent code between two versions
-git diff v<A> v<B> -- src/lup_template/agent/ src/lup_template/agent/tools/
+git diff v<A> v<B> -- src/inkwell/agent/ src/inkwell/agent/tools/
 
 # Commits between two versions
 git log --oneline v<A>..v<B>
 
 # Find when a string was introduced (pickaxe search)
-git log -S "<string>" --oneline -- src/lup_template/
+git log -S "<string>" --oneline -- src/inkwell/
 
 # Find when a string was introduced with context
-git log -S "<string>" -p -- src/lup_template/agent/prompts.py
+git log -S "<string>" -p -- src/inkwell/agent/prompts.py
 
 # Classified changelog since a version (dynamic — no CHANGELOG.md file;
 # degrades to the root commit until the first `version bump` creates a tag)
@@ -83,10 +83,10 @@ Diff code between two versions. This is the most common request.
 2. Read the classified changelog spanning the two versions: `uv run lup-devtools version changelog --since v<A>` (dynamic — there is no `CHANGELOG.md` file; the command degrades to the root commit until the first `version bump` creates a tag)
 3. List commits between them: `git log --oneline v<A>..v<B>`
 4. Diff the key files (prompts.py first, then others as relevant):
-   - `git diff v<A> v<B> -- src/lup_template/agent/prompts.py`
-   - `git diff v<A> v<B> -- src/lup_template/agent/core.py`
-   - `git diff v<A> v<B> -- src/lup_template/agent/tool_policy.py`
-   - `git diff v<A> v<B> -- src/lup_template/agent/tools/` (if tool changes are relevant)
+   - `git diff v<A> v<B> -- src/inkwell/agent/prompts.py`
+   - `git diff v<A> v<B> -- src/inkwell/agent/core.py`
+   - `git diff v<A> v<B> -- src/inkwell/agent/tool_policy.py`
+   - `git diff v<A> v<B> -- src/inkwell/agent/tools/` (if tool changes are relevant)
 5. Synthesize: explain what changed, why it matters, and what the practical effect on agent behavior would be
 
 **Output:**
@@ -125,7 +125,7 @@ Diff code between two versions. This is the most common request.
 Find when a concept, phrase, or pattern appeared or disappeared.
 
 **Process:**
-1. Use pickaxe search: `git log -S "<search term>" --oneline -- src/lup_template/`
+1. Use pickaxe search: `git log -S "<search term>" --oneline -- src/inkwell/`
 2. Map the commit(s) to version tags: for each commit, find which version tag contains it
    ```bash
    git tag --contains <commit> --sort=version:refname | head -1

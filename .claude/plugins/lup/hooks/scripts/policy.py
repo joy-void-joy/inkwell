@@ -28,7 +28,12 @@ from policy_data import (
 
 # lup: ignore[subprocess] — `sh` is third-party and this half is compiled into a bare script that has no virtual environment to resolve it from
 import subprocess
-from kernel.edit import decide_edit, relocated_edit_text, relocated_suppressions
+from kernel.edit import (
+    awaits_resolution,
+    decide_edit,
+    relocated_edit_text,
+    relocated_suppressions,
+)
 from kernel.fetch import decide_fetch
 from kernel.lex import shell_path_verb_targets, shell_write_targets
 from kernel.shell import decide_shell
@@ -38,7 +43,9 @@ from policy_data import (
     ALLOWANCE_GRANTS_ENV,
     ALLOWED_FETCH_SCOPES,
     ANTI_PATTERN_ROWS,
+    RESOLUTION_COMMAND,
     DENIED_FETCH_SCOPES,
+    EDIT_RULES,
     KNOWN_ALLOWANCES,
     MAXIMUM_ADDED_LINES,
     PATH_ROLES,
@@ -184,6 +191,104 @@ def publish_edition(path_text: str) -> None:
         print(f"lup: could not publish the edition: {error}", file=sys.stderr)
 
 
+def project_environment(
+    root: Path,
+    variable: str = "UV_PROJECT_ENVIRONMENT",
+    default: str = ".venv",
+) -> Path:
+    """Where a sync puts *root*'s environment.
+
+    ``.venv`` beside the manifest is `uv`'s default and this project's own
+    layout, but it is a default rather than the answer: *variable* redirects
+    it, which is how one environment gets shared across worktrees, kept off a
+    slow filesystem, or placed where a container expects it. A relative value
+    resolves against the project, the way `uv` resolves it, rather than
+    against whatever directory a command happened to run in.
+
+    Lives in this half because this is the constrained one: the hook is
+    compiled to a bare script that may import nothing but the standard
+    library, so logic it needs cannot sit anywhere it would have to import
+    from. Everything else reads it from here, which is what keeps one answer
+    rather than two that agree until they do not.
+
+    Both names arrive as defaults rather than as module constants because the
+    compiler that splices this half into each hook carries functions alone —
+    a name declared beside one would be left behind, and the script would
+    reference it undefined.
+    """
+    environ = os.environ  # lup: ignore[os-environ] — uv's own configuration
+    declared = (environ[variable] if variable in environ else "").strip()
+    if not declared:
+        return root / default
+    return Path(declared) if Path(declared).is_absolute() else root / declared
+
+
+def declared_program(root: str, declared: str) -> str:
+    """Where a declared program is, or "" when it is not there to run.
+
+    The checkout answers first, whatever the spelling. That is what makes the
+    verdict the edited tree's rather than whichever environment the session
+    was launched from, and it is the property worth keeping — a sibling
+    worktree holds the same relative path with different contents.
+
+    Only where the checkout holds nothing does the spelling decide. A bare
+    name goes to the OS to find on ``PATH``, for a project whose toolchain
+    lives somewhere else entirely: a conda environment, a pyenv shim, a
+    system or user-level install, an environment ``UV_PROJECT_ENVIRONMENT``
+    put outside the project. A path that resolved to nothing stays nothing,
+    because a project that named a location meant that location.
+
+    Accepting only the first is what made this gate unavailable rather than
+    configurable. A declared program it could not resolve produced no
+    diagnostics and said nothing about why, so a project outside one layout
+    did not get a weaker check — it got silence indistinguishable from a
+    clean file, on every edit.
+
+    A bare name is asked of the checkout's own environment before ``PATH``,
+    because that is where a project's toolchain is installed and asking is
+    what keeps the declaration from naming a layout. Spelling the path in
+    would answer only for the layout it spelled: ``.venv`` is `uv`'s default
+    and nothing else's, so a project that redirected it, or that installs
+    through conda or pyenv, resolved to nothing and was gated in silence.
+    The scripts directory comes from the running interpreter — ``bin`` on
+    POSIX, ``Scripts`` on Windows — because that is a property of how Python
+    is installed rather than of any project, and reading it is what keeps
+    this from being a second layout assumption behind the one it replaces.
+    """
+    located = Path(root) / declared
+    if located.is_file():
+        return str(located)
+    if "/" in declared or "\\" in declared:
+        return ""
+    installed = (
+        project_environment(Path(root)) / Path(sys.executable).parent.name / declared
+    )
+    return str(installed) if installed.is_file() else declared
+
+
+def conflicted(path_text: str) -> bool:
+    """Whether a file is holding a merge open, and so is not source yet.
+
+    Both markers, at the start of a line. A lone `<<<<<<<` is reachable in
+    honest text — a diff quoted in a docstring, a fixture about conflicts, this
+    very sentence — and answering yes to one would silence the checker for a
+    file nothing is wrong with. A conflict always writes the pair, so requiring
+    both costs nothing it was meant to catch.
+
+    Unreadable is not conflicted. Whatever the reason, the checker is about to
+    meet the same file and is the one that should say so.
+    """
+    try:
+        lines = (
+            Path(path_text).read_text(encoding="utf-8", errors="replace").splitlines()
+        )
+    except OSError:
+        return False
+    return any(line.startswith("<<<<<<<") for line in lines) and any(
+        line.startswith(">>>>>>>") for line in lines
+    )
+
+
 def file_diagnostics(
     path_text: str,
     command: list[str],
@@ -197,6 +302,16 @@ def file_diagnostics(
     checkout — same module names, different source, diagnostics about a file
     nobody edited. Running the checker per edit has no root to go stale:
     the file names its own checkout, and that is where the check runs.
+
+    The checkout alone does not decide it. A checker finds the interpreter
+    whose packages it resolves against by looking down ``PATH``, and a hook
+    inherits whichever one the session was launched with, so a check running
+    in one tree reads another tree's installed packages and calls every
+    third-party import unresolvable. The checker's own directory goes first:
+    that is the environment it was installed into, and therefore the one
+    belonging to the checkout that holds the file. A checker the checkout
+    does not hold has no such directory to prefer, and keeps the ``PATH`` it
+    inherited — that is where the OS is about to find it.
 
     Reported for the edited file alone. The checker resolves whatever the
     file imports, so it can have opinions about the whole tree, and a hook
@@ -214,22 +329,42 @@ def file_diagnostics(
     that exists to be read. It is a default rather than a constant because the
     checker is the caller's choice: a project whose checker reads more than
     Python says so instead of editing this.
+
+    A file mid-merge is the same case arriving from the other direction. Its
+    conflict markers are not source in any language, so the checker reports the
+    file as broken from the first one onward and every line it names is about
+    the merge rather than about the edit — during a resolution, which is
+    exactly when a reader is editing that file and has the least attention to
+    spare for a wall of output that cannot be acted on.
     """
     if not command or Path(path_text).suffix.lower() not in suffixes:
+        return []
+    if conflicted(path_text):
         return []
     root = worktree_root(path_text)
     if not root:
         return []
-    executable = Path(root) / command[0]
-    if not executable.is_file():
+    located = declared_program(root, command[0])
+    if not located:
         return []
     edited = str(Path(path_text).resolve())
+    environ = os.environ  # lup: ignore[os-environ] — the checker inherits this
+    inherited = environ["PATH"] if "PATH" in environ else ""
+    # Only a checker the checkout holds has an own directory to put first.
+    # A bare name is about to be found on the PATH this inherits, so that
+    # PATH is already the environment it belongs to.
+    searched = (
+        f"{Path(located).parent}{os.pathsep}{inherited}"
+        if Path(located).is_absolute()
+        else inherited
+    )
     try:
         finished = subprocess.run(
-            [str(executable), *command[1:], edited],
+            [located, *command[1:], edited],
             capture_output=True,
             text=True,
             cwd=root,
+            env={**environ, "PATH": searched},
             timeout=timeout_seconds,
             check=False,
         )
@@ -243,14 +378,67 @@ def file_diagnostics(
     ]
 
 
-def existing_write_targets(targets: list[str]) -> list[str]:
+def resolved_refutations(
+    path_text: str,
+    proposed: str,
+    command: list[str],
+    timeout_seconds: float = 30.0,
+) -> dict[str, list[int]] | None:
+    """What a checker refutes in the text about to be written, or None.
+
+    The kernel decides from primitive rows and reads nothing, which is what
+    keeps a verdict a pure function of its inputs. Resolving a receiver's
+    declaration is not a decision — it is a fact about the machine, the same
+    kind this half already resolves — so it is answered here and passed in.
+
+    Run in the checkout holding the file, like every other checker this half
+    starts, and handed the proposed text on stdin: the change is judged before
+    it is written, so the copy on disk is the one being replaced. *path_text*
+    still names where the content belongs, because imports and the module's
+    own name resolve against it and against nothing else.
+
+    None where no answer was had — no declared resolver, none installed, a
+    crash, a timeout, output that will not decode — and it has to stay
+    distinct from an empty refutation. Empty means a checker looked and
+    refuted nothing, which is evidence; None means nothing looked, which is
+    the gate's cue to ask rather than refuse. Collapsing the two would turn
+    every unresolvable session into a wall of confident denials.
+    """
+    if not command:
+        return None
+    root = worktree_root(path_text)
+    if not root:
+        return None
+    located = declared_program(root, command[0])
+    if not located:
+        return None
+    try:
+        finished = subprocess.run(
+            [located, *command[1:], "--path", str(Path(path_text).resolve())],
+            capture_output=True,
+            text=True,
+            input=proposed,
+            cwd=root,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        reported = json.loads(finished.stdout)
+        if not reported["resolved"]:
+            return None
+        return {rule: list(lines) for rule, lines in reported["refuted"].items()}
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
+
+
+def existing_write_targets(targets: list[str], root: Path | None = None) -> list[str]:
     """Report which of a command's write targets already exist on disk.
 
     The kernel never reads the filesystem, so it cannot tell creating a file
     from overwriting one. Resolving that here keeps the decision itself a
     pure function of the command text and this list.
     """
-    return [target for target in targets if (Path.cwd() / target).exists()]
+    where = Path.cwd() if root is None else root
+    return [target for target in targets if (where / target).exists()]
 
 
 def git_answers(arguments: list[str], root: Path) -> list[str] | None:
@@ -397,6 +585,7 @@ def bash_decision(
     sandboxed: bool,
     interactive: bool,
     escapable: bool,
+    cwd: Path | None,
 ) -> KernelDecision:
     """Judge one shell command against the declared vocabulary.
 
@@ -411,6 +600,11 @@ def bash_decision(
     replacing it would cost. Resolving them for only one of the two writing
     forms is what left ``rm f`` granted while ``echo x > f`` asked about the
     same clean, tracked file.
+
+    ``cwd`` is where the calling session is, which the command's relative
+    operands resolve against. It is a parameter rather than a read of this
+    process, because a hook is promised nothing about where it runs, and
+    resolving a target against the wrong tree answers a different question.
 
     ``escapable`` is the one thing here a runtime answers rather than the host:
     whether it can put a single call outside its own sandbox. It arrives as an
@@ -429,13 +623,13 @@ def bash_decision(
         path_roles=PATH_ROLES,
         path_rules=PATH_RULES,
         existing_targets=existing_write_targets(
-            [*shell_write_targets(command), *acted_on]
+            [*shell_write_targets(command), *acted_on], cwd
         ),
         recoverable_targets=recoverable_write_targets(
-            [*shell_write_targets(command), *acted_on]
+            [*shell_write_targets(command), *acted_on], cwd
         ),
-        directory_targets=directory_write_targets(acted_on),
-        empty_directories=empty_directory_targets(acted_on),
+        directory_targets=directory_write_targets(acted_on, cwd),
+        empty_directories=empty_directory_targets(acted_on, cwd),
         recoverable_target_limit=RECOVERABLE_TARGET_LIMIT,
         runner_targets=RUNNER_TARGETS,
         target_tables=RUNNER_TARGET_TABLES,
@@ -484,6 +678,7 @@ def edit_decision(
     after: str | None,
     path_exists: bool,
     autonomous: bool,
+    operation: str = "modify",
 ) -> KernelDecision:
     """Judge one file's before and after against the declared edit policy.
 
@@ -495,23 +690,39 @@ def edit_decision(
     when the session started: a grant is answered by a human while the session
     that asked for it is still running, and one resolved at launch could not
     have carried the answer.
+
+    A checker is started only where its answer decides something. The kernel
+    is asked first, from the tree and the tables alone, whether this edit
+    trips a rule whose verdict turns on a resolved declaration; almost none
+    do, and those are judged for nothing. Only the rest pay for a language
+    server, which is the difference between a gate that costs a second per
+    edit and one that costs a second on the edits that need it.
     """
     suffix = Path(path_text).suffix.lower()
+    python_source = suffix in (".py", ".pyi")
+    rows = ANTI_PATTERN_ROWS[suffix] if suffix in ANTI_PATTERN_ROWS else []
+    refuted = (
+        resolved_refutations(path_text, after, RESOLUTION_COMMAND)
+        if after is not None and awaits_resolution(before, after, rows, python_source)
+        else None
+    )
     return decide_edit(
         worktree_path(path_text),
         before,
         after,
         path_exists=path_exists,
         path_rules=PATH_RULES,
-        antipattern_rows=ANTI_PATTERN_ROWS[suffix]
-        if suffix in ANTI_PATTERN_ROWS
-        else [],
+        antipattern_rows=rows,
         path_roles=PATH_ROLES,
         maximum_added_lines=MAXIMUM_ADDED_LINES,
         autonomous=autonomous,
         allowances=granted_allowances(ALLOWANCE_GRANTS_ENV, KNOWN_ALLOWANCES),
-        python_source=suffix in (".py", ".pyi"),
+        python_source=python_source,
         acceptance_guard=ACCEPTANCE_GUARD,
+        refuted=refuted,
+        suffix=suffix,
+        operation=operation,
+        edit_rules=EDIT_RULES,
     )
 
 
@@ -617,6 +828,7 @@ def dispatch(payload):
             # A call's sandbox is an argument of the call here, so a verdict
             # that has to leave the sandbox is carried out rather than refused.
             escapable=True,
+            cwd=Path(payload["cwd"]) if "cwd" in payload else None,
         )
     if name == "WebFetch":
         return fetch_decision(tool_input["url"])
@@ -628,15 +840,19 @@ def dispatch(payload):
             tool_input["new_string"],
             "replace_all" in tool_input and tool_input["replace_all"] is True,
         )
-        return edit_decision(path, before, after, Path(path).exists(), autonomous)
+        return edit_decision(
+            path, before, after, Path(path).exists(), autonomous, "modify"
+        )
     if name == "Write":
         path = tool_input["file_path"]
+        exists = Path(path).exists()
         return edit_decision(
             path,
             read_document(path),
             tool_input["content"],
-            Path(path).exists(),
+            exists,
             autonomous,
+            "overwrite" if exists else "create",
         )
     # Asked of whatever reached here rather than of a listed few: which tools
     # are worth refusing is the declaration's answer, and naming any of them

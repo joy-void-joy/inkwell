@@ -138,8 +138,11 @@ def sandbox_escaped(sandbox: SandboxPlacement, agent_escaped: bool) -> bool:
 # lup: ignore[library-default] — the stdlib the kernel actually imports; the hermetic guarantee it exists to hold
 KERNEL_IMPORT_ALLOWLIST = (
     "ast",
+    "collections",
     "collections.abc",
+    "difflib",
     "fnmatch",
+    "functools",
     "io",
     "pathlib",
     "posixpath",
@@ -184,12 +187,26 @@ class KernelDecision:
     effect: DecisionEffect
     reason: str
     sandbox: SandboxPlacement
+    escalated: str
+    """Why the agent said this call was worth putting to a human, if it did.
+
+    Carried as its own field rather than left readable in the reason, because
+    a host with no human to ask has somewhere else to send it and needs to
+    know that this particular refusal is one somebody asked for. Sniffing the
+    reason text for a prefix would make every caller re-derive what the
+    marker already stated.
+
+    It survives the collapse to ``deny``: the whole point is that the agent's
+    stated intent outlives the refusal, so whoever reads the relay sees why
+    the agent thought the command was worth running.
+    """
 
     def __init__(
         self,
         effect: DecisionEffect,
         reason: str = "",
         sandbox: SandboxPlacement = "ambient",
+        escalated: str = "",
     ) -> None:
         if effect not in ("allow", "ask", "deny", "defer"):
             raise ValueError(f"invalid kernel decision effect {effect!r}")
@@ -197,6 +214,7 @@ class KernelDecision:
             raise ValueError(f"invalid kernel decision placement {sandbox!r}")
         self.effect = effect
         self.reason = reason
+        self.escalated = escalated
         # Only a verdict this policy actually reached is placed: a refusal is
         # not softened by where the call would have run, and a deferral hands
         # the whole question over, the session's sandbox status included.
@@ -236,17 +254,25 @@ class KernelDecision:
         if self.sandbox == "escalable" and not agent_escalates:
             reason = self.reason + SANDBOX_ESCALATION_UNSUPPORTED
             return KernelDecision(
-                self.effect, reason, "inside" if escapable else "ambient"
+                self.effect,
+                reason,
+                "inside" if escapable else "ambient",
+                self.escalated,
             )
         if self.sandbox == "escalable":
             reason = self.reason + SANDBOX_ESCALATION_OFFER
             return KernelDecision(
-                self.effect, reason, "escalable" if escapable else "ambient"
+                self.effect,
+                reason,
+                "escalable" if escapable else "ambient",
+                self.escalated,
             )
         if not escapable:
-            return KernelDecision(self.effect, self.reason)
+            return KernelDecision(self.effect, self.reason, escalated=self.escalated)
         if self.effect == "ask" and self.sandbox == "outside":
-            return KernelDecision("ask", self.reason + SANDBOX_ESCAPE_NOTICE, "outside")
+            return KernelDecision(
+                "ask", self.reason + SANDBOX_ESCAPE_NOTICE, "outside", self.escalated
+            )
         return self
 
 

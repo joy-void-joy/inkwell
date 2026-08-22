@@ -72,7 +72,7 @@ Three questions place every module, and they point in different directions.
 
 **Outward — would another project built on lup want this?** If yes it belongs
 in `packages/lup/` even when only this application uses it today, because the
-library never imports the application: a utility left in `src/lup_template/`
+library never imports the application: a utility left in `src/inkwell/`
 is unreachable from here and has to move later. The same test applies to
 values. The library may declare one only when it could not have chosen
 otherwise — a language's file suffixes, a provider's wire spelling, a closed
@@ -158,7 +158,8 @@ every git side effect (leases, worktrees, commits, dependency bases);
 `mailbox.py` carries questions and answers as files so any door can write
 while the run holds its lease. Each phase is a collaborator over those rather
 than a method on one class: `questions.py` publishes and promotes,
-`actors.py` holds one durable session per actor, `turns.py` puts the prompts
+the `actors` package holds the population and one durable session per member,
+`turns.py` puts the prompts
 to them, `joins.py` brings branches together and settles what that breaks,
 `verification.py` runs one tree through the verification set, and
 `execution.py` drives one concern's revision loop. `core.py` composes them
@@ -195,20 +196,34 @@ Every remaining top-level entry, and what makes it one. `types` is tier 1
 above and `__init__` is the front door; the rest each answer a question no
 sibling answers.
 
+Which entries this table has to cover is walked from the installed `lup`
+package when the page is generated — `packages/lup/src/lup` in this repository,
+and wherever a downstream project resolved the dependency to. Generation fails
+naming any package that is neither described here nor tiered above, so a
+package added to the library cannot be quietly missing from its own roster —
+the way six of them once were.
+
 | Package | Solves |
 | --- | --- |
 | `devtools` | The development CLI an adopter inherits rather than forks: worktrees and branches, trace and Python introspection, the resolver supervisor, the sync registry, version bookkeeping. Ships the whole roster — `roster.py` wires every sub-app over one `DevtoolsDeclarations`, and an application declares only what it retires and what only it has, so a sub-app added here reaches it on the next lock refresh instead of waiting to be noticed. Requires the `web` extra for the supervisor. |
 | `channels` | File-backed channels — a value that settles, an ordered log, and the atomic publish under both. The widest dependency here: `harness`, `resolver`, `runtime`, `realtime`, `telemetry`, and `adapters` all write through it, which is what makes it a package rather than a helper inside any one of them. |
-| `codeintel` | An LSP client and the tools built on it, so a name is resolved rather than grepped. Serves an agent's toolset and the pyright oracle behind `dev check` — two consumers on opposite sides of the library, neither of which owns it. |
-| `gitlocks` | Why git cannot take the lock its config writes need. A confinement owning the path and a lock some git left behind when it died both surface as `File exists`, and the remedies are opposite, so telling them apart reads the mount state and the lock's age rather than the message. The same two-consumers shape as `codeintel`: the resolver's orchestrator and `devtools/utils` both diagnose it, and neither owns it. |
+| `journal` | One ordered record file, sequenced and durably appended, read back from a byte offset or a sequence number and paged backwards from either. Two products ride it — the resolver&#x27;s typed decision log and the observable transcript&#x27;s hash-chained provider payloads — and neither collapses into the other. Sharing the mechanism is what lets any reader tail either record the same way, and what stops the next thing needing a record from arriving with a third implementation. |
+| `codeintel` | An LSP client and the tools built on it, so a name is resolved rather than grepped. Serves an agent&#x27;s toolset and the pyright oracle behind `dev check` — two consumers on opposite sides of the library, neither of which owns it. |
+| `gitlocks` | Why git cannot take the lock its config writes need. A confinement owning the path and a lock some git left behind when it died both surface as `File exists`, and the remedies are opposite, so telling them apart reads the mount state and the lock&#x27;s age rather than the message. The same two-consumers shape as `codeintel`: the resolver&#x27;s orchestrator and `devtools/utils` both diagnose it, and neither owns it. |
+| `gitguard` | Catching a suite that wrote into the checkout it was running inside. A test that forgets to bind git to its throwaway repository inherits the process working directory instead, and nothing fails — git finds a repository, commits succeed, and the suite passes green while the developer&#x27;s branch has moved. Found the slow way, by a `dev pr sync-base` merging a `dev` whose tip had become a fixture&#x27;s commit deleting the application source. The suite cannot be trusted to notice, because noticing is exactly what it failed at, so the refs are read around it. |
+| `actors` | Addressable agents: one held session each, reachable while they work. An agent opened for a single turn and closed cannot be talked to, because there is nothing to talk to between the call and the result. An actor holds its session across turns, takes mail mid-turn through a hook it never chooses to check, and asks questions that settle without stalling the asker. Nothing here knows what the actors are for — the resolver names its own kinds over this mechanism, and a research session names different ones. |
+| `jobs` | Durable containerized work that outlives the process that submitted it. A sandbox cell runs inside the caller&#x27;s process, so the agent waits and a crash takes the work with it; a job is submitted, left running, and asked about later — possibly by a process started after that crash. Everything durable is on the filesystem, and the scheduler&#x27;s atomically-replaced view is deliberately separate from the terminal result the container writes, so a job cannot forge its own completion. |
+| `replay` | A durable journal of executed cells and the divergence check on replaying one: state is reconstructed by re-running the record rather than by serializing objects. What differs between users is the contract attached. An environment claiming determinism says a replay must reproduce its outcomes, so a divergence there is a defect in a claim; an environment claiming nothing still gets the report, and there the divergence *is* the finding — the result depended on something outside the journal. Both are replayable; only the first is certifiable. |
+| `selection` | Taking a library table as offered and saying only what differs from it. Three tables reach a project as a starting point rather than a fixture — the anti-patterns it holds its code to, the shell vocabulary it runs, the edit gates it judges its own changes by — and in all three the only way to disagree with one entry was to restate the table around it, where a restatement fallen behind the library looks exactly like a decision. A project names what it drops and adds what the library lacks, keyed on the same id a directive, a denial and the generated reference already use, so an override replaces its namesake in place rather than sitting beside it. |
 | `subagents` | Spec-driven delegation for engines with no native subagents, dispatching the same `SubagentSpec` roster the native path uses. |
-| `tool_policy` | Tool-availability filtering: the mechanism, not the policy. A project subclasses `BaseToolPolicy` and maps its own settings onto it, which is the placement rule in miniature — the machinery is the library's, every exclusion is the adopter's. |
+| `tool_policy` | Tool-availability filtering: the mechanism, not the policy. A project subclasses `BaseToolPolicy` and maps its own settings onto it, which is the placement rule in miniature — the machinery is the library&#x27;s, every exclusion is the adopter&#x27;s. |
+| `tool_routes` | Which tool answers a URL better than fetching it would. Behind a prediction-market URL is a market tool and behind a paper URL is a paper tool, and the rendered page is a poorer answer than either API. This is the table that says so — a URL shape, the tool it stands for, and how to build that tool&#x27;s arguments from what the shape matched. The same placement split as `tool_policy`: the matching and dispatch are the library&#x27;s, the table&#x27;s content belongs to the only thing that knows its own tools. |
 | `markdown` | Rendering Markdown that is generated rather than authored, escaping at the leaf where data enters the document. Only `devtools` renders such tables today, but nothing in it is about development tooling. |
 | `web` | What a page served on this machine does to stay local-only: the loopback bind refusal, the `Host` check that DNS rebinding would otherwise walk past, and the browser round-trip an installed OAuth client needs. One subject — a local HTTP surface a browser reaches — and the OAuth half is reached by a downstream project rather than by anything here, which is the outward test answering in the affirmative. The two user-facing pages, `devtools/dashboard` and `devtools/supervisor`, sit *on* this; it does not belong beside them. |
-| `workspace` | Where a run's data lives: version-aware paths, the `SessionContext` that crosses a process boundary, session history, and the note directories a session may touch. |
+| `workspace` | Where a run&#x27;s data lives: version-aware paths, the `SessionContext` that crosses a process boundary, session history, and the note directories a session may touch. |
 | `realtime` | The wake/act/sleep lifecycle for persistent agents. `scheduler.py` stands alone; `relay.py` layers a subprocess mailbox transport on top and is never imported by it. |
 | `telemetry` | What a run records about itself: markdown trace plus machine-readable sidecar, console rendering, per-tool metrics with a file-backed flush for subprocess tools. |
-| `usage` | One account's metered usage, whichever runtime billed it: the windows a plan meters and when each clears, where the tokens went day by day, and the display that draws both. Ships no roster — each adapter declares the entry that reads its own runtime into this shape, so a runtime joins the display by being read rather than by growing a command beside it. |
+| `usage` | One account&#x27;s metered usage, whichever runtime billed it: the windows a plan meters and when each clears, where the tokens went day by day, and the display that draws both. Ships no roster — each adapter declares the entry that reads its own runtime into this shape, so a runtime joins the display by being read rather than by growing a command beside it. |
 | `sandbox` | A Docker-isolated Python REPL — mount topology, container lifecycle, and the exec-multiplexed socket protocol. Requires the `docker` extra. |
 | `resilience` | `throttle` bounds concurrency and minimum call interval; `retry` re-runs a coroutine with exponential backoff. |
 | `hooks` | SDK-agnostic hook models and factories: permission hooks, tool allowlists, gates, nudges, capture. |
@@ -223,6 +238,14 @@ three questions put it. The exception is `resolver`, whose home is
 so it is part of the harness subject rather than a sibling of it, and the
 downward question stops it at the library edge — following the driver into
 `devtools/` would move provider-neutral code into the tooling layer.
+
+Acting on one of these answers is a command rather than an afternoon.
+`uv run lup-devtools dev relocate old.module=new.module` repoints every import
+of what moved, locating each module path by Python's own grammar rather than
+by pattern, and reports the mentions it deliberately did not touch — a log
+line, a docstring naming the old home — for a human to read. That the
+mechanical half is cheap is what keeps the placement question answerable
+instead of perpetually deferred.
 
 `usage/` and the `usage/` beside each adapter are worth naming next to it as
 the placement rule worked all the way through. What an account publishes is
@@ -265,5 +288,5 @@ read `TurnResult.output`. A missing submission raises a typed error carrying
 the blocks, usage, duration, and validation history — it cannot arrive as an
 empty success.
 
-`src/lup_template` is the worked example of all three; see
+`src/inkwell` is the worked example of all three; see
 [template.md](template.md).

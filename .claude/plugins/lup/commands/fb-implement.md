@@ -58,10 +58,27 @@ Remove prescriptive rules. Add general principles. Don't add:
 1. Version bump: `/lup:bump`
 2. Commit changes
 3. Verify: `git diff --stat` confirms each change
-4. Log changes in analysis doc:
-   - **COMMITTED**: In git, verified
-   - **PROPOSED**: Discussed but not implemented
-   - **DEFERRED**: Identified but deprioritized
+4. Close the loop over the sessions this pass read:
+
+   ```bash
+   uv run lup-devtools feedback mark <session-id> ...
+   uv run lup-devtools feedback commit
+   ```
+
+   Marking is what makes `feedback unanalyzed` stop returning them. Skip it
+   and the next pass re-reads the same sessions, re-finds the same gaps, and
+   spends its budget confirming what this one already fixed.
+5. Record what happened to each change, in the place that will surface it
+   again:
+   - **Committed** — in git and verified; it needs no note, the commit is
+     the record.
+   - **Proposed** — discussed and not implemented. If it belongs to a site
+     in this code, it is a `# lup:` note there.
+   - **Deferred** — deliberately parked. That is a `# lup: defer: <why>`
+     note at the site it concerns, which `dev check` keeps visible until
+     somebody wakes it. Never a line in an analysis document: a finding
+     parked in a file no workflow reads is a finding delegated to nobody,
+     which is the failure this loop exists to catch rather than commit.
 
 ## Queue Next Evaluation
 

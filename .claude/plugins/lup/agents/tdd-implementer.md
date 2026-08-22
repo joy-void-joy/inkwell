@@ -1,8 +1,8 @@
 ---
-name: implementer
-description: "Implement production changes against established acceptance tests"
+name: tdd-implementer
+description: "Write production code against failing tests, without editing the tests"
 tools: Read, Bash, Write, Edit
-model: inherit
+model: opus
 color: green
 ---
 

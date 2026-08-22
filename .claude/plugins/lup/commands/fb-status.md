@@ -18,13 +18,15 @@ uv run lup-devtools feedback status
 
 ### 2. Previous session
 
-Read the most recent analysis file in `notes/feedback_loop/`:
+`feedback status` above reports the analysis state. For what the last pass
+actually concluded, read the most recent `*_analysis.md` under
+`notes/feedback_loop` with your own file tools — the directory may not exist
+yet in a project that has never run this loop, and that is an answer rather
+than an error.
 
-```bash
-ls -t notes/feedback_loop/*_analysis.md 2>/dev/null | head -1
-```
-
-If it exists, read it. Note what was already fixed — don't re-investigate.
+Note what was already fixed, and don't re-investigate it. What the last pass
+deliberately parked is not in that file: it is a `# lup: defer:` note at the
+site it concerns, which `uv run lup-devtools dev comments` lists.
 
 ### 3. Select targets
 

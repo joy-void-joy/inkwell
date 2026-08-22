@@ -135,6 +135,17 @@ def create_app() -> FastAPI:
     if FRONTEND_DIST.is_dir():
         index_html = FRONTEND_DIST / "index.html"
 
+        def document() -> FileResponse:
+            """The SPA's document, which a browser must never keep.
+
+            Everything under /assets is named by a hash of its contents and can
+            be held forever; this names them, so a cached copy of it pins a tab
+            to the build it was fetched under. A server restarted onto new code
+            then serves an old application, and the person reloading has no way
+            to tell — they conclude the change did not work.
+            """
+            return FileResponse(index_html, headers={"Cache-Control": "no-store"})
+
         app.mount(
             "/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets"
         )
@@ -148,7 +159,7 @@ def create_app() -> FastAPI:
                 # arrives flagged by rlaif's forwarded-prefix header; serve the
                 # document in place (its URL already sits inside the base).
                 if "x-forwarded-prefix" in request.headers:
-                    return FileResponse(index_html)
+                    return document()
                 return RedirectResponse(base)
 
         @app.get("/{path:path}")
@@ -156,6 +167,6 @@ def create_app() -> FastAPI:
             static = FRONTEND_DIST / path
             if static.is_file():
                 return FileResponse(static)
-            return FileResponse(index_html)
+            return document()
 
     return app

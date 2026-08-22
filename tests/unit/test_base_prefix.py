@@ -48,3 +48,22 @@ def test_prefixed_asset_resolves_to_the_real_file(client: TestClient) -> None:
     resp = client.get(f"/inkwell/assets/{asset.name}")
     assert resp.status_code == 200
     assert not resp.headers["content-type"].startswith("text/html")
+
+
+def test_the_document_is_never_kept_by_the_browser(client: TestClient) -> None:
+    """It names the hashed bundles, so a cached copy pins a tab to the build it
+    was fetched under: a server restarted onto new code serves an old
+    application, and whoever reloaded concludes the change did not work."""
+    resp = client.get("/inkwell/works")
+
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_a_hashed_asset_stays_cacheable(client: TestClient) -> None:
+    """Only the document is unkeepable. Its assets are named by their contents,
+    so holding those is what makes a reload cheap."""
+    asset = next((FRONTEND_DIST / "assets").iterdir())
+
+    resp = client.get(f"/inkwell/assets/{asset.name}")
+
+    assert resp.headers.get("cache-control") != "no-store"

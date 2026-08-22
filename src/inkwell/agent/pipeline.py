@@ -3844,7 +3844,12 @@ class PipelineRunner:
         out_dir.mkdir(parents=True, exist_ok=True)
         output_path = out_dir / "output.md"
         sandbox = Sandbox(
-            session_id=f"inkwell-{label}-{out_dir.name}",
+            # Slugged because this label names a container, and a section
+            # writer's label carries the section's title: a heading with a
+            # space, a colon or a bracket in it is not a name Docker will
+            # accept, and the stage that asked for it loses its sandbox and
+            # runs on unable to execute anything.
+            session_id=f"inkwell-{slugify(label)}-{out_dir.name}",
             shared_dir=shared_dir,
             docker_image=self.stage_docker_image(),
             read_only_mounts={notes.base_dir: "/notes", **self.source_mounts()},

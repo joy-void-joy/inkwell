@@ -1,6 +1,7 @@
 """Tests for pipeline utility functions: slugify, voice refs."""
 
 from pathlib import Path
+from string import ascii_lowercase, digits
 from typing import Literal
 
 import pytest
@@ -46,6 +47,18 @@ class TestSlugify:
     def test_truncates_long_input(self) -> None:
         result = slugify("x" * 200)
         assert len(result) <= 80
+
+    def test_a_section_writers_label_is_a_name_docker_accepts(self) -> None:
+        """What a stage's container is named after. A section heading is prose
+        — spaces, a question mark, brackets — and Docker takes none of them,
+        so the stage lost its sandbox and ran on unable to execute code."""
+        legal = set(ascii_lowercase + digits + "_.-")
+
+        slug = slugify("write:How much time do defenders have? (new paragraph)")
+
+        assert set(slug) <= legal
+        assert slug[0] not in "_.-"
+        assert slug == "writehow-much-time-do-defenders-have-new-paragraph"
 
 
 class TestAddVoiceRefs:

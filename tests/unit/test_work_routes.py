@@ -12,12 +12,15 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from inkwell.agent.glossary import DECLARED_VOCABULARY, write_chapter_glossary
+from inkwell.environment.web import work_loops
 from inkwell.environment.web.routes import works
 from inkwell.environment.web.work_loops import WorkLoopManager
+from inkwell.manuscript.loop import PassReport
 from inkwell.manuscript.graph import adopted, readings
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.mailbox import PartMailbox, PartQuestion, question_id
@@ -324,7 +327,7 @@ class TestSayingWhatARunWouldCostBeforeItRuns:
 
 
 class TestALoopIsRefusedWhereItCouldNotHelp:
-    def test_a_work_whose_checkout_is_gone_is_refused(
+    async def test_a_work_whose_checkout_is_gone_is_refused(
         self, recorded: ManuscriptStore, tmp_path: Path
     ) -> None:
         """The answer is about a directory, not about two hundred rewrites."""
@@ -336,12 +339,12 @@ class TestALoopIsRefusedWhereItCouldNotHelp:
         )
 
         with pytest.raises(HTTPException) as raised:
-            works.start_run("work", works.RunRequest())
+            await works.start_run("work", works.RunRequest())
 
         assert raised.value.status_code == 409
         assert "which is not there" in raised.value.detail
 
-    def test_a_second_loop_over_one_work_is_refused(
+    async def test_a_second_loop_over_one_work_is_refused(
         self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The loop is the single writer of state; two would lease the same parts."""
@@ -350,7 +353,7 @@ class TestALoopIsRefusedWhereItCouldNotHelp:
         monkeypatch.setattr(loops, "running", lambda work: True)
 
         with pytest.raises(HTTPException) as raised:
-            works.start_run("work", works.RunRequest())
+            await works.start_run("work", works.RunRequest())
 
         assert raised.value.status_code == 409
 
@@ -360,6 +363,45 @@ class TestALoopIsRefusedWhereItCouldNotHelp:
         works.set_loops(WorkLoopManager())
 
         assert not works.run_status("work").running
+
+
+class TestAPostedRunActuallySchedulesThePass:
+    """Routed to rather than called, because the dispatch is the thing at issue.
+
+    A loop is a task, and a task needs a running event loop to belong to. An
+    endpoint declared synchronous is handed to a worker thread, which has none,
+    so every start from the browser raised where the pass should have been
+    scheduled — while calling ``start_run`` directly, as the refusal tests
+    above do, went nowhere near that and passed throughout.
+    """
+
+    async def test_starting_a_loop_over_http_schedules_it(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        works.set_loops(WorkLoopManager())
+        asked: list[str] = []
+
+        async def scheduled(
+            store: ManuscriptStore, work: str, manuscript: object, **held: object
+        ) -> tuple[PassReport, ...]:
+            asked.append(work)
+            return ()
+
+        monkeypatch.setattr(work_loops, "run_loop", scheduled)
+        routed = FastAPI()
+        routed.include_router(works.router)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=routed), base_url="http://work"
+        ) as browser:
+            answered = await browser.post("/api/works/work/run", json={})
+
+        assert answered.status_code == 202
+        assert answered.json()["running"]
+        held = works.get_loops().loop_for("work")
+        assert held is not None
+        assert await held.task == ()
+        assert asked == ["work"]
 
 
 class TestClearingIsTheWayOutOfAStickyStanding:

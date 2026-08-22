@@ -515,11 +515,15 @@ def preview_run(
 
 
 @router.post("/{work}/run", status_code=202)
-def start_run(work: str, request: RunRequest) -> WorkLoopStatus:
+async def start_run(work: str, request: RunRequest) -> WorkLoopStatus:
     """Take this work to rest in the background, and say where that stands.
 
     Refused where the work's source is gone: the loop would schedule nothing and
     report a settled book, and the actual answer is about a checkout.
+
+    Awaitable because the loop it starts is a task, and a task needs a loop to
+    belong to: a synchronous endpoint is handed to a worker thread, where there
+    is no running event loop and the pass cannot be scheduled at all.
     """
     store = manuscript_store()
     tree = tree_of(store, work)

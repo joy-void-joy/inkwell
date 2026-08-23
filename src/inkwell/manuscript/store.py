@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     # display loads to read a tree. Paying for either import to answer "which
     # works are there" would make the cheapest question in the system one of
     # the most expensive.
+    from inkwell.manuscript.attending import AttendanceLog
     from inkwell.manuscript.chapters import WorkDocs
     from inkwell.manuscript.findings import WorkFindings
 
@@ -230,6 +231,18 @@ class ManuscriptStore(BaseModel, frozen=True):
         path.parent.mkdir(parents=True, exist_ok=True)
         publish_atomic(path, found)
         return path
+
+    def attending(self, work: str) -> "AttendanceLog":
+        """Where the agents this work spends outside any part are recorded.
+
+        A part run's agents live under that run's own artifacts and die with
+        it, which is right — they are that run's. These outlive every run, so
+        they are recorded against the work and any process that can read the
+        work can read them.
+        """
+        from inkwell.manuscript.attending import attending
+
+        return attending(self.work_dir(work))
 
     def docs_path(self, work: str) -> Path:
         """The file holding which documents this work projects into."""

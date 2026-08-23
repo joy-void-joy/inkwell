@@ -30,6 +30,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from lup.channels.models import utc_now
+
 from inkwell.agent.references import (
     DEFAULT_REFERENCE_CONCURRENCY,
     ReferenceReader,
@@ -53,6 +55,7 @@ from inkwell.corpus.distillation import (
 from inkwell.corpus.retrieval import CorpusEntry, CorpusFilter, read_index
 from inkwell.corpus.storage import CorpusStore, now_stamp
 from inkwell.corpus.tags import TagVocabulary
+from inkwell.manuscript.attending import AttendanceLog, WorkAgent
 from inkwell.manuscript.graph import source_text
 from inkwell.manuscript.inventory import cited_in
 from inkwell.manuscript.findings import (
@@ -147,6 +150,49 @@ class ResearchSync(BaseModel):
             yield f"{key} — {len(arrivals)} new finding(s)"
             for one in arrivals:
                 yield f"    {one.render()}"
+
+
+def distil_watch(log: AttendanceLog) -> Callable[[DistilStep], None]:
+    """A progress callback that records each document read where the work is.
+
+    The distilling is the most expensive thing a pass does and the least
+    visible: hours of whole-document readings before a word is written, with
+    the work reporting nothing, which is the state somebody stops a loop out
+    of. Written as each one lands rather than counted at the end, because the
+    window somebody is asking about is the one before the end.
+    """
+
+    def stepped(step: DistilStep) -> None:
+        """One document read, opened and closed in the same breath."""
+        held = WorkAgent(
+            id=f"distil:{step.digest}",
+            kind="distil",
+            about=step.title or step.digest,
+            detail=f"{step.findings} finding(s) — {step.done} of {step.total}",
+            closed_at=utc_now(),
+        )
+        log.opening(held)
+
+    return stepped
+
+
+def reference_watch(log: AttendanceLog) -> Callable[[ReferenceStep], None]:
+    """A progress callback that records each reference opened, the same way."""
+
+    def stepped(step: ReferenceStep) -> None:
+        """One reference checked."""
+        log.opening(
+            WorkAgent(
+                id=f"reference:{step.url}",
+                kind="reference",
+                about=step.url,
+                detail=f"{'holds up' if step.sound else 'does not hold up'} — "
+                f"{step.done} of {step.total}",
+                closed_at=utc_now(),
+            )
+        )
+
+    return stepped
 
 
 def reaching(

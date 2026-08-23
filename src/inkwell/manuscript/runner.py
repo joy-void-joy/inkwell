@@ -55,10 +55,13 @@ to idle would be picked up again on the next pass and fail the same way.
 
 import logging
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from lup.channels.models import utc_now
 
 from inkwell.agent.client import CostAccumulator
 from inkwell.agent.core import SessionTrace, run_session
@@ -117,6 +120,18 @@ It is also the only record of what a run produced where the splice refused it,
 which is what makes a failed run readable rather than merely reported.
 """
 
+RUN_FILE = "run.json"
+"""What a run says about itself, written into its room before anything else.
+
+The record that makes a history symmetric. A part's build stamp names the run
+that built it, so a run that produced prose is findable from the part — and a
+run that produced nothing is findable from nothing at all, which makes the runs
+most worth looking at the ones with the weakest linkage. A room whose first
+write says which work, which part, and when closes that: every run is
+discoverable from its own room, and how far it got is which of the files beside
+this one exist.
+"""
+
 type TurnEnding = Literal["rewritten", "parked", "failed"]
 """The three ways one part's turn can end.
 
@@ -124,6 +139,64 @@ Named rather than worked out from an outcome's fields by whoever is asking,
 so a fourth way to end costs a literal here instead of a stale condition at
 every reader.
 """
+
+
+class PartRun(BaseModel):
+    """What one run was about, written where the run's own files are.
+
+    Everything else in a run's room is an output — the material it was handed,
+    the prose it made, the successor that was settled, the audit of what was
+    dropped. This is the only thing that says whose run it was, and it is
+    written first so that a run which produced none of the rest still says so.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session: str = Field(description="The run")
+    work: str = Field(description="The work it was a run of")
+    key: str = Field(description="The part it was about")
+    title: str = Field(default="", description="How the work names that part")
+    opened_at: datetime = Field(default_factory=utc_now, description="When it started")
+    reasons: tuple[str, ...] = Field(
+        default=(), description="Why the part was picked up"
+    )
+
+
+def opened(
+    room: Path, work: str, node: ManuscriptNode, session: str, reasons: tuple[str, ...]
+) -> Path:
+    """Say whose run this is, before it does anything that could fail."""
+    path = room / RUN_FILE
+    path.write_text(
+        PartRun(
+            session=session,
+            work=work,
+            key=node.key,
+            title=node.title,
+            reasons=reasons,
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+def runs_under(root: Path) -> tuple[PartRun, ...]:
+    """Every run this work has recorded, newest first.
+
+    Read off the rooms rather than off the build stamps, which is what makes it
+    symmetric: a stamp exists only where a run produced prose, so a history
+    read from stamps is a history of successes with the failures missing.
+    """
+
+    def held() -> Iterator[PartRun]:
+        """Each room that says whose run it was."""
+        for path in sorted(root.glob(f"*/{RUN_FILE}")):
+            try:
+                yield PartRun.model_validate_json(path.read_text(encoding="utf-8"))
+            except (ValidationError, OSError):
+                logger.warning("Unreadable run record at %s", path, exc_info=True)
+
+    return tuple(sorted(held(), key=lambda one: one.opened_at, reverse=True))
 
 
 class PartRunObservers(BaseModel):
@@ -527,6 +600,7 @@ async def run_part(
         scratch if scratch is not None else store.work_dir(work) / "runs" / session_id
     )
     room.mkdir(parents=True, exist_ok=True)
+    opened(room, work, node, session_id, reasons)
     material = room / REVISION_FILE
     material.write_text(current, encoding="utf-8")
 

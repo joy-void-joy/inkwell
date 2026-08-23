@@ -43,12 +43,14 @@ from pathlib import Path
 
 from lup.actors.cohort import ActorCohort, ActorRecipe
 from lup.actors.refs import ActorRef
+from lup.actors.roster import ROSTER_FILE, Roster, SpawnedActor
 from lup.hooks import LupHooksConfig
 from lup.mcp import McpServerEntry
 from lup.runtime.factory import SessionFactory
 from lup.runtime.selection import SessionAutonomy
 from lup.runtime.usage import CostAccumulator
 from lup.telemetry.trace import TraceLogger
+from lup.workspace.paths import sessions_dir
 
 from inkwell.agent.client import (
     BlockCallback,
@@ -140,6 +142,39 @@ def suspended(error: BaseException) -> bool:
     if isinstance(error, PipelineStopRequested | PipelineInterrupted):
         return True
     return is_interrupt(error)
+
+
+def cohort_root(session_id: str) -> Path:
+    """Where one run's population sits, addressed by the run rather than held.
+
+    The other half of "the roster is on disk". A cohort resolves this from the
+    artifacts directory it was handed; something that never launched the run —
+    a console, a work page — has only the session id, and reassembling the path
+    at each such reader is how two spellings of one location come about.
+    """
+    # Deferred because the pipeline reaches this module, so importing the entry
+    # point at module scope would close the loop. Asked of the entry point
+    # rather than spelled again here, which is the whole point of the function.
+    from inkwell.agent.core import pipeline_notes_dir
+
+    return pipeline_notes_dir(sessions_dir() / session_id) / "artifacts" / COHORT_DIR
+
+
+def roster_of(session_id: str) -> tuple[SpawnedActor, ...]:
+    """Every agent one run holds, read by a process that is not that run.
+
+    A run reports which part it is writing and how far through the pipeline it
+    is; beneath that, the nine writers and six reviewers doing the work
+    reported nowhere anything outside the run could read. They were on disk the
+    whole time — this is the read.
+
+    Empty for a run that has opened no agents, which is a run in a stage that
+    spends none rather than a run that is idle.
+    """
+    root = cohort_root(session_id)
+    if not (root / ROSTER_FILE).is_file():
+        return ()
+    return tuple(Roster(root / ROSTER_FILE).live())
 
 
 def run_cohort(artifacts_dir: Path, parallel: int | None = None) -> ActorCohort:

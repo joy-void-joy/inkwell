@@ -430,6 +430,31 @@ Read and comment, never edit. Prose is edited in the markdown, where the sweep's
 surface would be a second copy of the book that could disagree with the first,
 and every projection would have to decide which one won.
 
+**Three levels, and the history counts what failed.** A pass reports when it is
+over; a part reports through the work's state while it holds a lease; beneath
+that, nine writers and six reviewers were doing the work and reporting nowhere
+anything outside the run could read. `GET /works/{work}/activity` joins all
+three in one reply — the loop, the parts in flight, and each part's agents read
+off the cohort roster its run already keeps on disk. One reply rather than
+three, because split across three calls a page renders a pass with no parts and
+then parts with no agents, and the moment somebody is asking about is the moment
+those disagree.
+
+The agents belonging to *no* part were the genuinely missing thing: distilling a
+document, placing findings, checking a reference. A pass that spends hours
+reading before it writes a word holds no lease on anything, so the work looked
+idle — which is the state somebody stops a loop out of. Those are recorded
+against the work rather than under a run, because they outlive every run, and
+written as each one lands rather than counted at the end, because the window
+somebody is asking about is the one before the end.
+
+`GET /works/{work}/history` lists every run, newest first, read off each run's
+own room rather than off the build stamps. A stamp exists only where a run
+produced prose, so a history read from stamps is a history of successes with
+every failure missing — and the failures are the runs most worth opening. Each
+room's first write says which work, which part, and when; how far the run got is
+which of `produced.md`, `adopted.md`, and `inherited.json` sit beside it.
+
 **Adoption is what makes it affordable.** A work nothing has built is a work
 where every part is out of date. `manuscript import` stamps each part as built
 from the text it already holds — `make -t`, and the same argument — so the

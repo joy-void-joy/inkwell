@@ -5803,16 +5803,16 @@ class PipelineRunner:
         )
         resolutions_path = notes.artifacts_dir / "resolutions.md"
         items = "\n".join(f"- {q}" for q in questions)
-        task = (
-            f"Open questions left by writers and reviewers:\n\n{items}\n\n"
-            f"{render_source_lines(notes)}"
-            f"{author_context_block(notes)}"
-            f"Resolve each question from the author's brief first, then the "
-            f"source; for a genuine judgment call, mark it for the author with "
-            f"a conservative brief-honoring default.\n\n"
-            f"Write the resolutions to: {resolutions_path}"
-        )
         async with self.stage_compute("resolve") as sc:
+            task = (
+                f"Open questions left by writers and reviewers:\n\n{items}\n\n"
+                f"{render_source_lines(notes)}"
+                f"{author_context_block(notes)}"
+                f"Resolve each question from the author's brief first, then the "
+                f"source; for a genuine judgment call, mark it for the author with "
+                f"a conservative brief-honoring default.\n\n"
+                f"Write the resolutions to: {sc.output_path}"
+            )
             await query(
                 task,
                 model=stage_model("review"),
@@ -5826,12 +5826,19 @@ class PipelineRunner:
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
             )
-        if resolutions_path.exists():
-            resolved = resolutions_path.read_text(encoding="utf-8").count("\n  A:")
-            await self.hooks.on_progress(
-                f"Resolved {resolved} question(s) from the source; "
-                f"resolutions saved for the rewrite"
-            )
+            if not sc.output_path.exists():
+                raise PipelineError("Resolve stage produced no output")
+            resolutions = sc.output_path.read_text(encoding="utf-8")
+
+        # The container sees the session artifacts at `/notes` read-only.
+        # Persist from the host only after the stage has produced a complete
+        # file, so a failed turn cannot leave a partial durable artifact.
+        resolutions_path.write_text(resolutions, encoding="utf-8")
+        resolved = resolutions.count("\n  A:")
+        await self.hooks.on_progress(
+            f"Resolved {resolved} question(s) from the source; "
+            f"resolutions saved for the rewrite"
+        )
 
     async def stage_rewrite(self) -> None:
         plan = self.snapshot.plan

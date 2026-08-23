@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generator_version": "0.2.0",
-  "source_digest": "6b060e862e03ea59e3c8c3e924fdc4e0ab1d73dea060adca8c69996e99f2d583",
+  "source_digest": "698cd7764c01b1b098fef5335002328e57ca4770957380916c6fe784bc73cbfb",
   "target_requirements": [
     "claude-code"
   ],
@@ -345,7 +345,7 @@
     {
       "path": ".claude/plugins/lup/hooks/runtime/policy_data.py",
       "category": "generated",
-      "sha256": "d53a787c5b80c91bfe25d132c64bab5adb82df6aae4aa3df6825985529022d07",
+      "sha256": "c8b1c54197a2f0bb72d64ba76eaf2af247badbe80a2cbb90c5188659d0f1bd32",
       "semantic_id": "hooks.inkwell-policy",
       "executable": false
     },

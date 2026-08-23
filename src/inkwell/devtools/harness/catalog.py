@@ -229,6 +229,20 @@ def portable_harness(version: str = "0.2.0", root: Path | None = None) -> Harnes
             path_roles=[
                 HookPathRole(root=Path("tests"), role="test"),
                 HookPathRole(root=Path("tmp"), role="scratch"),
+                # A stage writes its native-tool output here before the host
+                # process promotes it into the durable artifact tree.  The
+                # directory is unique per stage and disposable once that
+                # promotion succeeds, so a full Write must not become a
+                # human approval question in an unattended pipeline.
+                HookPathRole(root=Path("**/pipeline_notes/work"), role="scratch"),
+                # `/shared` is this directory inside a stage container.  It
+                # deliberately holds cross-stage scratch, not pipeline state;
+                # classifying its host spelling the same way keeps native
+                # Write and execute_code under one policy.
+                HookPathRole(
+                    root=Path("**/pipeline_notes/artifacts/shared"),
+                    role="scratch",
+                ),
             ],
             rules=RETIRED_RULES,
             shell_rules=SHELL_RULES,

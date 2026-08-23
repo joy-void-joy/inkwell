@@ -1765,6 +1765,14 @@ PATH_ROLES: list[PathRoleRow] = [
         "root": "tmp",
         "role": "scratch",
     },
+    {
+        "root": "**/pipeline_notes/work",
+        "role": "scratch",
+    },
+    {
+        "root": "**/pipeline_notes/artifacts/shared",
+        "role": "scratch",
+    },
 ]
 
 ACCEPTANCE_GUARD: AcceptanceGuardRow | None = None

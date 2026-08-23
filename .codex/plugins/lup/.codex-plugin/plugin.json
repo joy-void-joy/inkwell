@@ -1,0 +1,7 @@
+{
+  "description": "Writing harness with feedback, review, and safe resolution flows",
+  "hooks": "./hooks/hooks.json",
+  "name": "lup",
+  "skills": "./skills/",
+  "version": "0.2.0"
+}

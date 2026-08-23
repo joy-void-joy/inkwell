@@ -13,6 +13,7 @@ from pathlib import Path
 from pydantic import AnyHttpUrl
 
 from lup.adapters.claude.harness import ClaudeSpellings
+from lup.adapters.codex.harness import CodexSpellings
 from lup.codescan.boundaries import ApplicationRoots, generated_tree_paths
 from lup.codescan.common import RuleSelection
 from lup.devtools.dev.workflow import WorkflowSpec
@@ -126,10 +127,8 @@ Retiring them is a judgement about this repository, not a claim the rules are
 wrong: they still run in lup, where the reasoning that produced them holds.
 """
 
-NATIVE_RUNTIMES: list[NativeSpellings] = [ClaudeSpellings()]
-"""Every runtime inkwell generates a tree for. Claude Code alone — inkwell
-carries no `.codex/` tree, and generating one would publish a harness for a
-runtime nothing here drives."""
+NATIVE_RUNTIMES: list[NativeSpellings] = [ClaudeSpellings(), CodexSpellings()]
+"""Every runtime inkwell generates a tree for."""
 
 
 def application_roots() -> ApplicationRoots:
@@ -197,6 +196,8 @@ def portable_harness(version: str = "0.2.0", root: Path | None = None) -> Harnes
                 HookUrlScope(origin=AnyHttpUrl("https://code.claude.com")),
                 HookUrlScope(origin=AnyHttpUrl("https://platform.claude.com")),
                 HookUrlScope(origin=AnyHttpUrl("https://claude.ai")),
+                HookUrlScope(origin=AnyHttpUrl("https://developers.openai.com")),
+                HookUrlScope(origin=AnyHttpUrl("https://learn.chatgpt.com")),
                 HookUrlScope(origin=AnyHttpUrl("https://github.com")),
                 HookUrlScope(origin=AnyHttpUrl("https://api.github.com")),
                 HookUrlScope(

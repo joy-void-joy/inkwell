@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "python3 \"$PLUGIN_ROOT/hooks/scripts/policy.py\"",
+            "statusMessage": "Checking Lup policy",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|web_fetch|apply_patch"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "python3 \"$PLUGIN_ROOT/hooks/scripts/policy.py\"",
+            "statusMessage": "Checking Lup policy",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "apply_patch"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "python3 \"$PLUGIN_ROOT/hooks/scripts/policy.py\"",
+            "statusMessage": "Checking Lup policy",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|web_fetch|apply_patch"
+      }
+    ]
+  }
+}

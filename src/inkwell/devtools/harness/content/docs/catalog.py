@@ -33,8 +33,7 @@ def reference_pages() -> list[models.Document]:
     The parity audit reads what each runtime decodes from the runtime itself,
     so composing them is what this root is for: the page stays portable while
     the table it publishes cannot claim a decoded set that stopped being true.
-    Codex appears there as the runtime lup differentiates against, not as one
-    inkwell generates a tree for — `NATIVE_RUNTIMES` is what decides that.
+    Both native runtimes appear because inkwell generates both trees.
 
     No library checkout is passed. Lup is a git dependency here, so its own
     suite is not in this tree to resolve a fixture citation against — the

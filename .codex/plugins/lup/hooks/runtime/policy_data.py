@@ -855,7 +855,7 @@ ANTI_PATTERN_ROWS: dict[str, list[AntiPatternRow]] = {
         {
             "id": "pdf-extraction",
             "pattern": "\\b(?:import|from)\\s+(?:fitz|pymupdf|pypdf|PyPDF2|PyPDF4|pdfplumber|pdfminer|pypdfium2)\\b",
-            "message": "A PDF text extractor comes back empty from a scanned or image-only page, and an empty string reads as an empty document rather than as an extraction that failed \u2014 read the document whole instead of pulling text out of it. Hand the file to the `Read` tool, which takes the document itself",
+            "message": "A PDF text extractor comes back empty from a scanned or image-only page, and an empty string reads as an empty document rather than as an extraction that failed \u2014 read the document whole instead of pulling text out of it.",
             "context": "code",
             "matcher": "pdf_extraction_sites",
             "strength": "soft",
@@ -1253,7 +1253,7 @@ ANTI_PATTERN_ROWS: dict[str, list[AntiPatternRow]] = {
         {
             "id": "pdf-extraction",
             "pattern": "\\b(?:import|from)\\s+(?:fitz|pymupdf|pypdf|PyPDF2|PyPDF4|pdfplumber|pdfminer|pypdfium2)\\b",
-            "message": "A PDF text extractor comes back empty from a scanned or image-only page, and an empty string reads as an empty document rather than as an extraction that failed \u2014 read the document whole instead of pulling text out of it. Hand the file to the `Read` tool, which takes the document itself",
+            "message": "A PDF text extractor comes back empty from a scanned or image-only page, and an empty string reads as an empty document rather than as an extraction that failed \u2014 read the document whole instead of pulling text out of it.",
             "context": "code",
             "matcher": "pdf_extraction_sites",
             "strength": "soft",
@@ -7142,7 +7142,6 @@ REFUSED_TOOLS: list[RefusedToolRow] = []
 
 AUTONOMOUS_AGENT_IDENTITIES: list[str] = [
     "resolver-worker",
-    "lup:resolver-worker",
 ]
 
 AGENT_IDENTITY_ENV = "LUP_AGENT_IDENTITY"
@@ -7195,7 +7194,71 @@ RUNNER_TARGET_TABLES: list[ShellRuleRow] = []
 
 SANDBOX_EXCLUDED_COMMANDS: list[str] = []
 
-AUTO_ESCAPE_PREFIXES: list[list[str]] = []
+AUTO_ESCAPE_PREFIXES: list[list[str]] = [
+    ["git", "add"],
+    ["git", "annotate"],
+    ["git", "bisect", "log"],
+    ["git", "blame"],
+    ["git", "cat-file"],
+    ["git", "check-attr"],
+    ["git", "check-ignore"],
+    ["git", "check-mailmap"],
+    ["git", "check-ref-format"],
+    ["git", "cherry"],
+    ["git", "cherry-pick"],
+    ["git", "column"],
+    ["git", "commit"],
+    ["git", "commit-tree"],
+    ["git", "count-objects"],
+    ["git", "describe"],
+    ["git", "fmt-merge-msg"],
+    ["git", "for-each-ref"],
+    ["git", "fsck"],
+    ["git", "get-tar-commit-id"],
+    ["git", "hash-object"],
+    ["git", "help"],
+    ["git", "ls-files"],
+    ["git", "ls-remote"],
+    ["git", "ls-tree"],
+    ["git", "merge"],
+    ["git", "merge-base"],
+    ["git", "merge-tree"],
+    ["git", "mktag"],
+    ["git", "mktree"],
+    ["git", "mv"],
+    ["git", "name-rev"],
+    ["git", "notes"],
+    ["git", "pack-redundant"],
+    ["git", "patch-id"],
+    ["git", "request-pull"],
+    ["git", "rev-list"],
+    ["git", "rev-parse"],
+    ["git", "revert"],
+    ["git", "show-branch"],
+    ["git", "show-index"],
+    ["git", "show-ref"],
+    ["git", "stage"],
+    ["git", "stash", "apply"],
+    ["git", "stash", "pop"],
+    ["git", "stash", "push"],
+    ["git", "stash", "save"],
+    ["git", "status"],
+    ["git", "stripspace"],
+    ["git", "submodule", "status"],
+    ["git", "submodule", "summary"],
+    ["git", "var"],
+    ["git", "verify-commit"],
+    ["git", "verify-pack"],
+    ["git", "verify-tag"],
+    ["git", "version"],
+    ["git", "worktree", "add"],
+    ["git", "worktree", "list"],
+    ["git", "worktree", "move"],
+    ["git", "worktree", "repair"],
+    ["git", "write-tree"],
+    ["uv", "run", "inkwell"],
+    ["uv", "run", "lup-devtools"],
+]
 
 DIAGNOSTICS_COMMAND: list[str] = []
 

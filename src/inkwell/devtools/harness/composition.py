@@ -10,7 +10,11 @@ from pathlib import Path
 
 from lup.devtools.dev.rules import write_rule_reference
 from lup.devtools.dev.workflow import write_workflow
-from lup.devtools.harness.composition import NativeTargets, claude_composition
+from lup.devtools.harness.composition import (
+    NativeTargets,
+    claude_composition,
+    codex_composition,
+)
 from lup.devtools.harness.drift import RepositoryWriter
 from lup.devtools.harness.generate import NativeHarnessComposition, ProjectContent
 from lup.harness.banner import GeneratedBanner
@@ -50,7 +54,12 @@ def claude_target(root: Path) -> NativeHarnessComposition:
     return claude_composition(root, project_content(root))
 
 
-TARGETS = NativeTargets(builders={"claude": claude_target})
+def codex_target(root: Path) -> NativeHarnessComposition:
+    """Inkwell's content, compiled through the Codex adapter."""
+    return codex_composition(root, project_content(root))
+
+
+TARGETS = NativeTargets(builders={"claude": claude_target, "codex": codex_target})
 """Every native runtime inkwell generates a tree for, by CLI selector."""
 
 

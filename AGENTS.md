@@ -1,27 +1,6 @@
-"""Canonical repository guidance for inkwell.
+<!-- Generated from inkwell.devtools.harness.content.guidance by `uv run lup-devtools harness generate all` — edit the source, not this file. See docs/harness.md. Deliberately rendered as .claude/CLAUDE.md under Claude Code, AGENTS.md under Codex. -->
 
-The portable conventions are composed from ``lup.devtools.harness.content
-.conventions`` rather than restated here, so this document holds only what is
-true of *inkwell*: what it writes, the pipeline that writes it, the Google Doc
-it writes into, and the boundary between the writing application and the
-framework it takes as a dependency.
-
-What a reader needs at a particular moment rather than on every turn lives in
-a generated page under ``docs/`` with a file-path pointer from here — the
-always-loaded document is held to a byte budget, and reference material is
-what that budget is for.
-"""
-
-import lup.devtools.harness.content.conventions as conventions
-import lup.harness.models as models
-from lup.codescan.common import RuleSelection
-
-
-def guidance_parts(selection: RuleSelection) -> list[models.PromptPart]:
-    """Inkwell's guidance, naming only the rules it still enforces."""
-    return [
-        models.TextPart(
-            text=r"""# Inkwell repository guidance
+# Inkwell repository guidance
 
 **Inkwell** is an AI writing agent that turns conversations into polished, published articles. It takes a Claude conversation (or other source material), extracts a structured plan, researches every claim, writes each section in the author's voice, and produces a reviewed, fact-checked draft in a Google Doc.
 
@@ -72,11 +51,7 @@ The author can comment at any time; the agent picks feedback up at checkpoints. 
 ### Naming
 
 - **Claude** is the meta-agent working on this codebase — running commands, editing files, managing the development workflow.
-- **Lup** is the framework inkwell is built on, and the name of the agent inside the code being improved. It stays `lup` everywhere the framework's own vocabulary appears — `lup_tool`, `LupMcpTool`, `lup-devtools`, and every skill spelled """
-        ),
-        models.SkillPattern(plugin="lup", placeholder="<skill>"),
-        models.TextPart(
-            text=r""" — because that is the framework's identity rather than a project-specific term. Only inkwell's own package is named for inkwell.
+- **Lup** is the framework inkwell is built on, and the name of the agent inside the code being improved. It stays `lup` everywhere the framework's own vocabulary appears — `lup_tool`, `LupMcpTool`, `lup-devtools`, and every skill spelled $lup:<skill> — because that is the framework's identity rather than a project-specific term. Only inkwell's own package is named for inkwell.
 
 ---
 
@@ -150,11 +125,7 @@ uv run lup-devtools corpus pipeline       # Fetch, judge, then embed
 
 ### Debugging
 
-**Do not hypothesize — trace.** Find the actual logs, read the exact exception. Do not list "likely causes" or suggest the user check things. Open the log files, grep for the error, read the traceback, report what actually happened. If the logs lack the information, say exactly what logging to add and where. Use """
-        ),
-        models.SkillInvocation(plugin="lup", skill="debug"),
-        models.TextPart(
-            text=r""" to trace an error through the logs automatically.
+**Do not hypothesize — trace.** Find the actual logs, read the exact exception. Do not list "likely causes" or suggest the user check things. Open the log files, grep for the error, read the traceback, report what actually happened. If the logs lack the information, say exactly what logging to add and where. Use $lup:debug to trace an error through the logs automatically.
 
 ### Feedback Loop Scripts
 
@@ -165,35 +136,62 @@ uv run lup-devtools trace list
 uv run lup-devtools trace show <session_id>
 ```
 
-"""
-        ),
-        *conventions.PLAN_AT_AGENT_SPEED,
-        *conventions.AGENT_VOCABULARY,
-        *conventions.THE_GATES,
-        models.TextPart(
-            text=r"""## Development Workflow
+## Plan at Agent Speed
+
+Every instinct you have about how long software takes was learned from human teams, whose implementation time is scarce. Yours is not: what you would estimate as months completes in an afternoon. Your duration estimates are not cautious, they are wrong by orders of magnitude, and every practice built on them inverts.
+
+**Never scope, defer, or reject work from a predicted duration.** Scope by content — what changes, what it touches, how it is verified. A calendar figure in a plan is noise from someone else's constraints: delete it and re-derive the plan. Prototype-first exists to protect scarce human effort, and for you the real implementation costs what the throwaway was supposed to, so build it and let review cut scope rather than pre-shrinking the attempt.
+
+Catch the reflex in the act. "Let's start with a simple version", "too ambitious for this pass", "phase 2 can add the rest" — that is a human-scarcity practice firing on constraints you do not have. Ask what is actually expensive besides the imagined schedule.
+
+## Agent Vocabulary
+
+Two kinds of delegated agents look alike and must not be conflated:
+
+- A **native subagent** ("subagent" for short) is dispatched by the harness: its delegation tool hands a focused task to a named role defined upfront, inside the main agent's session — shared trace, shared metrics.
+- A **nested agent** (a *tool-subagent*) runs inside a tool call: the handler opens one independent session via `query()` and folds the result into the tool's response. The harness never sees it — to the caller it is just a tool.
+
+Guidance that says "subagent" unqualified means the native kind. `docs/orchestration.md` carries the delegation catalog and when to reach for each; `docs/patterns.md` carries the recurring *code* shapes.
+
+## The Gates You Will Meet
+
+You are not expected to hold this repository's conventions in memory. Gates enforce them, and their diagnostics — which name what was caught and how to answer — are written to be read cold. What is worth knowing up front is only that they exist.
+
+**The rule checker.** Anti-pattern, boundary, spelling, and architecture rules run on every edit and in `dev check`. A denial cites its rule id and spells the suppression where the rule admits one; one marked **refused** admits none, its replacement being right every time. `# noqa`, `# type: ignore`, and `# pyright: ignore` are forbidden shapes rather than suppressions.
+
+**The permission policy.** Every shell command, URL scope, and edit in a batch is classified, and a denial names what tripped and the recovery. `dev policy '<command>'` answers before you spend a turn on it, and `# lup: escalate: <why>` as a command's leading line promotes a deny or ask into an approval question carrying that reason.
+
+**The edit budget.** A change block of at most three "real" changed lines is auto-allowed, so split large changes — imports in one edit, logic in another. A file declared human-owned surfaces every change as an approval: propose the exact edit and let the user apply it.
+
+**The drift check.** Generated trees are regenerated, never hand-edited and never hand-merged. Take either side of a conflict, regenerate, and let the check confirm it settled.
+
+`docs/rules.md` indexes every rule from the registry that runs, `docs/permissions.md` carries the lattice and what counts as a real changed line, and `docs/contributing.md` carries how a suppression is scoped.
+
+## Development Workflow
 
 ### Git Workflow
 
-Work in a **git worktree**, not a branch switched in place, and never commit _code_ directly to `dev`. Create one with `uv run lup-devtools dev worktree create feat-name` — it lands as a sibling under `tree/`, never nested inside another checkout — and then """
-        ),
-        models.RelocateSession(path="the path it prints"),
-        models.TextPart(
-            text=r""", because creating a worktree does not move the session, and edits left in the old checkout never reach the branch.
+Work in a **git worktree**, not a branch switched in place, and never commit _code_ directly to `dev`. Create one with `uv run lup-devtools dev worktree create feat-name` — it lands as a sibling under `tree/`, never nested inside another checkout — and then start a session rooted at <the path it prints> and continue there — this runtime cannot move a running session, so work carried on here would land in the checkout it started from, because creating a worktree does not move the session, and edits left in the old checkout never reach the branch.
 
 `dev` integrates and `main` carries what has landed; feature branches target `dev`, and `dev` reaches `main` through a reviewed PR. Data commits (`data(outputs):`) are the one exception that may land on `dev` directly — generated outputs need no review.
 
-"""
-        ),
-        *conventions.MERGE_CONFLICT_RESOLUTION,
-        models.TextPart(
-            text=r"""**Generated artifacts are regenerated, never hand-merged.** Take either side of the conflict, regenerate, and let the drift check confirm it settled.
+### Merge Conflict Resolution
 
-"""
-        ),
-        *conventions.COMMIT_GUIDELINES,
-        models.TextPart(
-            text=r"""---
+**Never silently drop code during conflict resolution.** Keeping both sides is safer than losing features, and a rename on one side must not swallow an addition on the other. Before completing any merge, **audit for deletions**: compare the result against both parents and verify that every removed function, parameter, or command went deliberately, not as a side effect of choosing one side.
+
+Use `$lup:merge` for guided conflict resolution; the command carries the decision tree.
+
+**Generated artifacts are regenerated, never hand-merged.** Take either side of the conflict, regenerate, and let the drift check confirm it settled.
+
+### Commit Guidelines
+
+- **Commit before responding**, and often — frequent commits are checkpoints
+- **Keep commits atomic** — if you need "and" in the message, it is two commits
+- **History will be rebased**, so a message need not be perfect while developing; after rebasing, each commit should tell what changed and why
+
+**Format:** `type(scope): description`
+
+---
 
 ## Code Conventions
 
@@ -205,10 +203,7 @@ Use existing Python libraries from PyPI before writing raw HTTP requests. Don't 
 
 Default to the **strongest** tier for the main agent, every subagent, reviewer, and background agent. This runs on a subscription where the best model is the point: reach for a **balanced** tier only when latency or cost provably dominates and quality is non-critical, and for the **fast** tier almost never. A role that genuinely warrants a cheaper model declares that tier explicitly with a reason; otherwise it inherits the strongest default. Agent declarations state the tier, not a model id — each runtime spells the tier in its own lineup.
 
-"""
-        ),
-        models.TextPart(
-            text=r"""### Error Handling
+### Error Handling
 
 **MCP tools:** Return `{"content": [...], "is_error": True}` for recoverable errors. Log with `logger.exception()`. Include actionable messages.
 
@@ -218,12 +213,27 @@ Default to the **strongest** tier for the main agent, every subagent, reviewer, 
 
 **Never silently truncate content** — the container grows to fit what it holds, not the reverse. Cut only where a document format or a function contract imposes a hard limit, never for printing space, log volume, or ease of reading, and where a cut is forced save the full copy and point at it from what survives. A cut artifact looks exactly like a complete one, which is why `[:200]` on something an author wrote loses the rest with nothing said.
 
-"""
-        ),
-        *conventions.design_principles(selection),
-        *conventions.SANCTIONED_EXCEPTIONS,
-        models.TextPart(
-            text=r"""### Inline `# lup:` Notes
+### Design Principles
+
+A gate catches a violation once it is written. These change what gets written, so they are here rather than in the index.
+
+- **Compiling is stronger than emitting** — build an artifact from a typed declaration and it cannot diverge. Tempted to check that two things still match, ask whether one can be derived from the other (`docs/patterns.md`).
+- **Structured data, not strings** — reaching for `re`, `.replace()`, `.split()`, or slicing to process structured data means a parser was missed, and `docs/conventions.md` names one per format. Never hand-parse an agent's output either — take it through a Pydantic model.
+- **Placement decides the package** — would another project built on this library want it? Then it belongs to the library; only this application, and it stays there. The same test applies to values, not only to code.
+- **Never truncate** — the container grows to fit what it holds, not the reverse. Cut only where a document format or a function contract imposes a hard limit, never for printing space, log volume, or ease of reading; where a cut is forced, save the full copy and point at it. A cut artifact looks exactly like a complete one, which is the whole difficulty: `[:200]` loses the rest with nothing said, and the reader who needed it cannot tell.
+- **The code is the source of truth** — it should read as though it had always been written this way. Never reference what code used to do, and never write "now", "new", "updated", "fixed", or "changed" in a comment. Change history belongs in commit messages.
+- Reach for `for` and comprehensions over `while`, and `match`/`case` over an `if`/`elif` chain dispatching on a value.
+
+Some rules shape a design before any gate could catch it. Know these by name while choosing a shape rather than after being stopped: `own-model-dispatch` (a union answers through its members, never through `isinstance` over our own types), and `abc-capability` (a capability ABC is an engine, never a surface a consumer holds).
+
+### Exceptions No Rule Can See
+
+A rule states the shape it refuses. These carve-outs are ours, and its diagnostic does not carry them:
+
+- **Barrel files.** `__all__` and `__init__.py` re-exports are refused; import directly from the module that defines the symbol. The exception is a standalone package's own top-level `__init__.py`, which may declare a public API that way — the package root only, never a subpackage.
+- **Private prefixes.** Nothing is private, so a `_` prefix is refused on functions, methods, classes, and constants. An unused parameter (`_context`, `_exc_type`) is exempt: a linting convention, not a privacy one. A helper that should not pollute the module namespace **nests inside its only caller**, which hides it without claiming privacy; a wrapper whose only purpose is to call one other function is not worth hiding — inline it.
+
+### Inline `# lup:` Notes
 
 A `# lup:` (or `// lup:`) comment is **actionable review feedback** left in the code for the agent to address. A note that runs to several lines carries the marker on its **first line only**, continuing with bare `#` comments — every `# lup:` line starts a new note, so repeating the marker turns one concern into a note per line, and the resolver then plans each fragment separately. Four flavors, and only the removal rules differ:
 
@@ -234,20 +244,13 @@ A `# lup:` (or `// lup:`) comment is **actionable review feedback** left in the 
 | `# lup: defer: <text>` — parked work (§ Deferred Work) | **denied** while parked |
 | `# lup: ignore[<rule>]` — the rule-checker hatch (§ The Gates You Will Meet), not feedback | fine once the violation is gone |
 
-Resolve open feedback by fixing what it points at, or, for a question, by answering it definitively in the code, the docs, or a recorded user decision. Then rewrite the marker as **`# lup: solved: <the note's original words>`**, text unchanged, so the claim sits beside what it claims to fix and can be checked against what was asked. `docs/contributing.md` carries the full lifecycle (use """
-        ),
-        models.SkillInvocation(plugin="lup", skill="resolve"),
-        models.TextPart(
-            text=r"""`).
+Resolve open feedback by fixing what it points at, or, for a question, by answering it definitively in the code, the docs, or a recorded user decision. Then rewrite the marker as **`# lup: solved: <the note's original words>`**, text unchanged, so the claim sits beside what it claims to fix and can be checked against what was asked. `docs/contributing.md` carries the full lifecycle (use $lup:resolve`).
 
 ### Deferred Work
 
 **Never create tracking files.** A `TODO.md`, backlog, or roadmap file parks a decision where no workflow will surface it again — deferral by tracking file is delegation to nobody. Deferred work lives in exactly two places: a `# lup: defer: <text>` note at the site it concerns, where `dev check` keeps it visible; or a question to the user, when whether to defer is itself the open question. Default to the bare `defer:`; a bracket states a real, externally-checkable gate, never that this code might change again. The one exception is a `tmp/` briefing, which starts a fresh session on a situation this one cannot finish, and is rewritten whole rather than appended to.
 
-"""
-        ),
-        models.TextPart(
-            text=r"""---
+---
 
 ## Tooling
 
@@ -273,11 +276,7 @@ Run `uv run lup-devtools --help` for the command tree. `lup-devtools harness gen
 
 Permissions come from the canonical semantic policies in `lup.policy` and the application-owned `HookSet` in `devtools/harness/catalog.py`. Harness generation compiles one hermetic dispatcher and runtime for the native plugin. Never edit generated dispatcher or runtime files.
 
-Change the policy those gates enforce with """
-        ),
-        models.SkillInvocation(plugin="lup", skill="hooks"),
-        models.TextPart(
-            text=r""", which edits the canonical policy inputs, regenerates the plugin, and runs the shared fixture suite. `settings.json` holds only native settings outside this semantic policy boundary.
+Change the policy those gates enforce with $lup:hooks, which edits the canonical policy inputs, regenerates the plugin, and runs the shared fixture suite. `settings.json` holds only native settings outside this semantic policy boundary.
 
 ### Code Intelligence
 
@@ -293,11 +292,7 @@ The `codeintel` tool group answers questions about code by *resolving* it, throu
 
 `.env` holds defaults; `.env.local` holds secrets, is gitignored, and overrides them. Configuration is loaded through pydantic-settings in `src/inkwell/agent/config.py`, which is the only module that reads the environment — Google OAuth, research API keys, and the model and budget overrides.
 
-Harness settings changes stay **project-level**, in the tree the harness owns ("""
-        ),
-        models.NativePath(location="project_settings"),
-        models.TextPart(
-            text=r"""), never user-level.
+Harness settings changes stay **project-level**, in the tree the harness owns (.codex/config.toml), never user-level.
 
 ---
 
@@ -336,11 +331,7 @@ Detail earns its place when the reader needs it to act, and nowhere else.
 When a question is about the harness you are running under, its agent SDK, or its model API, read that runtime's own documentation rather than answering from memory:
 
 1. Delegate to the documentation subagent your harness ships, where it has one.
-2. Fetch the vendor's documentation directly — """
-        ),
-        models.RuntimeDocs(),
-        models.TextPart(
-            text=r""". The fetch scopes the permission policy admits are declared in `harness/catalog.py`.
+2. Fetch the vendor's documentation directly — the Codex documentation at https://developers.openai.com/codex/ and https://learn.chatgpt.com/. The fetch scopes the permission policy admits are declared in `harness/catalog.py`.
 
 When the user provides documentation links, incorporate that knowledge into the guidance source or the relevant skill declaration.
 
@@ -350,25 +341,10 @@ When the user provides documentation links, incorporate that knowledge into the 
 
 `docs/self-improvement.md` carries the full loop: how to diagnose a failure through the pipeline, the three levels of analysis, what to track per session, and the anti-patterns to avoid. Read it when running the feedback-loop, review, or meta skills — each of them works from it.
 
-"""
-        ),
-        *conventions.FAILURE_ANALYSIS,
-        models.TextPart(
-            text=r"""The durable fix is a capability, not a rule: trace the failure to the missing
+**When analyzing failures:** Ask "what general principle would have prevented this?" not "what specific rule would catch this case?" The fix is almost never a prompt line about a specific decision. Instead: does the agent have enough context? The right tools? A strong enough model?
+
+When the principle points to a workflow failure, fix the workflow at the exact juncture where the failure enters — don't add a warning about it. A step named "Classify each commit" invites whole-commit thinking regardless of how many times the text says "decompose." Renaming the step to "Extract portable pieces" and separating reading from judging makes the failure structurally impossible. Warnings coexist peacefully with the workflows they warn against; structural changes don't.
+
+The durable fix is a capability, not a rule: trace the failure to the missing
 input or the workflow step where the wrong decision entered, and change that.
 A prompt rule coexists peacefully with the failure it warns about.
-"""
-        ),
-    ]
-
-
-def document(selection: RuleSelection | None = None) -> models.PromptDocument:
-    """The guidance as one document, built against the project's selection.
-
-    Taking the selection rather than reading one keeps the catalog free to
-    import this module: the catalog owns the declaration and hands it down,
-    so nothing here reaches back up for it.
-    """
-    return models.PromptDocument(
-        source=__name__, parts=guidance_parts(selection or RuleSelection())
-    )

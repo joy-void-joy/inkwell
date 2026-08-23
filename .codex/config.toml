@@ -1,0 +1,25 @@
+# Generated from lup.adapters.codex.harness by `uv run lup-devtools harness generate all` — edit the source, not this file.
+# See docs/harness.md.
+# Personal sandbox and approval defaults stay in ~/.codex/config.toml.
+# Native shell allows are generated under .codex/rules/.
+# Tool servers start from this project, so start the runtime at its root.
+
+project_doc_max_bytes = 32768
+
+[features]
+hooks = true
+
+[mcp_servers.source]
+command = "uv"
+args = ["run", "--directory", ".", "lup-devtools", "agent", "serve-tools", "--server", "source", "--session", "harness"]
+default_tools_approval_mode = "approve"
+
+[mcp_servers.research]
+command = "uv"
+args = ["run", "--directory", ".", "lup-devtools", "agent", "serve-tools", "--server", "research", "--session", "harness"]
+default_tools_approval_mode = "approve"
+
+[mcp_servers.docs]
+command = "uv"
+args = ["run", "--directory", ".", "lup-devtools", "agent", "serve-tools", "--server", "docs", "--session", "harness"]
+default_tools_approval_mode = "approve"

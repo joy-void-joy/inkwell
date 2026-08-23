@@ -1,0 +1,20 @@
+{
+  "name": "inkwell",
+  "plugins": [
+    {
+      "category": "development",
+      "interface": {
+        "displayName": "Lup"
+      },
+      "name": "lup",
+      "policy": {
+        "authentication": "ON_INSTALL",
+        "installation": "AVAILABLE"
+      },
+      "source": {
+        "path": "./.codex/plugins/lup",
+        "source": "local"
+      }
+    }
+  ]
+}

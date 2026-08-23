@@ -1,0 +1,10 @@
+{
+  "askApproximation": "asks defer only on PermissionRequest; PreToolUse fails closed",
+  "policyIds": [
+    "fetch",
+    "shell",
+    "edit",
+    "unknown-tool"
+  ],
+  "schemaVersion": 1
+}

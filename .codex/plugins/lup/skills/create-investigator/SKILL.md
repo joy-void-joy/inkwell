@@ -1,0 +1,84 @@
+---
+name: create-investigator
+description: "Create a new diagnostic command that traces pasted output to a root cause, like the debug skill"
+---
+
+# Create Investigator Command
+
+You are creating a new **investigator command** — a command where the user pastes raw output (logs, errors, console snippets, tool results) with minimal commentary, and the command guides you to trace the issue through code and logs and produce a diagnostic report.
+
+This is distinct from `$lup:add-command` which creates general-purpose commands. Investigator commands share a specific pattern: raw input in, traced diagnosis out.
+
+**Arguments provided**: the arguments supplied with this skill invocation
+
+## Step 0: Parse arguments
+
+The first word is the **command name**. Everything after is a **brief description** of what the command investigates.
+
+If `the arguments supplied with this skill invocation` is empty, Ask the user directly, offering concrete options, and wait for the answer: what the command should be called and what it investigates
+
+## Step 1: Understand the domain
+
+Before writing anything, understand what this investigator needs to do:
+
+1. **Read existing investigator declarations** as reference. `debug` is the worked example — it traces errors through logs, and it is the library's, so read it through the package rather than through a path that only resolves when lup is vendored:
+
+   ```bash
+   uv run lup-devtools py source lup.devtools.harness.content.skills.debug
+   ```
+
+2. **Explore the codebase** to understand the domain. Based on the description, identify:
+   - What specific content will appear in the pasted trace? (tool calls, thinking blocks, error messages, subagent output, etc.)
+   - Where are the relevant logs and artifacts on disk? (`logs/`, `notes/`, other directories)
+   - What source code is most relevant? Which files in `src/` would the investigator need to read?
+   - What devtools commands might be useful? (`uv run lup-devtools --help`)
+
+3. **Align on the design with the user** before writing anything:
+   - What are the common scenarios this investigator will handle?
+   - What are the typical "anchors" in the pasted output that help trace the issue? (IDs, timestamps, function names, error codes, etc.)
+   - What domain-specific knowledge should the command encode? (common failure modes, known gotchas, relevant architecture)
+
+## Step 2: Design the command
+
+Based on your exploration and the user's input, design the command. Existing investigator commands share these traits (but adapt to the domain):
+
+**Philosophy**: "Don't hypothesize — trace." The command should guide you to find actual evidence, not speculate.
+
+**Input handling**: The input is **always raw pasted output** via `the arguments supplied with this skill invocation`. The user pastes trace logs, console output, error messages, or other raw text directly after the command. The command should never expect a file path, session ID, or structured input -- it works from whatever the user pastes. It should explain how to extract anchors (IDs, timestamps, tool names) from the pasted text and how to work with incomplete input.
+
+**Investigation steps**: Domain-specific steps that trace from the pasted input to root cause. Each step should explain:
+
+- What to look for
+- Where to look (specific directories, files, scripts)
+- What tools/commands to use
+- When to ask the user for more context
+
+**Report format**: What happened, why, and how to fix it — adapted to the domain.
+
+**Rules**: Domain-specific rules about what to never do (guess, speculate, etc.) and what to always do (quote evidence, read source, etc.).
+
+## Step 3: Declare the skill
+
+Write the declaration to `content/skills/<command_name>.py` as a `models.Skill`. It belongs to this project — `src/inkwell/devtools/harness/` — unless the investigation is one *any* project on lup would run, in which case it belongs to the library and `docs/library.md` carries how to reach lup's own source in whichever mode this project obtains it. Register it in that half's `content/catalog.py` beside its siblings, and regenerate with `uv run lup-devtools harness generate all`.
+
+A declaration that names a path inside this project's package exports `skill(layout)` and spells the path through the layout, rather than exporting a bare `SKILL` with the path written in — a literal is correct in exactly one repository and misdirects every other. One that names no such path exports `SKILL` directly. The artifacts under.claude/plugins/lup/commands/ under Claude Code, .codex/plugins/lup/skills/ under Codex are generated from this — never write them by hand.
+
+**Tools**: Choose the `tools` list based on what the investigator needs. Every
+grant is a `ToolGrant` from `packages/lup/src/lup/types.py` — read that closed
+type for the spellings rather than guessing. An investigator almost always
+needs file reading and search; add scoped shell grants for listing and sizing
+files or for the devtools it runs, a web grant if it needs outside context, and
+a question grant if it may need clarification from the user.
+
+**Content**: Write the prompt body as `models.TextPart` parts, splicing `models.ArgumentsRef()` where the pasted output lands. Use the design from Step 2.
+
+## Step 4: Confirm and iterate
+
+Show the user what was created — the first draft is rarely perfect. Ask the user directly, offering concrete options, and wait for the answer: what needs adjusting, if anything
+
+## Rules
+
+- **Read before writing** — Always explore the relevant codebase areas before designing the command. The command should reference actual file paths, actual script names, actual log locations.
+- **Be specific** — Generic investigation steps ("search the logs") are useless. Point to specific directories, file patterns, scripts, and code locations.
+- **Encode domain knowledge** — The whole point of an investigator command is that it captures knowledge you'd otherwise have to rediscover each time. Bake in common failure modes, known gotchas, and relevant architecture.
+- **Keep it conversational** — ask when you need input. Don't assume.

@@ -38,10 +38,12 @@ from inkwell.manuscript.state import WorkState
 from inkwell.manuscript.tree import Manuscript
 
 if TYPE_CHECKING:
-    # Imported for the annotation only: `findings` reaches the corpus and the
-    # agent client, and the store is what a status display loads to read a
-    # tree. Paying for that import to answer "which works are there" would
-    # make the cheapest question in the system one of the most expensive.
+    # Imported for the annotations only: `findings` reaches the corpus and the
+    # agent client, `chapters` reaches Google's, and the store is what a status
+    # display loads to read a tree. Paying for either import to answer "which
+    # works are there" would make the cheapest question in the system one of
+    # the most expensive.
+    from inkwell.manuscript.chapters import WorkDocs
     from inkwell.manuscript.findings import WorkFindings
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,15 @@ STATE_FILE = "state.json"
 
 GLOSSARY_DIR = "glossary"
 """Where each part coins its terms, one file per part."""
+
+DOCS_FILE = "docs.json"
+"""Which documents this work projects into, and which each part's runs reuse.
+
+The one file here that is neither a cache nor derivable. A document id cannot
+be recomputed from anything, and losing one does not lose the document — it
+leaves an orphan in somebody's Drive and makes a second one beside it, which is
+the failure this exists to stop happening two hundred times a pass.
+"""
 
 FINDINGS_FILE = "findings.json"
 """What the research has been placed on, part by part.
@@ -218,6 +229,40 @@ class ManuscriptStore(BaseModel, frozen=True):
         path = self.findings_path(work)
         path.parent.mkdir(parents=True, exist_ok=True)
         publish_atomic(path, found)
+        return path
+
+    def docs_path(self, work: str) -> Path:
+        """The file holding which documents this work projects into."""
+        return self.work_dir(work) / DOCS_FILE
+
+    def load_docs(self, work: str) -> "WorkDocs":
+        """Which documents this work has, empty where it has none.
+
+        Unlike the tree, and like the state, this cannot be recomputed — but an
+        unreadable one is reported and replaced rather than raised, because the
+        cost of carrying on is a second set of documents and the cost of
+        stopping is a pass that will not run.
+        """
+        from inkwell.manuscript.chapters import WorkDocs
+
+        path = self.docs_path(work)
+        if not path.is_file():
+            return WorkDocs()
+        try:
+            return WorkDocs.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValidationError, OSError):
+            logger.warning(
+                "Unreadable document record at %s — a projection will make new "
+                "documents rather than reuse what is there",
+                path,
+            )
+            return WorkDocs()
+
+    def publish_docs(self, work: str, docs: "WorkDocs") -> Path:
+        """Write which documents this work projects into, atomically."""
+        path = self.docs_path(work)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        publish_atomic(path, docs)
         return path
 
     def works(self) -> tuple[str, ...]:

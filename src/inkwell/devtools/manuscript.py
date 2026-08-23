@@ -43,6 +43,12 @@ from inkwell.agent.references import (
 from inkwell.corpus.distillation import DEFAULT_DISTIL_CONCURRENCY
 from inkwell.corpus.registry import corpus_vocabulary
 from inkwell.corpus.storage import CorpusStore
+from inkwell.manuscript.chapters import (
+    comments_on,
+    project,
+    routed,
+    unrouted,
+)
 from inkwell.manuscript.research import (
     cited_by_part,
     plan as research_plan,
@@ -682,6 +688,103 @@ def research_cmd(
         return
     dirtied = research_publish(store, synced)
     typer.echo(f"{len(dirtied)} part(s) are now out of date — `manuscript run {work}`")
+
+
+@app.command("project")
+def project_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    book: Annotated[
+        bool,
+        typer.Option(
+            "--book/--no-book",
+            help="Sync the whole-work document as well as the chapters",
+        ),
+    ] = True,
+) -> None:
+    """Write the work into the documents an author reads it in.
+
+    One document per chapter, one tab per part, nested the way the work is —
+    Docs take three levels of tab, which is chapter, section, subsection. The
+    part runs' own documents are working surfaces; these are the reading ones,
+    and they are projected from the markdown rather than written into, so
+    nothing here can disagree with what is on disk.
+
+    Safe to run whenever. A chapter that has a document keeps it and a tab that
+    exists is written over, so this is the same command after one part lands
+    and after two hundred do.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    refuse_unrooted(work, tree)
+
+    projected = asyncio.run(project(tree, store.load_docs(work), book=book))
+    store.publish_docs(work, projected)
+
+    for chapter in projected.chapters:
+        typer.echo(f"{chapter.key:<8} {len(chapter.tabs):>3} tab(s)  {chapter.url}")
+    if projected.book_url:
+        typer.echo(f"\nthe whole work: {projected.book_url}")
+
+
+@app.command("feedback")
+def feedback_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Ask for the parts without confirming"),
+    ] = False,
+) -> None:
+    """Take in what an author commented, and ask for the parts it is about.
+
+    A comment lands in a tab, a tab holds one part's prose, and the passage the
+    comment quotes is a passage of that part — so which part an author is
+    talking about is a lookup rather than a guess, and no routing table exists
+    anywhere. What comes back is comments; prose does not, because edits belong
+    in the markdown where the sweep already notices them.
+
+    A comment is taken in once. Acted on twice, it would ask for its part again
+    on every sweep and the loop would never settle.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    refuse_unrooted(work, tree)
+    docs = store.load_docs(work)
+    if not docs.chapters and not docs.book_doc_id:
+        typer.echo(
+            f"{work} projects into no documents yet — `manuscript project {work}`"
+        )
+        raise typer.Exit(1)
+
+    comments = asyncio.run(comments_on(docs))
+    taken = routed(tree, comments, docs.seen_comments)
+    stray = unrouted(tree, comments, docs.seen_comments)
+    for note in taken:
+        typer.echo(f"{note.key:<24} {note.render()}")
+    for entry in stray:
+        typer.echo(
+            f"{'(no part claims it)':<24} {entry.content}\n"
+            f"{'':<24} it quotes: {entry.anchor_text or '(nothing)'}"
+        )
+    if not taken:
+        typer.echo(f"\nnothing new on {work}")
+        return
+    asked = tuple(dict.fromkeys(note.key for note in taken))
+    if not yes and not typer.confirm(f"\nAsk for {len(asked)} part(s)?", default=False):
+        typer.echo(
+            "Left alone. Nothing is marked as read, so this says the same later."
+        )
+        return
+
+    state = store.load_state(work)
+    for key in asked:
+        state = state.declared(
+            key,
+            "requested",
+            "; ".join(note.render() for note in taken if note.key == key),
+        )
+    store.publish_state(work, state)
+    store.publish_docs(work, docs.taken_in(note.comment_id for note in taken))
+    typer.echo(f"{len(asked)} part(s) asked for — `manuscript run {work}`")
 
 
 @app.command("references")

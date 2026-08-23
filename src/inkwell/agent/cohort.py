@@ -53,7 +53,10 @@ from lup.telemetry.trace import TraceLogger
 from lup.workspace.paths import sessions_dir
 
 from inkwell.agent.client import (
+    AgentCallback,
     BlockCallback,
+    active_agent_callback,
+    context_value,
     is_interrupt,
     observed_factory,
     provider_factory,
@@ -77,6 +80,7 @@ def stage_recipe(
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
     block_callback: BlockCallback | None = None,
+    agent_callback: AgentCallback | None = None,
 ) -> ActorRecipe:
     """How one stage's agent opens its session, given the hooks that reach it.
 
@@ -97,6 +101,8 @@ def stage_recipe(
     what lets two sections write at once and still bill and trace apart.
     """
 
+    agent_callback = agent_callback or context_value(active_agent_callback, None)
+
     def recipe(actor: ActorRef, hooks: LupHooksConfig) -> SessionFactory:
         return observed_factory(
             provider_factory(
@@ -114,6 +120,9 @@ def stage_recipe(
             trace_logger=trace_logger,
             cost_accumulator=cost_accumulator,
             block_callback=block_callback,
+            agent_callback=agent_callback,
+            model=model,
+            address=actor.label(),
         )
 
     return recipe

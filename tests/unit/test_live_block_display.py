@@ -117,25 +117,37 @@ async def test_one_shot_stage_forwards_a_block_before_its_turn_finishes(
     release = asyncio.Event()
     forwarded = asyncio.Event()
     seen: list[tuple[str, str]] = []
+    agents: list[client.AgentUpdate] = []
     factory = held_factory(release)
 
     async def record(block, prefix: str) -> None:
         seen.append((block.text_payload or "", prefix))
         forwarded.set()
 
+    async def record_agent(update: client.AgentUpdate) -> None:
+        agents.append(update)
+
     monkeypatch.setattr(client, "provider_factory", lambda **_kwargs: factory)
     running = asyncio.create_task(
-        client.query("write", prefix="[write] ", block_callback=record)
+        client.query(
+            "write",
+            prefix="[write] ",
+            block_callback=record,
+            agent_callback=record_agent,
+        )
     )
 
     await wait_for(forwarded)
 
     assert not running.done()
     assert seen == [("drafting now", "[write] ")]
+    assert [one.status for one in agents] == ["running"]
+    assert agents[0].address == "[write]"
 
     release.set()
     await running
     assert seen == [("drafting now", "[write] ")]
+    assert [one.status for one in agents] == ["running", "completed"]
 
 
 async def test_cohort_stage_forwards_a_block_before_its_turn_finishes(
@@ -144,6 +156,7 @@ async def test_cohort_stage_forwards_a_block_before_its_turn_finishes(
     release = asyncio.Event()
     forwarded = asyncio.Event()
     seen: list[tuple[str, str]] = []
+    agents: list[client.AgentUpdate] = []
     factory = held_factory(release, "reviewing now")
     cohort = run_cohort(tmp_path / "cohort")
     actor = ActorRef(kind="reviewer", id="facts")
@@ -152,7 +165,10 @@ async def test_cohort_stage_forwards_a_block_before_its_turn_finishes(
         seen.append((block.text_payload or "", prefix))
         forwarded.set()
 
-    def recipe(_actor, _hooks):
+    async def record_agent(update: client.AgentUpdate) -> None:
+        agents.append(update)
+
+    def recipe(actor, _hooks):
         return client.observed_factory(
             factory,
             label="review",
@@ -160,6 +176,9 @@ async def test_cohort_stage_forwards_a_block_before_its_turn_finishes(
             trace_logger=None,
             cost_accumulator=None,
             block_callback=record,
+            agent_callback=record_agent,
+            model=None,
+            address=actor.label(),
         )
 
     running = asyncio.create_task(
@@ -170,7 +189,10 @@ async def test_cohort_stage_forwards_a_block_before_its_turn_finishes(
 
     assert not running.done()
     assert seen == [("reviewing now", "[review:facts] ")]
+    assert [one.status for one in agents] == ["running"]
+    assert agents[0].address == "reviewer:facts#1"
 
     release.set()
     await running
     assert seen == [("reviewing now", "[review:facts] ")]
+    assert [one.status for one in agents] == ["running", "completed"]

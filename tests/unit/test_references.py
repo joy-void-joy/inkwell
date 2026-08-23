@@ -209,6 +209,17 @@ class TestWhatCountsAsUnsound:
 
         assert held.sound()
 
+    def test_a_sound_reference_may_still_carry_a_caveat(self) -> None:
+        held = ReferenceVerdict(
+            url="https://a.test/p",
+            reachable=True,
+            title="A preprint",
+            caveat="not peer reviewed",
+        )
+
+        assert held.sound()
+        assert "caveat: not peer reviewed" in held.render()
+
     def test_a_dead_reference_is_not(self) -> None:
         assert not dead("https://a.test/p").sound()
 

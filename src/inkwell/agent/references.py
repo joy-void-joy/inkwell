@@ -72,9 +72,20 @@ holding a citation of it can tell whether they have cited the right thing. A \
 report about one incident that a draft cites for a different incident is the \
 failure this catches, and it is invisible from the citation alone.
 
-Where the page is not what a reference should be — a listing, a search result, \
-a redirect to somewhere else entirely — say so plainly in `note` rather than \
-describing whatever you landed on as though it were the source.
+Keep two kinds of qualification separate:
+
+- `caveat` records a limitation of a document that is still a sound reference: \
+a preprint rather than a peer-reviewed paper, a live page with revisions, \
+metered access where the content was readable, or a claim its own authors state \
+more narrowly than a casual summary would. These do **not** make the URL unfit \
+to ship.
+- `note` is a disqualifying problem with the destination itself. Use it only \
+where the page is not what a reference should be — a listing, search result, \
+unreadable paywall, missing document, or redirect somewhere else entirely. \
+`note` must be empty for a real, readable document, even where `caveat` is not.
+
+Do not invent a hypothetical mismatch with prose you have not been shown. You \
+are checking the reference, not its use in one sentence.
 """
 
 
@@ -130,6 +141,10 @@ class ReferenceVerdict(BaseModel):
         description="What the document establishes, in one sentence — enough to "
         "tell whether a citation of it cited the right thing",
     )
+    caveat: str = Field(
+        default="",
+        description="A limitation of a document that is still a sound reference",
+    )
     note: str = Field(
         default="",
         description="What is wrong with this as a reference, where something is",
@@ -145,7 +160,8 @@ class ReferenceVerdict(BaseModel):
         if not self.reachable:
             return f"{self.url} — nothing is there"
         named = self.title or "untitled"
-        said = f" — {self.note}" if self.note else ""
+        qualified = f" — caveat: {self.caveat}" if self.caveat else ""
+        said = f" — {self.note}" if self.note else qualified
         return f"{self.url} — {named}, {self.organization or 'unattributed'}{said}"
 
 
@@ -186,6 +202,11 @@ class ReadReference(BaseModel):
         default="",
         description="What the document establishes, in one sentence, so somebody "
         "holding a citation of it can tell whether they cited the right thing",
+    )
+    caveat: str = Field(
+        default="",
+        description="A limitation worth carrying that does not make the URL "
+        "unfit as a reference",
     )
     note: str = Field(
         default="",
@@ -228,6 +249,7 @@ class ModelReference(ReferenceReader):
             published=read.published,
             authority=venue_of(url),
             establishes=read.establishes,
+            caveat=read.caveat,
             note=read.note,
             checked_at=now_stamp(),
         )

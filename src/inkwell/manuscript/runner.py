@@ -83,6 +83,19 @@ A file rather than the text inline, because ``revision_target`` takes sources
 the extract stage opens, and a part of a book is exactly a document.
 """
 
+PRODUCED_FILE = "produced.md"
+"""What a run's prose is called where it is kept, beside the text it revised.
+
+Written before the splice rather than after it, because the pipeline returning
+is the moment the prose exists and every step after that can lose it — a run
+whose process ends between the two leaves a part reading ``running``, a work
+byte-identical to what it was handed, and hours of writing reachable only from
+a snapshot nothing points at.
+
+It is also the only record of what a run produced where the splice refused it,
+which is what makes a failed run readable rather than merely reported.
+"""
+
 type TurnEnding = Literal["rewritten", "parked", "failed"]
 """The three ways one part's turn can end.
 
@@ -365,9 +378,11 @@ async def run_part(
 ) -> PartOutcome:
     """Take one part through the pipeline and hand back what it produced.
 
-    Writes the part's prose back into the work, because that is what the next
-    part to read it must see; does not touch the work's state, because the
-    loop owns that and needs the outcome in hand before deciding anything.
+    Keeps the prose in the run's own room before putting it anywhere else, so
+    what a run wrote outlives the run whatever becomes of the splice. Writes it
+    back into the work, because that is what the next part to read it must see;
+    does not touch the work's state, because the loop owns that and needs the
+    outcome in hand before deciding anything.
     """
     target = Path(manuscript.root) / node.path
     if not target.is_file():
@@ -411,6 +426,7 @@ async def run_part(
         )
 
     try:
+        (room / PRODUCED_FILE).write_text(produced, encoding="utf-8")
         written_back(manuscript, node, produced)
     except (HeadingLost, PartNotFound, OSError) as failure:
         logger.exception("Could not put %s back into %s", node.key, node.path)

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import ValidationError
 
 from lup.devtools.utils import JSON_OPT, output_json
 
@@ -69,6 +70,7 @@ from inkwell.manuscript.recording import import_work
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import (
     DEFAULT_WORK_FORMAT,
+    DEFAULT_WRITER_MODE,
     Manuscript,
     ManuscriptNode,
 )
@@ -186,6 +188,23 @@ def import_cmd(
             "it inherits this",
         ),
     ] = DEFAULT_WORK_FORMAT,
+    writer_mode: Annotated[
+        str,
+        typer.Option(
+            "--writer-mode",
+            help="How each part is drafted: 'single' for one writer over the "
+            "subsection, 'parallel' for one per planned section plus a merge, "
+            "'auto' to leave it to the ambient setting",
+        ),
+    ] = DEFAULT_WRITER_MODE,
+    skip: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--skip",
+            help="A backbone stage a part run of this work does not perform. "
+            "Repeat for several",
+        ),
+    ] = None,
     vocabulary: Annotated[
         Path | None,
         typer.Option(help="The work's declared abbreviations file"),
@@ -210,17 +229,26 @@ def import_cmd(
         typer.echo(refusal, err=True)
         raise typer.Exit(1)
     store = manuscript_store()
-    recorded = import_work(
-        store,
-        work,
-        chapters,
-        title=title,
-        target_format=target_format,
-        vocabulary=vocabulary,
-        adopt=adopt,
-    )
+    try:
+        recorded = import_work(
+            store,
+            work,
+            chapters,
+            title=title,
+            target_format=target_format,
+            writer_mode=writer_mode,
+            skipped_stages=tuple(skip or ()),
+            vocabulary=vocabulary,
+            adopt=adopt,
+        )
+    except ValidationError as refused:
+        typer.echo(str(refused), err=True)
+        raise typer.Exit(1) from refused
+    skipping = ", ".join(recorded.skipped_stages) or "none"
     typer.echo(f"{work}: {recorded.parts} leaf part(s) recorded from {chapters}")
     typer.echo(f"  format: {recorded.target_format} — every run inherits it")
+    typer.echo(f"  drafting: {recorded.writer_mode} writer per part")
+    typer.echo(f"  stages skipped: {skipping}")
     typer.echo(f"  vocabulary: {recorded.vocabulary} declared term(s)")
     typer.echo(f"  dependencies: {recorded.dependencies} across the work")
     typer.echo(f"  adopted: {recorded.adopted} part(s) stamped as built")

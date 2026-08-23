@@ -32,6 +32,7 @@ from lup.types import JsonObject, JsonValue
 from inkwell.corpus.discovery import slugified
 from inkwell.manuscript.tree import (
     DEFAULT_WORK_FORMAT,
+    DEFAULT_WRITER_MODE,
     Manuscript,
     ManuscriptNode,
 )
@@ -280,12 +281,19 @@ def read_manuscript(
     *,
     title: str = "",
     target_format: str = DEFAULT_WORK_FORMAT,
+    writer_mode: str = DEFAULT_WRITER_MODE,
+    skipped_stages: tuple[str, ...] = (),
 ) -> Manuscript:
     """Read a whole work from the directory holding its chapters.
 
     Chapter directories are taken in name order, which is what the Atlas's own
     zero-padded ``01``..``09`` already encodes — its top-level nav declares
     only ``index.md`` and a wildcard, so there is no per-chapter order to read.
+
+    What the work declares about *how* its parts are written travels with the
+    structure rather than beside it, for the reason the format already does:
+    these are read back by every run months apart, and a second place to say
+    them is a second place for two runs of one book to disagree.
     """
     root = chapters_dir.resolve()
     directories = sorted(
@@ -295,5 +303,7 @@ def read_manuscript(
         title=title or root.parent.name,
         root=str(root),
         target_format=target_format,
+        writer_mode=writer_mode,
+        skipped_stages=skipped_stages,
         children=[chapter_node(directory, root) for directory in directories],
     )

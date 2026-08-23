@@ -3635,6 +3635,7 @@ class PipelineRunner:
         stop_after: str | None = None,
         light: bool = False,
         skipped_stages: list[str] | None = None,
+        writer_mode: str = "",
     ) -> None:
         self.sources = sources
         self.material_role: SourceRole = material_role
@@ -3653,6 +3654,7 @@ class PipelineRunner:
         self.stop_after = validate_checkpoint_stage(stop_after)
         self.explicit_light = light
         self.skipped_stages = skipped_stages or []
+        self.declared_writer_mode = writer_mode
 
         if cost_accumulator is None:
             cost_accumulator = CostAccumulator()
@@ -3768,6 +3770,21 @@ class PipelineRunner:
         from the snapshot's plan even though resume reconstructs with ``auto``.
         """
         return self.explicit_light or self.effective_format == "linkedin"
+
+    def writer_mode(self) -> str:
+        """How this run drafts: one writer over the whole piece, or one per section.
+
+        The launch's declaration where it made one, and the ambient setting
+        where it did not. A work of many parts declares it, because the choice
+        belongs to the work rather than to whoever happens to be running: a
+        subsection drafted by nine parallel writers and merged costs eleven
+        stage-runs to produce what one writer produces in one, and two parts of
+        the same book answering differently is the same inconsistency the
+        format declaration already refuses.
+        """
+        return resolve_writer_mode(
+            self.declared_writer_mode or current_settings().writer_mode
+        )
 
     def stages_for_run(self) -> list[str]:
         """The backbone stages this run executes, in order.
@@ -5365,10 +5382,7 @@ class PipelineRunner:
         if plan is None or (research is None and not self.light):
             raise PipelineError("Cannot write without plan and research")
 
-        if (
-            self.light
-            or resolve_writer_mode(current_settings().writer_mode) == "single"
-        ):
+        if self.light or self.writer_mode() == "single":
             await self.write_single_draft()
             return
 
@@ -5565,10 +5579,7 @@ class PipelineRunner:
         if plan is None:
             raise PipelineError("Cannot merge without a plan")
 
-        if (
-            resolve_writer_mode(current_settings().writer_mode) == "single"
-            and self.snapshot.merged
-        ):
+        if self.writer_mode() == "single" and self.snapshot.merged:
             self.snapshot.stage = "merge"
             await self.save_snapshot()
             return
@@ -6625,6 +6636,7 @@ async def run_pipeline(
     stop_after: str | None = None,
     light: bool = False,
     skipped_stages: list[str] | None = None,
+    writer_mode: str = "",
 ) -> WritingOutput:
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
@@ -6643,5 +6655,6 @@ async def run_pipeline(
         stop_after=stop_after,
         light=light,
         skipped_stages=skipped_stages,
+        writer_mode=writer_mode,
     )
     return await runner.run()

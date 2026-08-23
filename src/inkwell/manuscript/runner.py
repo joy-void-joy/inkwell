@@ -35,11 +35,16 @@ it — the published edition, a different version of the book it is holding one
 page of. So the instruction names the work's root and the files either side of
 this part, and the run reads them.
 
-**The format comes from the work, not from the part.** A run handed one
-subsection and asked to infer its own format is guessing at a book it can see a
-page of, and two parts of one work guessing differently is how a textbook
+**How a part is written comes from the work, not from the part.** A run handed
+one subsection and asked to infer its own format is guessing at a book it can
+see a page of, and two parts of one work guessing differently is how a textbook
 acquires a chapter that reads like a blog post. The work declares it once at
-import and every part inherits it.
+import and every part inherits it — and the same argument reaches past the
+format to how a part is drafted and which stages its runs perform. A subsection
+is already the unit the parallel-writer split exists to make manageable, so
+splitting it again buys nine writers and a merge to draft what one writer
+drafts in one pass; the work says so once rather than the setting saying it for
+every run of every project.
 
 **The lease is the standing.** A part is marked ``running`` with the session
 holding it before anything starts, and a part already held is one the loop
@@ -517,6 +522,8 @@ async def run_part(
         ],
         material_role="source",
         target_format=manuscript.target_format,
+        writer_mode=manuscript.writer_mode,
+        skipped_stages=list(manuscript.skipped_stages),
         glossary=shared,
         session_id=session_id,
         listener=watched.listener,

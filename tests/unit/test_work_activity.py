@@ -20,11 +20,19 @@ from fastapi import HTTPException
 from lup.channels.models import utc_now
 
 from inkwell.environment.web.routes import works
+from inkwell.agent.references import ReferenceStep
+from inkwell.corpus.distillation import DistilStep
 from inkwell.manuscript.attending import Attendance, WorkAgent, attending
 from inkwell.manuscript.inheritance import ADOPTED_FILE
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.recording import import_work
 from inkwell.manuscript.runner import PRODUCED_FILE, PartRun, opened, runs_under
+from inkwell.manuscript.research import (
+    distil_started,
+    distil_watch,
+    reference_started,
+    reference_watch,
+)
 from inkwell.manuscript.store import ManuscriptStore
 
 CHAPTER_PAGES = """\
@@ -128,6 +136,80 @@ class TestTheAgentsThatBelongToNoPart:
         store.attending("atlas").opening(WorkAgent(id="a", kind="distil"))
 
         assert store.attending("atlas").load().agents[0].id == "a"
+
+    def test_a_distiller_is_visible_while_its_model_turn_is_running(
+        self, tmp_path: Path
+    ) -> None:
+        log = attending(tmp_path / "atlas")
+        step = DistilStep(digest="abc", title="A paper", findings=0, done=0, total=3)
+
+        distil_started(log)(step)
+
+        assert [one.id for one in log.load().live()] == ["distil:abc"]
+
+        distil_watch(log)(step.model_copy(update={"findings": 2, "done": 1}))
+        held = log.load().agents[0]
+        assert not held.running()
+        assert held.detail == "2 finding(s) — 1 of 3"
+
+    def test_a_reference_is_visible_while_it_is_being_checked(
+        self, tmp_path: Path
+    ) -> None:
+        log = attending(tmp_path / "atlas")
+        step = ReferenceStep(url="https://example.test/p", sound=False, done=0, total=4)
+
+        reference_started(log)(step)
+
+        assert [one.id for one in log.load().live()] == [
+            "reference:https://example.test/p"
+        ]
+
+        reference_watch(log)(step.model_copy(update={"sound": True, "done": 1}))
+        held = log.load().agents[0]
+        assert not held.running()
+        assert held.detail == "holds up — 1 of 4"
+
+    @pytest.mark.parametrize(
+        ("step", "started", "watch", "identifier"),
+        [
+            (
+                DistilStep(
+                    digest="abc",
+                    title="A paper",
+                    findings=0,
+                    done=0,
+                    total=3,
+                ),
+                distil_started,
+                distil_watch,
+                "distil:abc",
+            ),
+            (
+                ReferenceStep(
+                    url="https://example.test/p", sound=False, done=0, total=4
+                ),
+                reference_started,
+                reference_watch,
+                "reference:https://example.test/p",
+            ),
+        ],
+    )
+    def test_an_interrupted_reader_is_closed_as_cancelled(
+        self,
+        tmp_path: Path,
+        step: DistilStep | ReferenceStep,
+        started: object,
+        watch: object,
+        identifier: str,
+    ) -> None:
+        log = attending(tmp_path / "atlas")
+        started(log)(step)  # type: ignore[operator]
+        watch(log)(step.model_copy(update={"failure": "cancelled"}))  # type: ignore[operator]
+
+        held = log.load().agents[0]
+        assert held.id == identifier
+        assert not held.running()
+        assert held.failure == "cancelled"
 
 
 class TestARunSaysWhoseItIs:

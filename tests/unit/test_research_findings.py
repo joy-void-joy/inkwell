@@ -7,12 +7,14 @@ nothing new dirties nothing (which is what makes the loop settle), and that the
 half which moves parts is separable from the half that costs money.
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from inkwell.corpus.distillation import (
     DistilRequest,
+    DistilStep,
     Distillation,
     Distiller,
     Finding,
@@ -170,10 +172,17 @@ class TestADocumentIsReadOnceEver:
             async def distil(self, request: DistilRequest) -> None:
                 return None
 
-        await distil_entries(store, read_index(store).entries, Refuses())
+        steps: list[DistilStep] = []
+        await distil_entries(
+            store,
+            read_index(store).entries,
+            Refuses(),
+            progress=steps.append,
+        )
 
         held = read_distillation(store, "digest-a")
         assert held is not None and not held.read()
+        assert steps[0].failure == "the reading did not come back"
 
     @pytest.mark.asyncio
     async def test_a_failed_reading_is_not_offered_as_a_finding(
@@ -188,6 +197,36 @@ class TestADocumentIsReadOnceEver:
         await distil_entries(store, read_index(store).entries, Refuses())
 
         assert findings_for(store, read_index(store).entries) == ()
+
+    @pytest.mark.asyncio
+    async def test_an_interrupted_reading_closes_what_it_opened(
+        self, tmp_path: Path
+    ) -> None:
+        """A stopped corpus smoke must not remain live in work activity."""
+        store = corpus_with(tmp_path, paper("a", "digest-a"))
+        entered = asyncio.Event()
+        steps: list[DistilStep] = []
+
+        class Waits(Distiller):
+            async def distil(self, request: DistilRequest) -> None:
+                entered.set()
+                await asyncio.Future()
+
+        task = asyncio.create_task(
+            distil_entries(
+                store,
+                read_index(store).entries,
+                Waits(),
+                progress=steps.append,
+            )
+        )
+        await entered.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert [one.failure for one in steps] == ["cancelled"]
 
 
 class TestPlacingReadsTitlesRatherThanProse:

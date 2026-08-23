@@ -370,6 +370,9 @@ class ReferenceStep(BaseModel):
     sound: bool
     done: int
     total: int
+    failure: str = Field(
+        default="", description="Why this check stopped without a verdict"
+    )
 
 
 class ReferenceReport(BaseModel):
@@ -404,6 +407,7 @@ async def check_references(
     reader: ReferenceReader | None = None,
     *,
     concurrency: int = DEFAULT_REFERENCE_CONCURRENCY,
+    started: Callable[[ReferenceStep], None] | None = None,
     progress: Callable[[ReferenceStep], None] | None = None,
 ) -> ReferenceReport:
     """Open whatever of these references has not been opened, and keep it.
@@ -417,7 +421,7 @@ async def check_references(
     cited = tuple(urls)
     references = distinct(cited)
     pending = unchecked(store, references)
-    opening = reader if reader is not None else ModelReference()
+    reader_for = reader if reader is not None else ModelReference()
     limiter = asyncio.Semaphore(concurrency)
     done = 0
 
@@ -425,8 +429,29 @@ async def check_references(
         """One reference opened, recorded, and reported the moment it lands."""
         nonlocal done
         async with limiter:
+            if started is not None:
+                started(
+                    ReferenceStep(
+                        url=url,
+                        sound=False,
+                        done=done,
+                        total=len(pending),
+                    )
+                )
             try:
-                verdict = await opening.check(url)
+                verdict = await reader_for.check(url)
+            except asyncio.CancelledError:
+                if progress is not None:
+                    progress(
+                        ReferenceStep(
+                            url=url,
+                            sound=False,
+                            done=done,
+                            total=len(pending),
+                            failure="cancelled",
+                        )
+                    )
+                raise
             except Exception:
                 logger.exception("Checking %s did not come back", url)
                 verdict = None
@@ -440,6 +465,9 @@ async def check_references(
                     sound=verdict is not None and verdict.sound(),
                     done=done,
                     total=len(pending),
+                    failure=""
+                    if verdict is not None
+                    else "the check did not come back",
                 )
             )
         return verdict

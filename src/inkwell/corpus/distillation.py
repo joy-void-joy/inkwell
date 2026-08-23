@@ -363,6 +363,9 @@ class DistilStep(BaseModel):
     findings: int
     done: int
     total: int
+    failure: str = Field(
+        default="", description="Why this reading stopped before it landed"
+    )
 
 
 class DistilReport(BaseModel):
@@ -392,6 +395,7 @@ async def distil_entries(
     distiller: Distiller | None = None,
     *,
     concurrency: int = DEFAULT_DISTIL_CONCURRENCY,
+    started: Callable[[DistilStep], None] | None = None,
     progress: Callable[[DistilStep], None] | None = None,
 ) -> DistilReport:
     """Read whatever of these documents has not been read, and keep it.
@@ -412,8 +416,31 @@ async def distil_entries(
         """One document read, recorded, and reported the moment it lands."""
         nonlocal done
         async with limiter:
+            if started is not None:
+                started(
+                    DistilStep(
+                        digest=entry.document.content_sha256,
+                        title=entry.document.title,
+                        findings=0,
+                        done=done,
+                        total=len(pending),
+                    )
+                )
             try:
                 found = await reading.distil(request_for(entry))
+            except asyncio.CancelledError:
+                if progress is not None:
+                    progress(
+                        DistilStep(
+                            digest=entry.document.content_sha256,
+                            title=entry.document.title,
+                            findings=0,
+                            done=done,
+                            total=len(pending),
+                            failure="cancelled",
+                        )
+                    )
+                raise
             except Exception:
                 logger.exception("Distilling %s could not be read", entry.name())
                 found = None
@@ -440,6 +467,7 @@ async def distil_entries(
                     findings=len(held.findings),
                     done=done,
                     total=len(pending),
+                    failure=held.failure,
                 )
             )
         return held

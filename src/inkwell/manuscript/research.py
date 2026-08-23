@@ -30,8 +30,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from lup.channels.models import utc_now
-
 from inkwell.agent.references import (
     DEFAULT_REFERENCE_CONCURRENCY,
     ReferenceReader,
@@ -152,6 +150,21 @@ class ResearchSync(BaseModel):
                 yield f"    {one.render()}"
 
 
+def distil_started(log: AttendanceLog) -> Callable[[DistilStep], None]:
+    """Record a document before its whole-document model turn begins."""
+
+    def starting(step: DistilStep) -> None:
+        log.opening(
+            WorkAgent(
+                id=f"distil:{step.digest}",
+                kind="distil",
+                about=step.title or step.digest,
+            )
+        )
+
+    return starting
+
+
 def distil_watch(log: AttendanceLog) -> Callable[[DistilStep], None]:
     """A progress callback that records each document read where the work is.
 
@@ -164,16 +177,30 @@ def distil_watch(log: AttendanceLog) -> Callable[[DistilStep], None]:
 
     def stepped(step: DistilStep) -> None:
         """One document read, opened and closed in the same breath."""
-        held = WorkAgent(
-            id=f"distil:{step.digest}",
-            kind="distil",
-            about=step.title or step.digest,
-            detail=f"{step.findings} finding(s) — {step.done} of {step.total}",
-            closed_at=utc_now(),
-        )
-        log.opening(held)
+        if step.failure:
+            log.closed(f"distil:{step.digest}", failure=step.failure)
+        else:
+            log.closed(
+                f"distil:{step.digest}",
+                detail=f"{step.findings} finding(s) — {step.done} of {step.total}",
+            )
 
     return stepped
+
+
+def reference_started(log: AttendanceLog) -> Callable[[ReferenceStep], None]:
+    """Record a cited URL before its fetch-and-read turn begins."""
+
+    def starting(step: ReferenceStep) -> None:
+        log.opening(
+            WorkAgent(
+                id=f"reference:{step.url}",
+                kind="reference",
+                about=step.url,
+            )
+        )
+
+    return starting
 
 
 def reference_watch(log: AttendanceLog) -> Callable[[ReferenceStep], None]:
@@ -181,16 +208,14 @@ def reference_watch(log: AttendanceLog) -> Callable[[ReferenceStep], None]:
 
     def stepped(step: ReferenceStep) -> None:
         """One reference checked."""
-        log.opening(
-            WorkAgent(
-                id=f"reference:{step.url}",
-                kind="reference",
-                about=step.url,
+        if step.failure:
+            log.closed(f"reference:{step.url}", failure=step.failure)
+        else:
+            log.closed(
+                f"reference:{step.url}",
                 detail=f"{'holds up' if step.sound else 'does not hold up'} — "
                 f"{step.done} of {step.total}",
-                closed_at=utc_now(),
             )
-        )
 
     return stepped
 
@@ -240,6 +265,7 @@ async def sync(
     sources: tuple[str, ...] = (),
     distiller: Distiller | None = None,
     concurrency: int = DEFAULT_DISTIL_CONCURRENCY,
+    started: Callable[[DistilStep], None] | None = None,
     progress: Callable[[DistilStep], None] | None = None,
 ) -> ResearchSync:
     """Read what the filter reaches, place it, and say what it would dirty.
@@ -252,7 +278,12 @@ async def sync(
     """
     entries = reaching(corpus, where, sources=sources)
     read = await distil_entries(
-        corpus, entries, distiller, concurrency=concurrency, progress=progress
+        corpus,
+        entries,
+        distiller,
+        concurrency=concurrency,
+        started=started,
+        progress=progress,
     )
     found = await assign(
         manuscript, findings_for(corpus, entries), vocabulary=vocabulary.signature()
@@ -360,6 +391,7 @@ async def sweep_references(
     *,
     reader: ReferenceReader | None = None,
     concurrency: int = DEFAULT_REFERENCE_CONCURRENCY,
+    started: Callable[[ReferenceStep], None] | None = None,
     progress: Callable[[ReferenceStep], None] | None = None,
 ) -> ReferenceSweep:
     """Open every reference this work cites that nothing has opened, and place
@@ -375,6 +407,7 @@ async def sweep_references(
         (url for urls in by_part.values() for url in urls),
         reader,
         concurrency=concurrency,
+        started=started,
         progress=progress,
     )
 

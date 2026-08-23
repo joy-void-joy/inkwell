@@ -8,12 +8,14 @@ does not hold up reaches the parts citing it through the machinery findings
 already use rather than a channel of its own.
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from inkwell.agent.references import (
     ReferenceReader,
+    ReferenceStep,
     ReferenceVerdict,
     VerdictStore,
     canonical,
@@ -174,10 +176,47 @@ class TestAReferenceIsOpenedOnceEver:
             async def check(self, url: str) -> None:
                 return None
 
-        report = await check_references(store, ["https://a.test/p"], Refuses())
+        steps: list[ReferenceStep] = []
+        report = await check_references(
+            store,
+            ["https://a.test/p"],
+            Refuses(),
+            progress=steps.append,
+        )
 
         assert report.failed == 1
         assert store.load("https://a.test/p") is None
+        assert steps[0].failure == "the check did not come back"
+
+    @pytest.mark.asyncio
+    async def test_an_interrupted_check_closes_what_it_opened(
+        self, tmp_path: Path
+    ) -> None:
+        """Cancellation must not leave the activity view claiming that a
+        reader is still working forever."""
+        entered = asyncio.Event()
+        steps: list[ReferenceStep] = []
+
+        class Waits(ReferenceReader):
+            async def check(self, url: str) -> None:
+                entered.set()
+                await asyncio.Future()
+
+        task = asyncio.create_task(
+            check_references(
+                VerdictStore(root=tmp_path / "references"),
+                ["https://a.test/p"],
+                Waits(),
+                progress=steps.append,
+            )
+        )
+        await entered.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert [one.failure for one in steps] == ["cancelled"]
 
     @pytest.mark.asyncio
     async def test_the_report_separates_dead_from_doubted(self, tmp_path: Path) -> None:

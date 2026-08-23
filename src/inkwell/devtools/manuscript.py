@@ -53,7 +53,9 @@ from inkwell.manuscript.attending import WorkAgent
 from inkwell.manuscript.planner import plan_work
 from inkwell.manuscript.research import (
     cited_by_part,
+    distil_started,
     distil_watch,
+    reference_started,
     reference_watch,
     plan as research_plan,
     publish as research_publish,
@@ -677,6 +679,7 @@ def research_cmd(
             vocabulary,
             sources=sources,
             concurrency=concurrency,
+            started=distil_started(store.attending(work)),
             progress=distil_watch(store.attending(work)),
         )
     )
@@ -926,6 +929,7 @@ def references_cmd(
             work,
             tree,
             concurrency=concurrency,
+            started=reference_started(store.attending(work)),
             progress=reference_watch(store.attending(work)),
         )
     )

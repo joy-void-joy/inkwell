@@ -53,6 +53,9 @@ and the work declares that once so pass three cannot answer it differently from
 pass one.
 """
 
+MANUSCRIPT_SKIPPED_STAGES = ("assumptions",)
+"""Stages settled by the work rather than rediscovered from each old part."""
+
 type NodeKind = Literal["work", "chapter", "section", "subsection", "group"]
 """What one node is, named rather than derived from its depth.
 
@@ -118,7 +121,7 @@ class Manuscript(BaseModel):
         "them, 'auto' to leave it to the ambient setting",
     )
     skipped_stages: tuple[str, ...] = Field(
-        default=(),
+        default=MANUSCRIPT_SKIPPED_STAGES,
         description="Backbone stages a part run of this work does not perform. "
         "Declared once on the work rather than decided per run, because which "
         "stages a book's parts need is a property of the book: a work whose "
@@ -162,6 +165,9 @@ class Manuscript(BaseModel):
         # second list here would be a second thing to keep in step.
         from inkwell.agent.config import PIPELINE_STAGES
 
+        self.skipped_stages = tuple(
+            dict.fromkeys((*MANUSCRIPT_SKIPPED_STAGES, *self.skipped_stages))
+        )
         unknown = [held for held in self.skipped_stages if held not in PIPELINE_STAGES]
         if unknown:
             raise ValueError(

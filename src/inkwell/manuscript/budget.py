@@ -12,10 +12,9 @@ text is on disk, so what a part holds, what its siblings hold, and what its
 chapter runs to are three reads. That is the book-level view this needs, and
 the whole of it.
 
-**A budget is a licence, not a limit.** A part that genuinely has to grow grows,
-and what makes that legitimate is a reason on the run saying so. What the budget
-stops is the growth nobody asked for — the kind that arrives because a writer
-had more to say than the part had room for and no way to know that.
+**A budget is a delivery contract.** The plan may choose what fits inside it,
+but a writer and rewriter cannot silently enlarge the book. If the evidence
+truly needs more room, the work's allocation must change before another run.
 """
 
 from collections.abc import Iterator
@@ -27,12 +26,11 @@ from inkwell.manuscript.graph import source_text
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 
 GROWTH_ALLOWANCE = 1.5
-"""How much longer than it stands a part may run before somebody has to say why.
+"""How much longer than it stands a successor may be accepted.
 
-Half again, which is room for a development the part predates and not room for
-a different piece of writing. A revision that has to double a subsection is
-answering a question about the book — whether this material belongs here at all
-— and that question is the brief's, not the writing's.
+Half again leaves room for a development the part predates, but not a different
+piece of writing. A revision that must double a subsection first needs a new
+book-level allocation; the writing run cannot grant itself one.
 
 A default rather than a rule: it is an argument to :func:`budget_for`, so a work
 whose parts are stubs to be grown disagrees with it by passing something else.
@@ -88,10 +86,9 @@ class LengthBudget(BaseModel):
         )
         return (
             f"This part runs to {self.holds:,} words as the work holds it."
-            f"{placed} Land between roughly {self.floor():,} and "
-            f"{self.ceiling():,} words. That is a licence rather than a limit: "
-            f"where what has changed asks for more than that, take it and say "
-            f"so. What it rules out is growing past it because the subject is "
+            f"{placed} Land between {self.floor():,} and "
+            f"{self.ceiling():,} words. The final submission is accepted only "
+            f"inside that interval. This rules out growing past it because the subject is "
             f"large, which every subject is — a part that arrives at several "
             f"times the length of its siblings has answered a question about "
             f"the book's shape that nothing in this run was in a position to ask."

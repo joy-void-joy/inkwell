@@ -4,9 +4,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import pytest
 import inkwell.agent.pipeline as pipeline
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import PipelineRunner, StageCompute
+from inkwell.agent.tools.source_consult import SourceDocument
 
 
 async def test_resolver_promotes_complete_stage_output(
@@ -19,7 +21,8 @@ async def test_resolver_promotes_complete_stage_output(
     stage_output.parent.mkdir(parents=True)
     prompts: list[str] = []
 
-    monkeypatch.setattr(pipeline, "load_source_registry", lambda _path: [object()])
+    source = SourceDocument(label="source", path="/source.md", kind="text")
+    monkeypatch.setattr(pipeline, "load_source_registry", lambda _path: [source])
     monkeypatch.setattr(pipeline, "render_source_lines", lambda _notes: "")
 
     @asynccontextmanager
@@ -41,3 +44,17 @@ async def test_resolver_promotes_complete_stage_output(
     assert durable.read_text(encoding="utf-8") == "- Q: One\n  A: Settled.\n"
     assert str(stage_output) in prompts[0]
     assert str(durable) not in prompts[0]
+
+
+async def test_resolver_skips_material_without_factual_authority(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = PipelineRunner(sources=["standing.md"], notes=PipelineNotes(tmp_path))
+    runner.state.pending_questions = ["Should this old claim survive?"]
+    material = SourceDocument(
+        label="standing", path="/standing.md", kind="text", factual_authority=False
+    )
+    monkeypatch.setattr(pipeline, "load_source_registry", lambda _path: [material])
+    monkeypatch.setattr(pipeline, "query", lambda *_args, **_kwargs: pytest.fail())
+
+    await runner.stage_resolve()

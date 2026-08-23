@@ -54,6 +54,7 @@ to idle would be picked up again on the next pass and fail the same way.
 """
 
 import logging
+from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -73,7 +74,16 @@ from inkwell.agent.glossary import (
     load_chapter_glossary,
 )
 from inkwell.agent.models import ArticlePlan
-from inkwell.manuscript.brief import BriefWriter, compose
+from inkwell.manuscript.brief import (
+    BRIEF_FILE,
+    BriefWriter,
+    CorpusPusher,
+    EditorialEvidence,
+    LocalCorpusPusher,
+    compose,
+    evidence_for,
+    subsection_topic,
+)
 from inkwell.manuscript.planner import article_plan
 from inkwell.manuscript.budget import LengthBudget, budget_for
 from inkwell.manuscript.facts import (
@@ -123,6 +133,9 @@ It is also the only record of what a run produced where the splice refused it,
 which is what makes a failed run readable rather than merely reported.
 """
 
+HANDOFF_FILE = "handoff.json"
+"""Proof that adopted prose reached both its source file and live surface."""
+
 RUN_FILE = "run.json"
 """What a run says about itself, written into its room before anything else.
 
@@ -163,6 +176,39 @@ class PartRun(BaseModel):
     reasons: tuple[str, ...] = Field(
         default=(), description="Why the part was picked up"
     )
+
+
+class PartHandoff(BaseModel):
+    """The settled successor that was committed after the pipeline draft."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session: str = Field(description="The run that produced the successor")
+    key: str = Field(description="The part whose source was replaced")
+    adopted_digest: str = Field(description="Fingerprint of the adopted prose")
+    working_doc: str = Field(
+        default="", description="Live document updated, empty where none exists"
+    )
+    completed_at: datetime = Field(
+        default_factory=utc_now, description="When every declared surface held it"
+    )
+
+
+class PartPublisher(ABC):
+    """Where adopted prose replaces the pipeline draft on its live surface."""
+
+    @abstractmethod
+    async def publish(self, doc_id: str, text: str) -> None:
+        """Replace the live final surface with settled prose."""
+
+
+class GoogleDocPublisher(PartPublisher):
+    """The working Google Doc as the author follows it."""
+
+    async def publish(self, doc_id: str, text: str) -> None:
+        from inkwell.agent.tools.google_docs import write_with_continuation
+
+        await write_with_continuation(doc_id, "Final", text)
 
 
 def opened(
@@ -245,6 +291,9 @@ class PartRunAgents(BaseModel):
 
     briefing: BriefWriter | None = Field(
         default=None, description="Who plans the part before the pipeline writes it"
+    )
+    corpus: CorpusPusher | None = Field(
+        default=None, description="Who pushes subsection-scoped corpus evidence"
     )
     inheriting: InheritanceReader | None = Field(
         default=None,
@@ -476,10 +525,7 @@ async def planned_for(
     material: Path,
     room: Path,
     *,
-    instruction: str,
-    figures: tuple[Figure, ...],
-    budget: LengthBudget,
-    found: WorkFindings,
+    evidence: EditorialEvidence,
     writer: BriefWriter | None,
 ) -> ArticlePlan | None:
     """The plan this run works to, from whichever reader has one.
@@ -492,20 +538,20 @@ async def planned_for(
     reason there are two.
     """
     held = store.load_briefs(work).brief_for(
-        node.key, digest_of(material.read_text(encoding="utf-8"))
+        node.key,
+        digest_of(material.read_text(encoding="utf-8")),
+        evidence.digest(),
     )
     if held is not None:
         logger.info("Running %s to the brief a book planner composed", node.key)
-        return article_plan(manuscript, node, held)
+        plan = article_plan(manuscript, node, held)
+        (room / BRIEF_FILE).write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+        return plan
     return await compose(
         manuscript,
         node,
-        material,
+        evidence,
         room,
-        instruction=instruction,
-        figures=figures,
-        budget=budget,
-        found=found,
         writer=writer,
     )
 
@@ -610,6 +656,7 @@ async def run_part(
     observers: PartRunObservers | None = None,
     agents: PartRunAgents | None = None,
     found: WorkFindings | None = None,
+    publisher: PartPublisher | None = None,
 ) -> PartOutcome:
     """Take one part through the pipeline and hand back what it produced.
 
@@ -655,34 +702,51 @@ async def run_part(
 
     watched = observers if observers is not None else PartRunObservers()
     reading = agents if agents is not None else PartRunAgents()
-    research = briefing(
-        found if found is not None else store.load_findings(work), node.key
-    )
+    work_findings = found if found is not None else store.load_findings(work)
+    research = briefing(work_findings, node.key)
     figures = inventory_of(current).figures
     budget = budget_for(manuscript, node)
+    corpus = await (reading.corpus or LocalCorpusPusher()).push(
+        subsection_topic(manuscript, node)
+    )
+    evidence = evidence_for(
+        manuscript,
+        node,
+        work_findings,
+        reasons=reasons,
+        corpus=corpus,
+        figures=figures,
+        budget=budget,
+    )
     instruction = part_instruction(
         manuscript, node, reasons, figures=figures, budget=budget, research=research
     )
+    plan = await planned_for(
+        store,
+        work,
+        manuscript,
+        node,
+        material,
+        room,
+        evidence=evidence,
+        writer=reading.briefing,
+    )
+    if plan is None:
+        return PartOutcome(
+            key=node.key,
+            session=session_id,
+            failure="prose-blind planning produced no brief; pipeline not started",
+        )
     result = await run_session(
         sources=[str(material), instruction],
         material_role="source",
+        material_authoritative=False,
+        review_profile="manuscript_part",
         asking="handback",
         target_format=manuscript.target_format,
         writer_mode=manuscript.writer_mode,
         skipped_stages=list(manuscript.skipped_stages),
-        plan=await planned_for(
-            store,
-            work,
-            manuscript,
-            node,
-            material,
-            room,
-            instruction=instruction,
-            figures=figures,
-            budget=budget,
-            found=found if found is not None else store.load_findings(work),
-            writer=reading.briefing,
-        ),
+        plan=plan,
         glossary=shared,
         existing_doc_id=store.load_docs(work).working_doc(node.key) or None,
         session_id=session_id,
@@ -701,6 +765,7 @@ async def run_part(
                 node.key, result.output.google_doc_id
             ),
         )
+    working_doc = result.output.google_doc_id if result.output else ""
 
     produced = result.output.content if result.output else ""
     if not produced:
@@ -723,6 +788,25 @@ async def run_part(
     except (HeadingLost, PartNotFound, OSError) as failure:
         logger.exception("Could not put %s back into %s", node.key, node.path)
         return PartOutcome(key=node.key, session=session_id, failure=str(failure))
+
+    if working_doc:
+        try:
+            await (publisher or GoogleDocPublisher()).publish(
+                working_doc, adoption.text
+            )
+        except Exception as failure:
+            logger.exception("Could not publish adopted prose for %s", node.key)
+            return PartOutcome(key=node.key, session=session_id, failure=str(failure))
+
+    (room / HANDOFF_FILE).write_text(
+        PartHandoff(
+            session=session_id,
+            key=node.key,
+            adopted_digest=digest_of(adoption.text),
+            working_doc=working_doc,
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
 
     coined = coinages(shared, settled, node.key)
     return PartOutcome(

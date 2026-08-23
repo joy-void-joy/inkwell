@@ -3,16 +3,15 @@
 The other producer of the same artifact :mod:`.brief` makes one at a time. Both
 emit an ``ArticlePlan`` per part, so nothing downstream knows which one it got,
 and that is the point: a run testing one subsection derives its own brief and
-never opens the book, while a full pass plans from a reader that has.
+never opens the prose, while a full pass plans from the declared outline.
 
 **What only this can see is what two parts are about to do to each other.** A
-per-part deriver reading one subsection and its neighbours cannot notice that
+per-part deriver reading one placement and its neighbouring titles cannot notice that
 three parts have all just been handed the same paper and are each about to
 introduce it, or that the part being asked to establish something is the third
-part in reading order to be asked to establish it. Those are the findings the
-run-level reviewers cannot reach either — a reviewer reads one part and asks
-whether it is good — and they cost a book read, which is why they are a full
-pass's to pay for and not a single part's.
+part in reading order to be asked to establish it. Those are cross-part
+findings no single placement can reach. The whole-work reader receives titles,
+reasons, and research, never current prose or headings.
 
 **A cross-cutting reading, then a chapter at a time.** The first pass reads the
 outline and everything outstanding and says what the parts are about to do to
@@ -36,7 +35,17 @@ from inkwell.agent.client import query
 from inkwell.agent.config import stage_model
 from inkwell.agent.models import ArticlePlan
 from inkwell.corpus.storage import now_stamp
-from inkwell.manuscript.brief import BRIEF_STAGE, ComposedBrief, planned
+from inkwell.manuscript.brief import (
+    BRIEF_STAGE,
+    ComposedBrief,
+    CorpusPusher,
+    EditorialEvidence,
+    LocalCorpusPusher,
+    PushedCorpusClaim,
+    evidence_for,
+    planned,
+    subsection_topic,
+)
 from inkwell.manuscript.budget import budget_for
 from inkwell.manuscript.findings import WorkFindings, briefing, outlined
 from inkwell.manuscript.inventory import inventory_of
@@ -72,106 +81,46 @@ so spend it on what needs the book.
 """
 
 PLANNER_SYSTEM = """\
-You are planning several parts of a book at once, all of them in one chapter.
+You are choosing editorial intent for several parts in one chapter.
 
-For each part you are given: the part as the book holds it now, why it is \
-outstanding, what the research holds on it, the figures it carries with the \
-numbers the book gave them, and its length budget. You are also given what a \
-reader of the whole book said these parts are about to do to each other — that \
-reading is the reason you are planning them together rather than one at a time, \
-so where it names one of your parts, your plan for that part answers it.
+Each part arrives as a typed evidence packet: findings first, then its place, \
+immediate boundaries, reason for running, budget, and protected figures. The \
+standing prose and its heading order are deliberately absent. Choose what the \
+reader needs first from the evidence and put it in the required opening field; \
+then plan the remainder. Preservation of old claims, citations, figures, and \
+voice happens in the inheritance pass after drafting.
 
-Plan each part's successor: its thesis, its sections, and what has to be \
-settled before it can be written. Three things are settled before you start and \
-are not yours to decide — the length budget, the figure numbering, and what the \
-reasons license. Where nothing asks a part to change, plan something \
-recognisably the same piece.
+For every section, name what it establishes, why it belongs in that order, the \
+pushed findings it uses, and what it hands to the next section. These are the \
+writer's section briefs, not planning commentary.
 
-**Research questions are about the subject, not about the draft.** A question \
-opening "The draft says…" can only confirm what is already written, and a plan \
-made of those has a blind spot shaped exactly like everything the draft left \
-out. Where a finding you were given already answers a question, do not ask it.
+Where the whole-book reading names a collision, settle it. Treat pushed \
+findings as established with their stated caveats and ask research questions \
+only for gaps they do not answer. Fit each complete argument to its budget and \
+respect its boundaries.
 
-Return one plan per part, each naming the part by the key it was given under. A \
-key you invent plans nothing.
+Return one plan per given key. A key you invent plans nothing.
 """
 
 
-class BriefLens(BaseModel):
-    """One independent question asked of every proposed brief."""
+EDITORIAL_AUDIT_SYSTEM = """\
+You are the single editorial audit of plans for existing book parts.
 
-    model_config = ConfigDict(frozen=True)
-
-    name: str = Field(description="Stable name persisted with this lens's concerns")
-    system: str = Field(description="The independent reading this lens performs")
-
-
-LENS_SYSTEMS: tuple[BriefLens, ...] = (
-    BriefLens(
-        name="ledger",
-        system="""\
-You are the scope reader in an adversarial review of plans for existing book \
-parts. Read each proposed brief against the reasons the build ledger says its \
-part is outstanding. Report only work the brief asks for that those reasons do \
-not license, or a reason the brief fails to answer. A reason about one claim \
-licenses settling that claim, not redesigning the whole part. A reason about \
-what the part is for may license reshaping it. Name the part by its exact key. \
-If the brief and ledger agree, report nothing for it.
-""",
-    ),
-    BriefLens(
-        name="standing-text",
-        system="""\
-You are the inheritance reader in an adversarial review of plans for existing \
-book parts. Compare every proposed brief with the standing text. Report where \
-the plan presents something the part already establishes as new work, silently \
-drops a load-bearing claim, case, caveat, citation, or figure, or inherits the \
-standing section order without deciding that it is still the right order. Do \
-not demand that the old shape survive: identify the material that must survive \
-or be deliberately retired. Name the part by its exact key. Report nothing \
-where the plan already accounts for it.
-""",
-    ),
-    BriefLens(
-        name="neighbours",
-        system="""\
-You are the boundary reader in an adversarial review of plans for existing book \
-parts. Read each proposed brief against the parts immediately before and after \
-it. Report where it would repeat what a neighbour already establishes, rely on \
-something a neighbour does not establish, or take work that belongs at that \
-boundary. Repetition can be deliberate in a textbook, so report only a real \
-ownership or dependency mistake. Name the part by its exact key. Report nothing \
-where the boundary is sound.
-""",
-    ),
-    BriefLens(
-        name="sources",
-        system="""\
-You are the evidence reader in an adversarial review of plans for existing book \
-parts. Look for a load-bearing claim the proposed successor would change or add \
-on the strength of a single source, especially where the standing text or the \
-research carries a caveat or contrary source. Report the claim and what the \
-plan must settle before relying on it. Do not demand several citations for a \
-fact one authoritative primary source settles, and do not assess prose style. \
-Name the part by its exact key. Report nothing where the evidence is adequate.
-""",
-    ),
-)
-"""The independent readings every proposed brief receives.
-
-The names are data because they are kept with the findings. A concern recorded
-only as prose cannot later answer which question the reviewer was asking, and
-adding a lens should be one tuple rather than another orchestration branch.
+Read each proposed brief against its build-ledger reasons, durable boundaries, \
+and pushed evidence. Report only a concrete scope mismatch, boundary mistake, \
+unsupported load-bearing claim, ignored caveat, or section whose purpose, \
+evidence, order, or handoff is incoherent. The standing prose is unavailable \
+and preservation belongs to the later inheritance pass. Name exact part keys. \
+Report nothing for a sound brief.
 """
 
 LENS_REPAIR_SYSTEM = """\
-You are settling plans for existing parts of a book after independent,
-adversarial readers examined them.
+You are settling plans for existing parts after one editorial audit.
 
 Revise each proposed brief only as needed to answer the review findings. The
 findings are objections, not instructions from the author: resolve them using
-the standing text, the build-ledger reasons, the neighbouring parts and the
-research shown in the task. Preserve a sound plan when an objection is
+the build-ledger reasons, part boundaries and pushed research shown in the
+task. Preserve a sound plan when an objection is
 mistaken. Return one plan for every key you were given and invent no keys.
 """
 
@@ -239,9 +188,13 @@ class PartPlan(BaseModel):
     brief: ComposedBrief = Field(description="What its successor should be")
     digest: str = Field(
         default="",
-        description="Fingerprint of the part's text as the planner read it. A "
-        "brief is a plan for a successor to *that* text, so once the part has "
+        description="Fingerprint of the part this plan is meant to replace. A "
+        "brief is a plan for a successor to *that* target, so once the part has "
         "been rewritten the brief is a plan for a piece that no longer exists",
+    )
+    evidence_digest: str = Field(
+        default="",
+        description="Fingerprint of the pushed evidence this plan considered",
     )
 
 
@@ -249,6 +202,17 @@ class ChapterPlans(BaseModel):
     """Every plan one chapter's planning produced."""
 
     plans: list[PartPlan] = Field(default=[], description="One entry per part planned")
+
+
+class PartCorpus(BaseModel):
+    """The subsection-scoped corpus packet shared by both brief producers."""
+
+    model_config = ConfigDict(frozen=True)
+
+    key: str = Field(description="The part this corpus query was scoped to")
+    claims: tuple[PushedCorpusClaim, ...] = Field(
+        default=(), description="Judged and cached full-document claims"
+    )
 
 
 class ProposedConcern(BaseModel):
@@ -314,10 +278,12 @@ class WorkBriefs(BaseModel):
     )
     planned_at: str = Field(default="", description="When the planning last ran")
 
-    def brief_for(self, key: str, digest: str = "") -> ComposedBrief | None:
+    def brief_for(
+        self, key: str, digest: str = "", evidence_digest: str = ""
+    ) -> ComposedBrief | None:
         """The brief planned for one part, where one is still about that part.
 
-        A brief plans a successor to the text the planner read. Once the part
+        A brief plans a successor to one target. Once the part
         has been rewritten the text has moved, and the brief is a plan for a
         piece that no longer exists — reusing it on the next pass would rewrite
         the part back toward a draft two revisions old, which is worse than
@@ -329,6 +295,8 @@ class WorkBriefs(BaseModel):
             return None
         if digest and held.digest and held.digest != digest:
             return None
+        if evidence_digest and held.evidence_digest != evidence_digest:
+            return None
         return held.brief
 
     def keys(self) -> tuple[str, ...]:
@@ -337,7 +305,10 @@ class WorkBriefs(BaseModel):
 
 
 def outstanding_block(
-    manuscript: Manuscript, verdicts: Iterable[NodeVerdict], found: WorkFindings
+    manuscript: Manuscript,
+    verdicts: Iterable[NodeVerdict],
+    found: WorkFindings,
+    pushed: tuple[PartCorpus, ...] = (),
 ) -> str:
     """The outstanding parts as the whole-book reading is shown them.
 
@@ -359,12 +330,18 @@ def outstanding_block(
             yield f"### {verdict.key} — {node.title}\n\nOutstanding: {because}\n"
             if research:
                 yield research
+            corpus = next((one.claims for one in pushed if one.key == verdict.key), ())
+            if corpus:
+                yield "\n".join(one.render() for one in corpus)
 
     return "\n".join(lines())
 
 
 async def crosscut(
-    manuscript: Manuscript, verdicts: Iterable[NodeVerdict], found: WorkFindings
+    manuscript: Manuscript,
+    verdicts: Iterable[NodeVerdict],
+    found: WorkFindings,
+    pushed: tuple[PartCorpus, ...] = (),
 ) -> CrossCut:
     """Read the whole book once, for what no reader of one part can see.
 
@@ -379,7 +356,7 @@ async def crosscut(
 
     read = await query(
         f"{outlined(manuscript)}\n\n## What is outstanding\n\n"
-        f"{outstanding_block(manuscript, held, found)}",
+        f"{outstanding_block(manuscript, held, found, pushed)}",
         output_type=CrossCut,
         model=stage_model(BRIEF_STAGE),
         system_prompt=CROSSCUT_SYSTEM,
@@ -400,48 +377,79 @@ async def crosscut(
     return read
 
 
+async def push_for_parts(
+    manuscript: Manuscript,
+    nodes: Iterable[ManuscriptNode],
+    pusher: CorpusPusher | None = None,
+) -> tuple[PartCorpus, ...]:
+    """Retrieve the same prose-free corpus packet a direct part run receives."""
+    held = tuple(nodes)
+    reader = pusher or LocalCorpusPusher()
+    claims = await asyncio.gather(
+        *(reader.push(subsection_topic(manuscript, node)) for node in held)
+    )
+    return tuple(
+        PartCorpus(key=node.key, claims=found)
+        for node, found in zip(held, claims, strict=True)
+    )
+
+
+def chapter_evidence(
+    manuscript: Manuscript,
+    nodes: Iterable[ManuscriptNode],
+    found: WorkFindings,
+    verdicts: Iterable[NodeVerdict] = (),
+    pushed: tuple[PartCorpus, ...] = (),
+) -> tuple[EditorialEvidence, ...]:
+    """Compile the evidence packets for a chapter without exposing its prose."""
+
+    by_key = {one.key: one for one in verdicts}
+
+    def packets() -> Iterator[EditorialEvidence]:
+        """Each part with pushed evidence and work-owned constraints."""
+        for node in nodes:
+            text = held_text_for(manuscript, node)
+            verdict = by_key[node.key] if node.key in by_key else None
+            reasons = (
+                verdict.reasons or (verdict.staleness,) if verdict is not None else ()
+            )
+            corpus = next((one.claims for one in pushed if one.key == node.key), ())
+            yield evidence_for(
+                manuscript,
+                node,
+                found,
+                reasons=reasons,
+                corpus=corpus,
+                figures=inventory_of(text).figures,
+                budget=budget_for(manuscript, node),
+            )
+
+    return tuple(packets())
+
+
+def evidence_block(evidence: Iterable[EditorialEvidence]) -> str:
+    """Evidence packets in a stable labelled form for planning and review."""
+    return "\n\n".join(one.render() for one in evidence)
+
+
 def chapter_block(
     manuscript: Manuscript,
     nodes: Iterable[ManuscriptNode],
     found: WorkFindings,
     verdicts: Iterable[NodeVerdict] = (),
+    pushed: tuple[PartCorpus, ...] = (),
 ) -> str:
-    """The parts of one chapter as their planning is shown them."""
+    """The parts of one chapter as evidence, never as standing prose."""
 
-    by_key = {one.key: one for one in verdicts}
-
-    def lines() -> Iterator[str]:
-        """Each part with what only the work knows about it."""
-        for node in nodes:
-            text = held_text_for(manuscript, node)
-            figures = inventory_of(text).figures
-            budget = budget_for(manuscript, node)
-            yield f"### {node.key} — {node.title}\n"
-            verdict = by_key[node.key] if node.key in by_key else None
-            if verdict is not None:
-                because = "; ".join(verdict.reasons) or verdict.staleness
-                yield f"The build ledger says it is outstanding because: {because}"
-            if budget.render():
-                yield budget.render()
-            if figures:
-                yield "Figures it carries, numbered by the book: " + ", ".join(
-                    f"{one.render()} ({one.image})" for one in figures
-                )
-            research = briefing(found, node.key)
-            if research:
-                yield research
-            yield f"The part as the book holds it now:\n\n{text}\n"
-
-    return "\n\n".join(lines())
+    return evidence_block(chapter_evidence(manuscript, nodes, found, verdicts, pushed))
 
 
 def neighbour_block(manuscript: Manuscript, nodes: Iterable[ManuscriptNode]) -> str:
-    """The text immediately around these parts, read once for the boundary lens.
+    """The titles immediately around these parts for the boundary lens.
 
-    The ordinary planner reads the whole outstanding chapter, which omits a
-    settled neighbour at exactly the boundary an outstanding part can cross.
-    This adds the predecessor and successor of every planned part, each once,
-    without turning a per-chapter review into another whole-book read.
+    A chapter plan omits a settled neighbour at exactly the boundary an
+    outstanding part can cross, so its durable title is added explicitly.
+    Their place is needed; their prose is an earlier instantiation and is not.
     """
     order = [one for one in manuscript.leaves() if one.path]
     positions = {one.key: at for at, one in enumerate(order)}
@@ -461,9 +469,7 @@ def neighbour_block(manuscript: Manuscript, nodes: Iterable[ManuscriptNode]) -> 
     if not nearby:
         return ""
     return "## Immediate neighbours\n\n" + "\n\n".join(
-        f"### {one.key} — {one.title}\n\n{held_text_for(manuscript, one)}"
-        for one in order
-        if one.key in nearby
+        f"### {one.key} — {one.title}" for one in order if one.key in nearby
     )
 
 
@@ -482,6 +488,7 @@ def review_task(
     found: WorkFindings,
     cut: CrossCut,
     plans: tuple[PartPlan, ...],
+    pushed: tuple[PartCorpus, ...] = (),
 ) -> str:
     """Everything the independent per-brief readers need, and no whole book."""
     keys = tuple(one.key for one in nodes)
@@ -490,7 +497,7 @@ def review_task(
         for held in (
             f"# Reviewing plans for parts of {manuscript.title}",
             cut.render(keys),
-            chapter_block(manuscript, nodes, found, verdicts),
+            chapter_block(manuscript, nodes, found, verdicts, pushed),
             neighbour_block(manuscript, nodes),
             plans_block(plans),
         )
@@ -505,54 +512,41 @@ async def review_chapter(
     found: WorkFindings,
     cut: CrossCut,
     plans: tuple[PartPlan, ...],
+    pushed: tuple[PartCorpus, ...] = (),
 ) -> tuple[BriefConcern, ...]:
-    """Read every proposed brief through each adversarial lens independently.
-
-    The four turns run together: their independence is the useful property,
-    not making a chapter wait four model latencies. A failed or empty lens does
-    not erase the plan or the other readings; it is logged and contributes no
-    invented assurance.
-    """
+    """Audit every proposed brief once across scope, boundary, and evidence."""
     if not plans:
         return ()
-    task = review_task(manuscript, nodes, verdicts, found, cut, plans)
-
-    async def read(name: str, system: str) -> tuple[BriefConcern, ...]:
-        try:
-            answered = await query(
-                task,
-                output_type=LensReading,
-                model=stage_model(BRIEF_STAGE),
-                system_prompt=system,
-                autonomy="unattended",
-                prefix=f"brief-lens-{name}",
-            )
-        except Exception:
-            logger.exception("The %s brief lens failed", name)
-            return ()
-        if answered is None:
-            logger.warning("The %s brief lens returned nothing", name)
-            return ()
-        keys = {one.key for one in plans}
-        return tuple(
-            BriefConcern(
-                key=one.key,
-                lens=name,
-                finding=one.finding,
-                settle=one.settle,
-            )
-            for one in answered.concerns
-            if one.key in keys
+    task = review_task(manuscript, nodes, verdicts, found, cut, plans, pushed)
+    try:
+        answered = await query(
+            task,
+            output_type=LensReading,
+            model=stage_model(BRIEF_STAGE),
+            system_prompt=EDITORIAL_AUDIT_SYSTEM,
+            autonomy="unattended",
+            prefix="brief-audit",
         )
-
-    readings = await asyncio.gather(
-        *(read(lens.name, lens.system) for lens in LENS_SYSTEMS)
+    except Exception:
+        logger.exception("The editorial brief audit failed")
+        return ()
+    if answered is None:
+        logger.warning("The editorial brief audit returned nothing")
+        return ()
+    keys = {one.key for one in plans}
+    concerns = tuple(
+        BriefConcern(
+            key=one.key,
+            lens="editorial",
+            finding=one.finding,
+            settle=one.settle,
+        )
+        for one in answered.concerns
+        if one.key in keys
     )
-    concerns = tuple(one for reading in readings for one in reading)
     logger.info(
-        "Read %d brief(s) through %d lens(es): %d concern(s)",
+        "Audited %d brief(s): %d concern(s)",
         len(plans),
-        len(LENS_SYSTEMS),
         len(concerns),
     )
     return concerns
@@ -562,6 +556,7 @@ def stamped_plans(
     manuscript: Manuscript,
     nodes: tuple[ManuscriptNode, ...],
     plans: Iterable[PartPlan],
+    evidence: tuple[EditorialEvidence, ...] = (),
 ) -> tuple[PartPlan, ...]:
     """Keep only asked-for plans and stamp them with the text they plan."""
     by_key = {one.key: one for one in nodes}
@@ -572,8 +567,12 @@ def stamped_plans(
                 logger.warning("A plan names %r, which was not asked about", one.key)
                 continue
             node = by_key[one.key]
+            packet = next((held for held in evidence if held.key == one.key), None)
             yield one.model_copy(
-                update={"digest": digest_of(held_text_for(manuscript, node))}
+                update={
+                    "digest": digest_of(held_text_for(manuscript, node)),
+                    "evidence_digest": packet.digest() if packet is not None else "",
+                }
             )
 
     return tuple(kept())
@@ -587,6 +586,7 @@ async def settle_reviews(
     cut: CrossCut,
     plans: tuple[PartPlan, ...],
     concerns: tuple[BriefConcern, ...],
+    pushed: tuple[PartCorpus, ...] = (),
 ) -> tuple[PartPlan, ...]:
     """Answer the independent concerns once, preserving every planned key.
 
@@ -597,7 +597,7 @@ async def settle_reviews(
     if not concerns:
         return plans
     task = (
-        f"{review_task(manuscript, nodes, verdicts, found, cut, plans)}\n\n"
+        f"{review_task(manuscript, nodes, verdicts, found, cut, plans, pushed)}\n\n"
         "## Adversarial findings to settle\n\n"
         + "\n".join(f"- {one.render()}" for one in concerns)
     )
@@ -616,14 +616,16 @@ async def settle_reviews(
     if answered is None:
         logger.warning("The brief repair returned nothing; keeping proposed plans")
         return plans
+    evidence = chapter_evidence(manuscript, nodes, found, verdicts, pushed)
     repaired = {
-        one.key: one for one in stamped_plans(manuscript, nodes, answered.plans)
+        one.key: one
+        for one in stamped_plans(manuscript, nodes, answered.plans, evidence)
     }
     return tuple(repaired[one.key] if one.key in repaired else one for one in plans)
 
 
 def held_text_for(manuscript: Manuscript, node: ManuscriptNode) -> str:
-    """One part's text, read for the planner rather than for a run."""
+    """Standing bytes used only for identity and protected-figure inventory."""
     from pathlib import Path
 
     from inkwell.manuscript.graph import source_text
@@ -639,19 +641,21 @@ async def plan_chapter(
     found: WorkFindings,
     cut: CrossCut,
     verdicts: tuple[NodeVerdict, ...] = (),
+    pushed: tuple[PartCorpus, ...] = (),
 ) -> tuple[PartPlan, ...]:
     """Plan one chapter's outstanding parts together, against the book reading."""
     if not nodes:
         return ()
 
     keys = tuple(node.key for node in nodes)
+    evidence = chapter_evidence(manuscript, nodes, found, verdicts, pushed)
     read = await query(
         "\n\n".join(
             held
             for held in (
                 cut.render(keys),
                 f"## The parts to plan, of {manuscript.title}\n",
-                chapter_block(manuscript, nodes, found, verdicts),
+                evidence_block(evidence),
                 "Plan each of them.",
             )
             if held
@@ -666,7 +670,7 @@ async def plan_chapter(
         logger.warning("Planning returned nothing for %s", keys)
         return ()
 
-    return stamped_plans(manuscript, nodes, read.plans)
+    return stamped_plans(manuscript, nodes, read.plans, evidence)
 
 
 class ReviewedChapter(BaseModel):
@@ -684,12 +688,15 @@ async def plan_reviewed_chapter(
     verdicts: tuple[NodeVerdict, ...],
     found: WorkFindings,
     cut: CrossCut,
+    pushed: tuple[PartCorpus, ...] = (),
 ) -> ReviewedChapter:
-    """Plan a chapter, challenge every brief, and settle what the lenses find."""
-    proposed = await plan_chapter(manuscript, nodes, found, cut, verdicts)
-    concerns = await review_chapter(manuscript, nodes, verdicts, found, cut, proposed)
+    """Plan a chapter, audit every brief once, and settle its concerns."""
+    proposed = await plan_chapter(manuscript, nodes, found, cut, verdicts, pushed)
+    concerns = await review_chapter(
+        manuscript, nodes, verdicts, found, cut, proposed, pushed
+    )
     settled = await settle_reviews(
-        manuscript, nodes, verdicts, found, cut, proposed, concerns
+        manuscript, nodes, verdicts, found, cut, proposed, concerns, pushed
     )
     return ReviewedChapter(plans=settled, concerns=concerns)
 
@@ -716,6 +723,7 @@ async def plan_work(
     manuscript: Manuscript,
     verdicts: Iterable[NodeVerdict],
     found: WorkFindings | None = None,
+    pusher: CorpusPusher | None = None,
 ) -> WorkBriefs:
     """Plan every outstanding part of a work, from a reader that has seen it all.
 
@@ -725,7 +733,11 @@ async def plan_work(
     """
     held = tuple(verdicts)
     research = found if found is not None else WorkFindings()
-    cut = await crosscut(manuscript, held, research)
+    nodes = tuple(
+        node for verdict in held if (node := manuscript.node(verdict.key)) is not None
+    )
+    pushed = await push_for_parts(manuscript, nodes, pusher)
+    cut = await crosscut(manuscript, held, research, pushed)
 
     verdict_of = {one.key: one for one in held}
     chapters = [
@@ -735,6 +747,7 @@ async def plan_work(
             tuple(verdict_of[node.key] for node in nodes if node.key in verdict_of),
             research,
             cut,
+            pushed,
         )
         for nodes in by_chapter(manuscript, held)
     ]

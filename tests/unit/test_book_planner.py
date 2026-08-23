@@ -12,8 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from inkwell.agent.models import SectionPlan
-from inkwell.manuscript.brief import ComposedBrief
+from inkwell.manuscript.brief import (
+    ComposedBrief,
+    CorpusPusher,
+    EditorialSection,
+    PushedCorpusClaim,
+)
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.planner import (
     BriefConcern,
@@ -27,8 +31,10 @@ from inkwell.manuscript.planner import (
     article_plan,
     by_chapter,
     chapter_block,
+    chapter_evidence,
     neighbour_block,
     outstanding_block,
+    push_for_parts,
     review_chapter,
     settle_reviews,
 )
@@ -92,7 +98,14 @@ def outstanding(*keys: str) -> tuple[NodeVerdict, ...]:
 
 SETTLED = ComposedBrief(
     thesis="Cyber offence is being measured.",
-    sections=[SectionPlan(title="What is measured", summary="X", key_points=[])],
+    opening=EditorialSection(
+        title="What is measured",
+        establishes="The measurement.",
+        order_reason="It defines the object before interpretation.",
+        evidence=["A current evaluation."],
+        handoff="The reader can interpret it.",
+        key_points=[],
+    ),
 )
 
 
@@ -160,7 +173,7 @@ class TestWhatTheWholeBookReaderIsShown:
 class TestTheLedgerReachesThePlanner:
     """The planner cannot respect the scope of a rewrite it was never shown."""
 
-    def test_the_reason_a_part_is_outstanding_sits_beside_its_text(
+    def test_the_reason_a_part_is_outstanding_sits_beside_its_evidence(
         self, tmp_path: Path
     ) -> None:
         from inkwell.manuscript.findings import WorkFindings
@@ -176,12 +189,67 @@ class TestTheLedgerReachesThePlanner:
             outstanding("02/03/2.3.2"),
         )
 
-        assert "build ledger" in said
         assert "a paper landed" in said
+        assert "Prose about cyber risk" not in said
+
+    def test_pushed_evidence_arrives_before_placement_without_standing_prose(
+        self, tmp_path: Path
+    ) -> None:
+        from inkwell.manuscript.findings import Bearing, WorkFindings
+
+        work = read_manuscript(two_chapters(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+        found = WorkFindings(
+            bearings=(
+                Bearing(
+                    key=node.key,
+                    document="current",
+                    claim="An urgent agentic campaign crossed the full attack chain.",
+                    cited="The current system card",
+                    why="It changes what cyber risk opens with.",
+                ),
+            )
+        )
+
+        said = chapter_block(work, (node,), found, outstanding(node.key))
+
+        assert said.index("urgent agentic campaign") < said.index("Editorial placement")
+        assert "Prose about cyber risk" not in said
+
+    @pytest.mark.asyncio
+    async def test_both_brief_producers_digest_the_same_corpus_packet(
+        self, tmp_path: Path
+    ) -> None:
+        from inkwell.manuscript.findings import WorkFindings
+
+        work = read_manuscript(two_chapters(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        class PushesOne(CorpusPusher):
+            async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+                return (
+                    PushedCorpusClaim(
+                        title="A current system card",
+                        claim="A current campaign crossed the attack chain.",
+                        source="lab/card",
+                    ),
+                )
+
+        pushed = await push_for_parts(work, (node,), PushesOne())
+        full = chapter_evidence(
+            work, (node,), WorkFindings(), outstanding(node.key), pushed
+        )[0]
+        direct = chapter_evidence(work, (node,), WorkFindings(), outstanding(node.key))[
+            0
+        ].model_copy(update={"corpus": pushed[0].claims})
+
+        assert full.digest() == direct.digest()
 
 
 class TestTheBoundaryLensCanReadSettledNeighbours:
-    """Only showing outstanding parts hides the exact boundary being reviewed."""
+    """Boundaries need durable titles, not prose from an earlier instantiation."""
 
     def test_the_parts_immediately_before_and_after_are_shown(
         self, tmp_path: Path
@@ -194,8 +262,8 @@ class TestTheBoundaryLensCanReadSettledNeighbours:
 
         assert "02/03/2.3.1" in said
         assert "04/01/4.1.1" in said
-        assert "engineered pathogens" in said
-        assert "Prose about ranges" in said
+        assert "engineered pathogens" not in said
+        assert "Prose about ranges" not in said
 
 
 class TestACrossCuttingFindingReachesTheChapterItIsAbout:
@@ -292,6 +360,41 @@ class TestBothProducersEmitTheSameThing:
         assert any("opening with its own heading" in one for one in held.deliverables)
         assert any("words" in one for one in held.deliverables)
 
+    def test_the_explicit_editorial_opening_leads_over_stale_order(
+        self, tmp_path: Path
+    ) -> None:
+        work = read_manuscript(two_chapters(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+        brief = ComposedBrief(
+            thesis="Agentic intrusion changes the threat model.",
+            opening=EditorialSection(
+                title="The live agentic campaign",
+                establishes="The urgent evidence.",
+                order_reason="It is the pressing current event.",
+                evidence=["The current incident record."],
+                handoff="The older outage becomes context.",
+                key_points=[],
+            ),
+            sections=[
+                EditorialSection(
+                    title="The older outage",
+                    establishes="Background.",
+                    order_reason="It historicizes the current event.",
+                    evidence=["The incident postmortem."],
+                    handoff="The comparison is complete.",
+                    key_points=[],
+                )
+            ],
+        )
+
+        held = article_plan(work, node, brief)
+
+        assert [one.title for one in held.sections] == [
+            "The live agentic campaign",
+            "The older outage",
+        ]
+
 
 class TestWhatWasPlannedSurvivesThePlanner:
     """Planning and running are different steps, hours apart."""
@@ -342,7 +445,7 @@ class TestWhatWasPlannedSurvivesThePlanner:
 
 
 @pytest.mark.asyncio
-async def test_every_brief_is_read_through_each_independent_lens(
+async def test_every_brief_receives_one_structured_editorial_audit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from inkwell.manuscript import planner
@@ -374,18 +477,8 @@ async def test_every_brief_is_read_through_each_independent_lens(
         (PartPlan(key=node.key, brief=SETTLED),),
     )
 
-    assert set(prefixes) == {
-        "brief-lens-ledger",
-        "brief-lens-standing-text",
-        "brief-lens-neighbours",
-        "brief-lens-sources",
-    }
-    assert {one.lens for one in concerns} == {
-        "ledger",
-        "standing-text",
-        "neighbours",
-        "sources",
-    }
+    assert prefixes == ["brief-audit"]
+    assert {one.lens for one in concerns} == {"editorial"}
     assert {one.key for one in concerns} == {"02/03/2.3.2"}
 
 

@@ -5,21 +5,24 @@ because that is all it could see. What is worth pinning is that the plan now
 arrives from outside carrying what only the work knows — the budget, the
 figures, what the run owes — that the plan stage *records* it rather than being
 skipped over, and that a deriver which comes back with nothing leaves the run
-planning for itself rather than failing.
+stopped before non-authoritative prose can become its fallback plan.
 """
 
 from pathlib import Path
 
 import pytest
 
-from inkwell.agent.models import ArticlePlan, SectionPlan
+from inkwell.agent.models import ArticlePlan
 from inkwell.agent.pipeline import PipelineRunner
 from inkwell.manuscript.brief import (
     BRIEF_FILE,
     BriefWriter,
     ComposedBrief,
+    EditorialSection,
+    LocalCorpusPusher,
     asked,
     compose,
+    evidence_for,
     planned,
 )
 from inkwell.manuscript.budget import LengthBudget
@@ -27,6 +30,10 @@ from inkwell.manuscript.findings import Bearing, WorkFindings
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.inventory import Figure
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
+from inkwell.corpus.distillation import Distillation, Finding, write_distillation
+from inkwell.corpus.semantics import SemanticLayer
+from inkwell.corpus.storage import CorpusStore, SourceShard, StoredDocument
+from inkwell.corpus.tags import DocumentTags
 
 CHAPTER_PAGES = """\
 nav:
@@ -74,9 +81,14 @@ class Answers(BriefWriter):
 
 SETTLED = ComposedBrief(
     thesis="Cyber offence is being measured, and the measurements are moving.",
-    sections=[
-        SectionPlan(title="What is measured", summary="The evaluations.", key_points=[])
-    ],
+    opening=EditorialSection(
+        title="What is measured",
+        establishes="The evaluations.",
+        order_reason="It defines the measurement before interpreting it.",
+        evidence=["A current evaluation."],
+        handoff="The reader can interpret the trend.",
+        key_points=[],
+    ),
     direction="Lead with the sandbox escape.",
 )
 
@@ -89,40 +101,92 @@ FIGURE = Figure(
 
 
 class TestWhatTheDeriverIsShown:
-    """One part, the two files either side of it, and this part's slice of what
-    the corpus established — never the book."""
+    """Pushed evidence and durable placement, never the standing instantiation."""
 
     def test_the_part_is_named_by_the_key_state_uses(self, tmp_path: Path) -> None:
         work, node = part_of(tmp_path)
 
-        said = asked(work, node, Path("/room/part.md"), "instruction", "")
+        said = asked(evidence_for(work, node, WorkFindings()))
 
         assert "02/03/2.3.2" in said
 
-    def test_the_material_arrives_as_a_file_to_open(self, tmp_path: Path) -> None:
-        work, node = part_of(tmp_path)
-
-        said = asked(work, node, Path("/room/part.md"), "instruction", "")
-
-        assert "/room/part.md" in said
-
-    def test_the_writers_own_instruction_is_what_the_planner_reads(
+    def test_the_standing_material_is_not_available_to_open(
         self, tmp_path: Path
     ) -> None:
-        """A plan made against a brief the writer never sees is a plan for a
-        different run."""
         work, node = part_of(tmp_path)
 
-        said = asked(work, node, Path("/room/part.md"), "Land under 1,500 words.", "")
+        said = asked(evidence_for(work, node, WorkFindings()))
 
-        assert "Land under 1,500 words." in said
+        assert "/room/part.md" not in said
+        assert "Prose about cyber risk" not in said
+
+    def test_the_work_owned_budget_is_what_the_planner_reads(
+        self, tmp_path: Path
+    ) -> None:
+        work, node = part_of(tmp_path)
+
+        said = asked(
+            evidence_for(work, node, WorkFindings(), budget=LengthBudget(holds=1000))
+        )
+
+        assert "1,500 words" in said
 
     def test_what_the_research_holds_travels_with_it(self, tmp_path: Path) -> None:
         work, node = part_of(tmp_path)
 
-        said = asked(work, node, Path("/room/part.md"), "", "## Research\n- A thing.")
+        found = WorkFindings(
+            bearings=(Bearing(key=node.key, document="d", claim="A current thing."),)
+        )
+        said = asked(evidence_for(work, node, found))
 
-        assert "- A thing." in said
+        assert "A current thing." in said
+
+    @pytest.mark.asyncio
+    async def test_cached_full_document_findings_join_the_judged_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = CorpusStore(root=tmp_path / "corpus")
+        store.save(
+            SourceShard(
+                source="mythos",
+                documents=[
+                    StoredDocument(
+                        slug="system-card",
+                        url="https://example.test/glasswing",
+                        title="Project Glasswing system card",
+                        summary="The system evaluates autonomous cyber work.",
+                        content_sha256="glasswing-bytes",
+                        tags=DocumentTags(judged=True),
+                    )
+                ],
+            )
+        )
+        write_distillation(
+            store,
+            Distillation(
+                content_sha256="glasswing-bytes",
+                source="mythos",
+                slug="system-card",
+                title="Project Glasswing system card",
+                findings=(
+                    Finding(
+                        claim="A public GitHub incident exposed the live campaign.",
+                        caveat="The system card describes one observed campaign.",
+                        locator="Incident report",
+                    ),
+                ),
+            ),
+        )
+        monkeypatch.setattr("inkwell.agent.config.corpus_root", lambda: store.root)
+        monkeypatch.setattr(
+            "inkwell.agent.config.corpus_semantics",
+            lambda held: SemanticLayer(store=held, enabled=False),
+        )
+
+        claims = await LocalCorpusPusher().push("Cyber Risk")
+
+        assert {one.depth for one in claims} == {"judged", "distilled"}
+        assert any("GitHub incident" in one.claim for one in claims)
 
 
 class TestWhatTheDeriverIsNotAskedFor:
@@ -141,6 +205,31 @@ class TestWhatTheDeriverIsNotAskedFor:
 
         assert planned(SETTLED, work, node, (), LengthBudget()).title == node.title
 
+    def test_each_editorial_section_description_reaches_the_writer_plan(
+        self, tmp_path: Path
+    ) -> None:
+        work, node = part_of(tmp_path)
+        brief = ComposedBrief(
+            thesis="Agentic campaigns change the threat model.",
+            opening=EditorialSection(
+                title="The live campaign",
+                establishes="The full attack chain can be automated.",
+                order_reason="The current incident is the reader's pressing question.",
+                evidence=["The Mythos system card and public incident record."],
+                handoff="The reader can now compare capability with older failures.",
+                key_points=["Name the observed campaign before historical context."],
+            ),
+        )
+
+        section = planned(brief, work, node, (), LengthBudget()).sections[0]
+
+        assert "full attack chain" in section.purpose
+        assert "pressing question" in section.purpose
+        assert section.evidence == [
+            "The Mythos system card and public incident record."
+        ]
+        assert "compare capability" in section.handoff
+
 
 class TestTheContractTheRunIsMeasuredOn:
     """`deliverables` is what every stage after the plan is checked against, so
@@ -152,6 +241,16 @@ class TestTheContractTheRunIsMeasuredOn:
         held = planned(SETTLED, work, node, (), LengthBudget())
 
         assert any("opening with its own heading" in one for one in held.deliverables)
+
+    def test_the_length_range_is_a_typed_delivery_contract(
+        self, tmp_path: Path
+    ) -> None:
+        work, node = part_of(tmp_path)
+
+        held = planned(SETTLED, work, node, (), LengthBudget(holds=900))
+
+        assert held.word_budget is not None
+        assert (held.word_budget.minimum, held.word_budget.maximum) == (600, 1350)
 
     def test_every_figure_is_owed_by_the_number_the_book_gave_it(
         self, tmp_path: Path
@@ -191,9 +290,8 @@ class TestComposingKeepsWhatItComposed:
         await compose(
             work,
             node,
-            tmp_path / "part.md",
+            evidence_for(work, node, WorkFindings()),
             room,
-            instruction="",
             writer=Answers(SETTLED),
         )
 
@@ -203,18 +301,20 @@ class TestComposingKeepsWhatItComposed:
         assert kept.thesis == SETTLED.thesis
 
     @pytest.mark.asyncio
-    async def test_a_deriver_that_declines_leaves_the_run_to_plan_for_itself(
+    async def test_a_deriver_that_declines_returns_no_manuscript_plan(
         self, tmp_path: Path
     ) -> None:
-        """A brief is a better plan, not a required one. Losing a book pass to a
-        planner that timed out would be the expensive way to hold that opinion.
-        """
+        """The runner treats this as terminal before opening the pipeline."""
         work, node = part_of(tmp_path)
         room = tmp_path / "room"
         room.mkdir()
 
         held = await compose(
-            work, node, tmp_path / "part.md", room, instruction="", writer=Answers(None)
+            work,
+            node,
+            evidence_for(work, node, WorkFindings()),
+            room,
+            writer=Answers(None),
         )
 
         assert held is None
@@ -241,10 +341,8 @@ class TestComposingKeepsWhatItComposed:
         await compose(
             work,
             node,
-            tmp_path / "part.md",
+            evidence_for(work, node, found),
             room,
-            instruction="",
-            found=found,
             writer=writer,
         )
 
@@ -265,10 +363,8 @@ class TestComposingKeepsWhatItComposed:
         await compose(
             work,
             node,
-            tmp_path / "part.md",
+            evidence_for(work, node, found),
             room,
-            instruction="",
-            found=found,
             writer=writer,
         )
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Annotated, Literal, Protocol, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from lup.runtime.usage import CostAccumulator
 from lup.types import JsonObject, JsonValue, StringMap
@@ -30,6 +30,10 @@ The distinction the pipeline cannot recover on its own is 'source' against
 run replaces, and finished prose carrying its own citations looks the same
 either way. It is declared by the entry point, which already knows.
 """
+
+
+type ReviewProfile = Literal["full", "manuscript_part"]
+"""Which independent review concerns a run buys after drafting."""
 
 
 type QuestionChannel = Literal["document", "handback"]
@@ -85,10 +89,38 @@ class SectionPlan(BaseModel):
     title: str = Field(description="Section heading")
     summary: str = Field(description="What this section should cover (2-3 sentences)")
     key_points: list[str] = Field(description="Specific points to make in this section")
+    purpose: str = Field(
+        default="", description="What this section establishes and why it belongs here"
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="Finding references or concrete evidence assigned to this section",
+    )
+    handoff: str = Field(
+        default="", description="What the following section inherits from this one"
+    )
     quotes_to_include: list[str] = Field(
         default_factory=list,
         description="Indices/references to SourceQuotes to weave in",
     )
+
+
+class WordBudget(BaseModel, frozen=True):
+    """The word-count interval a finished piece is allowed to occupy."""
+
+    minimum: int = Field(default=0, ge=0, description="Fewest accepted words")
+    maximum: int = Field(ge=1, description="Most accepted words")
+
+    @model_validator(mode="after")
+    def ordered(self) -> WordBudget:
+        """Reject an interval no output could satisfy."""
+        if self.minimum > self.maximum:
+            raise ValueError("minimum cannot exceed maximum")
+        return self
+
+    def accepts(self, words: int) -> bool:
+        """Whether a finished piece satisfies this contract."""
+        return self.minimum <= words <= self.maximum
 
 
 class ArticlePlan(BaseModel):
@@ -98,6 +130,9 @@ class ArticlePlan(BaseModel):
     thesis: str = Field(description="Core argument or insight in one sentence")
     target_format: str = Field(
         description="Output format: 'academic', 'lesswrong', 'twitter', 'blog', 'dialog', 'memo', or 'custom:<description>'. Choose based on what best fits the content."
+    )
+    word_budget: WordBudget | None = Field(
+        default=None, description="Accepted final word-count interval, when declared"
     )
     placement: ChapterPlacement | None = Field(
         default=None,
@@ -628,6 +663,9 @@ class PipelineSnapshot(BaseModel):
 
     generation: int = Field(default=0, description="Incremented on each restart")
     stage: str = Field(default="init", description="Current pipeline stage")
+    review_profile: ReviewProfile = Field(
+        default="full", description="Reviewer suite declared for this run"
+    )
     profile: str | None = Field(
         default=None, description="Config profile active when the session started"
     )

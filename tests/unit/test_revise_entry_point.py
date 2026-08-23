@@ -168,6 +168,13 @@ class TestARevisionTargetIsNotAnAuthority:
 
         assert not document.authoritative
 
+    def test_source_shaped_material_can_decline_factual_authority(self) -> None:
+        document = SourceDocument(
+            label="standing", path="/c.md", kind="text", factual_authority=False
+        )
+        assert document.role == "source"
+        assert not document.authoritative
+
     def test_the_registry_marks_the_paths_the_run_replaces(
         self, tmp_path: Path
     ) -> None:
@@ -183,3 +190,14 @@ class TestARevisionTargetIsNotAnAuthority:
         by_label = {d.label: d for d in registered}
         assert not by_label["chapter2"].authoritative
         assert by_label["paper"].authoritative
+
+    def test_registry_keeps_writing_material_consultable_but_not_authoritative(
+        self, tmp_path: Path
+    ) -> None:
+        standing = tmp_path / "standing.md"
+        standing.write_text("published prose", encoding="utf-8")
+        registered = build_source_registry(
+            [str(standing)], tmp_path / "artifacts", factual_authority=False
+        )
+        assert registered[0].role == "source"
+        assert not registered[0].authoritative

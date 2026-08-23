@@ -273,7 +273,7 @@ class ManuscriptStore(BaseModel, frozen=True):
             return WorkBriefs.model_validate_json(path.read_text(encoding="utf-8"))
         except (ValidationError, OSError):
             logger.warning(
-                "Unreadable briefs at %s — parts will plan for themselves", path
+                "Unreadable briefs at %s — parts will require new briefs", path
             )
             return WorkBriefs()
 

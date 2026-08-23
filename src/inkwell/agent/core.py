@@ -33,6 +33,7 @@ from inkwell.agent.models import (
     ArticlePlan,
     PipelineSnapshot,
     QuestionChannel,
+    ReviewProfile,
     SourceRole,
 )
 from inkwell.agent.notes import PipelineNotes
@@ -173,6 +174,7 @@ async def run_session(
     *,
     sources: list[str] | None = None,
     material_role: SourceRole = "source",
+    material_authoritative: bool = True,
     refs: list[str] | None = None,
     resume_session_id: str | None = None,
     resume_from_stage: str | None = None,
@@ -193,6 +195,7 @@ async def run_session(
     writer_mode: str = "",
     plan: ArticlePlan | None = None,
     asking: QuestionChannel = "document",
+    review_profile: ReviewProfile | None = None,
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
@@ -220,6 +223,10 @@ async def run_session(
       part's place in the book, which is not the run holding one subsection
     - material_role: What `sources` is to this run — 'source' to write from, or
       'revision_target' for the piece the run replaces
+    - material_authoritative: Whether claims in that writing material may be
+      treated as factual authority for source resolution and fidelity review
+    - review_profile: Which independent review concerns this kind of run owns;
+      manuscript parts leave standing-text coverage to their inheritance audit
     - assignment: Which book this run writes a chapter of, and which chapter of
       it where the launch settled that too; absent for a standalone piece,
       which stays bookless rather than becoming a book of one chapter
@@ -275,6 +282,7 @@ async def run_session(
             runner = PipelineRunner(
                 sources=sources or [],
                 material_role=material_role,
+                material_authoritative=material_authoritative,
                 refs=refs or [],
                 target_format=target_format,
                 assignment=assignment,
@@ -291,12 +299,14 @@ async def run_session(
                 writer_mode=writer_mode,
                 plan=plan,
                 asking=asking,
+                review_profile=review_profile,
             )
             output = await runner.run_from(snapshot, restart=bool(restart_from_stage))
         else:
             output = await run_pipeline(
                 sources=sources or [],
                 material_role=material_role,
+                material_authoritative=material_authoritative,
                 refs=refs or [],
                 target_format=target_format,
                 assignment=assignment,
@@ -313,6 +323,7 @@ async def run_session(
                 writer_mode=writer_mode,
                 plan=plan,
                 asking=asking,
+                review_profile=review_profile,
             )
     finally:
         setup.trace_logger.save()

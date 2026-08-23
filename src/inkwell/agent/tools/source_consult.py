@@ -49,6 +49,9 @@ class SourceDocument(BaseModel):
     path: str = Field(description="Absolute path to the original document")
     kind: Literal["pdf", "text"] = Field(description="Document type")
     page_count: int = Field(default=0, description="Number of pages (PDFs)")
+    factual_authority: bool = Field(
+        default=True, description="Whether finished claims are answerable to it"
+    )
     role: SourceRole = Field(
         default="source",
         description="What this document is to the run. A 'revision_target' is "
@@ -64,7 +67,7 @@ class SourceDocument(BaseModel):
         False for the piece a revision replaces. Checking a rewrite against the
         text it supersedes scores every intended change as an infidelity.
         """
-        return self.role != "revision_target"
+        return self.factual_authority and self.role != "revision_target"
 
     @computed_field
     @property
@@ -86,6 +89,8 @@ def build_source_registry(
     source_paths: list[str],
     artifacts_dir: Path,
     revision_targets: list[str] | None = None,
+    *,
+    factual_authority: bool = True,
 ) -> list[SourceDocument]:
     """Register source documents and build their navigation text layers.
 
@@ -97,6 +102,9 @@ def build_source_registry(
     rather than answers to. They are registered like any other document, so a
     writer can still read the passage it is rewriting; what the role changes is
     who gets to check the finished draft against them.
+
+    ``factual_authority`` is independent of that writing role: standing prose
+    can be source-shaped material without becoming evidence for its successor.
     """
     superseded = {Path(raw).expanduser().resolve() for raw in revision_targets or []}
     sources_dir = artifacts_dir / "sources"
@@ -117,6 +125,7 @@ def build_source_registry(
                 path=str(path.resolve()),
                 kind="pdf" if is_pdf else "text",
                 page_count=page_count(path) if is_pdf else 0,
+                factual_authority=factual_authority,
                 role=(
                     "revision_target"
                     if original.resolve() in superseded or path.resolve() in superseded
@@ -138,10 +147,16 @@ async def build_source_registry_async(
     source_paths: list[str],
     artifacts_dir: Path,
     revision_targets: list[str] | None = None,
+    *,
+    factual_authority: bool = True,
 ) -> list[SourceDocument]:
     """Thread-offloaded ``build_source_registry`` (it copies files and shells out)."""
     return await asyncio.to_thread(
-        build_source_registry, source_paths, artifacts_dir, revision_targets
+        build_source_registry,
+        source_paths,
+        artifacts_dir,
+        revision_targets,
+        factual_authority=factual_authority,
     )
 
 

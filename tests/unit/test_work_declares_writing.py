@@ -17,7 +17,13 @@ from inkwell.agent.models import AgentSessionResult, WritingOutput
 from inkwell.agent.pipeline import PipelineRunner
 from inkwell.manuscript import runner as runner_module
 from inkwell.manuscript.ingest import read_manuscript
-from inkwell.manuscript.brief import BriefWriter
+from inkwell.manuscript.brief import (
+    BriefWriter,
+    ComposedBrief,
+    CorpusPusher,
+    EditorialSection,
+    PushedCorpusClaim,
+)
 from inkwell.manuscript.inheritance import ADOPTED_FILE, Audit, InheritanceReader
 from inkwell.manuscript.runner import PRODUCED_FILE, PartRunAgents, run_part
 from inkwell.manuscript.store import ManuscriptStore
@@ -48,14 +54,33 @@ class PassesThrough(InheritanceReader):
         return Audit()
 
 
-class PlansNothing(BriefWriter):
-    """Declines to plan, so the run plans for itself as it always did."""
+class PlansPart(BriefWriter):
+    """Returns a prose-blind plan without reaching a model."""
 
-    async def compose(self, task: str, root: Path) -> None:
-        return None
+    async def compose(self, task: str, root: Path) -> ComposedBrief:
+        return ComposedBrief(
+            thesis="The successor.",
+            opening=EditorialSection(
+                title="The successor",
+                establishes="The planned point.",
+                order_reason="It opens the part.",
+                evidence=["The fixture."],
+                handoff="The part can conclude.",
+                key_points=[],
+            ),
+        )
 
 
-OFFLINE = PartRunAgents(briefing=PlansNothing(), inheriting=PassesThrough())
+class PushesNothing(CorpusPusher):
+    """An empty corpus, so unit runs do no external retrieval."""
+
+    async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+        return ()
+
+
+OFFLINE = PartRunAgents(
+    briefing=PlansPart(), corpus=PushesNothing(), inheriting=PassesThrough()
+)
 """Every reader a part run buys, stubbed — handed over as the set."""
 
 
@@ -148,13 +173,20 @@ class TestTheWorkSaysWhichStagesItsPartsSkip:
     voice and assumptions are settled at the work level has its parts skip
     both, and one whose parts are drafts does not."""
 
-    def test_a_work_skips_nothing_by_default(self, tmp_path: Path) -> None:
-        assert read_manuscript(atlas_like(tmp_path)).skipped_stages == ()
+    def test_a_work_settles_assumptions_by_default(self, tmp_path: Path) -> None:
+        assert read_manuscript(atlas_like(tmp_path)).skipped_stages == ("assumptions",)
 
     def test_a_declared_skip_is_recorded(self, tmp_path: Path) -> None:
         held = read_manuscript(atlas_like(tmp_path), skipped_stages=("voice",))
 
-        assert held.skipped_stages == ("voice",)
+        assert held.skipped_stages == ("assumptions", "voice")
+
+    def test_an_older_tree_inherits_the_work_level_skip(self) -> None:
+        held = Manuscript.model_validate(
+            {"title": "W", "root": "/n", "skipped_stages": []}
+        )
+
+        assert held.skipped_stages == ("assumptions",)
 
     @pytest.mark.asyncio
     async def test_the_skips_reach_the_run(
@@ -166,7 +198,7 @@ class TestTheWorkSaysWhichStagesItsPartsSkip:
 
         asked = await asked_of_a_run(tmp_path, work, monkeypatch)
 
-        assert asked["skipped_stages"] == ["voice", "assumptions"]
+        assert asked["skipped_stages"] == ["assumptions", "voice"]
 
     def test_a_skip_naming_no_stage_is_refused(self, tmp_path: Path) -> None:
         """A typo skips nothing and reads afterwards exactly like a stage that

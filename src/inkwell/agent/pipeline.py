@@ -43,7 +43,7 @@ from inkwell.agent.client import (
 from inkwell.agent.cohort import run_cohort, stage_recipe
 from lup.actors.cohort import ActorCohort
 from lup.actors.refs import ActorRef
-from lup.mcp import LupMcpTool, McpServerEntry, create_mcp_server
+from lup.mcp import LupMcpTool, McpServerEntry, ToolError, create_mcp_server, lup_tool
 from lup.types import StringMap
 from lup.runtime.models import AnyTurnBlock, turn_request
 from lup.runtime.usage import CostAccumulator
@@ -79,6 +79,7 @@ from inkwell.agent.models import (
     MergedDraft,
     PipelineSnapshot,
     QuestionChannel,
+    ReviewProfile,
     SourceRole,
     ResearchCompilation,
     RestartQueue,
@@ -88,6 +89,7 @@ from inkwell.agent.models import (
     SectionDraft,
     SectionPlan,
     WritingOutput,
+    WordBudget,
 )
 from inkwell.agent.content import ContentManifest
 from inkwell.agent.diversity import (
@@ -593,9 +595,9 @@ def add_source_refs(manifest: ContentManifest, notes: PipelineNotes) -> None:
                 f"authoritative source document ({doc.kind}{pages}) — verify "
                 "claims against it via consult_source or Read"
                 if doc.authoritative
-                else f"the draft this run replaces ({doc.kind}{pages}) — read it "
-                "via consult_source or Read to see what a passage said, never "
-                "as the authority your own draft is answerable to"
+                else f"writing material without factual authority "
+                f"({doc.kind}{pages}) — read it via consult_source or Read, "
+                "but verify its claims elsewhere"
             ),
         )
     for notes_file in sorted(reading_notes_dir(notes.artifacts_dir).glob("*.md")):
@@ -629,7 +631,11 @@ def inlinable_source_files(source_dir: Path) -> list[str]:
 
 def render_source_lines(notes: PipelineNotes) -> str:
     """Render source-document references for stages that use plain file refs."""
-    docs = load_source_registry(registry_path_for(notes.artifacts_dir))
+    docs = [
+        doc
+        for doc in load_source_registry(registry_path_for(notes.artifacts_dir))
+        if doc.authoritative
+    ]
     if not docs:
         return ""
     lines = [
@@ -2032,6 +2038,8 @@ async def refine_plan(
             voice_notes="",
         )
     refined = ArticlePlan.model_validate_json(refined_path.read_text(encoding="utf-8"))
+    if current is not None:
+        refined = refined.model_copy(update={"word_budget": current.word_budget})
     return record_placement(notes, refined, placed)
 
 
@@ -2083,8 +2091,8 @@ async def research_plan(
     task = (
         f"Research all questions from the article plan.\n\n"
         f"{file_refs}\n"
-        f"Read the plan to find the research questions, then investigate "
-        f"each one. After researching, call record_finding for each answer."
+        f"Read the plan to find the research questions, investigate each one, "
+        f"then record related findings together."
     )
 
     await query(
@@ -2153,7 +2161,7 @@ async def research_questions(
     task = (
         f"Research these questions raised by author feedback:\n\n"
         f"{question_list}\n\n"
-        f"Investigate each one, then call record_finding for each answer."
+        f"Investigate each one, then record related findings together."
     )
 
     await query(
@@ -2629,7 +2637,7 @@ async def review_narrative(
         f"Read both files. When you recommend a structural change, it must "
         f"not flatten the author's voice — read the voice files first, and "
         f"don't trade the author's self-implication, hedges, or asides for "
-        f"conventional momentum. Call record_finding for each issue."
+        f"conventional momentum. Record the complete finding set together."
     )
     return await reviewed(
         cohort=cohort,
@@ -2695,7 +2703,7 @@ async def review_facts(
         f"Read the draft. Use list_research to see all research findings, "
         f"then read_finding for details on specific ones. Cross-reference "
         f"the draft against research findings, then verify remaining claims "
-        f"with your research tools. Call record_finding for each issue."
+        f"with your research tools. Record the complete finding set together."
     )
     return await reviewed(
         cohort=cohort,
@@ -2756,7 +2764,7 @@ async def review_style(
         f"{manifest.render()}\n\n"
         f"{author_context_block(notes)}"
         f"Read each voice and style reference file, then read the draft. "
-        f"Call record_finding for each issue."
+        f"Record the complete finding set together."
     )
     return await reviewed(
         cohort=cohort,
@@ -2815,7 +2823,7 @@ async def review_source_fidelity(
         f"{author_context_block(notes)}"
         f"Check every source-derived definition, convention, named "
         f"structure, and argument outline against the document itself. "
-        f"Call record_finding for each issue."
+        f"Record the complete finding set together."
     )
     return await reviewed(
         cohort=cohort,
@@ -2879,8 +2887,8 @@ async def review_coverage(
         f"{author_context_block(notes)}"
         f"Read the plan (source_quotes, each section's quotes_to_include, and "
         f"the concrete nouns in its key_points) and the draft. Where a source "
-        f"document is listed, scan it for named specifics too. Call "
-        f"record_finding for each specific that was dropped, substituted with "
+        f"document is listed, scan it for named specifics too. Record all "
+        f"specifics that were dropped, substituted with "
         f"a generic version, or hollowed out."
     )
     return await reviewed(
@@ -2911,14 +2919,16 @@ async def review_all(
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
     light: bool = False,
+    profile: ReviewProfile = "full",
     cohort: ActorCohort,
     block_callback: BlockCallback | None = None,
 ) -> list[ReviewFinding]:
     """Stage 5: Run the reviewers as one wave of the run's cohort.
 
-    The full pass runs narrative, fact-check, style, and coverage (the
-    author's dropped specifics); a light pass runs only the fact-checker.
-    Source fidelity is added either way when source documents are registered.
+    The full profile adds coverage to narrative, fact-check, and style. A
+    manuscript part leaves standing-text coverage to its inheritance audit;
+    a light pass runs only the fact-checker.
+    Source fidelity is added either way when authoritative documents are registered.
 
     Each reviewer is named rather than anonymous, so the author reading the
     document while they work can address one of them — and so a reader of the
@@ -3004,16 +3014,11 @@ async def review_all(
             block_callback=block_callback,
         )
 
-    passes: dict[str, ReviewPass] = (
-        {"facts": facts}
-        if light
-        else {
-            "narrative": narrative,
-            "facts": facts,
-            "style": style,
-            "coverage": coverage,
-        }
-    )
+    passes: dict[str, ReviewPass] = {"facts": facts}
+    if not light:
+        passes = {"narrative": narrative, "facts": facts, "style": style}
+    if profile == "full" and not light:
+        passes["coverage"] = coverage
     # Only a document the finished draft answers to earns a fidelity check. A
     # run that has nothing but the piece it replaces gets none: every change it
     # was asked to make would read there as a departure from the source.
@@ -3224,6 +3229,51 @@ def consolidate_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
     return critical + anchored + unanchored + praise
 
 
+class SubmitFinalInput(BaseModel):
+    """A complete candidate for the final writing contract."""
+
+    content: str = Field(description="Complete final piece in markdown")
+
+
+class SubmitFinalOutput(BaseModel):
+    """The accepted candidate and the count that admitted it."""
+
+    word_count: int = Field(description="Accepted word count")
+
+
+def enforce_word_budget(content: str, budget: WordBudget | None) -> int:
+    """Return the count, or refuse content outside the plan's typed contract."""
+    words = len(content.split())
+    if budget is not None and not budget.accepts(words):
+        raise PipelineError(
+            f"Final draft has {words} words; contract accepts "
+            f"{budget.minimum}-{budget.maximum}."
+        )
+    return words
+
+
+def make_final_submission_tool(
+    output_path: Path, budget: WordBudget | None
+) -> LupMcpTool:
+    """Build the only write capability a final rewriter receives."""
+
+    @lup_tool(
+        "Submit the complete final piece. This validates the declared word "
+        "budget and saves only an accepted candidate. If rejected, revise the "
+        "piece and call this tool again in the same turn.",
+        name="submit_final",
+    )
+    async def submit_final(inp: SubmitFinalInput) -> SubmitFinalOutput:
+        try:
+            words = enforce_word_budget(inp.content, budget)
+        except PipelineError as exc:
+            raise ToolError(str(exc)) from exc
+        output_path.write_text(inp.content, encoding="utf-8")
+        return SubmitFinalOutput(word_count=words)
+
+    return submit_final
+
+
 async def rewrite_final(
     notes: PipelineNotes,
     draft_path: Path,
@@ -3242,10 +3292,21 @@ async def rewrite_final(
     cost_accumulator: CostAccumulator | None = None,
 ) -> WritingOutput:
     """Stage 6: Incorporate all feedback and produce the final article."""
+    plan = notes.load_artifact("plan", ArticlePlan)
     note_collector = author_notes if author_notes is not None else []
     dispositions = DispositionCollector(notes.artifact_path("dispositions"))
     stage_tools = build_note_server("rewrite", note_collector).merged(
         build_output_server("output", make_disposition_tools(dispositions))
+    )
+    stage_tools = stage_tools.merged(
+        build_output_server(
+            "submission",
+            [
+                make_final_submission_tool(
+                    output_path, plan.word_budget if plan else None
+                )
+            ],
+        )
     )
     rewrite_servers = {
         **stage_tools.servers,
@@ -3276,9 +3337,8 @@ async def rewrite_final(
         "# Review Summary\n\n",
         f"**{n_critical} critical** (mandatory), **{n_suggestion} suggestions** "
         f"({len(actionable)} findings to answer for)\n\n",
-        "Each is annotated inline in the draft at the passage it quotes. Call "
-        "record_disposition once per tag below — every one, including the ones "
-        "you decide against.\n\n",
+        "Each is annotated inline in the draft at the passage it quotes. Record "
+        "every disposition, including rejections; batch them where possible.\n\n",
     ] + [
         f"- **{tag}** [{f.severity}:{f.reviewer}] {f.location}: {f.issue}\n"
         for tag, f in actionable
@@ -3337,6 +3397,12 @@ async def rewrite_final(
         else ""
     )
     format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
+    delivery = f"Write the final piece to: {output_path}"
+    if plan is not None and plan.word_budget is not None:
+        delivery = (
+            f"Call submit_final with the complete piece. It must contain "
+            f"{plan.word_budget.minimum}-{plan.word_budget.maximum} words"
+        )
     task = (
         f"Produce the final version of this piece.\n\n"
         f"Target format: {target_format}\n\n"
@@ -3351,14 +3417,14 @@ async def rewrite_final(
         f"Passages marked [PRESERVE:] were praised by reviewers: protect "
         f"their quality while editing around them. "
         f"Apply all critical findings and worthwhile suggestions. Each is "
-        f"tagged; call record_disposition once per tag, including every one "
-        f"you decide against — a finding rejected on the merits and one never "
+        f"tagged; record every disposition together where possible, including "
+        f"ones you decide against — a finding rejected on the merits and one never "
         f"read produce the same draft, and only this record tells them apart. "
         f"Use list_research + read_finding to verify corrections against research findings. "
         f"{diversity_note}"
         f"If a style rules file is available, read it and enforce every "
         f"hard editing rule with zero remaining violations.\n\n"
-        f"Write the final piece to: {output_path}\n\n"
+        f"{delivery}\n\n"
     )
     task += academic_assembly_block(target_format, output_path)
 
@@ -3366,7 +3432,11 @@ async def rewrite_final(
         task,
         model=stage_model("rewrite"),
         system_prompt=REWRITER_SYSTEM,
-        tools=BUILTIN_WRITE_TOOLS,
+        tools=(
+            BUILTIN_READ_TOOLS
+            if plan is not None and plan.word_budget is not None
+            else BUILTIN_WRITE_TOOLS
+        ),
         max_thinking_tokens=128_000 - 1,
         autonomy="unattended",
         mcp_servers=rewrite_servers,
@@ -3381,14 +3451,14 @@ async def rewrite_final(
     else:
         raise PipelineError("Rewriter produced no output")
 
-    plan = notes.load_artifact("plan", ArticlePlan)
+    word_count = enforce_word_budget(content, plan.word_budget if plan else None)
     title = plan.title if plan else "Untitled"
     summary = result_text(collector).strip()
 
     return WritingOutput(
         title=title,
         content=content,
-        word_count=len(content.split()),
+        word_count=word_count,
         summary=summary,
         review_findings=findings,
     )
@@ -3640,6 +3710,7 @@ class PipelineRunner:
         *,
         sources: list[str],
         material_role: SourceRole = "source",
+        material_authoritative: bool = True,
         refs: list[str] | None = None,
         target_format: str = "auto",
         assignment: ChapterAssignment | None = None,
@@ -3656,9 +3727,11 @@ class PipelineRunner:
         writer_mode: str = "",
         plan: ArticlePlan | None = None,
         asking: QuestionChannel = "document",
+        review_profile: ReviewProfile | None = None,
     ) -> None:
         self.sources = sources
         self.material_role: SourceRole = material_role
+        self.material_authoritative = material_authoritative
         self.revision_target_paths: list[str] = []
         self.refs = refs or []
         self.style_refs: list[str] = []
@@ -3677,12 +3750,13 @@ class PipelineRunner:
         self.declared_writer_mode = writer_mode
         self.launched_plan = plan
         self.asking: QuestionChannel = asking
+        self.declared_review_profile: ReviewProfile | None = review_profile
 
         if cost_accumulator is None:
             cost_accumulator = CostAccumulator()
         self.cost_accumulator = cost_accumulator
 
-        self.snapshot = PipelineSnapshot()
+        self.snapshot = PipelineSnapshot(review_profile=review_profile or "full")
         self.pending_resume: StringMap = {}
         self.plan_breaking = asyncio.Event()
         self.restart_count = 0
@@ -4291,6 +4365,8 @@ class PipelineRunner:
         """
         self.install_block_callback()
         self.snapshot = snapshot
+        if self.declared_review_profile is not None:
+            self.snapshot.review_profile = self.declared_review_profile
         configure_session_state(self.state)
 
         if snapshot.doc_id:
@@ -4911,7 +4987,10 @@ class PipelineRunner:
             # replaces.
             superseded.append(str(output_path))
         registered = await build_source_registry_async(
-            registry_candidates, notes.artifacts_dir, superseded
+            registry_candidates,
+            notes.artifacts_dir,
+            superseded,
+            factual_authority=self.material_authoritative,
         )
         if registered:
             await self.hooks.on_progress(
@@ -5204,6 +5283,13 @@ class PipelineRunner:
         if self.launched_plan is not None:
             await self.record_launched_plan(self.launched_plan)
             return
+        registered = load_source_registry(
+            registry_path_for(self.ensure_notes().artifacts_dir)
+        )
+        if registered and not any(document.authoritative for document in registered):
+            raise PipelineError(
+                "Non-authoritative writing material requires an external plan"
+            )
         await self.announce_stage("plan", "Planning article structure")
         await self.update_overview(active_stage="plan")
         notes = self.ensure_notes()
@@ -5734,6 +5820,7 @@ class PipelineRunner:
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
                 light=self.light,
+                profile=self.snapshot.review_profile,
                 cohort=self.cohort(),
                 block_callback=self.block_callback,
             )
@@ -5770,7 +5857,7 @@ class PipelineRunner:
             plan=self.snapshot.plan,
             drafts=self.snapshot.section_drafts,
             placement=self.placement,
-            judge=not self.light,
+            judge=not self.light and self.snapshot.review_profile == "full",
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
             cohort=self.cohort(),
@@ -5791,7 +5878,10 @@ class PipelineRunner:
         guessing.
         """
         notes = self.ensure_notes()
-        if not load_source_registry(registry_path_for(notes.artifacts_dir)):
+        if not any(
+            doc.authoritative
+            for doc in load_source_registry(registry_path_for(notes.artifacts_dir))
+        ):
             return
         questions = list(dict.fromkeys(self.state.pending_questions))
         if not questions:
@@ -5916,11 +6006,13 @@ class PipelineRunner:
         await self.announce_stage("format", f"Applying {chosen_format} formatting")
         await self.update_overview(active_stage="format")
         article_text = output.content or output.summary
+        final_words = enforce_word_budget(article_text, plan.word_budget)
 
         if chosen_format == "academic":
             final_content = await self.finalize_academic(article_text, plan)
         else:
             final_content = await apply_format(article_text, plan.title, chosen_format)
+            final_words = enforce_word_budget(final_content, plan.word_budget)
             async with gdoc_nonfatal("write final tab"):
                 from inkwell.agent.tools.google_docs import write_with_continuation
 
@@ -5931,9 +6023,19 @@ class PipelineRunner:
                     self.final_tab_id = tab_ids[0]
                     self.known_tabs["Final"] = tab_ids[0]
 
+        checked = article_text if chosen_format == "academic" else final_content
+        checked_path = self.ensure_notes().save_text_artifact("final_checked", checked)
+        await add_format_check_report(
+            ContentManifest(),
+            self.ensure_notes(),
+            checked,
+            checked_path,
+            target_format=chosen_format,
+        )
+
         output.google_doc_id = self.doc_id
         output.google_doc_url = self.doc_url
-        output.word_count = len(final_content.split())  # claude: ignore
+        output.word_count = final_words
         self.snapshot.stage = "format"
         self.state.set_stage("complete")
         await self.save_snapshot()
@@ -6081,7 +6183,9 @@ class PipelineRunner:
     async def execute_strategy(self, strategy: RestartStrategy) -> None:
         notes = self.ensure_notes()
         if strategy.new_plan:
-            replanned = record_placement(notes, strategy.new_plan, self.placement)
+            budget = self.snapshot.plan.word_budget if self.snapshot.plan else None
+            successor = strategy.new_plan.model_copy(update={"word_budget": budget})
+            replanned = record_placement(notes, successor, self.placement)
             self.snapshot.plan = replanned
             await self.write_plan_tab(replanned)
             await self.create_section_tabs(replanned)
@@ -6689,6 +6793,7 @@ async def run_pipeline(
     *,
     sources: list[str],
     material_role: SourceRole = "source",
+    material_authoritative: bool = True,
     refs: list[str] | None = None,
     target_format: str = "auto",
     assignment: ChapterAssignment | None = None,
@@ -6705,11 +6810,13 @@ async def run_pipeline(
     writer_mode: str = "",
     plan: ArticlePlan | None = None,
     asking: QuestionChannel = "document",
+    review_profile: ReviewProfile | None = None,
 ) -> WritingOutput:
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
         sources=sources,
         material_role=material_role,
+        material_authoritative=material_authoritative,
         refs=refs,
         target_format=target_format,
         assignment=assignment,
@@ -6726,5 +6833,6 @@ async def run_pipeline(
         writer_mode=writer_mode,
         plan=plan,
         asking=asking,
+        review_profile=review_profile,
     )
     return await runner.run()

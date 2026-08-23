@@ -15,14 +15,13 @@ book numbers for it, what the research holds on its subject, and what asked for
 the run. Every one of those is already assembled — the brief is what turns them
 from a paragraph of instruction into the structure the write stage reads.
 
-**It never opens the book.** The deriver reads one part, the two files either
-side of it, and this part's slice of what the corpus established. That bound is
-deliberate and it is what keeps a single part affordable: a producer that read
-the whole work to plan one subsection would make testing one subsection cost a
-book read. The other producer of the same artifact — a planner that reads the
-whole work and emits every part's brief at once — sees cross-cutting staleness
-this cannot, and is what a full pass wants. Both emit an ``ArticlePlan``, so
-nothing downstream knows which one it got.
+**It never opens the prose.** The deriver receives declared tree titles, the
+titles immediately beside this part, its work-owned constraints, and research
+pushed specifically for that durable placement. The standing passage and its
+neighbours' text reach the writer and inheritance pass later; they cannot shape
+editorial intent. The other producer reads the whole declared outline and
+emits every part's brief at once, which lets it see cross-cutting staleness
+without reading the current book instantiation. Both emit an ``ArticlePlan``.
 
 **The plan stage is not skipped; it is answered.** A run handed a brief records
 it and moves on — the Plan tab is still written, the section tabs still created,
@@ -31,11 +30,13 @@ and silently taken all of that with it.
 """
 
 import logging
+from hashlib import sha256
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from inkwell.agent.client import query
 from inkwell.agent.config import stage_model
@@ -44,9 +45,10 @@ from inkwell.agent.models import (
     ResearchQuestion,
     SectionPlan,
     SourceQuote,
+    WordBudget,
 )
 from inkwell.manuscript.budget import LengthBudget
-from inkwell.manuscript.findings import WorkFindings, briefing
+from inkwell.manuscript.findings import Bearing, WorkFindings
 from inkwell.manuscript.inventory import Figure
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 
@@ -65,45 +67,322 @@ BRIEF_STAGE = "plan"
 """Which stage's model tier composing a brief runs at.
 
 The stage it replaces. It is doing that stage's work from better inputs, not
-cheaper work — the saving is that it reads a subsection and its surroundings
-rather than a subsection and a research compilation, not that it thinks less.
+cheaper work — the saving is that it reads a typed evidence packet rather than
+standing prose and a research compilation, not that it thinks less.
 """
 
 BRIEF_SYSTEM = """\
-You are planning one part of a book that already exists.
+You are choosing the editorial intent for one part of a book.
 
-What you produce is the plan its writer works from. The writer will see the \
-part as the book currently holds it and will write a successor to it — so your \
-plan decides what that successor *is*, and the current text's own section order \
-is evidence about the subject rather than the shape of your answer.
+Your task contains pushed evidence, the part's place and immediate boundaries, \
+the reason it is running, its length budget, and figures that inheritance will \
+protect. It deliberately does not contain the standing prose. Choose what a \
+reader needs first from this evidence, then build the successor around it. The \
+opening is a separate field because choosing it is an editorial decision, not \
+the first surviving heading of an older draft.
 
-Three things are settled before you start, and you are not deciding them:
+For every section, state what it establishes, why it belongs at that point, \
+which pushed findings it uses, and what it hands to the following section. \
+Those fields become the writer's section brief; do not leave sequencing logic \
+implicit in a heading.
 
-- **The length budget.** It is stated in your task and it is the part's share \
-of its chapter. Plan sections that fit it. If what has changed genuinely needs \
-more, say so in the author direction and plan for what it needs — but a plan \
-that quietly runs to several times the budget is a plan that has decided the \
-book's shape.
-- **The figures.** They carry the numbers the book gave them and they are \
-reproduced as they stand. Plan where each one goes; never renumber one.
-- **What licenses the scope.** The reasons this part is being revised are in \
-your task. A reason naming a claim asks for that claim to be settled; a reason \
-about what the part is *for* licenses reshaping it. Where nothing asks for a \
-change, the part's argument is the best evidence of what it establishes, and \
-your plan should arrive at something recognisably the same piece.
+Treat findings as established with exactly their stated caveats. Ask research \
+questions only for gaps the pushed evidence does not settle. Fit the complete \
+argument to the stated budget, respect its place between its neighbours, and \
+leave preservation of standing claims, citations, figures, and voice to the \
+inheritance pass after drafting.
 
-**Research questions are about the subject, not about the draft.** A question \
-that opens "The draft says…" can only ever confirm what is already written, and \
-a plan made of those has a blind spot shaped exactly like everything the draft \
-left out. Ask what a well-read reader would notice missing, what has happened \
-that a piece written now has to account for, and which of the part's \
-load-bearing claims would embarrass the book if they had dated. Where the \
-research findings in your task already answer a question, do not ask it — say \
-in the section's key points that the finding settles it.
-
-Be specific and be brief. Title and summary is enough per section; one or two \
-key points at most.
+Be specific and brief. Give every section one or two checkable key points.
 """
+
+
+class PushedCorpusClaim(BaseModel):
+    """One judged corpus claim retrieved before subsection planning starts."""
+
+    model_config = ConfigDict(frozen=True)
+
+    title: str = Field(description="The matched document's title")
+    claim: str = Field(description="What judging or a cached full read establishes")
+    source: str = Field(description="The corpus source and document identifier")
+    depth: Literal["judged", "distilled"] = Field(
+        default="judged", description="Whether this came from judging or a full read"
+    )
+    caveat: str = Field(default="", description="Conditions the document attaches")
+    locator: str = Field(default="", description="Where the full read found it")
+    published: str = Field(default="", description="Source-stated publication date")
+    url: str = Field(default="", description="Where the document was published")
+
+    def render(self) -> str:
+        """This claim as the evidence-first planning packet carries it."""
+        dated = f" ({self.published})" if self.published else ""
+        caveat = f"\n  caveat: {self.caveat}" if self.caveat else ""
+        located = f" [{self.locator}]" if self.locator else ""
+        return (
+            f"- **{self.title}**{dated} [{self.depth}] — {self.claim}{located}"
+            f"{caveat}\n  {self.source}"
+        )
+
+
+class CorpusPusher(ABC):
+    """Who retrieves corpus claims before a subsection chooses its intent."""
+
+    @abstractmethod
+    async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+        """Return judged claims nearest to a prose-free subsection topic."""
+
+
+class LocalCorpusPusher(CorpusPusher):
+    """The same narrow semantic retrieval used by the ordinary plan stage."""
+
+    async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+        from inkwell.agent.config import corpus_root, corpus_semantics
+        from inkwell.agent.pipeline import CORPUS_BRIEFING_LIMIT, briefing_claim
+        from inkwell.corpus.distillation import read_distillation
+        from inkwell.corpus.retrieval import CorpusQuery, read_index, search_corpus
+        from inkwell.corpus.storage import CorpusStore
+
+        store = CorpusStore(root=corpus_root())
+        answer = await search_corpus(
+            CorpusQuery(tier="narrow", like=topic, limit=CORPUS_BRIEFING_LIMIT),
+            store,
+            semantics=corpus_semantics(store),
+        )
+        entries = read_index(store).entries
+
+        def claims() -> Iterator[PushedCorpusClaim]:
+            """Judged summaries, plus cached full reads of the top matches."""
+            for at, hit in enumerate(answer.documents):
+                source = f"{hit.source}/{hit.slug}"
+                yield PushedCorpusClaim(
+                    title=hit.title,
+                    claim=briefing_claim(hit),
+                    source=source,
+                    published=hit.published,
+                    url=hit.url,
+                )
+                if at >= SUBSECTION_DISTILLED_DOCUMENTS:
+                    continue
+                entry = next(
+                    (
+                        one
+                        for one in entries
+                        if one.source == hit.source and one.document.slug == hit.slug
+                    ),
+                    None,
+                )
+                if entry is None or not entry.document.content_sha256:
+                    continue
+                distilled = read_distillation(store, entry.document.content_sha256)
+                if distilled is None or not distilled.read():
+                    continue
+                for finding in distilled.findings:
+                    yield PushedCorpusClaim(
+                        title=distilled.title or hit.title,
+                        claim=finding.claim,
+                        source=source,
+                        depth="distilled",
+                        caveat=finding.caveat,
+                        locator=finding.locator,
+                        published=distilled.published or hit.published,
+                        url=distilled.url or hit.url,
+                    )
+
+        return tuple(claims())
+
+
+SUBSECTION_DISTILLED_DOCUMENTS = 5
+"""Top corpus matches whose cached full-document findings reach planning."""
+
+
+def subsection_topic(manuscript: Manuscript, node: ManuscriptNode) -> str:
+    """A corpus query made only of the work's durable declared structure."""
+    trail = tuple(
+        one.title for one in manuscript.walk() if node.key.startswith(f"{one.key}/")
+    )
+    return (
+        f"Part of {manuscript.title}: "
+        f"{' > '.join((*trail, node.title))}. {manuscript.target_format}."
+    )
+
+
+class EditorialEvidence(BaseModel):
+    """What can decide a part's successor without inheriting its old shape.
+
+    Standing prose is deliberately absent. Its material is protected by the
+    inheritance pass; showing its headings here would make the old arrangement
+    the cheapest available plan.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    key: str = Field(description="The part, by the key the work uses")
+    title: str = Field(description="The part's standing title")
+    work: str = Field(description="The work this part belongs to")
+    placement: tuple[str, ...] = Field(
+        default=(), description="Ancestor titles, from the work to the parent"
+    )
+    neighbours: tuple[str, ...] = Field(
+        default=(), description="Immediately adjacent parts, by key and title"
+    )
+    reasons: tuple[str, ...] = Field(
+        default=(), description="What made this part eligible to run"
+    )
+    corpus: tuple[PushedCorpusClaim, ...] = Field(
+        default=(), description="Subsection-scoped claims pushed before planning"
+    )
+    findings: tuple[Bearing, ...] = Field(
+        default=(), description="Full-document findings placed on this part"
+    )
+    figures: tuple[Figure, ...] = Field(
+        default=(), description="Figures inheritance must preserve"
+    )
+    budget: LengthBudget = Field(
+        default_factory=LengthBudget, description="This part's share of its chapter"
+    )
+
+    def digest(self) -> str:
+        """Fingerprint the evidence a stored plan claims to have considered."""
+        return sha256(self.model_dump_json().encode()).hexdigest()
+
+    def render(self) -> str:
+        """Render pushed evidence before placement and editorial constraints."""
+        pushed = "\n".join(one.render() for one in self.corpus)
+        research = "\n".join(
+            f"- {one.render()}"
+            + (f"\n  why here: {one.why}" if one.why else "")
+            + (f'\n  "{one.quote}"' if one.quote else "")
+            + (f" [{one.locator}]" if one.locator else "")
+            for one in self.findings
+        )
+        changed = "\n".join(f"- {one}" for one in self.reasons)
+        nearby = "\n".join(f"- {one}" for one in self.neighbours)
+        figures = "\n".join(f"- {one.render()} — {one.image}" for one in self.figures)
+        blocks = (
+            "## What the corpus pushes to this subsection\n\n"
+            + (pushed or "No corpus document matched this subsection."),
+            "## Evidence pushed to this part\n\n"
+            + (research or "No corpus finding is currently placed on this part."),
+            f"## Editorial placement\n\n{self.key} — {self.title}\n"
+            f"{' > '.join((*self.placement, self.title))} — of {self.work}",
+            f"## Why it is running\n\n{changed or 'It was selected directly.'}",
+            f"## Immediate boundaries\n\n{nearby}" if nearby else "",
+            self.budget.render(),
+            f"## Figures to preserve later\n\n{figures}" if figures else "",
+        )
+        return "\n\n".join(one for one in blocks if one)
+
+
+def evidence_for(
+    manuscript: Manuscript,
+    node: ManuscriptNode,
+    found: WorkFindings,
+    *,
+    reasons: tuple[str, ...] = (),
+    corpus: tuple[PushedCorpusClaim, ...] = (),
+    figures: tuple[Figure, ...] = (),
+    budget: LengthBudget | None = None,
+) -> EditorialEvidence:
+    """Compile one part's pushed evidence and place, without opening its prose."""
+    ancestors = tuple(
+        one.title for one in manuscript.walk() if node.key.startswith(f"{one.key}/")
+    )
+    leaves = tuple(one for one in manuscript.leaves() if one.path)
+    keys = tuple(one.key for one in leaves)
+    nearby: tuple[ManuscriptNode, ...] = ()
+    if node.key in keys:
+        at = keys.index(node.key)
+        nearby = (*leaves[max(0, at - 1) : at], *leaves[at + 1 : at + 2])
+    return EditorialEvidence(
+        key=node.key,
+        title=node.title,
+        work=manuscript.title,
+        placement=ancestors,
+        neighbours=tuple(f"{one.key} — {one.title}" for one in nearby),
+        reasons=reasons,
+        corpus=corpus,
+        findings=found.on(node.key),
+        figures=figures,
+        budget=budget or LengthBudget(),
+    )
+
+
+class LegacyBrief(TypedDict, total=False):
+    """The two fields needed to upgrade a stored pre-intent brief."""
+
+    opening: JsonValue
+    sections: list[JsonValue]
+
+
+class LegacyEditorialSection(TypedDict, total=False):
+    """Fields accepted while upgrading an older generic section plan."""
+
+    title: str
+    summary: str
+    purpose: str
+    establishes: str
+    order_reason: str
+    evidence: list[str]
+    handoff: str
+    key_points: list[str]
+    quotes_to_include: list[str]
+
+
+class EditorialSection(BaseModel):
+    """One section's purpose before it is compiled for a generic writer."""
+
+    title: str = Field(description="The section heading")
+    establishes: str = Field(description="What this section makes true for the reader")
+    order_reason: str = Field(
+        description="Why it belongs at this point in the argument"
+    )
+    evidence: list[str] = Field(
+        description="Claims or cited findings from the evidence packet it uses"
+    )
+    handoff: str = Field(description="What the next section can assume after this one")
+    key_points: list[str] = Field(description="Specific points the writer must make")
+    quotes_to_include: list[str] = Field(
+        default_factory=list, description="References to preserved source quotes"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_generic_section(
+        cls, value: LegacyEditorialSection
+    ) -> LegacyEditorialSection:
+        """Keep persisted generic plans readable after intent became explicit."""
+        missing = ["Legacy plan carried no evidence reference."]
+        if "establishes" in value:
+            return value
+        if "summary" not in value:
+            raise ValueError("A legacy section needs its summary")
+        migrated = value.copy()
+        migrated["establishes"] = (
+            value["purpose"]
+            if "purpose" in value and value["purpose"]
+            else value["summary"]
+        )
+        migrated["order_reason"] = "It follows the plan's declared reading order."
+        migrated["evidence"] = (
+            value["evidence"] if "evidence" in value and value["evidence"] else missing
+        )
+        migrated["handoff"] = (
+            value["handoff"]
+            if "handoff" in value and value["handoff"]
+            else "The following section continues the argument."
+        )
+        return migrated
+
+    def writer_plan(self) -> SectionPlan:
+        """Compile editorial purpose into fields every section writer reads."""
+        return SectionPlan(
+            title=self.title,
+            summary=self.establishes,
+            key_points=self.key_points,
+            purpose=f"{self.establishes} Why here: {self.order_reason}",
+            evidence=self.evidence,
+            handoff=self.handoff,
+            quotes_to_include=self.quotes_to_include,
+        )
 
 
 class ComposedBrief(BaseModel):
@@ -119,8 +398,11 @@ class ComposedBrief(BaseModel):
     thesis: str = Field(
         description="What this part establishes, in one specific sentence"
     )
-    sections: list[SectionPlan] = Field(
-        default=[], description="The successor's sections, in reading order"
+    opening: EditorialSection = Field(
+        description="The opening chosen from pushed evidence, not the old order"
+    )
+    sections: list[EditorialSection] = Field(
+        default=[], description="The successor's remaining sections, in reading order"
     )
     research_questions: list[ResearchQuestion] = Field(
         default=[],
@@ -129,17 +411,28 @@ class ComposedBrief(BaseModel):
     )
     source_quotes: list[SourceQuote] = Field(
         default=[],
-        description="Passages of the current text worth preserving verbatim",
+        description="Verbatim passages carried by pushed evidence worth using",
     )
     direction: str = Field(
         default="",
         description="What the writer most needs to know about this part that "
-        "the sections do not say — including where the budget has to give",
+        "the sections do not say — including what must give to meet the budget",
     )
     constraints: list[str] = Field(
         default=[],
         description="Short checkable items the successor must satisfy",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def promote_legacy_opening(cls, value: LegacyBrief) -> LegacyBrief:
+        """Read briefs stored before the opening became an explicit decision."""
+        if "opening" in value or "sections" not in value or not value["sections"]:
+            return value
+        migrated = value.copy()
+        migrated["opening"] = value["sections"][0]
+        migrated["sections"] = value["sections"][1:]
+        return migrated
 
 
 class BriefWriter(ABC):
@@ -167,37 +460,17 @@ class ModelBrief(BriefWriter):
             output_type=ComposedBrief,
             model=self.model or stage_model(BRIEF_STAGE),
             system_prompt=BRIEF_SYSTEM,
-            tools=["Read", "Grep", "Glob"],
+            tools=[],
             autonomy="unattended",
             prefix="brief",
-            cwd=root,
         )
 
 
-def asked(
-    manuscript: Manuscript,
-    node: ManuscriptNode,
-    material: Path,
-    instruction: str,
-    research: str,
-) -> str:
-    """What the deriver is shown: one part, its surroundings, and what asked.
-
-    The instruction the run would have been given anyway, plus the material as
-    a file it can open. Nothing is restated: what the writer will be told and
-    what the planner is told are the same paragraph, so a plan cannot be made
-    against a brief the writer never sees.
-    """
-    return "\n\n".join(
-        held
-        for held in (
-            f"# Planning {node.key} — {node.title}, of {manuscript.title}",
-            f"The part as the book holds it now: {material}\nRead it first.",
-            instruction,
-            research,
-            "Plan the successor.",
-        )
-        if held
+def asked(evidence: EditorialEvidence) -> str:
+    """What the deriver sees, with pushed findings first and no standing prose."""
+    return (
+        f"# Planning {evidence.key} — {evidence.title}\n\n"
+        f"{evidence.render()}\n\nChoose the editorial intent and plan the successor."
     )
 
 
@@ -226,16 +499,16 @@ def planned(
                 f"book numbers them: {', '.join(one.render() for one in figures)}"
             )
         if budget.holds:
-            yield (
-                f"a piece between roughly {budget.floor():,} and "
-                f"{budget.ceiling():,} words"
-            )
+            yield (f"a piece between {budget.floor():,} and {budget.ceiling():,} words")
 
     return ArticlePlan(
         title=node.title,
         thesis=composed.thesis,
         target_format=manuscript.target_format,
-        sections=composed.sections,
+        sections=[
+            composed.opening.writer_plan(),
+            *(one.writer_plan() for one in composed.sections),
+        ],
         research_questions=composed.research_questions,
         source_quotes=composed.source_quotes,
         author_direction=composed.direction,
@@ -243,45 +516,37 @@ def planned(
         deliverables=list(owed()),
         conventions=[],
         voice_notes="",
+        word_budget=(
+            WordBudget(minimum=budget.floor(), maximum=budget.ceiling())
+            if budget.holds
+            else None
+        ),
     )
 
 
 async def compose(
     manuscript: Manuscript,
     node: ManuscriptNode,
-    material: Path,
+    evidence: EditorialEvidence,
     room: Path,
     *,
-    instruction: str,
-    figures: tuple[Figure, ...] = (),
-    budget: LengthBudget | None = None,
-    found: WorkFindings | None = None,
     writer: BriefWriter | None = None,
 ) -> ArticlePlan | None:
     """Plan one part from its place in the work, and keep the plan.
 
-    ``None`` where the deriver came back with nothing, which is a run that
-    plans for itself as it always did rather than a run that fails: a brief is
-    a better plan, not a required one, and losing a book pass to a planner that
-    timed out would be the expensive way to hold that opinion.
+    ``None`` where the deriver came back with nothing. Non-authoritative
+    manuscript material cannot self-plan, so the pipeline refuses before
+    spending on research or drafting rather than inheriting the old shape.
     """
     composed = await (writer if writer is not None else ModelBrief()).compose(
-        asked(
-            manuscript,
-            node,
-            material,
-            instruction,
-            briefing(found, node.key) if found is not None else "",
-        ),
+        asked(evidence),
         Path(manuscript.root),
     )
     if composed is None:
-        logger.warning(
-            "No brief was composed for %s — it will plan for itself", node.key
-        )
+        logger.warning("No prose-blind brief was composed for %s", node.key)
         return None
 
-    held = planned(composed, manuscript, node, figures, budget or LengthBudget())
+    held = planned(composed, manuscript, node, evidence.figures, evidence.budget)
     (room / BRIEF_FILE).write_text(held.model_dump_json(indent=2), encoding="utf-8")
     logger.info(
         "Brief for %s: %d section(s), %d research question(s)",

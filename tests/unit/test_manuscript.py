@@ -20,7 +20,11 @@ from inkwell.agent.glossary import (
     read_glossary,
     write_chapter_glossary,
 )
-from inkwell.agent.models import AgentSessionResult, WritingOutput
+from inkwell.agent.models import (
+    AgentSessionResult,
+    ArticlePlan,
+    WritingOutput,
+)
 from inkwell.agent.stages import unknown_format
 from inkwell.manuscript.facts import (
     Consumption,
@@ -28,6 +32,7 @@ from inkwell.manuscript.facts import (
     ProposedChange,
     consumption_of,
 )
+from inkwell.manuscript.findings import WorkFindings
 from inkwell.manuscript.graph import (
     PartReading,
     WorkSweep,
@@ -65,13 +70,24 @@ from inkwell.manuscript.ingest import (
     read_manuscript,
 )
 from inkwell.manuscript import runner as runner_module
-from inkwell.manuscript.brief import BriefWriter
+from inkwell.manuscript.brief import (
+    BriefWriter,
+    ComposedBrief,
+    CorpusPusher,
+    EditorialSection,
+    PushedCorpusClaim,
+    evidence_for,
+)
+from inkwell.manuscript.planner import PartPlan, WorkBriefs
 from inkwell.manuscript.runner import (
+    HANDOFF_FILE,
     PRODUCED_FILE,
     PartOutcome,
     PartRunAgents,
     PartRunObservers,
     PartRunWatch,
+    PartHandoff,
+    PartPublisher,
     around,
     coinages,
     ledger,
@@ -86,7 +102,7 @@ from inkwell.manuscript.splice import (
     opens_with,
     spliced,
 )
-from inkwell.manuscript.state import WorkState
+from inkwell.manuscript.state import WorkState, digest_of
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 from inkwell.manuscript.vocabulary import (
@@ -160,14 +176,33 @@ class PassesThrough(InheritanceReader):
         return Audit(dropped=list(self.dropped))
 
 
-class PlansNothing(BriefWriter):
-    """A deriver that declines, so the run plans for itself as it always did."""
+class PlansPart(BriefWriter):
+    """A prose-blind planner stub, so no unit test reaches a model."""
 
-    async def compose(self, task: str, root: Path) -> None:
-        return None
+    async def compose(self, task: str, root: Path) -> ComposedBrief:
+        return ComposedBrief(
+            thesis="The part's successor.",
+            opening=EditorialSection(
+                title="The successor",
+                establishes="The planned point.",
+                order_reason="It opens the part.",
+                evidence=["The test fixture."],
+                handoff="The part can conclude.",
+                key_points=[],
+            ),
+        )
 
 
-OFFLINE = PartRunAgents(briefing=PlansNothing(), inheriting=PassesThrough())
+class PushesNothing(CorpusPusher):
+    """An empty corpus, so unit part runs do no external retrieval."""
+
+    async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+        return ()
+
+
+OFFLINE = PartRunAgents(
+    briefing=PlansPart(), corpus=PushesNothing(), inheriting=PassesThrough()
+)
 """The whole set of readers a part run buys, stubbed.
 
 Handed over by every test here that runs a part, so a unit test never reaches a
@@ -1062,6 +1097,148 @@ class TestTheStandingTextIsMaterialRatherThanTheShape:
         assert "Keep the author's voice" in part_instruction(work, node)
 
 
+class TestASelectedSubsectionPlansFromItsPushedEvidence:
+    """A click on one part must not reuse a plan made before its evidence moved."""
+
+    @pytest.mark.asyncio
+    async def test_new_subsection_evidence_invalidates_the_stored_book_plan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+        current = held_text(
+            (Path(work.root) / node.path).read_text(encoding="utf-8"), node
+        )
+        stale = ComposedBrief(
+            thesis="An outage is the main cyber risk.",
+            opening=EditorialSection(
+                title="The old outage",
+                establishes="Historical context.",
+                order_reason="The old plan inherited it first.",
+                evidence=["The old outage report."],
+                handoff="Continue to the current landscape.",
+                key_points=[],
+            ),
+        )
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        old_evidence = evidence_for(work, node, WorkFindings())
+        store.publish_briefs(
+            "atlas",
+            WorkBriefs(
+                briefs=(
+                    PartPlan(
+                        key=node.key,
+                        brief=stale,
+                        digest=digest_of(current),
+                        evidence_digest=old_evidence.digest(),
+                    ),
+                )
+            ),
+        )
+        pushed = WorkFindings()
+
+        class PushesCurrent(CorpusPusher):
+            def __init__(self) -> None:
+                self.topic = ""
+
+            async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+                self.topic = topic
+                return (
+                    PushedCorpusClaim(
+                        title="Mythos system card",
+                        claim="A live agentic campaign crossed the full attack chain.",
+                        source="mythos/system-card",
+                    ),
+                )
+
+        class PlansCurrent(BriefWriter):
+            def __init__(self) -> None:
+                self.task = ""
+
+            async def compose(self, task: str, root: Path) -> ComposedBrief:
+                self.task = task
+                return ComposedBrief(
+                    thesis="Agentic intrusion changes the threat model.",
+                    opening=EditorialSection(
+                        title="The live agentic campaign",
+                        establishes="The current evidence.",
+                        order_reason="It is the pressing development.",
+                        evidence=["Mythos system card."],
+                        handoff="The history can now follow as context.",
+                        key_points=[],
+                    ),
+                )
+
+        planner = PlansCurrent()
+        corpus = PushesCurrent()
+        passed: dict[str, object] = {}
+
+        async def record(**given: object) -> AgentSessionResult:
+            passed.update(given)
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        await run_part(
+            store,
+            "atlas",
+            work,
+            node,
+            session_id="s",
+            found=pushed,
+            agents=PartRunAgents(
+                briefing=planner, corpus=corpus, inheriting=PassesThrough()
+            ),
+        )
+
+        plan = passed["plan"]
+        assert isinstance(plan, ArticlePlan)
+        assert plan.sections[0].title == "The live agentic campaign"
+        assert "full attack chain" in planner.task
+        assert "Prose about cyber risk" not in planner.task
+        assert "Cyber Risk" in corpus.topic
+        assert "Prose about cyber risk" not in corpus.topic
+
+    @pytest.mark.asyncio
+    async def test_a_missing_prose_blind_brief_stops_before_the_pipeline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        class Declines(BriefWriter):
+            async def compose(self, task: str, root: Path) -> None:
+                return None
+
+        called = False
+
+        async def record(**given: object) -> AgentSessionResult:
+            nonlocal called
+            called = True
+            raise AssertionError("writing pipeline must not start")
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        outcome = await run_part(
+            ManuscriptStore(root=tmp_path / "manuscripts"),
+            "atlas",
+            work,
+            node,
+            session_id="s",
+            agents=PartRunAgents(
+                briefing=Declines(), corpus=PushesNothing(), inheriting=PassesThrough()
+            ),
+        )
+
+        assert outcome.ended() == "failed"
+        assert "pipeline not started" in outcome.failure
+        assert not called
+
+
 class TestTheReasonsAreWhatLicenseTheScope:
     """Nothing in a part run is in a position to decide what the subsection
     should open with. What asked for the run is."""
@@ -1165,12 +1342,10 @@ class TestAPartIsToldHowLongItsSiblingsRun:
 
         assert (held.floor(), held.ceiling()) == (666, 1500)
 
-    def test_the_budget_reads_as_a_licence_rather_than_a_limit(self) -> None:
-        """A part that genuinely has to grow grows, and what makes that
-        legitimate is a reason on the run saying so."""
+    def test_the_budget_reads_as_a_delivery_contract(self) -> None:
         said = LengthBudget(holds=1000, chapter="Chapter 02", siblings=3).render()
 
-        assert "licence rather than a limit" in said
+        assert "accepted only inside that interval" in said
 
     def test_a_part_with_no_text_is_given_no_budget(self) -> None:
         """Nothing to be measured against, and a range around zero would read
@@ -1427,6 +1602,70 @@ class TestARewriteThatLostItsHeadingIsRefused:
         assert outcome.ended() == "failed"
         kept = store.work_dir("atlas") / "runs" / "s" / PRODUCED_FILE
         assert kept.read_text(encoding="utf-8") == "Prose with no heading.\n"
+
+
+class TestTheAdoptedSuccessorOwnsTheLiveHandoff:
+    """The pipeline draft is provisional until inheritance settles it."""
+
+    @pytest.mark.asyncio
+    async def test_the_live_final_receives_adopted_not_produced_prose(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+        adopted = "## 2.3.2 Cyber Risk\n\nSettled successor.\n"
+
+        class Settles(InheritanceReader):
+            async def read(self, task: str, room: Path) -> Audit:
+                (room / ADOPTED_FILE).write_text(adopted, encoding="utf-8")
+                return Audit()
+
+        class Records(PartPublisher):
+            def __init__(self) -> None:
+                self.published: list[tuple[str, str]] = []
+
+            async def publish(self, doc_id: str, text: str) -> None:
+                self.published.append((doc_id, text))
+
+        async def raw_draft(**passed: object) -> AgentSessionResult:
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(
+                    title="",
+                    content="## 2.3.2 Cyber Risk\n\nRaw pipeline draft.\n",
+                    google_doc_id="doc-7",
+                ),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", raw_draft)
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        publisher = Records()
+
+        outcome = await run_part(
+            store,
+            "atlas",
+            work,
+            node,
+            session_id="s",
+            agents=PartRunAgents(
+                briefing=PlansPart(), corpus=PushesNothing(), inheriting=Settles()
+            ),
+            publisher=publisher,
+        )
+
+        assert outcome.text == adopted
+        assert publisher.published == [("doc-7", adopted)]
+        room = store.work_dir("atlas") / "runs" / "s"
+        handoff = PartHandoff.model_validate_json(
+            (room / HANDOFF_FILE).read_text(encoding="utf-8")
+        )
+        assert handoff.working_doc == "doc-7"
+        assert handoff.adopted_digest == digest_of(adopted)
+        assert "Settled successor" in (Path(work.root) / node.path).read_text(
+            encoding="utf-8"
+        )
 
 
 class TestAPassSaysWhatItIsDoingWhileItIsDoingIt:

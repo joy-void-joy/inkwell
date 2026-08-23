@@ -62,7 +62,7 @@ Every family in `.claude/` vs `.codex/`/`.agents/`, with an explicit decision.
 
 | Family | Claude | Codex | Decision |
 | --- | --- | --- | --- |
-| Skills (26) | `commands/*.md` | `skills/*/SKILL.md` | Parity — same 26 declarations, native formats. |
+| Skills (27) | `commands/*.md` | `skills/*/SKILL.md` | Parity — same 27 declarations, native formats. |
 | Agents (4) | `plugins/lup/agents/*.md` | `.codex/agents/*.toml` | Parity — same 4 declarations, native formats. |
 | Plugin manifest | `.claude-plugin/plugin.json` + marketplace | `.codex-plugin/plugin.json` + `.agents/plugins/marketplace.json` | Parity — native schemas. |
 | Hooks (`hooks.json`, `scripts/policy.py`, `runtime/kernel.py`, `runtime/policy_data.py`, `runtime/evidence.json`) | Structured decisions, edit inspection, autonomous identities | Structured decisions on `PermissionRequest`, one-shot approval correlation and fail-closed uncorrelated exits under `PreToolUse`, opaque patches, identities from the environment | Parity of the semantic kernel (identical `kernel.py`); dispatcher differences intentional per the table above. |

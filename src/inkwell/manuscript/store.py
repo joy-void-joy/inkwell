@@ -28,7 +28,7 @@ reading alongside the loop sees one whole state or the one before it.
 
 import logging
 from pathlib import Path, PurePosixPath
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, StringConstraints, ValidationError
 
@@ -36,6 +36,13 @@ from lup.channels.models import publish_atomic
 
 from inkwell.manuscript.state import WorkState
 from inkwell.manuscript.tree import Manuscript
+
+if TYPE_CHECKING:
+    # Imported for the annotation only: `findings` reaches the corpus and the
+    # agent client, and the store is what a status display loads to read a
+    # tree. Paying for that import to answer "which works are there" would
+    # make the cheapest question in the system one of the most expensive.
+    from inkwell.manuscript.findings import WorkFindings
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +72,15 @@ STATE_FILE = "state.json"
 
 GLOSSARY_DIR = "glossary"
 """Where each part coins its terms, one file per part."""
+
+FINDINGS_FILE = "findings.json"
+"""What the research has been placed on, part by part.
+
+Derived rather than recorded — the corpus holds the findings and the tree holds
+the structure, so this could be computed again from both — and stored anyway,
+because what dirties a part is the *difference* between this assignment and the
+last one, and a difference needs the last one.
+"""
 
 
 def flattened(key: str) -> str:
@@ -173,6 +189,35 @@ class ManuscriptStore(BaseModel, frozen=True):
         path = self.state_path(work)
         path.parent.mkdir(parents=True, exist_ok=True)
         publish_atomic(path, state)
+        return path
+
+    def findings_path(self, work: str) -> Path:
+        """The file holding what the research has been placed on."""
+        return self.work_dir(work) / FINDINGS_FILE
+
+    def load_findings(self, work: str) -> "WorkFindings":
+        """What the research was last placed on, empty where nothing has been.
+
+        An unreadable file reads as empty rather than raising, unlike the
+        state: this is derived, so the worst an empty one costs is one sync
+        reporting every finding as new, which is what a first sync does anyway.
+        """
+        from inkwell.manuscript.findings import WorkFindings
+
+        path = self.findings_path(work)
+        if not path.is_file():
+            return WorkFindings()
+        try:
+            return WorkFindings.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValidationError, OSError):
+            logger.warning("Unreadable findings at %s — sync them again", path)
+            return WorkFindings()
+
+    def publish_findings(self, work: str, found: "WorkFindings") -> Path:
+        """Write what the research has been placed on, atomically."""
+        path = self.findings_path(work)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        publish_atomic(path, found)
         return path
 
     def works(self) -> tuple[str, ...]:

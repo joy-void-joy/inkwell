@@ -36,12 +36,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lup.channels.models import utc_now
 
-type FactKind = Literal["node", "term", "claim"]
-"""The three ways one part of a work can depend on another.
+type FactKind = Literal["node", "term", "claim", "finding"]
+"""The four ways a part of a work can depend on something outside itself.
 
 ``node`` is structural — a link followed, or a part read whole. ``term`` is
 the shared ledger: what something is called. ``claim`` is substantive: a
 result or figure one part established and another leans on.
+
+``finding`` is the one that does not come from another part. It is what the
+research corpus establishes about the subject this part covers, and its
+subject is the part's own key — a part depends on "what is known about what I
+am about", which is a thing that changes without anybody touching the book.
+Keyed that way rather than by document, because a part cannot have consumed a
+document nobody had read when it last ran, and a paper published since is
+precisely the news it most needs.
 """
 
 FACT_KINDS: tuple[FactKind, ...] = get_args(FactKind.__value__)
@@ -55,6 +63,7 @@ KIND_PHRASING: dict[FactKind, str] = {
     "node": "the part",
     "term": "the term",
     "claim": "the claim",
+    "finding": "what the research holds on",
 }
 """How each kind reads in the sentence a part is told why it went dirty."""
 
@@ -77,6 +86,18 @@ class Dependency(BaseModel):
     def render(self) -> str:
         """This dependency as a sentence names it."""
         return f"{KIND_PHRASING[self.kind]} {self.subject!r}"
+
+
+def bears_on(key: str) -> Dependency:
+    """What the corpus knows about one part's subject, as the part depends on it.
+
+    Every part depends on this and nothing has to notice: a subsection on cyber
+    risk is out of date when a paper lands that bears on cyber risk, whether or
+    not its last run happened to read any research at all. Derived rather than
+    recorded per run for exactly that reason — recorded, a part whose last run
+    found nothing would record no dependency and never hear again.
+    """
+    return Dependency(kind="finding", subject=key)
 
 
 class Consumption(BaseModel):

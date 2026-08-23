@@ -134,10 +134,24 @@ class TestTheDraftTravelsUnderItsOwnRole:
     def test_the_role_reaches_the_extraction_agent(self) -> None:
         """Declared rather than inferred: published prose carrying its own
         citations reads the same as a reference to write from."""
-        note = material_role_note("revision_target")
+        assert "revision_target" in material_role_note("revision_target")
 
-        assert "revision_target" in note
-        assert material_role_note("source") == ""
+    def test_writing_from_finished_prose_is_declared_just_as_loudly(self) -> None:
+        """The argument is symmetric and was only ever written down for one
+        side. A part of a book handed to the run that writes that part is
+        polished and carries its own citations because it is somebody's
+        published book — and left to infer, an extractor reads exactly that as
+        the piece being replaced, which makes its section order the plan."""
+        note = material_role_note("source")
+
+        assert "route it `source`" in note
+
+    def test_a_role_no_entry_point_declares_its_material_to_be_says_nothing(
+        self,
+    ) -> None:
+        """A style reference is an input beside the material rather than the
+        material, so a note about it would be a note about nothing."""
+        assert material_role_note("style_reference") == ""
 
 
 class TestARevisionTargetIsNotAnAuthority:

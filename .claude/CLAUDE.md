@@ -22,7 +22,8 @@ Stage prompts and tool lists are declared in `agent/stages.py` and executed by `
 
 That pipeline writes one piece. A book is a tree of them, and `manuscript/` is the build loop over that tree — read a work into parts, ask which are out of date and why, run those, ask again until a pass finds nothing. The revisable unit is a subsection, three levels down, not a chapter.
 
-- **A part run is one ordinary run.** The part's own text is the material, under `revision_target`, and nothing here re-implements a stage. Composed at the outside deliberately, which is what keeps a book-length feature out of `agent/pipeline.py`.
+- **A part run is one ordinary run.** The part's own text is the material, under `source`, and nothing here re-implements a stage. Composed at the outside deliberately, which is what keeps a book-length feature out of `agent/pipeline.py`.
+- **The part is written, not anchored.** Routed as the piece a run *replaces*, the standing text becomes the plan and its section order survives the rewrite. Routed as material, the run answers what the part has to establish — and what the standing text carried is protected by the inheritance pass, whose audit is subtracted from what the two texts actually hold rather than believed.
 - **The loop is the single writer of state.** Parts run concurrently with no lock because each writes prose into a span that cannot overlap another's and hands back what it did.
 - **Propagation keys on what changed, not who changed it**, which is why a pass settles rather than cascading.
 - **The work declares its format**, once at import, and every run inherits it. A part asked to infer the format of a book it sees one subsection of answers differently on the next part.

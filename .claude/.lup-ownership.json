@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generator_version": "0.2.0",
-  "source_digest": "6e8ae00d46a91c18f5dce00a11a9a0629af74e832ef19370510473558149c70d",
+  "source_digest": "02290137790a9613a969260ee5ff8f64e3f0e05bc7fb49060b203afc8a7ea9f5",
   "target_requirements": [
     "claude-code"
   ],
@@ -9,7 +9,7 @@
     {
       "path": ".claude/CLAUDE.md",
       "category": "generated",
-      "sha256": "55bd3f19179fc456cc889774517931268475fcc6d9a8f51b3f4439f86c92a7b5",
+      "sha256": "d8dbc7d508bb7dc70b754345502be65b3e75b735d24f42fd3044deafeac5f631",
       "semantic_id": "harness.guidance",
       "executable": false
     },
@@ -401,7 +401,7 @@
     {
       "path": "docs/inkwell.md",
       "category": "generated",
-      "sha256": "6cd0678d0c2dcdb584de9d24c84423a12d651c19526fd457ebcc5246fd6d4d3d",
+      "sha256": "23f8a87a4e3ae7bb845ef09661ae2d357685979b3dd30704c915606450bbb0c5",
       "semantic_id": "docs.inkwell",
       "executable": false
     },

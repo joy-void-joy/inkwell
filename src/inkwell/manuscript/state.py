@@ -25,7 +25,7 @@ they are now.
 """
 
 from collections.abc import Iterable, Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import blake2b
 from typing import Literal
 
@@ -101,6 +101,22 @@ class PartText(BaseModel):
     )
 
 
+LEASE_TERM = timedelta(hours=12)
+"""How long a lease stands before it is worth asking whether anybody holds it.
+
+A part run is a whole pipeline over somebody's subsection and the longest
+measured one took five hours, so this is generous by a factor of two: the cost
+of being wrong in one direction is a lease reported as abandoned while a run is
+still working, and in the other a part that reads ``running`` for good.
+
+Not a timeout. Nothing reclaims an expired lease, because two runs writing one
+part's span is the one thing the lease exists to prevent and a process that has
+gone quiet is not a process that has stopped. What expiry buys is that somebody
+is *told* — the failure this closes was a part left ``running`` behind a holder
+whose process was gone, with every surface reporting it as work in progress.
+"""
+
+
 class NodeRecord(BaseModel):
     """What this system was told about one part.
 
@@ -126,6 +142,17 @@ class NodeRecord(BaseModel):
         default="",
         description="Identifier of the run holding this part, while one does",
     )
+
+    def abandoned(self, *, term: timedelta = LEASE_TERM) -> bool:
+        """Whether this part has read ``running`` for longer than a run lasts.
+
+        Asked of the record rather than stored on it, for the reason dirtiness
+        is: it is a question about now, and a flag would be a thing somebody
+        has to remember to clear. A part that is not running is never
+        abandoned, whatever its age — a stamp from last March is a part built
+        last March, not a lease nobody honoured.
+        """
+        return self.standing == "running" and utc_now() - self.changed_at > term
 
 
 class BuildStamp(BaseModel):
@@ -275,6 +302,19 @@ class WorkState(BaseModel):
     def active(self) -> tuple[NodeRecord, ...]:
         """Every part something is outstanding on, which a status display shows."""
         return tuple(held for held in self.records if held.standing in ACTIVE_STANDINGS)
+
+    def abandoned(self, *, term: timedelta = LEASE_TERM) -> tuple[NodeRecord, ...]:
+        """Every part held by a run that has said nothing for longer than one lasts.
+
+        What nothing said. A run whose process ended between the pipeline
+        returning and the splice left its part reading ``running``, its work
+        byte-identical to what it was handed, and every surface reporting a
+        rewrite in progress — for as long as anybody left it. Reported rather
+        than reclaimed: whether the run is gone or merely slow is not something
+        another process can tell, and taking the lease from one that is still
+        writing is the one failure the lease exists to prevent.
+        """
+        return tuple(held for held in self.records if held.abandoned(term=term))
 
     def verdict(self, key: str, source: str, found: bool = True) -> NodeVerdict:
         """Whether one part is out of date, given the text it holds now.

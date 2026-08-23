@@ -32,6 +32,7 @@ from inkwell.agent.models import (
     AgentSessionResult,
     ArticlePlan,
     PipelineSnapshot,
+    QuestionChannel,
     SourceRole,
 )
 from inkwell.agent.notes import PipelineNotes
@@ -191,6 +192,7 @@ async def run_session(
     skipped_stages: list[str] | None = None,
     writer_mode: str = "",
     plan: ArticlePlan | None = None,
+    asking: QuestionChannel = "document",
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
@@ -208,6 +210,10 @@ async def run_session(
       section, where the launch declares it. Empty leaves it to the ambient
       setting; a work of many parts declares it, because a book whose parts
       disagreed about it would be drafted two ways
+    - asking: Where this run's open questions reach somebody — as comments on
+      its document, or handed back to whoever launched it. A part of a work
+      hands them back, because its document is a scratch surface one run made
+      and the work has a mailbox that outlives every run
     - plan: A plan composed outside this run, where whoever launched it could
       see more than the run can. The plan stage records it rather than
       deriving one — a part of a book is planned by something that can see the
@@ -284,6 +290,7 @@ async def run_session(
                 skipped_stages=skipped_stages or [],
                 writer_mode=writer_mode,
                 plan=plan,
+                asking=asking,
             )
             output = await runner.run_from(snapshot, restart=bool(restart_from_stage))
         else:
@@ -305,6 +312,7 @@ async def run_session(
                 skipped_stages=skipped_stages or [],
                 writer_mode=writer_mode,
                 plan=plan,
+                asking=asking,
             )
     finally:
         setup.trace_logger.save()

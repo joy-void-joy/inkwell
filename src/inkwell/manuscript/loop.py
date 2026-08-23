@@ -241,7 +241,7 @@ def parked_by(
                 id=question_id(outcome.key, prompt),
                 work=work,
                 asker=outcome.key,
-                addressed_to=escalated_to(manuscript, outcome.key),
+                addressed_to=escalated_to(manuscript, outcome.key, prompt),
                 prompt=prompt,
                 session=outcome.session,
             )

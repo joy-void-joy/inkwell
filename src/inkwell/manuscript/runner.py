@@ -563,12 +563,24 @@ async def run_part(
             writer=reading.briefing,
         ),
         glossary=shared,
+        existing_doc_id=store.load_docs(work).working_doc(node.key) or None,
         session_id=session_id,
         listener=watched.listener,
         trace=watched.trace,
         session_state=watched.state,
         cost_accumulator=watched.cost,
     )
+    # Recorded before the prose is judged, because the document exists either
+    # way: a run that produced nothing still made one, and forgetting it is how
+    # a part that has failed twice comes to own three documents.
+    if result.output and result.output.google_doc_id:
+        store.publish_docs(
+            work,
+            store.load_docs(work).with_working_doc(
+                node.key, result.output.google_doc_id
+            ),
+        )
+
     produced = result.output.content if result.output else ""
     if not produced:
         return PartOutcome(

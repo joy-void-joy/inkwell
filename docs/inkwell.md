@@ -403,6 +403,33 @@ genuinely optional for it — `manuscript import --skip voice --skip assumptions
 — and a skip naming no stage is refused where it is declared, because a typo
 skips nothing and reads afterwards exactly like a stage that ran.
 
+**The document chain runs upward, and is read-only.** A part run makes its own
+Google Doc, and made a new one every time it ran — four runs of one subsection
+made four documents, and a pass over 201 parts makes 201 more nobody opens
+twice. A part's working document is now recorded and reused across its runs, and
+what an author actually reads is projected the other way: `manuscript project`
+writes each chapter into one document with a tab per part, nested the way the
+work is (Docs take three levels of tab, which is chapter/section/subsection),
+plus one document holding the whole work. Projecting is idempotent in both
+directions — a chapter keeps its document, a tab is written over rather than
+added beside — so it is the same command after one part lands and after two
+hundred do.
+
+A tab is a part, which is why there is no routing table. A comment lands in a
+tab, that tab holds one part's prose, and the passage the comment quotes is a
+passage of that part — so `manuscript feedback` traces each comment to its part
+by lookup and asks for that part, with the comment as the reason. Traced by the
+quoted text rather than by Drive's anchor, because an anchor is a position in a
+document rewritten every pass. A comment is taken in exactly once; acted on
+twice it would ask for its part again on every sweep and the loop would never
+settle. A comment quoting text no part holds any more is reported rather than
+dropped.
+
+Read and comment, never edit. Prose is edited in the markdown, where the sweep's
+`source-moved` verdict already notices it. A document that were also an editing
+surface would be a second copy of the book that could disagree with the first,
+and every projection would have to decide which one won.
+
 **Adoption is what makes it affordable.** A work nothing has built is a work
 where every part is out of date. `manuscript import` stamps each part as built
 from the text it already holds — `make -t`, and the same argument — so the

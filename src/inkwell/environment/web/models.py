@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
+from inkwell.agent.client import AgentUpdate
 from inkwell.agent.config import PipelineStage
 from inkwell.environment.entrypoints import (
     CHAPTER_ALONE,
@@ -224,6 +225,13 @@ class BlockEvent(SessionEvent):
     block_type: str
     content: str
     prefix: str
+
+
+class AgentEvent(SessionEvent):
+    """One provider turn started or changed standing."""
+
+    type: Literal["agent"] = "agent"
+    agent: AgentUpdate
 
 
 class CompleteEvent(SessionEvent):

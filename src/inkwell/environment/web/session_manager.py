@@ -496,7 +496,7 @@ class SessionManager:
                 },
             ),
             created_at=handle.created_at.isoformat(),
-            events=handle.events[-200:],
+            events=handle.events,
         )
 
     def detail_from_snapshot(

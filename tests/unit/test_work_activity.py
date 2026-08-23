@@ -19,7 +19,10 @@ import pytest
 from fastapi import HTTPException
 from lup.channels.models import utc_now
 
+from inkwell.agent.client import AgentUpdate
 from inkwell.environment.web.routes import works
+from inkwell.environment.web.models import AgentEvent, ProgressEvent
+from inkwell.environment.web.session_manager import SessionManager
 from inkwell.agent.references import ReferenceStep
 from inkwell.corpus.distillation import DistilStep
 from inkwell.manuscript.attending import Attendance, WorkAgent, attending
@@ -318,6 +321,33 @@ class TestTheThreeLevelsAreOneReply:
         held = works.activity("atlas")
 
         assert [one.about for one in held.working] == ["A paper"]
+
+    def test_one_shot_agents_reach_the_part_activity_roster(self) -> None:
+        sessions = SessionManager()
+        handle = sessions.adopt("s")
+        started = AgentUpdate(label="brief", address="brief")
+        handle.events = [
+            AgentEvent(agent=started),
+            AgentEvent(agent=started.model_copy(update={"status": "completed"})),
+            AgentEvent(agent=AgentUpdate(label="inherit", address="inherit")),
+        ]
+
+        held = works.agents_of("s", sessions)
+
+        assert [(one.address, one.running) for one in held] == [
+            ("brief", False),
+            ("inherit", True),
+        ]
+
+    def test_a_live_run_detail_keeps_its_complete_event_history(self) -> None:
+        sessions = SessionManager()
+        handle = sessions.adopt("s")
+        handle.events = [ProgressEvent(message=str(index)) for index in range(250)]
+
+        detail = sessions.get_session_detail("s")
+
+        assert detail is not None
+        assert len(detail.events) == 250
 
     def test_a_pass_reading_documents_does_not_look_idle(
         self, recorded: ManuscriptStore

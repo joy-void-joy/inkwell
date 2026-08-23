@@ -24,14 +24,15 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from inkwell.agent.client import AgentUpdate
 from inkwell.agent.cohort import roster_of
 from inkwell.agent.config import manuscript_store
 from inkwell.agent.glossary import DECLARED_VOCABULARY, load_chapter_glossary
 from inkwell.agent.stages import unknown_format
-from inkwell.environment.web.models import SessionStatus
-from inkwell.environment.web.session_manager import SessionHandle
+from inkwell.environment.web.models import AgentEvent, SessionStatus
+from inkwell.environment.web.session_manager import SessionHandle, SessionManager
 from inkwell.environment.web.work_loops import (
     LoopAlreadyRunning,
     WorkLoopManager,
@@ -102,6 +103,10 @@ class LoopHolder(BaseModel):
     def running(self, work: str) -> bool:
         """Whether a loop over this work is in flight in this process."""
         return self.loops is not None and self.loops.running(work)
+
+    def session_manager(self) -> SessionManager | None:
+        """The session surface receiving this loop's part-run events."""
+        return self.loops.sessions if self.loops is not None else None
 
 
 holder = LoopHolder()
@@ -904,9 +909,33 @@ class WorkActivity(BaseModel):
         )
 
 
-def agents_of(session: str) -> tuple[RunningAgent, ...]:
-    """Every agent one part's run holds, read off the cohort's own roster."""
-    return tuple(
+def agents_of(
+    session: str, sessions: SessionManager | None = None
+) -> tuple[RunningAgent, ...]:
+    """Every agent in one part, from live events plus the durable cohort roster."""
+    handle = sessions.handle_for(session) if sessions is not None else None
+
+    def live_updates() -> Iterator[AgentUpdate]:
+        for event in handle.events if handle is not None else ():
+            try:
+                yield AgentEvent.model_validate(event.model_dump()).agent
+            except ValidationError:
+                continue
+
+    updates = tuple({update.id: update for update in live_updates()}.values())
+    observed = tuple(
+        RunningAgent(
+            address=update.address,
+            kind=update.label,
+            task=update.model or "",
+            running=update.status == "running",
+            summary=update.status if update.status == "completed" else "",
+            error=update.error,
+        )
+        for update in updates
+    )
+    addresses = {one.address for one in observed}
+    cohort = tuple(
         RunningAgent(
             address=held.address,
             kind=held.actor.kind,
@@ -916,7 +945,9 @@ def agents_of(session: str) -> tuple[RunningAgent, ...]:
             error=held.error,
         )
         for held in roster_of(session)
+        if held.address not in addresses
     )
+    return (*observed, *cohort)
 
 
 def working_agents(store: ManuscriptStore, work: str) -> tuple[WorkingAgent, ...]:
@@ -952,7 +983,11 @@ def activity(work: str) -> WorkActivity:
         work=work,
         loop=holder.status_of(work),
         parts=held,
-        agents={one.key: agents_of(one.session) for one in held if one.session},
+        agents={
+            one.key: agents_of(one.session, holder.session_manager())
+            for one in held
+            if one.session
+        },
         working=working_agents(store, work),
     )
 

@@ -21,6 +21,7 @@ from inkwell.agent.book import BookStore
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.agent.client import PROVIDER_LOGIN
 from inkwell.corpus.semantics import DEFAULT_LOCAL_MODEL, SemanticLayer
+from inkwell.agent.references import VerdictStore
 from inkwell.corpus.storage import CorpusStore
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,17 @@ run, so a record kept in the session notes tree would die with the run that
 made it and chapter nine would have nothing of chapter one left to read.
 Resolving it against the shared checkout also means every worktree reads one
 book, rather than each starting a fresh one under whichever branch it is on.
+"""
+
+REFERENCES_DIR = profile_store_root() / "references"
+"""Where a cited URL's verdict lives unless configured otherwise.
+
+Beside ``corpus/`` and for the same argument, pointed at a different thing. A
+reference's verdict is a fact about that URL rather than about the run that
+cited it, and a book cites its sources over and over — 1,396 citation instances
+to 785 references across the Atlas. Kept per session it would be re-established
+per citation; kept here, the first part to cite a page pays for it and every
+part after reads it.
 """
 
 MANUSCRIPTS_DIR = profile_store_root() / "manuscripts"
@@ -402,6 +414,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    references_path: str = Field(
+        default=str(REFERENCES_DIR),
+        validation_alias="INKWELL_REFERENCES_PATH",
+        description=(
+            "Where what was established about each cited URL is kept — one "
+            "file per reference, keyed on the URL. Shared across sessions and "
+            "worktrees, so a page cited by twenty parts is opened once."
+        ),
+    )
+
     manuscripts_path: str = Field(
         default=str(MANUSCRIPTS_DIR),
         validation_alias="INKWELL_MANUSCRIPTS_PATH",
@@ -545,6 +567,17 @@ def book_store() -> BookStore:
     first of its book or the ninth.
     """
     return BookStore(root=Path(current_settings().books_path).expanduser())
+
+
+def verdict_store() -> VerdictStore:
+    """What has been established about each cited URL, for this context.
+
+    Resolved here rather than held by a run, for the third instance of the
+    argument the book and manuscript stores make: the record outlives every run
+    that writes to it, and a part reaches it identically whether it is the
+    first of its work to cite a page or the twentieth.
+    """
+    return VerdictStore(root=Path(current_settings().references_path).expanduser())
 
 
 def manuscript_store() -> ManuscriptStore:

@@ -26,9 +26,21 @@ appending the change facts does. Keeping them apart is what lets a sync report
 
 import logging
 from collections.abc import Callable, Iterable, Iterator
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from inkwell.agent.references import (
+    DEFAULT_REFERENCE_CONCURRENCY,
+    ReferenceReader,
+    ReferenceReport,
+    ReferenceStep,
+    ReferenceVerdict,
+    VerdictStore,
+    check_references,
+    unsound,
+    verdicts_for,
+)
 from inkwell.corpus.distillation import (
     DEFAULT_DISTIL_CONCURRENCY,
     DistilReport,
@@ -39,8 +51,10 @@ from inkwell.corpus.distillation import (
     findings_for,
 )
 from inkwell.corpus.retrieval import CorpusEntry, CorpusFilter, read_index
-from inkwell.corpus.storage import CorpusStore
+from inkwell.corpus.storage import CorpusStore, now_stamp
 from inkwell.corpus.tags import TagVocabulary
+from inkwell.manuscript.graph import source_text
+from inkwell.manuscript.inventory import cited_in
 from inkwell.manuscript.findings import (
     CORPUS_ORIGIN,
     Bearing,
@@ -216,6 +230,151 @@ def publish(store: ManuscriptStore, synced: ResearchSync) -> tuple[str, ...]:
     )
     store.publish_findings(synced.work, synced.found)
     return synced.dirtied()
+
+
+class ReferenceSweep(BaseModel):
+    """What checking a work's references found, before anything is written.
+
+    Held apart from the research sync for the reason the sync is held apart
+    from publishing: the reading is a cost and the dirtying is a decision, and
+    a book with forty dead links is not automatically a book somebody wants to
+    rewrite forty parts of today.
+    """
+
+    work: str = Field(description="The work this is about")
+    checked: ReferenceReport = Field(
+        default_factory=ReferenceReport, description="What the checking did"
+    )
+    arrivals: tuple[Bearing, ...] = Field(
+        default=(),
+        description="Bad references placed on the parts that carry them, new "
+        "since the standing assignment",
+    )
+
+    def dirtied(self) -> tuple[str, ...]:
+        """Every part these would put out of date, each once."""
+        return tuple(dict.fromkeys(one.key for one in self.arrivals))
+
+    def render(self) -> str:
+        """This sweep as the line somebody deciding whether to publish reads."""
+        return (
+            f"{self.checked.summary()}\n"
+            f"{len(self.arrivals)} bad reference(s) new, on "
+            f"{len(self.dirtied())} part(s)"
+        )
+
+    def detail(self) -> Iterator[str]:
+        """Each part that would go out of date, and what would do it."""
+        for key in self.dirtied():
+            for one in self.arrivals:
+                if one.key == key:
+                    yield f"{key} — {one.claim}"
+
+
+def cited_by_part(manuscript: Manuscript) -> dict[str, tuple[str, ...]]:
+    """Every URL each part of a work cites, read off the prose.
+
+    Read rather than recorded, because a citation is in the text and the text
+    is what ships: a record of what a run *intended* to cite would miss the one
+    an author pasted in by hand, which is exactly the one nothing has checked.
+    """
+    root = Path(manuscript.root)
+    # lup: ignore[dict-str-payload] — a cache keyed by whatever paths a work has
+    opened: dict[str, str | None] = {}
+    return {
+        node.key: cited_in(source_text(root, node, opened) or "")
+        for node in manuscript.leaves()
+    }
+
+
+def faulted(verdict: ReferenceVerdict, key: str) -> Bearing:
+    """One bad reference as the news the part carrying it is told.
+
+    A bearing rather than a channel of its own, because it is the same kind of
+    thing a finding is: something established about this part's subject that
+    its last run did not know. Travelling that way, it dirties the part through
+    the sweep, reaches the next run's brief, and needs nothing new anywhere.
+    """
+    wrong = verdict.note or "nothing is there"
+    return Bearing(
+        key=key,
+        document=verdict.canonical_url or verdict.url,
+        claim=f"a source this part cites does not hold up: {wrong}",
+        caveat=verdict.establishes,
+        cited=verdict.url,
+        why="checked as a reference, not as the claim it is cited for",
+    )
+
+
+async def sweep_references(
+    store: ManuscriptStore,
+    verdicts: VerdictStore,
+    work: str,
+    manuscript: Manuscript,
+    *,
+    reader: ReferenceReader | None = None,
+    concurrency: int = DEFAULT_REFERENCE_CONCURRENCY,
+    progress: Callable[[ReferenceStep], None] | None = None,
+) -> ReferenceSweep:
+    """Open every reference this work cites that nothing has opened, and place
+    the ones that do not hold up on the parts that carry them.
+
+    Writes the verdicts, because they are keyed on the URL and are true whatever
+    anybody decides next; returns the placements, because publishing them is
+    what puts parts out of date.
+    """
+    by_part = cited_by_part(manuscript)
+    checked = await check_references(
+        verdicts,
+        (url for urls in by_part.values() for url in urls),
+        reader,
+        concurrency=concurrency,
+        progress=progress,
+    )
+
+    def placed() -> Iterator[Bearing]:
+        """Each part paired with every bad reference it carries."""
+        for key, urls in by_part.items():
+            for verdict in unsound(verdicts_for(verdicts, urls)):
+                yield faulted(verdict, key)
+
+    standing = store.load_findings(work)
+    found = WorkFindings(
+        bearings=(*standing.bearings, *placed()),
+        vocabulary=standing.vocabulary,
+        assigned_at=now_stamp(),
+    )
+    return ReferenceSweep(
+        work=work,
+        checked=checked,
+        arrivals=arrived(standing, found),
+    )
+
+
+def publish_references(
+    store: ManuscriptStore, swept: ReferenceSweep
+) -> tuple[str, ...]:
+    """Record the bad references and dirty the parts that carry them.
+
+    Appended to what the research already placed rather than replacing it: the
+    two are the same kind of news about the same parts, and a sweep that wrote
+    its own set whole would silently retract every finding the corpus placed.
+    """
+    standing = store.load_findings(swept.work)
+    state = store.load_state(swept.work)
+    store.publish_state(
+        swept.work, state.changed(CORPUS_ORIGIN, changes(swept.arrivals))
+    )
+    store.publish_findings(
+        swept.work,
+        standing.model_copy(
+            update={
+                "bearings": (*standing.bearings, *swept.arrivals),
+                "assigned_at": now_stamp(),
+            }
+        ),
+    )
+    return swept.dirtied()
 
 
 def work_filter(tags: Iterable[str], *, since: str = "") -> CorpusFilter:

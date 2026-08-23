@@ -34,13 +34,21 @@ from pydantic import ValidationError
 
 from lup.devtools.utils import JSON_OPT, output_json
 
-from inkwell.agent.config import corpus_root, manuscript_store
+from inkwell.agent.config import corpus_root, manuscript_store, verdict_store
+from inkwell.agent.references import (
+    DEFAULT_REFERENCE_CONCURRENCY,
+    distinct,
+    unchecked,
+)
 from inkwell.corpus.distillation import DEFAULT_DISTIL_CONCURRENCY
 from inkwell.corpus.registry import corpus_vocabulary
 from inkwell.corpus.storage import CorpusStore
 from inkwell.manuscript.research import (
+    cited_by_part,
     plan as research_plan,
     publish as research_publish,
+    publish_references,
+    sweep_references,
     sync as research_sync,
     work_filter,
 )
@@ -655,4 +663,70 @@ def research_cmd(
         typer.echo("Left alone. The readings are kept, so saying yes later is free.")
         return
     dirtied = research_publish(store, synced)
+    typer.echo(f"{len(dirtied)} part(s) are now out of date — `manuscript run {work}`")
+
+
+@app.command("references")
+def references_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    concurrency: Annotated[
+        int, typer.Option(help="How many references are opened at once")
+    ] = DEFAULT_REFERENCE_CONCURRENCY,
+    dry_run: Annotated[
+        bool, typer.Option(help="Price the checking without opening anything")
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Publish what it finds without asking"),
+    ] = False,
+) -> None:
+    """Check every source this work cites, once per distinct reference.
+
+    A book cites the same pages over and over — 1,396 citation instances to 785
+    references across the Atlas, one page carrying 27 of them — so checking per
+    citation pays repeatedly to reach the same answer. What is checked is the
+    *reference*, not the claim it is cited for: whether the URL still resolves,
+    what it is, who published it, and when. Whether a source supports the
+    sentence citing it is a question about that sentence and belongs to the
+    fact-check reviewer.
+
+    A reference that does not hold up is placed on the parts that cite it, the
+    same way a research finding is, so the loop picks those parts up with a
+    reason naming the source. Placing is asked about separately: a book with
+    forty dead links is not automatically a book somebody wants to rewrite forty
+    parts of today.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    refuse_unrooted(work, tree)
+    verdicts = verdict_store()
+
+    by_part = cited_by_part(tree)
+    cited = [url for urls in by_part.values() for url in urls]
+    pending = unchecked(verdicts, cited)
+    typer.echo(
+        f"{len(cited)} citation(s) to {len(distinct(cited))} reference(s), "
+        f"{len(pending)} of them not yet checked."
+    )
+    if dry_run:
+        return
+    if not cited:
+        typer.echo("This work cites nothing — nothing to check.")
+        return
+
+    swept = asyncio.run(
+        sweep_references(store, verdicts, work, tree, concurrency=concurrency)
+    )
+    typer.echo(swept.render())
+    for line in swept.detail():
+        typer.echo(f"  {line}")
+    if not swept.arrivals:
+        typer.echo("\nEvery reference holds up — no part goes out of date.")
+        return
+    if not yes and not typer.confirm(
+        f"\nPut {len(swept.dirtied())} part(s) out of date?", default=False
+    ):
+        typer.echo("Left alone. The verdicts are kept, so saying yes later is free.")
+        return
+    dirtied = publish_references(store, swept)
     typer.echo(f"{len(dirtied)} part(s) are now out of date — `manuscript run {work}`")

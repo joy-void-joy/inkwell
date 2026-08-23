@@ -266,6 +266,33 @@ spent (`--dry-run` says how many documents the filter reaches that nothing has
 read), and publishing is asked about separately, because finding that 34 parts
 have gone out of date should not by itself commit anybody to rewriting them.
 
+### Checking a reference, once, for the whole book
+
+A book cites the same pages over and over: 873 citation instances across the
+Atlas reach 702 distinct references, and one Our World in Data page carries
+dozens on its own. Checking per citation pays repeatedly to reach the same
+answer, so a verdict is kept under the URL — canonicalised, so a fragment or a
+trailing slash does not buy a second reading — and the first part to cite a page
+pays for every part after it.
+
+What is cached is the *reference*, not the claim. Whether a source supports the
+sentence citing it is a question about that sentence, and two parts citing one
+paper for two different claims are asking two different things; that belongs to
+the fact-check reviewer. What is the same for both is what the paper **is** —
+whether the URL still resolves, its title, who published it, when, and what it
+establishes in a sentence. That is the half a book gets wrong at scale (a dead
+link, or a figure attributed to the wrong report) and the half that does not
+depend on who is citing it.
+
+`manuscript references <work>` runs it, and a reference that does not hold up is
+placed on the parts that cite it as a *bearing* — the same model a research
+finding travels as, so it dirties those parts through the ordinary sweep and
+reaches the next run's brief with nothing new anywhere. Dead and doubted are
+counted apart, because one wants a replacement and the other wants the citation
+corrected. A check that could not be made records nothing, unlike a distillation
+that found nothing: a reference the network refused today is one to try again,
+not one to record as dead.
+
 ## A work of many parts
 
 The pipeline writes one piece. A textbook is a tree of them — the AI Safety

@@ -140,34 +140,32 @@ uv run lup-devtools trace show <session_id>
 
 Every instinct you have about how long software takes was learned from human teams, whose implementation time is scarce. Yours is not: what you would estimate as months completes in an afternoon. Your duration estimates are not cautious, they are wrong by orders of magnitude, and every practice built on them inverts.
 
-**Never scope, defer, or reject work from a predicted duration.** Scope by content — what changes, what it touches, how it is verified. A calendar figure in a plan is noise from someone else's constraints: delete it and re-derive the plan. Prototype-first exists to protect scarce human effort, and for you the real implementation costs what the throwaway was supposed to cost, so build it and let review cut scope afterward rather than pre-shrinking the attempt.
+**Never scope, defer, or reject work from a predicted duration.** Scope by content — what changes, what it touches, how it is verified. A calendar figure in a plan is noise from someone else's constraints: delete it and re-derive the plan. Prototype-first exists to protect scarce human effort, and for you the real implementation costs what the throwaway was supposed to, so build it and let review cut scope rather than pre-shrinking the attempt.
 
-Catch the reflex in the act. "Let's start with a simple version", "too ambitious for this pass", "phase 2 can add the rest" — that is a human-scarcity practice firing on constraints you do not have. When you notice it, ask what is actually expensive here besides the imagined schedule.
+Catch the reflex in the act. "Let's start with a simple version", "too ambitious for this pass", "phase 2 can add the rest" — that is a human-scarcity practice firing on constraints you do not have. Ask what is actually expensive besides the imagined schedule.
 
 ## Agent Vocabulary
 
 Two kinds of delegated agents look alike and must not be conflated:
 
 - A **native subagent** ("subagent" for short) is dispatched by the harness: its delegation tool hands a focused task to a named role defined upfront, inside the main agent's session — shared trace, shared metrics.
-- A **nested agent** (also called a *tool-subagent*) runs inside a tool call: the handler opens one independent session via `query()` and folds the result into the tool's response. The harness never sees it — to the calling agent it is just a tool.
+- A **nested agent** (a *tool-subagent*) runs inside a tool call: the handler opens one independent session via `query()` and folds the result into the tool's response. The harness never sees it — to the caller it is just a tool.
 
-Guidance that says "subagent" unqualified means the native kind. `docs/orchestration.md` carries the full delegation catalog — subagent, nested, background, deferred tool schemas — and when to reach for each. `docs/patterns.md` carries the recurring *code* shapes: declaration-plus-renderer, closed-by-construction, the typed-matcher router, and the engine-versus-surface split.
+Guidance that says "subagent" unqualified means the native kind. `docs/orchestration.md` carries the delegation catalog and when to reach for each; `docs/patterns.md` carries the recurring *code* shapes.
 
 ## The Gates You Will Meet
 
-You are not expected to hold this repository's conventions in memory. Gates enforce them, each names what it caught and how to answer, and their diagnostics are written to be read cold. What is worth knowing up front is that they exist, and what a refusal from each one looks like.
+You are not expected to hold this repository's conventions in memory. Gates enforce them, and their diagnostics — which name what was caught and how to answer — are written to be read cold. What is worth knowing up front is only that they exist.
 
-**The rule checker.** Executable rules in anti-pattern, boundary, spelling, and architecture families run on every edit and in `dev check`. A denial cites its rule id, and `docs/rules.md` indexes every rule with the shape it matches, its diagnostic, and the module that enforces it — generated from the same registry that runs, so it cannot drift from what stopped you.
+**The rule checker.** Anti-pattern, boundary, spelling, and architecture rules run on every edit and in `dev check`. A denial cites its rule id and spells the suppression where the rule admits one; one marked **refused** admits none, its replacement being right every time. `# noqa`, `# type: ignore`, and `# pyright: ignore` are forbidden shapes rather than suppressions.
 
-Suppress one deliberate site with `# lup: ignore[rule-id]` and a reason, comma-separating ids where a line trips several. The directive sits on the line it guards, or alone directly above it when the reason will not fit inline; nowhere else reaches, and one placed in a file's opening comment block applies file-wide. A bare `# lup: ignore` still parses but is reported untyped. A stale directive blocks. `uv run lup-devtools dev directives` measures every one in the tree against that placement, so a directive silencing nothing is found by asking rather than by tripping over it later. A rule marked **refused** takes no directive at all — its replacement is right every time, so a directive there could only express a decision to keep the defect, and the way past is to write what the diagnostic names. `# noqa`, `# type: ignore`, and `# pyright: ignore` are forbidden shapes rather than suppressions.
+**The permission policy.** Every shell command, URL scope, and edit in a batch is classified, and a denial names what tripped and the recovery. `dev policy '<command>'` answers before you spend a turn on it, and `# lup: escalate: <why>` as a command's leading line promotes a deny or ask into an approval question carrying that reason.
 
-**The permission policy.** Every shell command, URL scope, and edit in a batch is classified. Segments join deny > ask > defer > allow, and malformed input fails conservatively. A denial names what tripped and the recovery, so you rarely need to read the lattice first. `uv run lup-devtools dev policy '<command>'` answers the same question before you spend a turn on it, and says why. `# lup: escalate: <why>` as the leading line of a shell command promotes a classified deny or ask into an approval question carrying that reason.
-
-**The edit budget.** A change block of at most three "real" changed lines is auto-allowed, so split large changes — imports in one edit, logic in another. A file declared human-owned surfaces every change as an approval instead: propose the exact edit as a question and let the user apply it, rather than writing it yourself.
+**The edit budget.** A change block of at most three "real" changed lines is auto-allowed, so split large changes — imports in one edit, logic in another. A file declared human-owned surfaces every change as an approval: propose the exact edit and let the user apply it.
 
 **The drift check.** Generated trees are regenerated, never hand-edited and never hand-merged. Take either side of a conflict, regenerate, and let the check confirm it settled.
 
-`docs/permissions.md` carries the full lattice, what counts as a real changed line, how the escalation marker scopes, and the recovery when work is denied as unjudged; `docs/contributing.md` carries the suppression marker's scoping.
+`docs/rules.md` indexes every rule from the registry that runs, `docs/permissions.md` carries the lattice and what counts as a real changed line, and `docs/contributing.md` carries how a suppression is scoped.
 
 ## Development Workflow
 
@@ -179,34 +177,19 @@ Work in a **git worktree**, not a branch switched in place, and never commit _co
 
 ### Merge Conflict Resolution
 
-**Never silently drop code during conflict resolution.** The bias is toward inclusion — keeping both sides is always safer than losing features. A rename on one side must not swallow an addition on the other.
+**Never silently drop code during conflict resolution.** Keeping both sides is safer than losing features, and a rename on one side must not swallow an addition on the other. Before completing any merge, **audit for deletions**: compare the result against both parents and verify that every removed function, parameter, or command went deliberately, not as a side effect of choosing one side.
 
-Before completing any merge, **audit for deletions**: compare the result against both parents and verify that every removed function, parameter, or command was intentionally removed, not lost as a side effect of choosing one conflict side.
-
-Use `/lup:merge` (with no argument) for guided conflict resolution. See the command for the full decision tree.
+Use `/lup:merge` for guided conflict resolution; the command carries the decision tree.
 
 **Generated artifacts are regenerated, never hand-merged.** Take either side of the conflict, regenerate, and let the drift check confirm it settled.
 
 ### Commit Guidelines
 
-- **Commit before responding** — Don't accumulate changes across responses
-- **Commit early, commit often** — Frequent commits provide checkpoints
-- **Keep commits atomic** — If you need "and" in your message, it should be two commits
-- **History will be rebased** — Don't worry about perfect messages during development
-- **Meaningful final commits** — After rebasing, each commit should tell what changed and why
+- **Commit before responding**, and often — frequent commits are checkpoints
+- **Keep commits atomic** — if you need "and" in the message, it is two commits
+- **History will be rebased**, so a message need not be perfect while developing; after rebasing, each commit should tell what changed and why
 
 **Format:** `type(scope): description`
-
-| Type | Use |
-| --- | --- |
-| `feat` | New feature or capability |
-| `fix` | Bug fix |
-| `refactor` | Neither fixes a bug nor adds a feature |
-| `docs` | Documentation only |
-| `test` | Adding or updating tests |
-| `chore` | Maintenance — dependencies, build config |
-| `meta` | Harness content and the trees it generates: guidance, settings, skills, hooks |
-| `data` | Generated data and outputs |
 
 ---
 
@@ -234,23 +217,21 @@ Default to the **strongest** tier for the main agent, every subagent, reviewer, 
 
 A gate catches a violation once it is written. These change what gets written, so they are here rather than in the index.
 
-- **Compiling is stronger than emitting** — build an artifact from a typed declaration and it cannot diverge; transport checked source and a checker can only warn once it already has. When tempted to add a check that two things still match, ask whether one can be derived from the other instead (`docs/patterns.md`).
-- **Structured data, not strings** — reaching for `re`, `.replace()`, `.split()`, or slicing to process structured data means a parser was missed, and `docs/conventions.md` names one per format. Never hand-parse an agent's output either: take a structured output through a Pydantic model.
-- **Placement decides the package** — would another project built on this library want it? Then it belongs to the library. Only this application? Then it stays in the application. The same test applies to values, not only to code, which is why a judgement reaches a caller as an overridable default rather than as a constant they would have to fork.
-- **Never truncate** — the container grows to fit what it holds, not the reverse. Cut only where a document format or a function contract imposes a hard limit, never for printing space, log volume, or ease of reading, and where a cut is forced save the full copy and point at it from what survives. A cut artifact looks exactly like a complete one, which is the whole difficulty: `[:200]` on something an author wrote loses the rest with nothing said, and the reader who needed it cannot tell it was ever there.
+- **Compiling is stronger than emitting** — build an artifact from a typed declaration and it cannot diverge. Tempted to check that two things still match, ask whether one can be derived from the other (`docs/patterns.md`).
+- **Structured data, not strings** — reaching for `re`, `.replace()`, `.split()`, or slicing to process structured data means a parser was missed, and `docs/conventions.md` names one per format. Never hand-parse an agent's output either — take it through a Pydantic model.
+- **Placement decides the package** — would another project built on this library want it? Then it belongs to the library; only this application, and it stays there. The same test applies to values, not only to code.
+- **Never truncate** — the container grows to fit what it holds, not the reverse. Cut only where a document format or a function contract imposes a hard limit, never for printing space, log volume, or ease of reading; where a cut is forced, save the full copy and point at it. A cut artifact looks exactly like a complete one, which is the whole difficulty: `[:200]` loses the rest with nothing said, and the reader who needed it cannot tell.
 - **The code is the source of truth** — it should read as though it had always been written this way. Never reference what code used to do, and never write "now", "new", "updated", "fixed", or "changed" in a comment. Change history belongs in commit messages.
-- Reach for `for` and comprehensions over `while`, and for `match`/`case` over an `if`/`elif` chain dispatching on a value or a range.
+- Reach for `for` and comprehensions over `while`, and `match`/`case` over an `if`/`elif` chain dispatching on a value.
 
-Some rules shape a design before any gate could catch it. Know these by name and read them in `docs/rules.md` while choosing a shape rather than after being stopped: `own-model-dispatch` (a union answers through its members, never through `isinstance` over our own types), and `abc-capability` (a capability ABC is an engine, never a surface a consumer holds).
+Some rules shape a design before any gate could catch it. Know these by name while choosing a shape rather than after being stopped: `own-model-dispatch` (a union answers through its members, never through `isinstance` over our own types), and `abc-capability` (a capability ABC is an engine, never a surface a consumer holds).
 
 ### Exceptions No Rule Can See
 
 A rule states the shape it refuses. These carve-outs are ours, and its diagnostic does not carry them:
 
-- **Barrel files.** `__all__` and `__init__.py` re-exports are refused, and import goes directly to the module that defines the symbol. The exception is a standalone package's own top-level `__init__.py`, which may declare a public API that way — the package root only, never a subpackage.
-- **Private prefixes.** Nothing is private, so a `_` prefix is refused on functions, methods, classes, and constants. An unused parameter (`_context`, `_exc_type`) is exempt: that is a linting convention, not a privacy one. What to do instead depends on why you wanted the prefix:
-  - A helper that genuinely should not pollute the module namespace **nests inside its only caller**, which hides it without claiming privacy.
-  - A wrapper whose only purpose is to call one other function, with no logic of its own, is not a helper worth hiding at all — inline it and let the caller reach the target directly.
+- **Barrel files.** `__all__` and `__init__.py` re-exports are refused; import directly from the module that defines the symbol. The exception is a standalone package's own top-level `__init__.py`, which may declare a public API that way — the package root only, never a subpackage.
+- **Private prefixes.** Nothing is private, so a `_` prefix is refused on functions, methods, classes, and constants. An unused parameter (`_context`, `_exc_type`) is exempt: a linting convention, not a privacy one. A helper that should not pollute the module namespace **nests inside its only caller**, which hides it without claiming privacy; a wrapper whose only purpose is to call one other function is not worth hiding — inline it.
 
 ### Inline `# lup:` Notes
 

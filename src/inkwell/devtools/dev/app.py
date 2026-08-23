@@ -12,7 +12,6 @@ import lup.devtools.dev.check as check
 import inkwell.devtools.harness.catalog as catalog
 from lup.devtools.dev.app import DevDeclarations, create_dev_app
 from inkwell.devtools.harness.composition import REPOSITORY_WIDE, TARGETS
-from inkwell.devtools.harness.content.guidance import document as guidance_document
 
 
 def declared() -> DevDeclarations:
@@ -34,7 +33,6 @@ app = create_dev_app(
     declared=declared,
     native_targets=TARGETS,
     repository_writers=REPOSITORY_WIDE,
-    guidance=guidance_document(catalog.declared_hook_set().rules),
     relocate_roots=[Path("src"), Path("tests")],
 )
 

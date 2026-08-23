@@ -93,6 +93,11 @@ def worktree_path(path_text: str) -> str:
     return Path(path_text).resolve().relative_to(root).as_posix()
 
 
+def is_git_marker(marker: Path) -> bool:
+    """Whether *marker* carries Git metadata rather than only its name."""
+    return marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file())
+
+
 def worktree_root(path_text: str) -> str:
     """The checkout a path belongs to, or "" when it belongs to none.
 
@@ -111,7 +116,7 @@ def worktree_root(path_text: str) -> str:
     # already a checkout root would otherwise be answered for by whatever
     # encloses it — or by nothing at all.
     for root in [resolved, *resolved.parents]:
-        if (root / ".git").exists():
+        if is_git_marker(root / ".git"):
             return str(root)
     return ""
 

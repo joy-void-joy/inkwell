@@ -214,6 +214,26 @@ In a file's opening comment block the marker goes file-wide — a standalone
 `# lup: ignore[rule-id]` disables only that rule, the way `# pyright: ignore`
 works for files.
 
+### A customization marker reads two ways
+
+`# lup: template: <decision>` is the one marker whose meaning depends on which
+repository it sits in, and `[tool.lup] template` in `pyproject.toml` says
+which. While that flag stands the repository is the scaffold itself and its
+customization markers are inventory: `dev check` counts them and says no
+more, because a permanent wall of text would sit in front of the notes
+somebody is actually owed. `dev init` clears the flag in the same rewrite that
+renames the package, and from then on every marker still standing lists in
+`dev check` as a decision this domain has not made.
+
+`uv run lup-devtools dev todos` walks them either way — an alias for
+`dev comments --kind template` — and initialization goes through them one by
+one. Answering one means writing this domain's own code where the scaffold's
+example stood, which leaves no original ask for a `solved:` claim to be
+checked against, so the marker is deleted rather than converted, exactly as
+`ignore` is. Advisory in both readings: a domain that means to leave one
+standing writes `# lup: defer:` and says why, which is the sentence it should
+have to write rather than a red branch it learns to ignore.
+
 ## Tests
 
 One standard decides whether a test earns its place: **would it catch a

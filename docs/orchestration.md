@@ -211,9 +211,14 @@ difference between the two cases.
 `reaching()` fold `roster.jsonl`, so a console in another process resolves the
 same address the cohort's own tools do, and a restart rebuilds the roster.
 
-**Library support:** `lup.actors.tools.create_cohort_tools` serves the three
-verbs an agent needs — list what I spawned, say something to one of them, say
-something back to whoever spawned me. `lup.actors.mailbox.QuestionMailbox`
+**Library support:** `lup.actors.tools.create_cohort_tools` serves the verbs an
+agent needs — list what I spawned, read what one of them has found so far, say
+something to one of them, say something back to whoever spawned me. Reading is
+what makes steering more than a guess: a spawn's turn events reach the journal
+as they happen, so `spawn_read` folds its own words, its calls and its
+refusals out of that record while it is still working, and a redirect can be
+aimed at what the agent is doing rather than at what it was asked.
+`lup.actors.mailbox.QuestionMailbox`
 adds decisions that park a run, on the same storage; messages ride a stream
 and never park anything, which is why "a message stalled the run" is not
 expressible rather than merely avoided.

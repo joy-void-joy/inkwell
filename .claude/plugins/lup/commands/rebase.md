@@ -61,7 +61,7 @@ Fix any failure this branch introduced. A failure the base already carries is no
 
 ### 5. Push and open PR
 
-Open the PR **now, before the history is rebuilt** -- never after. The force-push in step 8 lands in the PR timeline as a force-push event, so the PR carries both the history as it was actually worked and the cleaned sequence that replaced it. Creating it after the rebuild saves one body update and throws that whole trace away.
+Open the PR **now, before the history is rebuilt** -- never after. The force-push in step 9 lands in the PR timeline as a force-push event, so the PR carries both the history as it was actually worked and the cleaned sequence that replaced it. Creating it after the rebuild saves one body update and throws that whole trace away.
 
 ```bash
 uv run lup-devtools dev pr push --json
@@ -86,7 +86,13 @@ Write the body to a file and pass `--body-file`. A body worth reading has headin
 
 ### 7. Reset and rebuild commits
 
+Mark where the history was before touching it. The rebuild is the one step
+that can lose a file, and a rebuild that dropped one looks exactly like a
+rebuild that did not -- the tree is clean either way, and the checks pass
+because what is missing is what would have failed them.
+
 ```bash
+git branch -f rebase-backup HEAD
 git reset --soft <base>
 ```
 
@@ -96,7 +102,21 @@ All changes are now staged. For each logical unit of work:
 - Order logically: dependencies first, then features, then polish
 - Use conventional format: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`
 
-### 8. Force push and update PR
+### 8. Prove the rebuild lost nothing
+
+Rebuilt commits are a claim about the same tree, so check it against the mark
+before the force-push makes it unrecoverable:
+
+```bash
+git diff rebase-backup HEAD --quiet && git branch -D rebase-backup
+```
+
+Silent means identical, and the backup is gone because it has served. Any
+output is a file the rebuild dropped: find it in `git diff rebase-backup HEAD
+--stat`, commit it where it belongs, and check again. Never force-push past
+this -- the mark is the only copy of what the branch used to hold.
+
+### 9. Force push and update PR
 
 ```bash
 uv run lup-devtools dev pr push --force --json
@@ -115,5 +135,6 @@ Return the PR URL to the user.
 - **Never rebase dev/main/master**
 - **Confirm before force push**
 - **Use --force** (not --force-with-lease) -- after `git reset --soft`, --force-with-lease rejects the diverged ref
+- **Never force-push an unverified rebuild**: step 8 is what makes the cleaned history a claim you checked rather than one you made
 - **Keep meaningful history**: Don't squash everything into one commit
 - **Write good messages**: Future you will thank present you

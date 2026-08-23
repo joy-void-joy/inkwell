@@ -49,6 +49,7 @@ from inkwell.manuscript.chapters import (
     routed,
     unrouted,
 )
+from inkwell.manuscript.planner import plan_work
 from inkwell.manuscript.research import (
     cited_by_part,
     distil_watch,
@@ -691,6 +692,58 @@ def research_cmd(
         return
     dirtied = research_publish(store, synced)
     typer.echo(f"{len(dirtied)} part(s) are now out of date — `manuscript run {work}`")
+
+
+@app.command("plan")
+def plan_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    part: Annotated[
+        list[str] | None,
+        typer.Option("--part", help="Plan only these parts, by key"),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option(help="Say what would be planned without planning it")
+    ] = False,
+) -> None:
+    """Plan every outstanding part at once, from a reader that has seen the book.
+
+    The other producer of the brief a part run works to. A run derives its own
+    from the part and its neighbours and never opens the book, which is what
+    keeps testing one subsection cheap; this reads the whole work and can
+    therefore see what the outstanding parts are about to do to each other —
+    three parts each about to introduce the same paper, a definition ordered
+    after the part that leans on it, a figure being corrected in one place and
+    left wrong in three.
+
+    What it writes is one brief per part. The next run of each part works to it
+    instead of deriving its own, and a part it did not plan derives one as
+    before, so this is worth running before a full pass and skippable before a
+    single one.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    refuse_unrooted(work, tree)
+    state = store.load_state(work)
+    found = sweep(state, readings(tree, declared_vocabulary(store, work)))
+    outstanding = narrowed(schedulable(found, state), tuple(part or ()))
+
+    for verdict in outstanding:
+        typer.echo(verdict.render())
+    typer.echo(f"\n{len(outstanding)} part(s) to plan")
+    if dry_run:
+        return
+    if not outstanding:
+        typer.echo("nothing outstanding — nothing to plan")
+        return
+
+    briefs = asyncio.run(plan_work(tree, outstanding, store.load_findings(work)))
+    store.publish_briefs(work, briefs)
+    for one in briefs.crosscut:
+        typer.echo(f"  across: {one.render()}")
+    typer.echo(
+        f"\n{len(briefs.briefs)} brief(s) written — `manuscript run {work}` "
+        f"works to them"
+    )
 
 
 @app.command("project")

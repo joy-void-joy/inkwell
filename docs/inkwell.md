@@ -395,6 +395,25 @@ a full pass wants. Both emit an `ArticlePlan`, so nothing downstream knows which
 one it got, and a deriver that comes back with nothing leaves the run planning
 for itself rather than failing.
 
+There are two producers of that brief, emitting the same `ArticlePlan` so that
+nothing downstream can tell which one it got. The per-part deriver above is one.
+`manuscript plan` is the other: it reads the whole work and plans every
+outstanding part at once, which is what a full pass runs. What only it can see is
+what the outstanding parts are about to do to *each other* — three parts each
+about to introduce the same paper, a definition ordered after the part that leans
+on it, a figure corrected in one place and left wrong in three — and no reviewer
+reaches those either, because a reviewer reads one part and asks whether it is
+good. It reads the book once for that, then plans a chapter at a time against
+what it found: one call emitting 201 briefs is one call to lose, and a chapter is
+the unit whose parts actually share anything.
+
+A planned brief is stamped with the text it was planned against, so a run uses
+it only while its part still holds that text. Reused after the part is
+rewritten, it would be a plan for a piece that no longer exists and would pull
+the part back toward a draft two revisions old. A part nothing planned derives
+its own, so planning is worth running before a full pass and skippable before a
+single one.
+
 Recorded rather than skipped, deliberately. A declared skip would save exactly
 the same planner call and silently take the Plan tab, the section tabs, and the
 plan on disk with it; the first thing to notice would be whichever later stage

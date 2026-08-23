@@ -72,7 +72,9 @@ from inkwell.agent.glossary import (
     NodeGlossary,
     load_chapter_glossary,
 )
+from inkwell.agent.models import ArticlePlan
 from inkwell.manuscript.brief import BriefWriter, compose
+from inkwell.manuscript.planner import article_plan
 from inkwell.manuscript.budget import LengthBudget, budget_for
 from inkwell.manuscript.facts import (
     Consumption,
@@ -91,6 +93,7 @@ from inkwell.manuscript.splice import (
     held_text,
     spliced,
 )
+from inkwell.manuscript.state import digest_of
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 from inkwell.manuscript.vocabulary import Abbreviation, terms_used
@@ -465,6 +468,48 @@ def part_instruction(
     )
 
 
+async def planned_for(
+    store: ManuscriptStore,
+    work: str,
+    manuscript: Manuscript,
+    node: ManuscriptNode,
+    material: Path,
+    room: Path,
+    *,
+    instruction: str,
+    figures: tuple[Figure, ...],
+    budget: LengthBudget,
+    found: WorkFindings,
+    writer: BriefWriter | None,
+) -> ArticlePlan | None:
+    """The plan this run works to, from whichever reader has one.
+
+    A book planner's where a pass ran one, because that reader saw what this
+    part is about to do to its siblings and this part cannot. This part's own
+    deriver otherwise, because a run testing one subsection must not trigger a
+    book read to get a plan. Both emit the same model over the same inputs, so
+    nothing after this can tell which reader composed it — which is the whole
+    reason there are two.
+    """
+    held = store.load_briefs(work).brief_for(
+        node.key, digest_of(material.read_text(encoding="utf-8"))
+    )
+    if held is not None:
+        logger.info("Running %s to the brief a book planner composed", node.key)
+        return article_plan(manuscript, node, held)
+    return await compose(
+        manuscript,
+        node,
+        material,
+        room,
+        instruction=instruction,
+        figures=figures,
+        budget=budget,
+        found=found,
+        writer=writer,
+    )
+
+
 def own_change(key: str) -> ProposedChange:
     """The fact every rewrite publishes: this part's text is not what it was.
 
@@ -625,7 +670,9 @@ async def run_part(
         target_format=manuscript.target_format,
         writer_mode=manuscript.writer_mode,
         skipped_stages=list(manuscript.skipped_stages),
-        plan=await compose(
+        plan=await planned_for(
+            store,
+            work,
             manuscript,
             node,
             material,

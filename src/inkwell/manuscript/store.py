@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from inkwell.manuscript.attending import AttendanceLog
     from inkwell.manuscript.chapters import WorkDocs
     from inkwell.manuscript.findings import WorkFindings
+    from inkwell.manuscript.planner import WorkBriefs
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,15 @@ STATE_FILE = "state.json"
 
 GLOSSARY_DIR = "glossary"
 """Where each part coins its terms, one file per part."""
+
+BRIEFS_FILE = "briefs.json"
+"""What a book planner decided each outstanding part should become.
+
+Stored because planning and running are different steps: a pass plans from
+above every outstanding part and then runs them, concurrently and over hours.
+Held only in the planner's memory, a brief would have to be handed down through
+the loop — which would make the loop a thing that knows about briefs.
+"""
 
 DOCS_FILE = "docs.json"
 """Which documents this work projects into, and which each part's runs reuse.
@@ -243,6 +253,36 @@ class ManuscriptStore(BaseModel, frozen=True):
         from inkwell.manuscript.attending import attending
 
         return attending(self.work_dir(work))
+
+    def briefs_path(self, work: str) -> Path:
+        """The file holding what a book planner decided each part should become."""
+        return self.work_dir(work) / BRIEFS_FILE
+
+    def load_briefs(self, work: str) -> "WorkBriefs":
+        """What was last planned, empty where nothing was.
+
+        An unreadable one reads as empty rather than raising: a brief is a
+        better plan, not a required one, and a part with none derives its own.
+        """
+        from inkwell.manuscript.planner import WorkBriefs
+
+        path = self.briefs_path(work)
+        if not path.is_file():
+            return WorkBriefs()
+        try:
+            return WorkBriefs.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValidationError, OSError):
+            logger.warning(
+                "Unreadable briefs at %s — parts will plan for themselves", path
+            )
+            return WorkBriefs()
+
+    def publish_briefs(self, work: str, briefs: "WorkBriefs") -> Path:
+        """Write what a book planner decided, atomically."""
+        path = self.briefs_path(work)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        publish_atomic(path, briefs)
+        return path
 
     def docs_path(self, work: str) -> Path:
         """The file holding which documents this work projects into."""

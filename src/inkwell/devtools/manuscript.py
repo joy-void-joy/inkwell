@@ -49,6 +49,7 @@ from inkwell.manuscript.chapters import (
     routed,
     unrouted,
 )
+from inkwell.manuscript.attending import WorkAgent
 from inkwell.manuscript.planner import plan_work
 from inkwell.manuscript.research import (
     cited_by_part,
@@ -736,10 +737,37 @@ def plan_cmd(
         typer.echo("nothing outstanding — nothing to plan")
         return
 
-    briefs = asyncio.run(plan_work(tree, outstanding, store.load_findings(work)))
+    attendance = store.attending(work)
+    for verdict in outstanding:
+        node = tree.node(verdict.key)
+        attendance.opening(
+            WorkAgent(
+                id=f"brief:{verdict.key}",
+                kind="brief",
+                about=node.title if node is not None else verdict.key,
+                part=verdict.key,
+            )
+        )
+    try:
+        briefs = asyncio.run(plan_work(tree, outstanding, store.load_findings(work)))
+    except (Exception, KeyboardInterrupt) as failure:
+        for verdict in outstanding:
+            attendance.closed(
+                f"brief:{verdict.key}",
+                failure=str(failure) or failure.__class__.__name__,
+            )
+        raise
+    for verdict in outstanding:
+        concerns = [one for one in briefs.concerns if one.key == verdict.key]
+        attendance.closed(
+            f"brief:{verdict.key}",
+            detail=f"settled with {len(concerns)} adversarial concern(s)",
+        )
     store.publish_briefs(work, briefs)
     for one in briefs.crosscut:
         typer.echo(f"  across: {one.render()}")
+    for one in briefs.concerns:
+        typer.echo(f"  lens: {one.render()}")
     typer.echo(
         f"\n{len(briefs.briefs)} brief(s) written — `manuscript run {work}` "
         f"works to them"

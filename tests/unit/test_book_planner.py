@@ -16,13 +16,21 @@ from inkwell.agent.models import SectionPlan
 from inkwell.manuscript.brief import ComposedBrief
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.planner import (
+    BriefConcern,
+    ChapterPlans,
     CrossCut,
     CrossCutting,
+    LensReading,
     PartPlan,
+    ProposedConcern,
     WorkBriefs,
     article_plan,
     by_chapter,
+    chapter_block,
+    neighbour_block,
     outstanding_block,
+    review_chapter,
+    settle_reviews,
 )
 from inkwell.manuscript.state import NodeVerdict, digest_of
 from inkwell.manuscript.store import ManuscriptStore
@@ -149,6 +157,47 @@ class TestWhatTheWholeBookReaderIsShown:
         assert outstanding_block(work, outstanding("09/09/9.9.9"), WorkFindings()) == ""
 
 
+class TestTheLedgerReachesThePlanner:
+    """The planner cannot respect the scope of a rewrite it was never shown."""
+
+    def test_the_reason_a_part_is_outstanding_sits_beside_its_text(
+        self, tmp_path: Path
+    ) -> None:
+        from inkwell.manuscript.findings import WorkFindings
+
+        work = read_manuscript(two_chapters(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        said = chapter_block(
+            work,
+            (node,),
+            WorkFindings(),
+            outstanding("02/03/2.3.2"),
+        )
+
+        assert "build ledger" in said
+        assert "a paper landed" in said
+
+
+class TestTheBoundaryLensCanReadSettledNeighbours:
+    """Only showing outstanding parts hides the exact boundary being reviewed."""
+
+    def test_the_parts_immediately_before_and_after_are_shown(
+        self, tmp_path: Path
+    ) -> None:
+        work = read_manuscript(two_chapters(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        said = neighbour_block(work, (node,))
+
+        assert "02/03/2.3.1" in said
+        assert "04/01/4.1.1" in said
+        assert "engineered pathogens" in said
+        assert "Prose about ranges" in said
+
+
 class TestACrossCuttingFindingReachesTheChapterItIsAbout:
     """A chapter shown every finding about the book would be shown mostly
     findings about parts it is not planning."""
@@ -271,6 +320,116 @@ class TestWhatWasPlannedSurvivesThePlanner:
         )
 
         assert store.load_briefs("atlas").crosscut[0].finding == "something"
+
+    def test_the_adversarial_readings_are_kept_with_the_settled_briefs(
+        self, tmp_path: Path
+    ) -> None:
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        store.publish_briefs(
+            "atlas",
+            WorkBriefs(
+                concerns=(
+                    BriefConcern(
+                        key="02/03/2.3.2",
+                        lens="ledger",
+                        finding="the plan exceeds what changed",
+                    ),
+                )
+            ),
+        )
+
+        assert store.load_briefs("atlas").concerns[0].lens == "ledger"
+
+
+@pytest.mark.asyncio
+async def test_every_brief_is_read_through_each_independent_lens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inkwell.manuscript import planner
+    from inkwell.manuscript.findings import WorkFindings
+
+    work = read_manuscript(two_chapters(tmp_path))
+    node = work.node("02/03/2.3.2")
+    assert node is not None
+    prefixes: list[str] = []
+
+    async def read(*args: object, **kwargs: object) -> LensReading:
+        prefix = str(kwargs["prefix"])
+        assert "max_thinking_tokens" not in kwargs
+        prefixes.append(prefix)
+        return LensReading(
+            concerns=[
+                ProposedConcern(key="02/03/2.3.2", finding=f"found by {prefix}"),
+                ProposedConcern(key="invented", finding="belongs nowhere"),
+            ]
+        )
+
+    monkeypatch.setattr(planner, "query", read)
+    concerns = await review_chapter(
+        work,
+        (node,),
+        outstanding("02/03/2.3.2"),
+        WorkFindings(),
+        CrossCut(),
+        (PartPlan(key=node.key, brief=SETTLED),),
+    )
+
+    assert set(prefixes) == {
+        "brief-lens-ledger",
+        "brief-lens-standing-text",
+        "brief-lens-neighbours",
+        "brief-lens-sources",
+    }
+    assert {one.lens for one in concerns} == {
+        "ledger",
+        "standing-text",
+        "neighbours",
+        "sources",
+    }
+    assert {one.key for one in concerns} == {"02/03/2.3.2"}
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_omits_a_plan_does_not_erase_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inkwell.manuscript import planner
+    from inkwell.manuscript.findings import WorkFindings
+
+    work = read_manuscript(two_chapters(tmp_path))
+    nodes = tuple(
+        node
+        for key in ("02/03/2.3.1", "02/03/2.3.2")
+        if (node := work.node(key)) is not None
+    )
+    proposed = tuple(
+        PartPlan(key=node.key, brief=SETTLED, digest="planned") for node in nodes
+    )
+    repaired = SETTLED.model_copy(update={"thesis": "The reviewed thesis."})
+
+    async def repair(*args: object, **kwargs: object) -> ChapterPlans:
+        return ChapterPlans(plans=[PartPlan(key="02/03/2.3.2", brief=repaired)])
+
+    monkeypatch.setattr(planner, "query", repair)
+    settled = await settle_reviews(
+        work,
+        nodes,
+        outstanding(*(one.key for one in nodes)),
+        WorkFindings(),
+        CrossCut(),
+        proposed,
+        (
+            BriefConcern(
+                key="02/03/2.3.2",
+                lens="ledger",
+                finding="scope drift",
+            ),
+        ),
+    )
+
+    assert settled[0].brief == SETTLED
+    assert settled[1].brief.thesis == "The reviewed thesis."
+    assert all(one.digest for one in settled)
 
 
 @pytest.mark.asyncio

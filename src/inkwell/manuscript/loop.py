@@ -336,6 +336,10 @@ async def run_pass(
     """
     watch = watching if watching is not None else PartRunWatch()
     mailbox = PartMailbox(root=store.work_dir(work))
+    # Read once for the whole pass rather than once per part: it is one file,
+    # and two hundred parts opening it would be two hundred reads of the same
+    # bytes to answer two hundred different questions of it.
+    research = store.load_findings(work)
     held = readings(manuscript, vocabulary)
     opening = store.load_state(work)
     picked = narrowed(schedulable(sweep(opening, held), opening), only)
@@ -378,6 +382,7 @@ async def run_pass(
                     vocabulary=vocabulary,
                     observers=watch.opening(verdict.key, session),
                     inheriting=inheriting,
+                    found=research,
                 )
                 return ending
             finally:

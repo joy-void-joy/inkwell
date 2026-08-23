@@ -69,8 +69,10 @@ from inkwell.manuscript.facts import (
     Consumption,
     Dependency,
     ProposedChange,
+    bears_on,
     consumption_of,
 )
+from inkwell.manuscript.findings import WorkFindings, briefing
 from inkwell.manuscript.inheritance import Dropped, InheritanceReader, settle
 from inkwell.manuscript.inventory import Figure, inventory_of
 from inkwell.manuscript.links import links_from
@@ -309,6 +311,7 @@ def part_instruction(
     *,
     figures: tuple[Figure, ...] = (),
     budget: LengthBudget | None = None,
+    research: str = "",
 ) -> str:
     """What a part's run is for, said beside the material rather than in a prompt.
 
@@ -352,7 +355,9 @@ def part_instruction(
         "already established, and do not rename anything the shared glossary "
         "already settles — look it up and adopt it. Question the part's own "
         "claims where they have dated. Return this part alone, opening with "
-        "its own heading exactly as the material spells it." + licensed(reasons)
+        "its own heading exactly as the material spells it."
+        + licensed(reasons)
+        + (f"\n\n{research}" if research else "")
     )
 
 
@@ -455,6 +460,7 @@ async def run_part(
     scratch: Path | None = None,
     observers: PartRunObservers | None = None,
     inheriting: InheritanceReader | None = None,
+    found: WorkFindings | None = None,
 ) -> PartOutcome:
     """Take one part through the pipeline and hand back what it produced.
 
@@ -467,6 +473,10 @@ async def run_part(
 
     Does not touch the work's state, because the loop owns that and needs the
     outcome in hand before deciding anything.
+
+    ``found`` is what the research has been placed on this part, read off the
+    store where a caller does not already hold it. A pass holds it, because a
+    pass reads it once for two hundred parts.
     """
     target = Path(manuscript.root) / node.path
     if not target.is_file():
@@ -499,6 +509,10 @@ async def run_part(
                 reasons,
                 figures=inventory_of(current).figures,
                 budget=budget_for(manuscript, node),
+                research=briefing(
+                    found if found is not None else store.load_findings(work),
+                    node.key,
+                ),
             ),
         ],
         material_role="source",
@@ -538,6 +552,7 @@ async def run_part(
         dropped=adoption.dropped,
         consumed=consumption_of(
             (
+                bears_on(node.key),
                 *terms_used(adoption.text, vocabulary),
                 *links_from(manuscript, node, adoption.text),
             )

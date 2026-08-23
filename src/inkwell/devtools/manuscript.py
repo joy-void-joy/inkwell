@@ -33,7 +33,16 @@ import typer
 
 from lup.devtools.utils import JSON_OPT, output_json
 
-from inkwell.agent.config import manuscript_store
+from inkwell.agent.config import corpus_root, manuscript_store
+from inkwell.corpus.distillation import DEFAULT_DISTIL_CONCURRENCY
+from inkwell.corpus.registry import corpus_vocabulary
+from inkwell.corpus.storage import CorpusStore
+from inkwell.manuscript.research import (
+    plan as research_plan,
+    publish as research_publish,
+    sync as research_sync,
+    work_filter,
+)
 from inkwell.agent.glossary import (
     DECLARED_VOCABULARY,
     load_chapter_glossary,
@@ -527,3 +536,95 @@ def reaches_cmd(
         typer.echo(f"{node.key:<24} {node.title}")
     typer.echo("")
     typer.echo(f"{len(leaning)} part(s) lean on {kind} {subject!r}")
+
+
+@app.command("research")
+def research_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    tag: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--tag",
+            help="Only documents carrying this tag, spelled as `corpus tags` "
+            "spells it — 'subject:governance', not 'governance'. Repeat for "
+            "several: all of them have to hold. Omit to reach the whole corpus",
+        ),
+    ] = None,
+    since: Annotated[
+        str, typer.Option(help="Only documents published on or after this date")
+    ] = "",
+    source: Annotated[
+        list[str] | None,
+        typer.Option("--source", help="Only these corpus sources"),
+    ] = None,
+    concurrency: Annotated[
+        int, typer.Option(help="How many documents are read at once")
+    ] = DEFAULT_DISTIL_CONCURRENCY,
+    dry_run: Annotated[
+        bool, typer.Option(help="Price the reading without doing any of it")
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            help="Publish what it finds without asking, for an unattended run",
+        ),
+    ] = False,
+) -> None:
+    """Bring what the corpus has read to bear on this work.
+
+    Reads whatever documents the filter reaches and nothing has read yet, places
+    what they establish onto the parts it bears on, and puts those parts out of
+    date so the loop picks them up with a reason naming the paper.
+
+    Reading a document is a delegated session over the whole of it, so this
+    spends in proportion to how much of the corpus the filter reaches that has
+    not been read before — and never twice for one document, because a reading
+    is cached under the document's content and a document's content is what
+    decides what it establishes. `--dry-run` prices it without spending it.
+
+    Publishing is asked about separately, because it is the half that moves
+    anything: a sync that finds thirty-four parts have gone out of date has
+    committed nobody to rewriting them until somebody says so.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    refuse_unrooted(work, tree)
+    corpus = CorpusStore(root=corpus_root())
+    vocabulary = corpus_vocabulary()
+    where = work_filter(tag or (), since=since)
+    sources = tuple(source or ())
+
+    priced = research_plan(corpus, store, work, where, vocabulary, sources=sources)
+    typer.echo(priced.render())
+    if dry_run:
+        return
+    if not priced.reached:
+        typer.echo("The filter reaches nothing — check the tags against `corpus tags`.")
+        raise typer.Exit(1)
+
+    synced = asyncio.run(
+        research_sync(
+            corpus,
+            store,
+            work,
+            tree,
+            where,
+            vocabulary,
+            sources=sources,
+            concurrency=concurrency,
+        )
+    )
+    typer.echo(synced.render())
+    for line in synced.detail():
+        typer.echo(f"  {line}")
+    if not synced.arrivals:
+        typer.echo("\nNothing new — no part goes out of date.")
+        return
+    if not yes and not typer.confirm(
+        f"\nPut {len(synced.dirtied())} part(s) out of date?", default=False
+    ):
+        typer.echo("Left alone. The readings are kept, so saying yes later is free.")
+        return
+    dirtied = research_publish(store, synced)
+    typer.echo(f"{len(dirtied)} part(s) are now out of date — `manuscript run {work}`")

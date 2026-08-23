@@ -30,7 +30,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from inkwell.manuscript.facts import Consumption, Dependency, consumption_of
+from inkwell.manuscript.facts import (
+    Consumption,
+    Dependency,
+    bears_on,
+    consumption_of,
+)
 from inkwell.manuscript.links import links_from
 from inkwell.manuscript.splice import held_text
 from inkwell.manuscript.state import (
@@ -126,6 +131,12 @@ def readings(
     no record and is exactly the case that most needs an answer. What a run
     later reports supersedes this for that part — it knows what it actually
     reached for, where this knows only what the prose implies.
+
+    Every part depends on what the research holds about its own subject, and
+    that one is derived rather than reported for a reason the others are not:
+    a run that found no research to read would report no dependency on it, and
+    the part would then never hear about a paper published afterwards — which
+    is exactly the part most in need of hearing.
     """
     root = Path(manuscript.root)
     declared = tuple(vocabulary)
@@ -143,6 +154,7 @@ def readings(
                 found=held is not None,
                 consumed=consumption_of(
                     (
+                        bears_on(node.key),
                         *terms_used(text, declared),
                         *links_from(manuscript, node, text),
                     )

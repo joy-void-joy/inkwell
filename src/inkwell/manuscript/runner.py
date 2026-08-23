@@ -4,10 +4,17 @@ The build system's compile step. Everything above this decides *which* part to
 run and *why*; this runs it, returns its prose to the file it came from, and
 records what the run read and what it moved so the parts leaning on it hear.
 
-**A part run is a revision, not a fresh piece.** The part's own text is the
-run's material, under ``revision_target`` — the pipeline path that already
-exists for exactly this. Nothing here re-implements a stage; a part is one
-ordinary run whose source happens to be a span of somebody's book.
+**A part run writes the part, and inherits from the standing text.** The part's
+own text is the run's material, under ``source`` — content to write *from*, and
+deliberately not ``revision_target``. Routed as the piece the run replaces, the
+standing text becomes the plan: its sections are the run's sections, so the
+most pressing thing in a subsection lands fourth because a heading that was
+already fourth was already there, and thirty research questions open "The draft
+says…". Routed as material, the run answers what this part of the book has to
+establish. What the standing text carries that a fresh draft would not is then
+:mod:`.inheritance`'s to protect, checked by subtraction rather than by
+instruction. Nothing here re-implements a stage; a part is one ordinary run
+whose material happens to be a span of somebody's book.
 
 **Composed at the outside, deliberately.** The pipeline is not told it is
 running inside a work. It is handed material, and what comes back is spliced
@@ -57,12 +64,15 @@ from inkwell.agent.glossary import (
     NodeGlossary,
     load_chapter_glossary,
 )
+from inkwell.manuscript.budget import LengthBudget, budget_for
 from inkwell.manuscript.facts import (
     Consumption,
     Dependency,
     ProposedChange,
     consumption_of,
 )
+from inkwell.manuscript.inheritance import Dropped, InheritanceReader, settle
+from inkwell.manuscript.inventory import Figure, inventory_of
 from inkwell.manuscript.links import links_from
 from inkwell.manuscript.splice import (
     HeadingLost,
@@ -79,8 +89,11 @@ logger = logging.getLogger(__name__)
 REVISION_FILE = "part.md"
 """What a part's text is called where a run is handed it.
 
-A file rather than the text inline, because ``revision_target`` takes sources
-the extract stage opens, and a part of a book is exactly a document.
+A file rather than the text inline, because the extract stage opens sources and
+a part of a book is exactly a document. It is also what the inheritance pass
+reads the successor against, which is the second reason it is a file: two
+passes need the same standing text, and the second runs after the first has
+finished with everything it held.
 """
 
 PRODUCED_FILE = "produced.md"
@@ -171,6 +184,11 @@ class PartOutcome(BaseModel):
     changes: tuple[ProposedChange, ...] = Field(
         default=(), description="What the run moved that others may depend on"
     )
+    dropped: tuple[Dropped, ...] = Field(
+        default=(),
+        description="What the standing text carried that the successor does "
+        "not, each with the reason it does without it",
+    )
     questions: tuple[str, ...] = Field(
         default=(), description="What the run needs answered before it is done"
     )
@@ -232,8 +250,65 @@ def around(manuscript: Manuscript, node: ManuscriptNode) -> str:
     return "\n".join(f"- {held.key} {held.title} — {root / held.path}" for held in near)
 
 
+def licensed(reasons: tuple[str, ...]) -> str:
+    """What this run is licensed to change, which is what asked for it.
+
+    Why the part is being revised is what bounds the revision. "Something you
+    depend on changed, and here is what" is the difference between a rewrite
+    that addresses the change and one that rewrites the part on general
+    principle and moves the book for no reason — and, pointed the other way,
+    a reason about what the part is *for* is the only thing that licenses
+    reshaping it. Nothing else in the run is in a position to decide what this
+    subsection should open with.
+
+    A part with no reasons is one somebody asked for or one nothing has built,
+    and saying so is better than saying nothing: a writer told only to write
+    infers a licence from the size of the subject.
+    """
+    if not reasons:
+        return (
+            "\n\nNothing specific is outstanding on this part — it was asked "
+            "for, or the work has never built it. Write it as it should stand, "
+            "and treat its scale and its place in the chapter as settled."
+        )
+    asked = "\n".join(f"- {reason}" for reason in reasons)
+    return (
+        f"\n\nWhat has changed since this was last written:\n{asked}\n"
+        "That list is the scope. A reason naming a claim asks you to settle "
+        "that claim; a reason about what this part is for licenses reshaping "
+        "it. Where nothing here asks for a change, the standing text's "
+        "argument is the best evidence there is of what this part establishes."
+    )
+
+
+def constrained(figures: tuple[Figure, ...]) -> str:
+    """The figures this part carries, handed over as fixed rather than inferred.
+
+    A number and an image path are facts about the book, not choices a writer
+    makes: Figure 2.13 is the thirteenth figure of chapter two because twelve
+    come before it in chapters this run cannot see. A writer left to infer them
+    renumbers from one, or composes a figure of its own around a path it found
+    in the material, and either way the chapter acquires two conventions.
+    """
+    if not figures:
+        return ""
+    listed = "\n".join(f"- {figure.render()} — {figure.image}" for figure in figures)
+    return (
+        f"\n\nThis part carries {len(figures)} figure(s), and their numbering is "
+        f"the book's rather than yours:\n{listed}\n"
+        "Reproduce each block exactly as the material spells it — same number, "
+        "same image path, same caption — wherever your argument wants it. Never "
+        "renumber one and never build a new figure around an image path."
+    )
+
+
 def part_instruction(
-    manuscript: Manuscript, node: ManuscriptNode, reasons: tuple[str, ...] = ()
+    manuscript: Manuscript,
+    node: ManuscriptNode,
+    reasons: tuple[str, ...] = (),
+    *,
+    figures: tuple[Figure, ...] = (),
+    budget: LengthBudget | None = None,
 ) -> str:
     """What a part's run is for, said beside the material rather than in a prompt.
 
@@ -241,17 +316,13 @@ def part_instruction(
     already travels by — the material and what it is for reach the planner the
     same way, so nothing here has to reach inside the pipeline to place it.
 
-    Why the part is being revised is included where it is known. "Something you
-    depend on changed, and here is what" is the difference between a rewrite
-    that addresses the change and one that rewrites the part on general
-    principle and moves the book for no reason.
+    What it does *not* say is that the part's structure is to be kept. That
+    instruction, sitting beside material routed as the piece being replaced, is
+    what produced a subsection whose seven headings survived a full rewrite in
+    their original order with thirty-four new ones hung off them. The standing
+    text reaches the run as material; its sequence is where the last draft put
+    things, and this says so.
     """
-    because = (
-        "\n\nWhat has changed since this was last written:\n"
-        + "\n".join(f"- {reason}" for reason in reasons)
-        if reasons
-        else ""
-    )
     neighbours = around(manuscript, node)
     reachable = (
         "\n\nThe rest of the work is on disk under "
@@ -265,15 +336,23 @@ def part_instruction(
         if neighbours
         else ""
     )
+    scale = f"\n\n{budget.render()}" if budget is not None and budget.render() else ""
     return (
-        f"You are revising one part of a larger work: {placed(manuscript, node)}."
+        f"You are writing one part of a larger work: {placed(manuscript, node)}."
         + reachable
-        + "\n\nKeep the author's structure, voice, and argument. Do not "
-        "reintroduce what the work has already established, and do not rename "
-        "anything the shared glossary already settles — look it up and adopt "
-        "it. Revise for clarity and for currency, questioning the part's own "
+        + "\n\nThe material you are given is this part as the work holds it "
+        "now. It is the current state of the passage and the best evidence of "
+        "what the passage is for — it is not the shape of what you are "
+        "writing. The order its headings happen to be in is where the last "
+        "draft left them, and a development that matters more than everything "
+        "around it does not belong fourth because a heading was already there."
+        + constrained(figures)
+        + scale
+        + "\n\nKeep the author's voice. Do not reintroduce what the work has "
+        "already established, and do not rename anything the shared glossary "
+        "already settles — look it up and adopt it. Question the part's own "
         "claims where they have dated. Return this part alone, opening with "
-        "its own heading exactly as it stands." + because
+        "its own heading exactly as the material spells it." + licensed(reasons)
     )
 
 
@@ -375,13 +454,18 @@ async def run_part(
     vocabulary: tuple[Abbreviation, ...] = (),
     scratch: Path | None = None,
     observers: PartRunObservers | None = None,
+    inheriting: InheritanceReader | None = None,
 ) -> PartOutcome:
     """Take one part through the pipeline and hand back what it produced.
 
-    Keeps the prose in the run's own room before putting it anywhere else, so
-    what a run wrote outlives the run whatever becomes of the splice. Writes it
-    back into the work, because that is what the next part to read it must see;
-    does not touch the work's state, because the loop owns that and needs the
+    Three things in order, and the order is the point. The pipeline writes the
+    part from the material; the inheritance pass settles that draft against the
+    text the work holds, so nothing the author put there goes missing without a
+    reason; and only then is the settled text spliced in. Each step's output is
+    kept in the run's own room before the next one runs, so what a run wrote
+    outlives the run whatever becomes of the steps after it.
+
+    Does not touch the work's state, because the loop owns that and needs the
     outcome in hand before deciding anything.
     """
     target = Path(manuscript.root) / node.path
@@ -407,8 +491,17 @@ async def run_part(
 
     watched = observers if observers is not None else PartRunObservers()
     result = await run_session(
-        sources=[str(material), part_instruction(manuscript, node, reasons)],
-        material_role="revision_target",
+        sources=[
+            str(material),
+            part_instruction(
+                manuscript,
+                node,
+                reasons,
+                figures=inventory_of(current).figures,
+                budget=budget_for(manuscript, node),
+            ),
+        ],
+        material_role="source",
         target_format=manuscript.target_format,
         glossary=shared,
         session_id=session_id,
@@ -424,10 +517,15 @@ async def run_part(
             session=session_id,
             failure="the run finished without producing any prose",
         )
+    (room / PRODUCED_FILE).write_text(produced, encoding="utf-8")
+
+    adoption = await settle(material, room / PRODUCED_FILE, room, reader=inheriting)
+    if not adoption.settled():
+        logger.warning("Nothing was adopted for %s: %s", node.key, adoption.render())
+        return PartOutcome(key=node.key, session=session_id, failure=adoption.render())
 
     try:
-        (room / PRODUCED_FILE).write_text(produced, encoding="utf-8")
-        written_back(manuscript, node, produced)
+        written_back(manuscript, node, adoption.text)
     except (HeadingLost, PartNotFound, OSError) as failure:
         logger.exception("Could not put %s back into %s", node.key, node.path)
         return PartOutcome(key=node.key, session=session_id, failure=str(failure))
@@ -436,11 +534,12 @@ async def run_part(
     return PartOutcome(
         key=node.key,
         session=session_id,
-        text=produced,
+        text=adoption.text,
+        dropped=adoption.dropped,
         consumed=consumption_of(
             (
-                *terms_used(produced, vocabulary),
-                *links_from(manuscript, node, produced),
+                *terms_used(adoption.text, vocabulary),
+                *links_from(manuscript, node, adoption.text),
             )
         ),
         changes=(own_change(node.key), *coined),

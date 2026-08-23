@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.manuscript.graph import WorkSweep, readings, sweep
+from inkwell.manuscript.inheritance import InheritanceReader
 from inkwell.manuscript.mailbox import (
     PartMailbox,
     PartQuestion,
@@ -322,6 +323,7 @@ async def run_pass(
     concurrency: int = DEFAULT_CONCURRENCY,
     reconciling: bool = True,
     watching: PartRunWatch | None = None,
+    inheriting: InheritanceReader | None = None,
 ) -> PassReport:
     """Run every part a pass may pick up, and record what each one did.
 
@@ -375,6 +377,7 @@ async def run_pass(
                     reasons=verdict.reasons,
                     vocabulary=vocabulary,
                     observers=watch.opening(verdict.key, session),
+                    inheriting=inheriting,
                 )
                 return ending
             finally:
@@ -449,6 +452,7 @@ async def run_loop(
     reconciling: bool = True,
     reporting: Callable[[PassReport], None] | None = None,
     watching: PartRunWatch | None = None,
+    inheriting: InheritanceReader | None = None,
 ) -> tuple[PassReport, ...]:
     """Pass over a work until it settles, or until the cap says to stop.
 
@@ -484,6 +488,7 @@ async def run_loop(
                 concurrency=concurrency,
                 reconciling=reconciling,
                 watching=watching,
+                inheriting=inheriting,
             )
             logger.info("Pass %d of %s: %s", number, work, report.render())
             if reporting is not None:

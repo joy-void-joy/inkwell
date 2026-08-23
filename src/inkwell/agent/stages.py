@@ -655,11 +655,15 @@ source's generality.
 
 One input is neither of those, and your task names it when it is there: a \
 **draft being revised** is the piece this run REPLACES. Plan its successor. \
-Its sections are your sections and its claims are your research questions, \
-but nothing in it is settled by having been written — it is finished prose, \
-often published, and you were pointed at it precisely to have it rewritten. \
-Reading its polish, or the citations it already carries, as a reason to \
-leave a passage as it stands is the one way to fail this brief.
+Its claims are your research questions — every one of them, since a claim \
+nobody asks about ships again unchecked. Its section order is not your \
+section order: nothing in it is settled by having been written, it is \
+finished prose you were pointed at precisely to have rewritten, and a \
+successor whose headings arrive in the draft's order with new ones hung off \
+them has kept the shape of an argument it was asked to make again. Where the \
+draft's sequence is still right, arrive at it; do not start from it. Reading \
+its polish, or the citations it already carries, as a reason to leave a \
+passage as it stands is the one way to fail this brief.
 
 Build the plan incrementally using your tools:
 

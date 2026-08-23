@@ -35,6 +35,14 @@ from inkwell.manuscript.graph import (
     readings,
     sweep,
 )
+from inkwell.manuscript.budget import LengthBudget, budget_for
+from inkwell.manuscript.inheritance import (
+    ADOPTED_FILE,
+    Audit,
+    Dropped,
+    InheritanceReader,
+)
+from inkwell.manuscript.inventory import inventory_of
 from inkwell.manuscript.loop import (
     Recorded,
     narrowed,
@@ -121,6 +129,35 @@ Prose about cyber risk.
 
 ## 2.3.3 Autonomous Weapons Risk {: #03}
 """
+
+
+FIGURE_BLOCK = """
+<figure markdown="span">
+![alt](Images/1Wx_Image_14.png){ loading=lazy }
+  <figcaption markdown="1"><b>Figure 2.14:</b> Hacking websites with agents.</figcaption>
+</figure>
+"""
+
+
+class PassesThrough(InheritanceReader):
+    """An inheritance pass that adopts the fresh draft exactly as it stands.
+
+    The seam every test that runs a part hands over, so a unit test never
+    reaches a model to settle two drafts it wrote itself. Adopting verbatim is
+    also what keeps these tests about what they were about: whatever the run
+    produced is what reaches the splice, as it did before there was a pass in
+    between.
+    """
+
+    def __init__(self, dropped: tuple[Dropped, ...] = ()) -> None:
+        self.dropped = dropped
+
+    async def read(self, task: str, room: Path) -> Audit:
+        produced = room / PRODUCED_FILE
+        (room / ADOPTED_FILE).write_text(
+            produced.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        return Audit(dropped=list(self.dropped))
 
 
 def atlas_like(root: Path) -> Path:
@@ -800,6 +837,7 @@ class TestAPartIsWrittenAsTheWorkIsWrittenAs:
             node,
             session_id="s",
             scratch=tmp_path / "room",
+            inheriting=PassesThrough(),
         )
 
         assert asked["target_format"] == "textbook"
@@ -832,6 +870,7 @@ class TestAPartIsWrittenAsTheWorkIsWrittenAs:
             node,
             session_id="s",
             scratch=tmp_path / "room",
+            inheriting=PassesThrough(),
         )
 
         assert asked["target_format"] == "lesswrong"
@@ -945,6 +984,183 @@ class TestAPartRunCanReadTheWorkItIsIn:
         assert around(work, stranger) == ""
 
 
+class TestTheStandingTextIsMaterialRatherThanTheShape:
+    """A run handed the standing text as the piece it is *replacing* keeps that
+    piece's shape: seven headings survived a full rewrite in their original
+    order with thirty-four new ones hung off them, and the most pressing
+    development in the section landed fourth because a heading was already
+    fourth. The concrete instruction beat the abstract warning beside it, which
+    is why the fix is where the material is routed rather than in the wording.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_part_reaches_the_run_as_material_to_write_from(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+        asked: dict[str, object] = {}
+
+        async def record(**passed: object) -> AgentSessionResult:
+            asked.update(passed)
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        await run_part(
+            ManuscriptStore(root=tmp_path / "manuscripts"),
+            "atlas",
+            work,
+            node,
+            session_id="s",
+            inheriting=PassesThrough(),
+        )
+
+        assert asked["material_role"] == "source"
+
+    def test_the_instruction_does_not_ask_for_the_structure_to_be_kept(
+        self, tmp_path: Path
+    ) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        said = part_instruction(work, node)
+
+        assert "structure" not in said
+        assert "it is not the shape of what you are writing" in said
+
+    def test_the_voice_is_still_the_authors(self, tmp_path: Path) -> None:
+        """Only the shape stops being inherited. A part that came back in a
+        different register would be a worse failure than one that kept its
+        headings."""
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        assert "Keep the author's voice" in part_instruction(work, node)
+
+
+class TestTheReasonsAreWhatLicenseTheScope:
+    """Nothing in a part run is in a position to decide what the subsection
+    should open with. What asked for the run is."""
+
+    def test_the_reasons_are_named_as_the_scope(self, tmp_path: Path) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        said = part_instruction(
+            work, node, ("the CrowdStrike figure is misattributed",)
+        )
+
+        assert "the CrowdStrike figure is misattributed" in said
+        assert "That list is the scope" in said
+
+    def test_a_part_with_nothing_outstanding_is_told_so(self, tmp_path: Path) -> None:
+        """A writer told only to write infers a licence from the size of the
+        subject, and the subject is inexhaustible."""
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        assert "Nothing specific is outstanding" in part_instruction(work, node)
+
+
+class TestFiguresReachTheWriterAsConstraints:
+    """Figure 2.13 is the thirteenth figure of chapter two because twelve come
+    before it in chapters this run cannot see."""
+
+    def figured(self, tmp_path: Path) -> str:
+        """The instruction for a part carrying one numbered figure."""
+        chapters = atlas_like(tmp_path)
+        held = (chapters / "02" / "03.md").read_text(encoding="utf-8")
+        (chapters / "02" / "03.md").write_text(held + FIGURE_BLOCK, encoding="utf-8")
+        work = read_manuscript(chapters)
+        node = work.node("02/03/2.3.3")
+        assert node is not None
+        text = (chapters / "02" / "03.md").read_text(encoding="utf-8")
+        return part_instruction(work, node, figures=inventory_of(text).figures)
+
+    def test_the_number_the_book_gave_it_is_stated(self, tmp_path: Path) -> None:
+        assert "Figure 2.14" in self.figured(tmp_path)
+
+    def test_the_image_path_is_stated(self, tmp_path: Path) -> None:
+        assert "Images/1Wx_Image_14.png" in self.figured(tmp_path)
+
+    def test_renumbering_is_refused_rather_than_left_to_judgement(
+        self, tmp_path: Path
+    ) -> None:
+        assert "Never renumber one" in self.figured(tmp_path)
+
+    def test_a_part_with_no_figures_says_nothing_about_them(
+        self, tmp_path: Path
+    ) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        assert "Never renumber one" not in part_instruction(work, node)
+        assert "numbering is the book's" not in part_instruction(work, node)
+
+
+class TestAPartIsToldHowLongItsSiblingsRun:
+    """Asked how long a subsection should be, a run holding that subsection and
+    nothing else answers from the subject — and the subject is inexhaustible,
+    so the answer is "longer". A thousand words in, eight thousand out."""
+
+    def test_the_budget_names_what_the_part_holds_now(self, tmp_path: Path) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        held = budget_for(work, node)
+
+        assert held.holds == len(
+            held_text(
+                (Path(work.root) / node.path).read_text(encoding="utf-8"), node
+            ).split()
+        )
+
+    def test_the_chapter_is_what_the_part_is_measured_against(
+        self, tmp_path: Path
+    ) -> None:
+        """A subsection three times the length of every other subsection in its
+        chapter is out of scale whatever the rest of the book does."""
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        held = budget_for(work, node)
+
+        assert held.chapter == work.children[0].title
+        assert held.siblings > 1
+        assert held.chapter_words >= held.holds
+
+    def test_the_room_either_side_is_the_declared_allowance(
+        self, tmp_path: Path
+    ) -> None:
+        held = LengthBudget(holds=1000, allowance=1.5)
+
+        assert (held.floor(), held.ceiling()) == (666, 1500)
+
+    def test_the_budget_reads_as_a_licence_rather_than_a_limit(self) -> None:
+        """A part that genuinely has to grow grows, and what makes that
+        legitimate is a reason on the run saying so."""
+        said = LengthBudget(holds=1000, chapter="Chapter 02", siblings=3).render()
+
+        assert "licence rather than a limit" in said
+
+    def test_a_part_with_no_text_is_given_no_budget(self) -> None:
+        """Nothing to be measured against, and a range around zero would read
+        as an instruction to write nothing."""
+        assert LengthBudget().render() == ""
+
+
 class TestAPartRunSharesTheWorksTermLedger:
     """The vocabulary has to reach the writers while they write.
 
@@ -989,7 +1205,9 @@ class TestAPartRunSharesTheWorksTermLedger:
             )
 
         monkeypatch.setattr(runner_module, "run_session", record)
-        await run_part(store, "atlas", work, node, session_id="s")
+        await run_part(
+            store, "atlas", work, node, session_id="s", inheriting=PassesThrough()
+        )
 
         scope = asked["glossary"]
         assert isinstance(scope, NodeGlossary)
@@ -1160,6 +1378,7 @@ class TestARewriteThatLostItsHeadingIsRefused:
             work,
             node,
             session_id="s",
+            inheriting=PassesThrough(),
         )
 
         assert outcome.ended() == "failed"
@@ -1186,7 +1405,9 @@ class TestARewriteThatLostItsHeadingIsRefused:
 
         monkeypatch.setattr(runner_module, "run_session", unheaded)
         store = ManuscriptStore(root=tmp_path / "manuscripts")
-        outcome = await run_part(store, "atlas", work, node, session_id="s")
+        outcome = await run_part(
+            store, "atlas", work, node, session_id="s", inheriting=PassesThrough()
+        )
 
         assert outcome.ended() == "failed"
         kept = store.work_dir("atlas") / "runs" / "s" / PRODUCED_FILE
@@ -1229,7 +1450,14 @@ class TestAPassSaysWhatItIsDoingWhileItIsDoingIt:
         monkeypatch.setattr(runner_module, "run_session", record)
         store, work = self.staged(tmp_path)
 
-        await run_pass(store, "atlas", work, only=("02/03/2.3.2",), watching=watch)
+        await run_pass(
+            store,
+            "atlas",
+            work,
+            only=("02/03/2.3.2",),
+            watching=watch,
+            inheriting=PassesThrough(),
+        )
 
         assert said == ["open 02/03/2.3.2", "closed 02/03/2.3.2 rewritten"]
 
@@ -1247,7 +1475,14 @@ class TestAPassSaysWhatItIsDoingWhileItIsDoingIt:
         monkeypatch.setattr(runner_module, "run_session", broken)
         store, work = self.staged(tmp_path)
 
-        await run_pass(store, "atlas", work, only=("02/03/2.3.2",), watching=watch)
+        await run_pass(
+            store,
+            "atlas",
+            work,
+            only=("02/03/2.3.2",),
+            watching=watch,
+            inheriting=PassesThrough(),
+        )
 
         assert said == ["open 02/03/2.3.2", "closed 02/03/2.3.2 failed"]
 

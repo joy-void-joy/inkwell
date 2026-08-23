@@ -219,21 +219,45 @@ def assemble_sources(manifest: ExtractionManifest) -> AssembledSources:
     )
 
 
+MATERIAL_ROLE_NOTES: dict[SourceRole, str] = {
+    "revision_target": (
+        "This run was launched to REVISE. The substantive content among these "
+        "inputs is a draft the author wants rewritten and replaced — route it "
+        "`revision_target`, not `source`. It is published or finished prose, "
+        "so being polished and carrying its own citations is what a revision "
+        "target looks like, never evidence that it is a reference to write "
+        "from."
+    ),
+    "source": (
+        "This run was launched to WRITE FROM its material. The substantive "
+        "content among these inputs is content to write from — route it "
+        "`source`, not `revision_target`, even where it reads as finished "
+        "prose. A part of a book handed to a run that writes that part is "
+        "exactly this case: it is polished and carries its own citations "
+        "because it is somebody's published book, and routing it as the piece "
+        "being replaced would make its section order the plan."
+    ),
+}
+"""What the task adds for each role an entry point can declare its material to be.
+
+Declared rather than decided in a condition, because the argument for saying so
+is symmetric and was only ever written down for one side. An entry point knows
+what its material is; leaving the extractor to infer it from how finished the
+prose looks is leaving it to infer exactly the thing the prose cannot show.
+"""
+
+
 def material_role_note(material_role: SourceRole) -> str:
     """What the task adds when the entry point already knows its material's role.
 
-    Empty for ``source``, which is what routing decides on its own anyway.
+    Empty for the roles no entry point declares its *material* to be —
+    ``style_reference`` and ``context`` describe inputs beside the material
+    rather than the material itself, so a note about them would be a note
+    about nothing.
     """
-    if material_role != "revision_target":
-        return ""
-    return (
-        "\n\nThis run was launched to REVISE. The substantive content among "
-        "these inputs is a draft the author wants rewritten and replaced — "
-        "route it `revision_target`, not `source`. It is published or "
-        "finished prose, so being polished and carrying its own citations is "
-        "what a revision target looks like, never evidence that it is a "
-        "reference to write from."
-    )
+    # lup: ignore[dict-get] — keyed by a role no entry point declares material to be
+    said = MATERIAL_ROLE_NOTES.get(material_role)
+    return f"\n\n{said}" if said else ""
 
 
 async def run_extraction_agent(

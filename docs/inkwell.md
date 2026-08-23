@@ -285,6 +285,38 @@ it *could* reach it: the published edition, which on a book mid-revision is a
 different version with different chapter numbers, so what came back was a
 revision measured against a book this is not.
 
+**The part is written, not anchored — and then inherited from.** The standing
+text reaches the run as `source`, material to write from. Routed as
+`revision_target` it became the plan instead: the planner is shown the piece it
+replaces, so its sections are the planner's sections, and one subsection came
+back with all seven of its headings in their original order, thirty-four new
+ones hung off them, and the most pressing development in the section fourth
+because a heading was already fourth. Twenty-five of its thirty research
+questions opened "The draft says…". The warning beside that instruction said
+nothing in the draft was settled by having been written, and the concrete
+instruction won, as it always does — which is why the fix is where the material
+is routed rather than in the wording.
+
+What that trade costs is paid in one place. A draft written from scratch keeps
+what it happened to keep, and the standing text is somebody's book: figures the
+work numbers, citations somebody chased, claims nobody restates for free. So the
+fresh draft is not what goes into the work — the *inheritance pass* reads the
+two against each other and writes the successor, and every figure and citation
+the standing text carried either survives or is named as dropped with a reason.
+That binds because it is arithmetic: the audit is subtracted from what the two
+texts actually carry, so a pass that dropped three citations and mentioned none
+of them is told exactly which three and asked again, up to three attempts,
+before the part fails with them named. Both drafts and the audit stay in the
+run's room, so which of the two went into the book is answerable afterwards.
+
+Three things travel with the run that only the work knows: its figures with the
+numbers the book gave them and the paths they load from, because Figure 2.13 is
+the thirteenth figure of chapter two for reasons in chapters this run cannot
+see; a *length budget* read off its chapter, because a run asked how long a
+subsection should be answers from the subject and the subject is inexhaustible
+— 1,023 words in, 8,321 out; and what the reasons for the run license, because a
+part told nothing infers its scope from the size of what it is about.
+
 **Adoption is what makes it affordable.** A work nothing has built is a work
 where every part is out of date. `manuscript import` stamps each part as built
 from the text it already holds — `make -t`, and the same argument — so the

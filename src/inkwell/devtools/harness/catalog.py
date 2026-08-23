@@ -140,8 +140,8 @@ def application_roots() -> ApplicationRoots:
         composition=[
             *generated_tree_paths(NATIVE_RUNTIMES, plugins),
             "tests/",
-            # The provider selection boundary: `provider_factory` names a
-            # concrete adapter here so nothing above it has to.
+            # The agent surface owns provider selection and observation so
+            # nothing above it can open an unobserved concrete session.
             f"{package}/agent/client.py",
             f"{package}/agent/core.py",
             f"{package}/agent/pipeline.py",

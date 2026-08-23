@@ -21,6 +21,7 @@ from lup.mcp import LupMcpTool, ToolError
 from lup.types import JsonObject, JsonValue
 
 import inkwell.agent.tools.google_docs as google_docs
+from inkwell.agent import client
 from inkwell.agent.google_auth import (
     CommentsResource,
     DriveService,
@@ -639,12 +640,13 @@ class TestWatcherClaims:
         self, tmp_path: Path
     ) -> None:
         state = watched()
-        watcher = watcher_module.create_comment_watcher(
-            session_state=state,
-            notes=PipelineNotes(tmp_path / "n"),
-            plan_breaking_signal=asyncio.Event(),
-            report_unreachable=quiet,
-        )
+        with client.AgentSurface().activate():
+            watcher = watcher_module.create_comment_watcher(
+                session_state=state,
+                notes=PipelineNotes(tmp_path / "n"),
+                plan_breaking_signal=asyncio.Event(),
+                report_unreachable=quiet,
+            )
 
         state.seen_comments.claim(["c1"])
         watcher.claims.hold(["c1"])

@@ -56,7 +56,6 @@ to idle would be picked up again on the next pass and fail the same way.
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -65,7 +64,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from lup.channels.models import utc_now
 
-from inkwell.agent.client import AgentUpdate, CostAccumulator, observation_scope
+from inkwell.agent.client import AgentSurface, AgentUpdate, CostAccumulator
 from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.pipeline import PipelineListener
 from inkwell.agent.session import WritingSessionState
@@ -275,9 +274,8 @@ class PartRunObservers(BaseModel):
         default_factory=SessionTrace, description="Where its turns are recorded"
     )
 
-    @contextmanager
-    def observing(self) -> Iterator[None]:
-        """Publish every model call in this part through the same run surface."""
+    def surface(self) -> AgentSurface:
+        """Build the one observation owner for the part's complete task tree."""
         listener = self.listener
 
         async def forward_block(block: AnyTurnBlock, prefix: str) -> None:
@@ -289,16 +287,12 @@ class PartRunObservers(BaseModel):
             if listener is not None:
                 await listener.on_agent(update)
 
-        with observation_scope(
+        return AgentSurface(
             block_callback=forward_block if listener is not None else None,
             agent_callback=forward_agent if listener is not None else None,
             trace_logger=self.trace.trace_logger,
             cost_accumulator=self.cost,
-        ):
-            try:
-                yield
-            finally:
-                self.trace.save()
+        )
 
 
 class PartRunAgents(BaseModel):
@@ -686,6 +680,44 @@ async def run_part(
     found: WorkFindings | None = None,
     publisher: PartPublisher | None = None,
 ) -> PartOutcome:
+    """Run one part with observation active from its first phase to its last."""
+    watched = observers if observers is not None else PartRunObservers()
+    watched.trace.open(session_id)
+    with watched.surface().activate():
+        try:
+            return await execute_part(
+                store,
+                work,
+                manuscript,
+                node,
+                session_id=session_id,
+                reasons=reasons,
+                vocabulary=vocabulary,
+                scratch=scratch,
+                observers=watched,
+                agents=agents,
+                found=found,
+                publisher=publisher,
+            )
+        finally:
+            watched.trace.save()
+
+
+async def execute_part(
+    store: ManuscriptStore,
+    work: str,
+    manuscript: Manuscript,
+    node: ManuscriptNode,
+    *,
+    session_id: str,
+    reasons: tuple[str, ...] = (),
+    vocabulary: tuple[Abbreviation, ...] = (),
+    scratch: Path | None = None,
+    observers: PartRunObservers | None = None,
+    agents: PartRunAgents | None = None,
+    found: WorkFindings | None = None,
+    publisher: PartPublisher | None = None,
+) -> PartOutcome:
     """Take one part through the pipeline and hand back what it produced.
 
     Four things in order, and the order is the point. The brief is composed
@@ -729,7 +761,6 @@ async def run_part(
     settled = named_in(shared)
 
     watched = observers if observers is not None else PartRunObservers()
-    watched.trace.open(session_id)
     reading = agents if agents is not None else PartRunAgents()
     work_findings = found if found is not None else store.load_findings(work)
     research = briefing(work_findings, node.key)
@@ -738,39 +769,38 @@ async def run_part(
     if watched.listener is not None:
         await watched.listener.on_stage("plan", "Planning this part in its work")
         await watched.listener.on_progress("Retrieving corpus evidence for this part")
-    with watched.observing():
-        corpus = await (reading.corpus or LocalCorpusPusher()).push(
-            subsection_topic(manuscript, node)
-        )
-        evidence = evidence_for(
-            manuscript,
-            node,
-            work_findings,
-            reasons=reasons,
-            corpus=corpus,
-            figures=figures,
-            budget=budget,
-        )
-        instruction = part_instruction(
-            manuscript,
-            node,
-            reasons,
-            figures=figures,
-            budget=budget,
-            research=research,
-        )
-        if watched.listener is not None:
-            await watched.listener.on_progress("Composing this part's editorial brief")
-        plan = await planned_for(
-            store,
-            work,
-            manuscript,
-            node,
-            material,
-            room,
-            evidence=evidence,
-            writer=reading.briefing,
-        )
+    corpus = await (reading.corpus or LocalCorpusPusher()).push(
+        subsection_topic(manuscript, node)
+    )
+    evidence = evidence_for(
+        manuscript,
+        node,
+        work_findings,
+        reasons=reasons,
+        corpus=corpus,
+        figures=figures,
+        budget=budget,
+    )
+    instruction = part_instruction(
+        manuscript,
+        node,
+        reasons,
+        figures=figures,
+        budget=budget,
+        research=research,
+    )
+    if watched.listener is not None:
+        await watched.listener.on_progress("Composing this part's editorial brief")
+    plan = await planned_for(
+        store,
+        work,
+        manuscript,
+        node,
+        material,
+        room,
+        evidence=evidence,
+        writer=reading.briefing,
+    )
     if plan is None:
         return PartOutcome(
             key=node.key,
@@ -820,10 +850,9 @@ async def run_part(
         await watched.listener.on_progress(
             "Reconciling the fresh draft with the standing text"
         )
-    with watched.observing():
-        adoption = await settle(
-            material, room / PRODUCED_FILE, room, reader=reading.inheriting
-        )
+    adoption = await settle(
+        material, room / PRODUCED_FILE, room, reader=reading.inheriting
+    )
     if not adoption.settled():
         logger.warning("Nothing was adopted for %s: %s", node.key, adoption.render())
         return PartOutcome(key=node.key, session=session_id, failure=adoption.render())

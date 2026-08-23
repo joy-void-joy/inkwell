@@ -1,8 +1,8 @@
 """Inkwell's session surface over lup's provider-neutral runtime.
 
 Every pipeline stage, nested agent, and format adapter reaches a model through
-:func:`query` here. The one place a concrete adapter is named is
-:func:`provider_factory`; everything above it holds a ``SessionFactory`` and
+an :class:`AgentSurface` here. The surface owns observation and the one place a
+concrete adapter is named; everything above it holds a ``SessionFactory`` and
 knows nothing about which runtime answers.
 
 The keyword surface is inkwell's own rather than lup's: a stage says what it
@@ -125,31 +125,6 @@ list rather than a set — two turns can share a label, and the second one
 finishing must not retire the first.
 """
 
-active_block_callback: contextvars.ContextVar[BlockCallback | None] = (
-    contextvars.ContextVar("active_block_callback", default=None)
-)
-"""Where completed blocks are forwarded for the current task tree.
-
-Set once at the root of a run by whatever is displaying it, so every nested
-`query()` beneath reports to the same listener without a callback threaded
-through every stage signature.
-"""
-
-active_agent_callback: contextvars.ContextVar[AgentCallback | None] = (
-    contextvars.ContextVar("active_agent_callback", default=None)
-)
-"""Where provider-turn lifecycle updates go for the current run."""
-
-active_trace_logger: contextvars.ContextVar[TraceLogger | None] = (
-    contextvars.ContextVar("active_trace_logger", default=None)
-)
-"""The run-wide trace inherited by model calls outside the main pipeline."""
-
-active_cost_accumulator: contextvars.ContextVar[CostAccumulator | None] = (
-    contextvars.ContextVar("active_cost_accumulator", default=None)
-)
-"""The run-wide spend inherited by model calls outside the main pipeline."""
-
 
 class SessionPolicy(BaseModel):
     """Run-scoped policy that makes nested ``query()`` calls resumable.
@@ -210,34 +185,6 @@ def stage_label(prefix: str) -> str | None:
     if stripped.startswith("[") and "]" in stripped:
         return stripped[1 : stripped.index("]")]
     return None
-
-
-def context_value[T](variable: contextvars.ContextVar[T], default: T) -> T:
-    """Read a context variable without losing its declared fallback."""
-    context = contextvars.copy_context()
-    return context[variable] if variable in context else default
-
-
-@contextmanager
-def observation_scope(
-    *,
-    block_callback: BlockCallback | None,
-    agent_callback: AgentCallback | None,
-    trace_logger: TraceLogger | None,
-    cost_accumulator: CostAccumulator | None,
-) -> Iterator[None]:
-    """Make every model call in one task tree observable as part of one run."""
-    block_token = active_block_callback.set(block_callback)
-    agent_token = active_agent_callback.set(agent_callback)
-    trace_token = active_trace_logger.set(trace_logger)
-    cost_token = active_cost_accumulator.set(cost_accumulator)
-    try:
-        yield
-    finally:
-        active_cost_accumulator.reset(cost_token)
-        active_trace_logger.reset(trace_token)
-        active_agent_callback.reset(agent_token)
-        active_block_callback.reset(block_token)
 
 
 def fenced_json(text: str) -> JsonValue:
@@ -648,6 +595,96 @@ def observed_factory(
     )
 
 
+class AgentSurface(BaseModel):
+    """The owning observation boundary through which model sessions open.
+
+    A run activates one surface before any of its work begins. Every kind of
+    model-backed activity — one-shot queries, held cohort actors, and
+    background agents — asks that surface for its factory, so registration is
+    a property of opening a provider turn rather than a callback each caller
+    may remember or omit.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    block_callback: BlockCallback | None = None
+    agent_callback: AgentCallback | None = None
+    trace_logger: TraceLogger | None = None
+    cost_accumulator: CostAccumulator | None = None
+
+    @contextmanager
+    def activate(self) -> Iterator[None]:
+        """Own every model session opened by this task tree until exit."""
+        token = active_agent_surface.set(self)
+        try:
+            yield
+        finally:
+            active_agent_surface.reset(token)
+
+    def session_factory(
+        self,
+        *,
+        prefix: str,
+        address: str | None = None,
+        model: str | None = None,
+        system_prompt: str = "",
+        tools: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        autonomy: SessionAutonomy | None = None,
+        tool_servers: dict[str, McpServerEntry] | None = None,
+        max_thinking_tokens: int | None = None,
+        max_turns: int | None = None,
+        cwd: Path | None = None,
+        hooks: LupHooksConfig | None = None,
+    ) -> SessionFactory:
+        """Build one provider session already wired to this surface."""
+        label = stage_label(prefix)
+        return observed_factory(
+            provider_factory(
+                model=model,
+                system_prompt=system_prompt,
+                tools=tools,
+                allowed_tools=allowed_tools,
+                autonomy=autonomy,
+                tool_servers=tool_servers,
+                max_thinking_tokens=max_thinking_tokens,
+                max_turns=max_turns,
+                cwd=cwd,
+                hooks=hooks,
+            ),
+            label=label,
+            prefix=prefix,
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+            block_callback=self.block_callback,
+            agent_callback=self.agent_callback,
+            model=model,
+            address=address,
+        )
+
+
+active_agent_surface: contextvars.ContextVar[AgentSurface | None] = (
+    contextvars.ContextVar("active_agent_surface", default=None)
+)
+"""The sole owner of model-session construction in the current task tree."""
+
+
+def current_agent_surface() -> AgentSurface | None:
+    """Return the surface inherited by this task tree, where one is active."""
+    context = contextvars.copy_context()
+    if active_agent_surface not in context:
+        return None
+    return context[active_agent_surface]
+
+
+def required_agent_surface() -> AgentSurface:
+    """Return the run surface, refusing activity opened outside one."""
+    surface = current_agent_surface()
+    if surface is None:
+        raise RuntimeError("model-backed activity requires an active AgentSurface")
+    return surface
+
+
 async def drain_events(events: EventStream) -> None:
     """Drive a one-shot turn's live forwarding and discard the event values."""
 
@@ -736,10 +773,14 @@ async def query(
     ``TurnResult`` — its blocks are what a caller reading free prose wants.
     """
     label = stage_label(prefix) or prefix.strip() or None
-    trace_logger = trace_logger or context_value(active_trace_logger, None)
-    cost_accumulator = cost_accumulator or context_value(active_cost_accumulator, None)
-    block_callback = block_callback or context_value(active_block_callback, None)
-    agent_callback = agent_callback or context_value(active_agent_callback, None)
+    surface = current_agent_surface()
+    if surface is None:
+        surface = AgentSurface(
+            trace_logger=trace_logger,
+            cost_accumulator=cost_accumulator,
+            block_callback=block_callback,
+            agent_callback=agent_callback,
+        )
     policy = session_policy.get()
     resumed = resume
     if policy is not None:
@@ -747,26 +788,18 @@ async def query(
         if label is not None and resumed is None:
             resumed = policy.resume_for(label)
 
-    factory = observed_factory(
-        provider_factory(
-            model=model,
-            system_prompt=system_prompt,
-            tools=tools,
-            allowed_tools=allowed_tools,
-            autonomy=autonomy,
-            tool_servers=mcp_servers,
-            max_thinking_tokens=max_thinking_tokens,
-            max_turns=max_turns,
-            cwd=cwd,
-            hooks=hooks,
-        ),
-        label=label,
+    factory = surface.session_factory(
         prefix=prefix,
-        trace_logger=trace_logger,
-        cost_accumulator=cost_accumulator,
-        block_callback=block_callback,
-        agent_callback=agent_callback,
         model=model,
+        system_prompt=system_prompt,
+        tools=tools,
+        allowed_tools=allowed_tools,
+        autonomy=autonomy,
+        tool_servers=mcp_servers,
+        max_thinking_tokens=max_thinking_tokens,
+        max_turns=max_turns,
+        cwd=cwd,
+        hooks=hooks,
     )
 
     running = None if label is None else ActiveAgent(label=label, model=model)

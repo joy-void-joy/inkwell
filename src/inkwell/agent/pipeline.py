@@ -32,12 +32,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.client import (
     AgentCallback,
+    AgentSurface,
     AgentUpdate,
     BlockCallback,
     HeartbeatCallback,
     SessionPolicy,
-    active_agent_callback,
-    active_block_callback,
+    current_agent_surface,
     is_interrupt,
     query,
     result_text,
@@ -4156,14 +4156,19 @@ class PipelineRunner:
             self.trace_logger.log_text(description, heading=f"🚩 Stage: {stage}")
         await self.hooks.on_stage(stage, description)
 
-    def install_observers(self) -> None:
-        """Make every model call publish blocks and lifecycle to the listener.
+    def agent_surface(self) -> AgentSurface:
+        """Build the owning surface for every model call in this run.
 
-        Kept on the run as well as set on the contextvar, because a cohort
-        member's session is opened when the population's cap admits it rather
-        than where its stage stood — so a recipe reading ambient state at that
-        moment would read whichever task happened to be current.
+        Cohort recipes capture this surface while their stage is active. Their
+        sessions may open later, when the population's cap admits them, without
+        losing the listener that owns the run.
         """
+
+        inherited = current_agent_surface()
+        if inherited is not None:
+            self.block_callback = inherited.block_callback
+            self.agent_callback = inherited.agent_callback
+            return inherited
 
         async def forward_block(block: AnyTurnBlock, prefix: str) -> None:
             info = extract_block_info(block.telemetry_block)
@@ -4174,8 +4179,12 @@ class PipelineRunner:
 
         self.block_callback = forward_block
         self.agent_callback = forward_agent
-        active_block_callback.set(forward_block)
-        active_agent_callback.set(forward_agent)
+        return AgentSurface(
+            block_callback=forward_block,
+            agent_callback=forward_agent,
+            trace_logger=self.trace_logger,
+            cost_accumulator=self.cost_accumulator,
+        )
 
     def writer_actor(self, section_title: str, round: int = 1) -> ActorRef:
         """The address that writes this section, on the attempt named.
@@ -4325,11 +4334,19 @@ class PipelineRunner:
     async def run(self) -> WritingOutput:
         """Execute the pipeline with restart and stop-point support.
 
+        The surface is entered before setup so any model-backed activity added
+        to the run inherits observation without another callback path.
+        """
+        with self.agent_surface().activate():
+            return await self.execute()
+
+    async def execute(self) -> WritingOutput:
+        """Run the fresh pipeline inside its owning agent surface.
+
         The stage sequence comes from ``stages_for_run`` so a light run skips the
         heavy stages; the comment watcher starts before the write stage either
         way.
         """
-        self.install_observers()
         self.snapshot.profile = current_settings().profile
         configure_session_state(self.state)
         await self.ingest_reader_channel()
@@ -4371,12 +4388,22 @@ class PipelineRunner:
     ) -> WritingOutput:
         """Resume pipeline execution from a saved snapshot.
 
+        The resumed task tree owns the same observation boundary as a fresh
+        run, including agents reconstructed after the saved checkpoint.
+        """
+        with self.agent_surface().activate():
+            return await self.execute_from(snapshot, restart=restart)
+
+    async def execute_from(
+        self, snapshot: PipelineSnapshot, *, restart: bool = False
+    ) -> WritingOutput:
+        """Run the resumed pipeline inside its owning agent surface.
+
         With ``restart``, the snapshot is a checkpoint that predates the stage
         being redone: no agent resumes a prior conversation (``pending_resume``
         stays empty) and the on-disk artifacts are reset to the snapshot, so the
         redone stages regenerate from clean state instead of continuing one.
         """
-        self.install_observers()
         self.snapshot = snapshot
         if self.declared_review_profile is not None:
             self.snapshot.review_profile = self.declared_review_profile

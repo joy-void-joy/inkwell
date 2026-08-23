@@ -51,6 +51,8 @@ from inkwell.manuscript.chapters import (
 )
 from inkwell.manuscript.research import (
     cited_by_part,
+    distil_watch,
+    reference_watch,
     plan as research_plan,
     publish as research_publish,
     publish_references,
@@ -673,6 +675,7 @@ def research_cmd(
             vocabulary,
             sources=sources,
             concurrency=concurrency,
+            progress=distil_watch(store.attending(work)),
         )
     )
     typer.echo(synced.render())
@@ -836,7 +839,14 @@ def references_cmd(
         return
 
     swept = asyncio.run(
-        sweep_references(store, verdicts, work, tree, concurrency=concurrency)
+        sweep_references(
+            store,
+            verdicts,
+            work,
+            tree,
+            concurrency=concurrency,
+            progress=reference_watch(store.attending(work)),
+        )
     )
     typer.echo(swept.render())
     for line in swept.detail():

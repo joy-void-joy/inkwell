@@ -26,6 +26,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from inkwell.agent.cohort import roster_of
 from inkwell.agent.config import manuscript_store
 from inkwell.agent.glossary import DECLARED_VOCABULARY, load_chapter_glossary
 from inkwell.agent.stages import unknown_format
@@ -46,8 +47,10 @@ from inkwell.manuscript.loop import (
     schedulable,
     unpicked,
 )
+from inkwell.manuscript.inheritance import ADOPTED_FILE
 from inkwell.manuscript.mailbox import PartAnswer, PartMailbox, PartQuestion
 from inkwell.manuscript.recording import WorkImport, import_work
+from inkwell.manuscript.runner import PRODUCED_FILE, runs_under
 from inkwell.manuscript.state import (
     NodeStanding,
     NodeVerdict,
@@ -825,3 +828,193 @@ def reaches(work: str, subject: str, kind: str = "term") -> ReachedBy:
     return ReachedBy(
         kind=kind, subject=subject, parts=tuple(node.key for node in leaning)
     )
+
+
+class RunningAgent(BaseModel):
+    """One agent inside a part's run, as something surveying the pass reads.
+
+    The third level, and the one nothing outside a run could see. A part run
+    reports which subsection it holds and how far through the pipeline it is;
+    beneath that, nine writers and six reviewers were doing the work and
+    reporting nowhere. They were on the cohort's disk roster the whole time.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    address: str = Field(description="What reaches this agent")
+    kind: str = Field(description="What it is — writer, reviewer, judge")
+    task: str = Field(default="", description="What it was asked")
+    running: bool = Field(description="Whether it is still working")
+    summary: str = Field(default="", description="What it said, once it had")
+    error: str = Field(default="", description="What went wrong, where it did")
+
+
+class WorkingAgent(BaseModel):
+    """One agent working on a work rather than on any part of it.
+
+    Distilling a document, placing findings, checking a reference. A pass that
+    spends two hundred dollars reading before it writes a word is doing the
+    most expensive thing it will do all day, and with nothing reporting it the
+    work looks idle — which is the state somebody stops a loop out of.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(description="What this agent is addressed by")
+    kind: str = Field(description="What it is — distil, assign, reference, brief")
+    about: str = Field(default="", description="What it is reading or placing")
+    running: bool = Field(description="Whether it is still working")
+    opened_at: datetime = Field(description="When it started")
+    detail: str = Field(default="", description="What it found, once it has")
+    failure: str = Field(default="", description="Why it produced nothing")
+
+
+class WorkActivity(BaseModel):
+    """Everything happening to one work, at all three of its levels.
+
+    One reply rather than three, because the question is one question: what is
+    this work doing. Split across three calls, a page would render a pass with
+    no parts and then parts with no agents, and the moment somebody is asking
+    about is the moment those disagree.
+    """
+
+    work: str = Field(description="The work")
+    loop: WorkLoopStatus | None = Field(
+        default=None, description="The pass, where one is running or has run"
+    )
+    parts: tuple[PartInFlight, ...] = Field(
+        default=(), description="Every part a run is holding"
+    )
+    agents: dict[str, tuple[RunningAgent, ...]] = Field(
+        default={},
+        description="The agents inside each part's run, by part key",
+    )
+    working: tuple[WorkingAgent, ...] = Field(
+        default=(),
+        description="The agents belonging to no part — the ones a pass looks "
+        "idle without",
+    )
+
+    def busy(self) -> bool:
+        """Whether anything at all is happening, at any of the three levels."""
+        return bool(
+            self.parts
+            or any(one.running for one in self.working)
+            or (self.loop is not None and self.loop.running)
+        )
+
+
+def agents_of(session: str) -> tuple[RunningAgent, ...]:
+    """Every agent one part's run holds, read off the cohort's own roster."""
+    return tuple(
+        RunningAgent(
+            address=held.address,
+            kind=held.actor.kind,
+            task=held.task,
+            running=held.running,
+            summary=held.summary,
+            error=held.error,
+        )
+        for held in roster_of(session)
+    )
+
+
+def working_agents(store: ManuscriptStore, work: str) -> tuple[WorkingAgent, ...]:
+    """Every agent this work has spent outside its parts, newest first."""
+    return tuple(
+        WorkingAgent(
+            id=held.id,
+            kind=held.kind,
+            about=held.about,
+            running=held.running(),
+            opened_at=held.opened_at,
+            detail=held.detail,
+            failure=held.failure,
+        )
+        for held in reversed(store.attending(work).load().agents)
+    )
+
+
+@router.get("/{work}/activity")
+def activity(work: str) -> WorkActivity:
+    """What this work is doing, from the pass down to the agents.
+
+    The three levels joined where they are asked about together. A part's
+    agents come from the cohort roster its run keeps on disk, so this reads
+    what the run wrote rather than asking the run — which is what makes it
+    answerable from a browser in another process, and from a page reloaded
+    after the run that started it went away.
+    """
+    store = manuscript_store()
+    tree_of(store, work)
+    held = in_flight(store, work)
+    return WorkActivity(
+        work=work,
+        loop=holder.status_of(work),
+        parts=held,
+        agents={one.key: agents_of(one.session) for one in held if one.session},
+        working=working_agents(store, work),
+    )
+
+
+class PartHistory(BaseModel):
+    """One run against one part, and how far it got.
+
+    Read off the run's own room rather than off the build stamps, which is
+    what makes it symmetric: a stamp exists only where a run produced prose, so
+    a history read from stamps is a history of successes with every failure
+    missing — and the failures are the runs most worth opening.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session: str = Field(description="The run")
+    key: str = Field(description="The part it was about")
+    title: str = Field(default="", description="How the work names that part")
+    opened_at: datetime = Field(description="When it started")
+    reasons: tuple[str, ...] = Field(
+        default=(), description="Why the part was picked up"
+    )
+    produced: bool = Field(
+        default=False, description="Whether the pipeline came back with prose"
+    )
+    adopted: bool = Field(
+        default=False, description="Whether the inheritance pass settled a successor"
+    )
+    built: bool = Field(
+        default=False, description="Whether this is the run the part was built from"
+    )
+
+
+@router.get("/{work}/history")
+def history(work: str, key: str = "") -> list[PartHistory]:
+    """Every run this work has recorded, newest first.
+
+    ``key`` narrows it to one part, which is the question somebody usually has:
+    this subsection has been run four times and reads the same, so what did
+    each of them do. How far a run got is which files its room holds, so a run
+    that produced nothing says so rather than being absent.
+    """
+    store = manuscript_store()
+    tree_of(store, work)
+    state = store.load_state(work)
+    room = store.work_dir(work) / "runs"
+
+    def held() -> Iterator[PartHistory]:
+        """Each recorded run, narrowed to the part named where one is."""
+        for run in runs_under(room):
+            if key and run.key != key:
+                continue
+            stamp = state.stamp(run.key)
+            yield PartHistory(
+                session=run.session,
+                key=run.key,
+                title=run.title,
+                opened_at=run.opened_at,
+                reasons=run.reasons,
+                produced=(room / run.session / PRODUCED_FILE).is_file(),
+                adopted=(room / run.session / ADOPTED_FILE).is_file(),
+                built=stamp is not None and stamp.run == run.session,
+            )
+
+    return list(held())

@@ -184,6 +184,7 @@ async def run_session(
     stop_after: str | None = None,
     light: bool = False,
     skipped_stages: list[str] | None = None,
+    writer_mode: str = "",
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
@@ -197,6 +198,10 @@ async def run_session(
       leaving a checkpoint to resume from after the author reviews the Doc
     - skipped_stages: Backbone stages this run does not perform, read off the
       entry point that launched it rather than decided stage by stage
+    - writer_mode: Whether one writer drafts the whole piece or one drafts each
+      section, where the launch declares it. Empty leaves it to the ambient
+      setting; a work of many parts declares it, because a book whose parts
+      disagreed about it would be drafted two ways
     - material_role: What `sources` is to this run — 'source' to write from, or
       'revision_target' for the piece the run replaces
     - assignment: Which book this run writes a chapter of, and which chapter of
@@ -267,6 +272,7 @@ async def run_session(
                 stop_after=stop_after,
                 light=light,
                 skipped_stages=skipped_stages or [],
+                writer_mode=writer_mode,
             )
             output = await runner.run_from(snapshot, restart=bool(restart_from_stage))
         else:
@@ -286,6 +292,7 @@ async def run_session(
                 stop_after=stop_after,
                 light=light,
                 skipped_stages=skipped_stages or [],
+                writer_mode=writer_mode,
             )
     finally:
         setup.trace_logger.save()

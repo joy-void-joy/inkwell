@@ -47,7 +47,7 @@ That pipeline writes one piece. A book is a tree of them, and `manuscript/` is t
 - **The part is written, not anchored.** Routed as the piece a run *replaces*, the standing text becomes the plan and its section order survives the rewrite. Routed as material, the run answers what the part has to establish — and what the standing text carried is protected by the inheritance pass, whose audit is subtracted from what the two texts actually hold rather than believed.
 - **The loop is the single writer of state.** Parts run concurrently with no lock because each writes prose into a span that cannot overlap another's and hands back what it did.
 - **Propagation keys on what changed, not who changed it**, which is why a pass settles rather than cascading.
-- **The work declares its format**, once at import, and every run inherits it. A part asked to infer the format of a book it sees one subsection of answers differently on the next part.
+- **The work declares how its parts are written**, once at import, and every run inherits it — the format, whether one writer drafts a part or one drafts each planned section, and which stages a part run skips. A part asked to infer any of these from the one subsection it sees answers differently on the next part. Drafting defaults to a single writer: the book has already done the splitting, and splitting a subsection again buys nine writers and a merge to produce what one writer produces in one pass.
 - **Parked is not failed**, and both are sticky on purpose: a run that cannot settle something asks and its part waits at no cost, while a failed part keeps what it said. Both need somebody to open the door.
 
 ### The Research Corpus

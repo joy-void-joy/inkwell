@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from lup.channels.models import utc_now
 
@@ -35,6 +35,22 @@ differently on two parts of one work is worse than either answer.
 Overridable rather than fixed, because a work of many parts need not be a
 textbook: a collection of essays is imported the same way and wants its own
 format.
+"""
+
+DEFAULT_WRITER_MODE = "single"
+"""How a part of a work is drafted, unless whoever imported it says otherwise.
+
+One writer over the whole subsection rather than one per planned section, and
+the merge that reassembles them dropped with them. A subsection is already the
+unit the parallel split exists to make manageable: splitting it again bought
+nine writers and a merge — eleven stage-runs, and the largest single line of
+what a part costs — to draft what one writer drafts in one pass, over material
+short enough that no writer was ever short of context.
+
+Different from a standalone article, deliberately. There the piece is the whole
+work and the split earns its keep; here the book has already done the splitting,
+and the work declares that once so pass three cannot answer it differently from
+pass one.
 """
 
 type NodeKind = Literal["work", "chapter", "section", "subsection", "group"]
@@ -95,6 +111,20 @@ class Manuscript(BaseModel):
         "work rather than asked per run, so pass three cannot answer it "
         "differently from pass one",
     )
+    writer_mode: str = Field(
+        default=DEFAULT_WRITER_MODE,
+        description="How each part is drafted — 'single' for one writer over the "
+        "subsection, 'parallel' for one per planned section and a merge after "
+        "them, 'auto' to leave it to the ambient setting",
+    )
+    skipped_stages: tuple[str, ...] = Field(
+        default=(),
+        description="Backbone stages a part run of this work does not perform. "
+        "Declared once on the work rather than decided per run, because which "
+        "stages a book's parts need is a property of the book: a work whose "
+        "voice and assumptions are settled at the work level has its parts skip "
+        "both, and one whose parts are drafts does not",
+    )
     imported_at: datetime = Field(
         default_factory=utc_now, description="When the tree was last read"
     )
@@ -115,3 +145,27 @@ class Manuscript(BaseModel):
     def node(self, key: str) -> ManuscriptNode | None:
         """The node under ``key``, or nothing where the work has no such part."""
         return next((node for node in self.walk() if node.key == key), None)
+
+    @model_validator(mode="after")
+    def skips_name_real_stages(self) -> "Manuscript":
+        """Refuse a skip that names no stage, where it is declared.
+
+        A typo skips nothing and reads afterwards exactly like a stage that
+        ran: the pass costs what it always cost, the report says the same
+        thing, and the only evidence is a bill nobody was expecting. Caught
+        here rather than at the import command, so a tree edited by hand is
+        refused on the same terms as one imported with a bad flag.
+        """
+        # Deferred because settings reach the manuscript store, so a tree that
+        # imported the stage names at module scope would close the loop. What
+        # a stage is called is the settings module's to say either way: a
+        # second list here would be a second thing to keep in step.
+        from inkwell.agent.config import PIPELINE_STAGES
+
+        unknown = [held for held in self.skipped_stages if held not in PIPELINE_STAGES]
+        if unknown:
+            raise ValueError(
+                f"{self.title} skips {', '.join(unknown)}, which name no stage; "
+                f"the stages are {', '.join(PIPELINE_STAGES)}"
+            )
+        return self

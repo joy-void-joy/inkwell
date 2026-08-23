@@ -229,6 +229,43 @@ edge starts refusing or stops, an archive picks a page up next month — and the
 alternative to a single-document probe was sweeping thousands of URLs to find
 out, which is both slow and, against a host that is refusing, rude.
 
+### Distilling: the corpus de-duplicates documents, not conclusions
+
+One subsection's research cost $27 and 32M input tokens, and almost none of it
+went on *finding* things: 42 of its 120 sources came off disk, and every "what
+happened this year" question was answered from the corpus. It went on **reading**
+them. The next subsection reopens the same evaluations paper and re-derives the
+same numbers at full price.
+
+So `distil` is a fourth stage, and what it produces is keyed on
+`content_sha256` — a document's findings are a function of its bytes, so a
+document that changes source, gets re-slugged, or is re-fetched unchanged reuses
+what was read of it, and two sources holding one paper read it once between
+them. A finding is a claim as far as the document supports it, **the caveat its
+own authors attach** (the half that gets lost — a number travels and its
+conditions do not), a verbatim quote, and a locator.
+
+It cannot ride the judging pass, which reads six pages on purpose because the
+front matter is what says what a document is *about*; a finding is what it
+*establishes*, and that is on page 34 as often as on page 1. And it runs lazily,
+a document read the first time a filter reaches it, because eleven hundred
+documents distilled up front is a bill for a corpus of which one subsection
+needs three hundred.
+
+`manuscript research <work>` is the arrow after that. It distils what the work's
+tag filter reaches, asks which parts each finding bears on — reading the tree's
+*titles*, never the book's prose, which is what makes it cheap enough to re-run
+whenever the book's structure moves and what keeps a single part from triggering
+a book read — and turns each new placement into a `finding` change fact. The
+ordinary sweep then dirties those parts and the loop picks them up naming the
+paper. Two properties matter and are structural rather than watched for: a sync
+that places nothing new dirties nothing, so the loop still settles; and the
+placement is compared by document-and-claim, so re-running the assignment does
+not re-dirty everything it already placed. The reading is priced before it is
+spent (`--dry-run` says how many documents the filter reaches that nothing has
+read), and publishing is asked about separately, because finding that 34 parts
+have gone out of date should not by itself commit anybody to rewriting them.
+
 ## A work of many parts
 
 The pipeline writes one piece. A textbook is a tree of them — the AI Safety

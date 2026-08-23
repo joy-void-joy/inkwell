@@ -31,7 +31,9 @@ That pipeline writes one piece. A book is a tree of them, and `manuscript/` is t
 
 ### The Research Corpus
 
-`corpus/` holds documents enumerated from declared sources, tagged against a vocabulary and optionally embedded. The three stages run in one order — fetch, judge, then embed, because embedding reads what judging wrote. The plan stage is *handed* a briefing of what the corpus already holds on the topic rather than left to search for it: what the corpus has and the source material does not is the strongest research question there is, and no question derived from the source could reach it.
+`corpus/` holds documents enumerated from declared sources, tagged against a vocabulary and optionally embedded. The first three stages run in one order — fetch, judge, then embed, because embedding reads what judging wrote. The plan stage is *handed* a briefing of what the corpus already holds on the topic rather than left to search for it: what the corpus has and the source material does not is the strongest research question there is, and no question derived from the source could reach it.
+
+`distil` is the fourth, and it runs lazily rather than in that order: a document is read whole the first time a filter reaches it, and what it establishes is cached under its `content_sha256` for good. The judging cannot carry it — the judge reads six pages on purpose, and a finding is on page 34. `manuscript research` is what puts the two together: it distils what a work's filter reaches, places the findings on the parts they bear on by reading the tree's titles, and turns each new placement into a `finding` change fact, so the ordinary sweep dirties those parts and the loop names the paper. Placing moves nothing until somebody says so; the reading is priced first with `--dry-run`.
 
 `docs/inkwell.md` carries both of these in full — the store layout, the sweep ladder, and every standing a part can hold.
 

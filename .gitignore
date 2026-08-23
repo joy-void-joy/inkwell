@@ -143,6 +143,11 @@ profiles/
 # across sessions and worktrees. Rebuilt by `lup-devtools corpus sync`. Rooted,
 # so it never swallows the `src/inkwell/corpus/` package that builds it.
 /corpus/
+# Book identities and checked-reference verdicts are the other shared runtime
+# stores. Like the corpus they are durable across runs, but local to an
+# installation rather than source artifacts a branch should carry.
+/books/
+/references/
 # An imported work's tree and state, one directory per work. The same store
 # root as the two above and rooted for the same reason: it holds the path of
 # somebody's own checkout, so it is machine state rather than a branch artifact.

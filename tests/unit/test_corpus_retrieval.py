@@ -16,7 +16,7 @@ point of having one.
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from inkwell.agent.stages import (
     RESEARCHER_PROMPT,
@@ -25,7 +25,11 @@ from inkwell.agent.stages import (
 )
 from inkwell.agent.provenance import Venue
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
-from inkwell.agent.tools.research.corpus import CORPUS_TOOLS, corpus_search
+from inkwell.agent.tools.research.corpus import (
+    CORPUS_TOOLS,
+    CorpusSearchInput,
+    corpus_search,
+)
 from inkwell.corpus.quality import QualityReport
 from inkwell.corpus.retrieval import (
     CorpusFilter,
@@ -323,6 +327,34 @@ async def test_two_documents_of_one_day_are_split_by_quality(
         "same-day-evaluation",
         "newer-policy",
     ]
+
+
+async def test_a_query_pages_without_skipping_or_repeating_documents(
+    corpus: CorpusStore,
+) -> None:
+    first = await search_corpus(CorpusQuery(limit=2), corpus)
+    second = await search_corpus(
+        CorpusQuery(limit=2, offset=first.next_offset or 0), corpus
+    )
+
+    assert [hit.slug for hit in first.documents] == [
+        "same-day-evaluation",
+        "newer-policy",
+    ]
+    assert [hit.slug for hit in second.documents] == [
+        "a-system-card",
+        "older-evaluation",
+    ]
+    assert first.next_offset == 2
+    assert second.next_offset is None
+    assert first.truncated and not second.truncated
+
+
+def test_the_agent_facing_corpus_page_cannot_overfill_tool_output() -> None:
+    with pytest.raises(ValidationError):
+        CorpusSearchInput(limit=11)
+
+    assert CorpusSearchInput().limit == 10
 
 
 async def test_a_caller_overrides_the_order_and_its_direction(

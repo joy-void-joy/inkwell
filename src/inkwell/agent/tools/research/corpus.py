@@ -227,7 +227,7 @@ class CorpusOverviewOutput(BaseModel):
 
 class CorpusSearchInput(BaseModel):
     """One question put to the corpus. Every field is optional; none narrows by
-    default, so an empty call is a browse of everything held."""
+    default, so an empty call starts a paginated browse of everything held."""
 
     sources: list[str] = Field(
         default_factory=list,
@@ -312,7 +312,15 @@ class CorpusSearchInput(BaseModel):
         description="Turn the ordering around, so the first result is the last one",
     )
     limit: int = Field(
-        default=0, description="How many documents to return (default: the tier's own)"
+        default=10,
+        ge=1,
+        le=10,
+        description="Documents in this page; use offset for the next page",
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Zero-based result offset; use the prior answer's next_offset",
     )
 
 
@@ -396,8 +404,9 @@ async def corpus_overview(_inp: CorpusOverviewInput) -> CorpusOverviewOutput:
     "locators (cheap, start here), 'narrow' adds each abstract or judged "
     "summary, 'read' hands over the path and PDF page ranges for Read. Results "
     "come back most recent first with quality breaking ties, which order_by "
-    "and oldest_first override. Every result carries its locator, so you can "
-    "Read straight from a browse.",
+    "and oldest_first override. Answers are pages of at most ten documents; "
+    "pass next_offset back as offset to continue without losing any. Every "
+    "result carries its locator, so you can Read straight from a browse.",
     name="corpus_search",
 )
 async def corpus_search(inp: CorpusSearchInput) -> CorpusAnswer:
@@ -433,6 +442,7 @@ async def corpus_search(inp: CorpusSearchInput) -> CorpusAnswer:
         phrase=inp.phrase,
         like=inp.like,
         limit=inp.limit,
+        offset=inp.offset,
     )
     return await search_corpus(query, corpus, semantics=corpus_semantics(corpus))
 

@@ -5,6 +5,7 @@ domain filtering, date filtering, and highlight extraction. Primary research
 tool for the writing pipeline.
 """
 
+import json
 import logging
 from typing import TypedDict
 
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 SNIPPET_LENGTH = 500
 """How much of a result is returned inline before it is saved to disk instead."""
+
+INLINE_RESULTS = 5
+"""How many complete search records fit safely in one tool response."""
 
 UTC_SUFFIX = "Z"
 """What Exa appends to a timestamp, which callers here read without."""
@@ -107,8 +111,13 @@ class ExaSearchInput(BaseModel):
 
 class ExaSearchOutput(BaseModel):
     query: str = Field(description="Original search query")
-    results: list[ExaResult] = Field(description="Search results")
-    count: int = Field(description="Number of results returned")
+    results: list[ExaResult] = Field(description="Results carried in this response")
+    count: int = Field(description="Total results Exa returned")
+    returned: int = Field(description="Results carried inline")
+    results_path: str | None = Field(
+        default=None,
+        description="Pretty-printed full result set to Read when count exceeds returned",
+    )
 
 
 @lup_tool(
@@ -121,7 +130,9 @@ class ExaSearchOutput(BaseModel):
     "title, URL, snippet, highlighted key passages, and full_text_path — "
     "the complete page text saved to disk. Read full_text_path before "
     "citing or fact-checking against a result; the snippet alone is not "
-    "enough to verify a claim."
+    "enough to verify a claim. When Exa returns more than five hits, the "
+    "response carries five inline and results_path points to the complete, "
+    "pretty-printed result set for Read."
 )
 async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
     api_key = current_settings().exa_api_key
@@ -211,10 +222,34 @@ async def exa_search(params: ExaSearchInput) -> ExaSearchOutput:
 
     results = [result(hit) for hit in found.results]
 
+    def stored_results() -> str | None:
+        """Where every result can be read when the inline page would overflow."""
+        if len(results) <= INLINE_RESULTS:
+            return None
+        serializable = [
+            {**one, "acquisition": one["acquisition"].model_dump()} for one in results
+        ]
+        try:
+            return save_content(
+                "exa-search", params.query, json.dumps(serializable, indent=2)
+            ).path
+        except RuntimeError:
+            logger.warning("No content directory configured for Exa result manifest")
+            return None
+
+    results_path = stored_results()
+    inline = (
+        [one for index, one in enumerate(results) if index < INLINE_RESULTS]
+        if results_path is not None
+        else results
+    )
+
     return ExaSearchOutput(
         query=params.query,
-        results=results,
+        results=inline,
         count=len(results),
+        returned=len(inline),
+        results_path=results_path,
     )
 
 

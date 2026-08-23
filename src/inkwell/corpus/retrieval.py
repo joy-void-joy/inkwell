@@ -801,6 +801,7 @@ class CorpusQuery(BaseModel):
     phrase: str = ""
     like: str = ""
     limit: int = 0
+    offset: int = Field(default=0, ge=0)
 
     def mode(self) -> QueryMode:
         """Which way of asking this is. Structural unless it says otherwise."""
@@ -828,6 +829,11 @@ class CorpusAnswer(BaseModel):
         default=(), description="The documents that matched, in order"
     )
     matched: int = Field(default=0, description="How many documents the filters kept")
+    offset: int = Field(default=0, description="Zero-based position of this page")
+    next_offset: int | None = Field(
+        default=None,
+        description="Offset for the next page, or null when this is the last page",
+    )
     truncated: bool = Field(
         default=False, description="True when more matched than were returned"
     )
@@ -914,9 +920,10 @@ async def search_corpus(
             kept = query.ordering.applied(entries)
 
     limit = query.capped(tier)
+    page_end = query.offset + limit
     shown = tuple(
         hit_for(entry, tier, similarity=found.similarity(entry.name()))
-        for entry in kept[:limit]
+        for entry in islice(kept, query.offset, page_end)
     )
     return CorpusAnswer(
         mode=mode,
@@ -929,7 +936,9 @@ async def search_corpus(
         ),
         documents=shown,
         matched=len(kept),
-        truncated=len(kept) > limit,
+        offset=query.offset,
+        next_offset=page_end if page_end < len(kept) else None,
+        truncated=page_end < len(kept),
         gaps=sum(1 for hit in shown if hit.gap),
         sources_held=held,
         listed_but_absent=index.listed_but_absent(),

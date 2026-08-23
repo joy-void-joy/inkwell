@@ -163,6 +163,13 @@ class AddSectionInput(BaseModel):
     title: str = Field(description="Section heading")
     summary: str = Field(description="What this section should cover (2-3 sentences)")
     key_points: list[str] = Field(description="Specific points to make")
+    purpose: str = Field(
+        default="", description="What this section establishes and why"
+    )
+    evidence: list[str] = Field(
+        default_factory=list, description="Evidence assigned here"
+    )
+    handoff: str = Field(default="", description="What the next section can assume")
     quotes_to_include: list[str] = Field(
         default_factory=list,
         description="Source quote texts to weave into this section",
@@ -278,8 +285,8 @@ def make_plan_tools(collector: PlanCollector) -> list[LupMcpTool]:
             "add_section",
             (
                 "Add a section to the article plan. Call once per section, "
-                "in order. Each section has a title, summary, key points, "
-                "and optional quotes to weave in."
+                "in order. Include its purpose, assigned evidence, handoff, "
+                "key points, and any quotations to weave in."
             ),
             AddSectionInput,
             handle_section,
@@ -736,6 +743,13 @@ class RecordFindingInput(BaseModel):
         )
 
 
+class RecordFindingsInput(BaseModel):
+    findings: list[RecordFindingInput] = Field(
+        min_length=1,
+        description="Complete research findings to validate and record together",
+    )
+
+
 class FindingRecorded(ToolOk):
     """What recording a finding leaves the researcher to act on."""
 
@@ -748,6 +762,15 @@ class FindingRecorded(ToolOk):
             "reviewer reads them; close them now rather than leaving them."
         ),
     )
+
+
+class RecordedFinding(BaseModel):
+    question: str = Field(description="The research question that was recorded")
+    provenance_gaps: list[str] = Field(default_factory=list)
+
+
+class FindingsRecorded(ToolOk):
+    findings: list[RecordedFinding] = Field(description="One result per input finding")
 
 
 class SuggestAdditionInput(BaseModel):
@@ -800,7 +823,7 @@ def make_research_output_tools(
     sources are not the open web passes its own table.
     """
 
-    async def handle_finding(inp: RecordFindingInput) -> FindingRecorded:
+    def recorded(inp: RecordFindingInput) -> ResearchFinding:
         finding = inp.recorded(venue_rules)
         claims_the_document = inp.origin in ("source_document", "mixed")
         if claims_the_document and not finding.cites_source_document():
@@ -812,9 +835,26 @@ def make_research_output_tools(
                 "this finding as origin='external' — an external work's wording is "
                 "not evidence of what the source document says."
             )
+        return finding
+
+    async def handle_finding(inp: RecordFindingInput) -> FindingRecorded:
+        finding = recorded(inp)
         collector.research.findings.append(finding)
         await collector.save_and_notify()
         return FindingRecorded(provenance_gaps=finding.provenance_gaps())
+
+    async def handle_findings(inp: RecordFindingsInput) -> FindingsRecorded:
+        findings = [recorded(one) for one in inp.findings]
+        collector.research.findings.extend(findings)
+        await collector.save_and_notify()
+        return FindingsRecorded(
+            findings=[
+                RecordedFinding(
+                    question=one.question, provenance_gaps=one.provenance_gaps()
+                )
+                for one in findings
+            ]
+        )
 
     async def handle_suggestion(inp: SuggestAdditionInput) -> ToolOk:
         collector.research.suggested_additions.append(inp.suggestion)
@@ -828,10 +868,21 @@ def make_research_output_tools(
 
     return [
         build_stage_tool(
+            "record_findings",
+            (
+                "Record several complete research findings in one call. Each "
+                "item has exactly the same validation and provenance result as "
+                "record_finding; the batch is validated before any item is saved. "
+                "Prefer this after investigating several questions together."
+            ),
+            RecordFindingsInput,
+            handle_findings,
+        ),
+        build_stage_tool(
             "record_finding",
             (
-                "Record a research finding for one question. Call once per "
-                "research question after investigating it. Include all "
+                "Record a single research finding when only one is ready; use "
+                "record_findings whenever several can be submitted together. Include all "
                 "sources with their acquisition records and key excerpts, your "
                 "synthesized answer, and confidence level. Each source carries "
                 "two independent things: its venue, which is derived from the "
@@ -893,6 +944,13 @@ class RecordReviewFindingInput(BaseModel):
     )
 
 
+class RecordReviewFindingsInput(BaseModel):
+    findings: list[RecordReviewFindingInput] = Field(
+        min_length=1,
+        description="Review findings to validate and record together",
+    )
+
+
 class ReviewCollector:
     """Accumulates review findings for one reviewer."""
 
@@ -932,7 +990,25 @@ def make_review_output_tools(collector: ReviewCollector) -> list[LupMcpTool]:
         await collector.save_and_notify()
         return ToolOk()
 
+    async def handle_findings(inp: RecordReviewFindingsInput) -> ToolOk:
+        collector.review.findings.extend(
+            ReviewFinding(reviewer=collector.reviewer, **one.model_dump())
+            for one in inp.findings
+        )
+        await collector.save_and_notify()
+        return ToolOk()
+
     return [
+        build_stage_tool(
+            "record_findings",
+            (
+                "Record several review findings in one call. Every item uses "
+                "the same severity, location, and verbatim-excerpt contract as "
+                "record_finding. Prefer this when the review is complete."
+            ),
+            RecordReviewFindingsInput,
+            handle_findings,
+        ),
         build_stage_tool(
             "record_finding",
             (
@@ -980,6 +1056,13 @@ class RecordDispositionInput(BaseModel):
     )
 
 
+class RecordDispositionsInput(BaseModel):
+    dispositions: list[RecordDispositionInput] = Field(
+        min_length=1,
+        description="Finding dispositions to validate and record together",
+    )
+
+
 def make_disposition_tools(collector: DispositionCollector) -> list[LupMcpTool]:
     """The tool the rewrite answers each review finding through."""
 
@@ -988,12 +1071,29 @@ def make_disposition_tools(collector: DispositionCollector) -> list[LupMcpTool]:
         collector.save()
         return ToolOk()
 
+    async def handle_dispositions(inp: RecordDispositionsInput) -> ToolOk:
+        collector.record.dispositions.extend(
+            FindingDisposition(**one.model_dump()) for one in inp.dispositions
+        )
+        collector.save()
+        return ToolOk()
+
     return [
+        build_stage_tool(
+            "record_dispositions",
+            (
+                "Record what the rewrite did about several tagged findings in "
+                "one call. Every item has the same contract as "
+                "record_disposition, and every item is preserved in order."
+            ),
+            RecordDispositionsInput,
+            handle_dispositions,
+        ),
         build_stage_tool(
             "record_disposition",
             (
-                "Record what you did about one review finding, by its tag. Call "
-                "this for every finding in the annotated draft — including the "
+                "Record what you did about one review finding, by its tag. Use "
+                "record_dispositions for the full set, including the "
                 "ones you decide against, which is the whole point: a finding "
                 "you rejected on the merits and one you never read look the "
                 "same in the finished piece. Reviewers cost real money per run, "

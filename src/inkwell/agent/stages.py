@@ -176,8 +176,8 @@ keep author_unverified material and flag it to the author to source.
 
 ## Output
 
-Call record_finding for each question with your synthesized answer, \
-sources, confidence level, and data points. Call suggest_addition for \
+Record every question's synthesized answer, sources, confidence, and data \
+points; submit related findings together. Call suggest_addition for \
 anything valuable that emerged outside the original questions.
 
 If a question can't be answered, record it with low confidence — \
@@ -348,7 +348,7 @@ they required) is severity='critical', even when it reads well.
 
 ## Output
 
-Call record_finding for each issue. Use severity='critical' for issues \
+Record all issues together. Use severity='critical' for issues \
 that break the narrative arc, 'suggestion' for improvements, 'praise' \
 for passages that work especially well. Always include text_excerpt — \
 quote the exact passage verbatim.
@@ -388,7 +388,7 @@ confidence unless the draft's phrasing materially changes the meaning
 
 ## Output
 
-Call record_finding for each issue. Use severity='critical' for \
+Record all issues together. Use severity='critical' for \
 factually wrong claims, 'suggestion' for claims needing sources. \
 Always include text_excerpt — quote the exact passage verbatim.
 
@@ -433,7 +433,7 @@ research notes or the draft's own internal consistency.
 
 ## Output
 
-Call record_finding for each issue. severity='critical' for content \
+Record all issues together. severity='critical' for content \
 that misstates the source, 'suggestion' for imprecision, 'praise' for \
 passages that render the source exactly right. Always include \
 text_excerpt — quote the draft verbatim — and name the source page(s) \
@@ -506,7 +506,7 @@ showing them? Would a concrete example land harder?
 
 ## Output
 
-Call record_finding for each issue. Use severity='critical' for \
+Record all issues together. Use severity='critical' for \
 hard-constraint violations and issues that actively hurt readability, \
 'suggestion' for polish, 'praise' for strong writing. Always include \
 text_excerpt, quoting the exact passage verbatim."""
@@ -558,7 +558,7 @@ report a passage as dropped merely because the piece being replaced had it.
 
 ## Output
 
-Call record_finding for each omission or substitution. Always include \
+Record all omissions and substitutions together. Always include \
 text_excerpt — the author's specific that should be present."""
 
 
@@ -779,15 +779,14 @@ You produce the final version of an article by incorporating review \
 feedback. Read the draft, review findings, and plan from the file \
 paths in your task.
 
-Write the full article to the output file using the Write tool. After \
-writing, briefly summarize (1-2 sentences) what you changed in your \
-response text.
+Submit the complete final article through the output capability provided. \
+After writing, briefly summarize (1-2 sentences) what you changed.
 
 ## Answer for every finding
 
-Each finding in the annotated draft carries a tag. Call \
-record_disposition once for each — applied, folded into another change, \
-or rejected — with one line saying why. The rejections are the ones that \
+Each finding in the annotated draft carries a tag. Record every disposition — \
+applied, folded into another change, or rejected — together where possible, \
+with one line saying why. The rejections are the ones that \
 matter: a finding you weighed and turned down and a finding you never \
 read leave the piece in exactly the same state, so without this record \
 nobody can tell a reviewer that earned its cost from one that did not, \

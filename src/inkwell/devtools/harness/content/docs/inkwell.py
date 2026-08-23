@@ -305,6 +305,13 @@ corrected. A check that could not be made records nothing, unlike a distillation
 that found nothing: a reference the network refused today is one to try again,
 not one to record as dead.
 
+A readable source may still carry a caveat — a preprint's standing, a live
+page's revision history, or a claim its authors state narrowly. That is stored
+apart from `note`: a caveat travels with a sound reference, while `note` is
+reserved for a disqualifying destination such as a listing, missing document,
+or unreadable paywall. Mixing the two would turn every careful qualification
+into an instruction to rewrite the part that cites it.
+
 ## A work of many parts
 
 The pipeline writes one piece. A textbook is a tree of them — the AI Safety
@@ -419,6 +426,18 @@ good. It reads the book once for that, then plans a chapter at a time against
 what it found: one call emitting 201 briefs is one call to lose, and a chapter is
 the unit whose parts actually share anything.
 
+Before a chapter's briefs are stored, four independent readers challenge each
+one at the plan tier: whether the ledger reasons license its scope, whether the
+standing text already says or silently loses what it proposes, whether an
+immediate neighbour owns or must establish the work, and whether a
+load-bearing change rests on one source. The readings run concurrently and
+report only concrete faults. A final planning turn settles the findings, keeps
+an original brief when a repair omits it, and records every concern beside the
+briefs so the reason for a changed plan survives the planning command.
+
+Those structured readers keep the work's configured plan model (Opus unless a
+caller overrides it) and its full reasoning budget.
+
 A planned brief is stamped with the text it was planned against, so a run uses
 it only while its part still holds that text. Reused after the part is
 rewritten, it would be a plan for a piece that no longer exists and would pull
@@ -485,6 +504,12 @@ produced prose, so a history read from stamps is a history of successes with
 every failure missing — and the failures are the runs most worth opening. Each
 room's first write says which work, which part, and when; how far the run got is
 which of `produced.md`, `adopted.md`, and `inherited.json` sit beside it.
+
+The work page renders both replies. Its activity panel shows the pass, every
+leased part and the agents inside that part's run, plus corpus/reference/planning
+readers that belong to the work rather than a part. Its run history links every
+attempt to its session and distinguishes produced, adopted, and current-build
+prose, including attempts that produced nothing.
 
 **Adoption is what makes it affordable.** A work nothing has built is a work
 where every part is out of date. `manuscript import` stamps each part as built

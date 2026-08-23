@@ -6,11 +6,13 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from inkwell.agent.client import AgentUpdate
 from inkwell.agent.models import WritingOutput
 from inkwell.agent.pipeline import PipelineListener
 from inkwell.agent.session import WritingSessionState
 from inkwell.agent.tools.google_docs import do_insert_comment
 from inkwell.environment.web.models import (
+    AgentEvent,
     BlockEvent,
     CollectRevisionEvent,
     CompleteEvent,
@@ -97,6 +99,9 @@ class WebListener(PipelineListener):
                 prefix=prefix,
             )
         )
+
+    async def on_agent(self, update: AgentUpdate) -> None:
+        await self.broadcast(AgentEvent(agent=update))
 
     async def on_stage(self, stage: str, description: str) -> None:
         await self.broadcast(StageEvent(stage=stage, description=description))

@@ -380,11 +380,23 @@ export interface GeneratingPrompt {
 }
 
 // WebSocket message types
+export interface AgentUpdate {
+  id: string;
+  label: string;
+  address: string;
+  model: string | null;
+  status: "running" | "completed" | "failed" | "cancelled";
+  started_at: string;
+  finished_at: string | null;
+  error: string;
+}
+
 export type ServerMessage =
   | { type: "stage"; stage: string; description: string; timestamp: string }
   | { type: "progress"; message: string; timestamp: string }
   | { type: "message"; source: string; message: string; timestamp: string }
   | { type: "block"; block_type: string; content: string; prefix: string; timestamp: string }
+  | { type: "agent"; agent: AgentUpdate; timestamp: string }
   | { type: "complete"; output: CompletionOutput; timestamp: string }
   | { type: "cost_update"; cost: CostSnapshot; timestamp: string }
   | { type: "state_update"; state: SessionStateSnapshot; timestamp: string }

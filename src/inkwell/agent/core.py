@@ -57,6 +57,12 @@ def traces_path() -> Path:
     return notes_path() / "traces"
 
 
+def trace_logger_for(session_id: str) -> TraceLogger:
+    """Open the reasoning log shared by every phase of one run."""
+    trace_path = traces_path() / session_id / f"{datetime.now().strftime('%H%M%S')}.md"
+    return TraceLogger(trace_path=trace_path, title=f"Session {session_id}")
+
+
 class SessionSetup(BaseModel):
     """What setting a session up produced: its notes, its trace, its state."""
 
@@ -71,11 +77,11 @@ def setup_session(
     session_id: str,
     *,
     session_state: WritingSessionState | None = None,
+    trace_logger: TraceLogger | None = None,
 ) -> SessionSetup:
     """Create notes, trace logger, and session state for a writing session."""
     notes = setup_notes(session_id, "0")
-    trace_path = traces_path() / session_id / f"{datetime.now().strftime('%H%M%S')}.md"
-    trace_logger = TraceLogger(trace_path=trace_path, title=f"Session {session_id}")
+    trace_logger = trace_logger or trace_logger_for(session_id)
 
     if session_state is None:
         session_state = WritingSessionState()
@@ -165,6 +171,12 @@ class SessionTrace(BaseModel):
 
     trace_logger: TraceLogger | None = None
 
+    def open(self, session_id: str) -> TraceLogger:
+        """Open this session's trace before its first model turn."""
+        if self.trace_logger is None:
+            self.trace_logger = trace_logger_for(session_id)
+        return self.trace_logger
+
     def save(self) -> Path | None:
         """Write the trace out, or nothing when no log was ever opened."""
         return self.trace_logger.save() if self.trace_logger else None
@@ -247,7 +259,11 @@ async def run_session(
     )
     reset_metrics()
 
-    setup = setup_session(session_id, session_state=session_state)
+    setup = setup_session(
+        session_id,
+        session_state=session_state,
+        trace_logger=trace.trace_logger if trace is not None else None,
+    )
 
     if trace is not None:
         trace.trace_logger = setup.trace_logger

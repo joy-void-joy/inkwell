@@ -18,11 +18,12 @@ import contextvars
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
-from contextlib import asynccontextmanager
+import uuid
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import overload
+from typing import Literal, overload
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr
 
@@ -66,6 +67,28 @@ logger = logging.getLogger(__name__)
 
 type BlockCallback = Callable[[AnyTurnBlock, str], Coroutine[None, None, None]]
 """Async hook fired once per completed block, with the caller's trace prefix."""
+
+type AgentStatus = Literal["running", "completed", "failed", "cancelled"]
+"""Every standing a provider turn can report to a watching surface."""
+
+
+class AgentUpdate(BaseModel):
+    """One provider turn's live identity and current standing."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    label: str
+    address: str
+    model: str | None = None
+    status: AgentStatus = "running"
+    started_at: datetime = Field(default_factory=datetime.now)
+    finished_at: datetime | None = None
+    error: str = ""
+
+
+type AgentCallback = Callable[[AgentUpdate], Coroutine[None, None, None]]
+"""Async hook fired when a provider turn starts or changes standing."""
 
 type HeartbeatCallback = Callable[[float], Coroutine[None, None, None]]
 """Async hook fired every interval a turn is still running, with its elapsed seconds."""
@@ -111,6 +134,21 @@ Set once at the root of a run by whatever is displaying it, so every nested
 `query()` beneath reports to the same listener without a callback threaded
 through every stage signature.
 """
+
+active_agent_callback: contextvars.ContextVar[AgentCallback | None] = (
+    contextvars.ContextVar("active_agent_callback", default=None)
+)
+"""Where provider-turn lifecycle updates go for the current run."""
+
+active_trace_logger: contextvars.ContextVar[TraceLogger | None] = (
+    contextvars.ContextVar("active_trace_logger", default=None)
+)
+"""The run-wide trace inherited by model calls outside the main pipeline."""
+
+active_cost_accumulator: contextvars.ContextVar[CostAccumulator | None] = (
+    contextvars.ContextVar("active_cost_accumulator", default=None)
+)
+"""The run-wide spend inherited by model calls outside the main pipeline."""
 
 
 class SessionPolicy(BaseModel):
@@ -172,6 +210,34 @@ def stage_label(prefix: str) -> str | None:
     if stripped.startswith("[") and "]" in stripped:
         return stripped[1 : stripped.index("]")]
     return None
+
+
+def context_value[T](variable: contextvars.ContextVar[T], default: T) -> T:
+    """Read a context variable without losing its declared fallback."""
+    context = contextvars.copy_context()
+    return context[variable] if variable in context else default
+
+
+@contextmanager
+def observation_scope(
+    *,
+    block_callback: BlockCallback | None,
+    agent_callback: AgentCallback | None,
+    trace_logger: TraceLogger | None,
+    cost_accumulator: CostAccumulator | None,
+) -> Iterator[None]:
+    """Make every model call in one task tree observable as part of one run."""
+    block_token = active_block_callback.set(block_callback)
+    agent_token = active_agent_callback.set(agent_callback)
+    trace_token = active_trace_logger.set(trace_logger)
+    cost_token = active_cost_accumulator.set(cost_accumulator)
+    try:
+        yield
+    finally:
+        active_cost_accumulator.reset(cost_token)
+        active_trace_logger.reset(trace_token)
+        active_agent_callback.reset(agent_token)
+        active_block_callback.reset(block_token)
 
 
 def fenced_json(text: str) -> JsonValue:
@@ -400,6 +466,42 @@ class ForwardingEventStream(EventStream):
         return self.forward(self.inner.live())
 
 
+class AgentObservedTurn[T: BaseModel | None](Turn[T]):
+    """Publish one provider turn's terminal standing to its run observer."""
+
+    def __init__(
+        self, inner: Turn[T], activity: AgentUpdate, callback: AgentCallback
+    ) -> None:
+        self.inner = inner
+        self.activity = activity
+        self.callback = callback
+
+    async def result(self) -> TurnResult[T]:
+        try:
+            result = await self.inner.result()
+        except asyncio.CancelledError as exc:
+            await self.finished("cancelled", str(exc))
+            raise
+        except Exception as exc:
+            status = "cancelled" if is_interrupt(exc) else "failed"
+            await self.finished(status, str(exc))
+            raise
+        await self.finished("completed")
+        return result
+
+    async def finished(self, status: AgentStatus, error: str = "") -> None:
+        """Publish the terminal update for this turn."""
+        await self.callback(
+            self.activity.model_copy(
+                update={
+                    "status": status,
+                    "finished_at": datetime.now(),
+                    "error": error,
+                }
+            )
+        )
+
+
 class ReplayForwardingTurn[T: BaseModel | None](Turn[T]):
     """Forward a completed replay when a runtime offers no event stream."""
 
@@ -416,35 +518,63 @@ class ReplayForwardingTurn[T: BaseModel | None](Turn[T]):
 
 
 class BlockForwardingSession(Session):
-    """Give every accepted turn live block forwarding when it is available."""
+    """Give every accepted turn live output and lifecycle forwarding."""
 
-    def __init__(self, inner: Session, callback: BlockCallback, prefix: str) -> None:
+    def __init__(
+        self,
+        inner: Session,
+        block_callback: BlockCallback | None,
+        agent_callback: AgentCallback | None,
+        label: str,
+        address: str,
+        prefix: str,
+        model: str | None,
+    ) -> None:
         self.inner = inner
-        self.callback = callback
+        self.block_callback = block_callback
+        self.agent_callback = agent_callback
+        self.label = label
+        self.address = address
         self.prefix = prefix
+        self.model = model
 
     async def start[T: BaseModel | None](
         self, request: TurnRequest[T]
     ) -> TurnHandle[T]:
         handle = await self.inner.start(request)
-        if handle.events is None:
-            return TurnHandle[T](
-                turn=ReplayForwardingTurn(handle.turn, self.callback, self.prefix),
-                interrupt=handle.interrupt,
-                steer=handle.steer,
+        turn = handle.turn
+        events = handle.events
+        if self.block_callback is not None and events is None:
+            turn = ReplayForwardingTurn(turn, self.block_callback, self.prefix)
+        if self.agent_callback is not None:
+            activity = AgentUpdate(
+                label=self.label,
+                address=self.address,
+                model=self.model,
             )
+            await self.agent_callback(activity)
+            turn = AgentObservedTurn(turn, activity, self.agent_callback)
+        if self.block_callback is not None and events is not None:
+            events = ForwardingEventStream(events, self.block_callback, self.prefix)
         return TurnHandle[T](
-            turn=handle.turn,
-            events=ForwardingEventStream(handle.events, self.callback, self.prefix),
+            turn=turn,
+            events=events,
             interrupt=handle.interrupt,
             steer=handle.steer,
         )
 
 
-def block_forwarding_factory(
-    inner: SessionFactory, callback: BlockCallback, prefix: str
+def observing_factory(
+    inner: SessionFactory,
+    *,
+    block_callback: BlockCallback | None,
+    agent_callback: AgentCallback | None,
+    label: str,
+    address: str,
+    prefix: str,
+    model: str | None,
 ) -> SessionFactory:
-    """Wrap every session opened by ``inner`` with live block forwarding."""
+    """Wrap every session with the output and lifecycle observers it has."""
 
     @asynccontextmanager
     async def open_forwarding(
@@ -452,7 +582,15 @@ def block_forwarding_factory(
     ) -> AsyncGenerator[SessionHandle]:
         async with inner.open(resume) as handle:
             yield SessionHandle(
-                session=BlockForwardingSession(handle.session, callback, prefix),
+                session=BlockForwardingSession(
+                    handle.session,
+                    block_callback,
+                    agent_callback,
+                    label,
+                    address,
+                    prefix,
+                    model,
+                ),
                 fork=handle.fork,
             )
 
@@ -467,6 +605,9 @@ def observed_factory(
     trace_logger: TraceLogger | None,
     cost_accumulator: CostAccumulator | None,
     block_callback: BlockCallback | None,
+    agent_callback: AgentCallback | None,
+    model: str | None,
+    address: str | None = None,
 ) -> SessionFactory:
     """Wire this call's trace, display, and billing onto a built factory.
 
@@ -494,9 +635,17 @@ def observed_factory(
             else None
         ),
     )
-    if block_callback is None:
+    if block_callback is None and agent_callback is None:
         return decorated
-    return block_forwarding_factory(decorated, block_callback, prefix)
+    return observing_factory(
+        decorated,
+        block_callback=block_callback,
+        agent_callback=agent_callback,
+        label=label or prefix.strip() or "agent",
+        address=address or prefix.strip() or label or "agent",
+        prefix=prefix,
+        model=model,
+    )
 
 
 async def drain_events(events: EventStream) -> None:
@@ -523,6 +672,7 @@ async def query[T: BaseModel](
     trace_logger: TraceLogger | None = ...,
     cost_accumulator: CostAccumulator | None = ...,
     block_callback: BlockCallback | None = ...,
+    agent_callback: AgentCallback | None = ...,
     heartbeat: HeartbeatCallback | None = ...,
     heartbeat_interval: float = ...,
     hooks: LupHooksConfig | None = ...,
@@ -547,6 +697,7 @@ async def query(
     trace_logger: TraceLogger | None = ...,
     cost_accumulator: CostAccumulator | None = ...,
     block_callback: BlockCallback | None = ...,
+    agent_callback: AgentCallback | None = ...,
     heartbeat: HeartbeatCallback | None = ...,
     heartbeat_interval: float = ...,
     hooks: LupHooksConfig | None = ...,
@@ -571,6 +722,7 @@ async def query(
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
     block_callback: BlockCallback | None = None,
+    agent_callback: AgentCallback | None = None,
     heartbeat: HeartbeatCallback | None = None,
     heartbeat_interval: float = 30.0,
     hooks: LupHooksConfig | None = None,
@@ -583,7 +735,11 @@ async def query(
     ``None`` when it submitted nothing. Without one, returns the whole
     ``TurnResult`` — its blocks are what a caller reading free prose wants.
     """
-    label = stage_label(prefix)
+    label = stage_label(prefix) or prefix.strip() or None
+    trace_logger = trace_logger or context_value(active_trace_logger, None)
+    cost_accumulator = cost_accumulator or context_value(active_cost_accumulator, None)
+    block_callback = block_callback or context_value(active_block_callback, None)
+    agent_callback = agent_callback or context_value(active_agent_callback, None)
     policy = session_policy.get()
     resumed = resume
     if policy is not None:
@@ -608,7 +764,9 @@ async def query(
         prefix=prefix,
         trace_logger=trace_logger,
         cost_accumulator=cost_accumulator,
-        block_callback=block_callback or active_block_callback.get(),
+        block_callback=block_callback,
+        agent_callback=agent_callback,
+        model=model,
     )
 
     running = None if label is None else ActiveAgent(label=label, model=model)

@@ -11,7 +11,9 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from lup.runtime.models import TurnTextBlock
 
+import inkwell.agent.client as client
 from inkwell.agent.glossary import (
     DECLARED_VOCABULARY,
     ChapterGlossary,
@@ -25,6 +27,7 @@ from inkwell.agent.models import (
     ArticlePlan,
     WritingOutput,
 )
+from inkwell.agent.pipeline import PipelineListener
 from inkwell.agent.stages import unknown_format
 from inkwell.manuscript.facts import (
     Consumption,
@@ -1237,6 +1240,71 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
         assert outcome.ended() == "failed"
         assert "pipeline not started" in outcome.failure
         assert not called
+
+    @pytest.mark.asyncio
+    async def test_briefing_is_visible_before_the_pipeline_starts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        work = read_manuscript(atlas_like(tmp_path))
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        class Reports(PlansPart):
+            async def compose(self, task: str, root: Path) -> ComposedBrief:
+                agent = client.context_value(client.active_agent_callback, None)
+                blocks = client.context_value(client.active_block_callback, None)
+                trace = client.context_value(client.active_trace_logger, None)
+                assert agent is not None
+                assert blocks is not None
+                assert trace is not None
+                trace.log_text("Planning the successor", heading="Brief")
+                started = client.AgentUpdate(label="brief", address="brief")
+                await agent(started)
+                await blocks(TurnTextBlock(text="Planning the successor"), "brief")
+                await agent(started.model_copy(update={"status": "completed"}))
+                return await super().compose(task, root)
+
+        class Records(PipelineListener):
+            def __init__(self) -> None:
+                super().__init__()
+                self.agents: tuple[client.AgentUpdate, ...] = ()
+                self.blocks: tuple[tuple[str, str], ...] = ()
+
+            async def on_agent(self, update: client.AgentUpdate) -> None:
+                self.agents = (*self.agents, update)
+
+            async def on_block(
+                self, block_type: str, content: str, prefix: str
+            ) -> None:
+                self.blocks = (*self.blocks, (content, prefix))
+
+        async def raw_draft(**passed: object) -> AgentSessionResult:
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", raw_draft)
+        listener = Records()
+        observers = PartRunObservers(listener=listener)
+        await run_part(
+            ManuscriptStore(root=tmp_path / "manuscripts"),
+            "atlas",
+            work,
+            node,
+            session_id="s",
+            observers=observers,
+            agents=PartRunAgents(
+                briefing=Reports(), corpus=PushesNothing(), inheriting=PassesThrough()
+            ),
+        )
+
+        assert [one.status for one in listener.agents] == ["running", "completed"]
+        assert listener.blocks == (("Planning the successor", "brief"),)
+        trace_path = observers.trace.save()
+        assert trace_path is not None
+        assert "Planning the successor" in trace_path.read_text(encoding="utf-8")
 
 
 class TestTheReasonsAreWhatLicenseTheScope:

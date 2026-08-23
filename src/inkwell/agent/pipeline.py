@@ -31,9 +31,12 @@ from markdown_it import MarkdownIt
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.agent.client import (
+    AgentCallback,
+    AgentUpdate,
     BlockCallback,
     HeartbeatCallback,
     SessionPolicy,
+    active_agent_callback,
     active_block_callback,
     is_interrupt,
     query,
@@ -1206,6 +1209,10 @@ class PipelineListener:
 
     async def on_block(self, _block_type: str, _content: str, _prefix: str) -> None:
         pass
+
+    async def on_agent(self, update: AgentUpdate) -> None:
+        """One provider turn started or reached a terminal standing."""
+        logger.info("Agent %s: %s", update.address, update.status)
 
     async def on_message(self, source: str, message: str) -> None:
         logger.info("[%s] %s", source, message)
@@ -3785,6 +3792,7 @@ class PipelineRunner:
         self.source_is_extracted_gdoc = False
 
         self.block_callback: BlockCallback | None = None
+        self.agent_callback: AgentCallback | None = None
         self.population: ActorCohort | None = None
 
     @property
@@ -4148,8 +4156,8 @@ class PipelineRunner:
             self.trace_logger.log_text(description, heading=f"🚩 Stage: {stage}")
         await self.hooks.on_stage(stage, description)
 
-    def install_block_callback(self) -> None:
-        """Set the contextvar so all query() calls forward blocks to the listener.
+    def install_observers(self) -> None:
+        """Make every model call publish blocks and lifecycle to the listener.
 
         Kept on the run as well as set on the contextvar, because a cohort
         member's session is opened when the population's cap admits it rather
@@ -4161,8 +4169,13 @@ class PipelineRunner:
             info = extract_block_info(block.telemetry_block)
             await self.hooks.on_block(info.label, info.content, prefix)
 
+        async def forward_agent(update: AgentUpdate) -> None:
+            await self.hooks.on_agent(update)
+
         self.block_callback = forward_block
+        self.agent_callback = forward_agent
         active_block_callback.set(forward_block)
+        active_agent_callback.set(forward_agent)
 
     def writer_actor(self, section_title: str, round: int = 1) -> ActorRef:
         """The address that writes this section, on the attempt named.
@@ -4316,7 +4329,7 @@ class PipelineRunner:
         heavy stages; the comment watcher starts before the write stage either
         way.
         """
-        self.install_block_callback()
+        self.install_observers()
         self.snapshot.profile = current_settings().profile
         configure_session_state(self.state)
         await self.ingest_reader_channel()
@@ -4363,7 +4376,7 @@ class PipelineRunner:
         stays empty) and the on-disk artifacts are reset to the snapshot, so the
         redone stages regenerate from clean state instead of continuing one.
         """
-        self.install_block_callback()
+        self.install_observers()
         self.snapshot = snapshot
         if self.declared_review_profile is not None:
             self.snapshot.review_profile = self.declared_review_profile

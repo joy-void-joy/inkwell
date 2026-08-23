@@ -19,10 +19,76 @@ import {
 } from "../types";
 import type {
   EntryPointDescriptor,
+  AgentUpdate,
   ProfileResponse,
+  ServerMessage,
   SuppliedValue,
   SuppliedValues,
 } from "../types";
+
+function agentsIn(events: ServerMessage[]): AgentUpdate[] {
+  const order: string[] = [];
+  const byId = new Map<string, AgentUpdate>();
+  for (const event of events) {
+    if (event.type !== "agent") continue;
+    if (!byId.has(event.agent.id)) order.push(event.agent.id);
+    byId.set(event.agent.id, event.agent);
+  }
+  const agents: AgentUpdate[] = [];
+  for (const id of order) {
+    const agent = byId.get(id);
+    if (agent) agents.push(agent);
+  }
+  return agents.sort(
+    (left, right) =>
+      Number(right.status === "running") - Number(left.status === "running"),
+  );
+}
+
+function agentElapsed(agent: AgentUpdate, now: number): string {
+  const started = new Date(agent.started_at).getTime();
+  const finished = agent.finished_at ? new Date(agent.finished_at).getTime() : now;
+  if (!Number.isFinite(started) || !Number.isFinite(finished)) return "";
+  const seconds = Math.max(0, Math.floor((finished - started) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+}
+
+function AgentRoster({ events }: { events: ServerMessage[] }) {
+  const [now, setNow] = useState(() => Date.now());
+  const agents = agentsIn(events);
+  const running = agents.filter((agent) => agent.status === "running").length;
+
+  useEffect(() => {
+    if (running === 0) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
+  return (
+    <section className="run-agents">
+      <div className="run-agents-header">
+        <span>Agents</span>
+        <span>{running} running · {agents.length} total</span>
+      </div>
+      {agents.length === 0 ? (
+        <div className="run-agents-empty">No agent has opened yet.</div>
+      ) : (
+        <div className="run-agents-list">
+          {agents.map((agent) => (
+            <div className={`run-agent run-agent-${agent.status}`} key={agent.id}>
+              <span className="run-agent-address">{agent.address}</span>
+              {agent.model && <span className="run-agent-model">{agent.model}</span>}
+              <span className="run-agent-state">
+                {agent.error || agent.status} · {agentElapsed(agent, now)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function formatSessionTitle(sessionId: string): string {
   const m = sessionId.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/);
@@ -240,6 +306,7 @@ function SessionDetailInner() {
 
       {isEnded && <ResumeControls />}
 
+      <AgentRoster events={state.events} />
       <LogStream events={state.events} stopped={isEnded} />
       <CostBreakdown cost={state.cost} />
 

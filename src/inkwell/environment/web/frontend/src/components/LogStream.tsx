@@ -12,6 +12,8 @@ function formatEvent(event: ServerMessage): string {
       return event.message;
     case "block":
       return event.content;
+    case "agent":
+      return event.agent.error || event.agent.status;
     case "error":
       return event.message;
     case "complete":
@@ -33,6 +35,8 @@ function eventLabel(event: ServerMessage): string {
       return event.source;
     case "block":
       return event.block_type;
+    case "agent":
+      return event.agent.address;
     case "complete":
       return "Done";
     case "session_ended":

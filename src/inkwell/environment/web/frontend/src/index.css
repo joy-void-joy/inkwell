@@ -288,6 +288,46 @@ textarea { resize: none; }
   color: var(--text-muted);
 }
 
+/* --- Run agent roster --- */
+
+.run-agents {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.run-agents-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.run-agents-list { padding: 2px 0; }
+.run-agent {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 14px;
+  border-top: 1px solid rgba(34, 34, 34, 0.6);
+  font-size: 0.78rem;
+}
+.run-agent:first-child { border-top: none; }
+.run-agent-address { color: var(--accent); font-family: "SF Mono", "Fira Code", monospace; }
+.run-agent-model { color: var(--text-muted); }
+.run-agent-state { margin-left: auto; color: var(--text-dim); }
+.run-agent-running .run-agent-state { color: var(--yellow); }
+.run-agent-failed .run-agent-state,
+.run-agent-cancelled .run-agent-state { color: var(--red); }
+.run-agent-completed .run-agent-state { color: var(--green); }
+.run-agents-empty { padding: 12px 14px; color: var(--text-muted); font-size: 0.8rem; }
+
 /* --- Log Stream (primary view) --- */
 
 .log-stream {

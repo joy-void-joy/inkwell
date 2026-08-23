@@ -349,6 +349,73 @@ class TestCorpusBriefingReachesThePlanner:
         assert "A post" in briefing
         assert "nearest first" not in briefing
 
+    async def test_the_planner_is_shown_what_each_document_claims(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The judging pass already paid to read every document and wrote down
+        what it says. A briefing of titles over the top of that spends the
+        reading and throws the result away — and a title is exactly the part
+        that cannot distinguish a document that moves something from one that
+        does not."""
+        store = CorpusStore(root=tmp_path / "corpus")
+        store.save(
+            SourceShard(
+                source="aisi",
+                documents=[
+                    StoredDocument(
+                        slug="evaluations",
+                        url="https://fixture.test/evaluations",
+                        title="Pre-deployment evaluations",
+                        kind="markdown",
+                        summary="Cyber-range performance is doubling every five months.",
+                        tags=DocumentTags(judged=True),
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_root", lambda: tmp_path / "corpus"
+        )
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_semantics",
+            lambda held: SemanticLayer(store=held, enabled=False),
+        )
+
+        briefing = await corpus_briefing("AI and cyber risk")
+
+        assert "doubling every five months" in briefing
+
+    async def test_a_document_nothing_judged_is_named_rather_than_listed_bare(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A gap with a repair. Listed as a bare title it would read exactly
+        like a document that had been read and found to say nothing."""
+        store = CorpusStore(root=tmp_path / "corpus")
+        store.save(
+            SourceShard(
+                source="aisi",
+                documents=[
+                    StoredDocument(
+                        slug="unjudged",
+                        url="https://fixture.test/unjudged",
+                        title="Something nothing has read",
+                        kind="markdown",
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_root", lambda: tmp_path / "corpus"
+        )
+        monkeypatch.setattr(
+            "inkwell.agent.pipeline.corpus_semantics",
+            lambda held: SemanticLayer(store=held, enabled=False),
+        )
+
+        briefing = await corpus_briefing("AI and cyber risk")
+
+        assert "not yet judged" in briefing
+
     def test_the_brief_leads_the_subject_where_there_is_one(
         self, tmp_path: Path
     ) -> None:

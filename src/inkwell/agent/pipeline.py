@@ -155,7 +155,7 @@ from inkwell.agent.glossary import (
 )
 from inkwell.agent.segmenter import reader
 from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
-from inkwell.corpus.retrieval import CorpusQuery, search_corpus
+from inkwell.corpus.retrieval import CorpusHit, CorpusQuery, search_corpus
 from inkwell.corpus.storage import CorpusStore
 from inkwell.pdf import reads_by_page
 from inkwell.agent.tool_policy import research_tool_names, review_tool_names
@@ -806,9 +806,30 @@ def planning_topic(notes: PipelineNotes, target_format: str) -> str:
 CORPUS_BRIEFING_LIMIT = 30
 """How many corpus documents the planner is shown before it writes a question.
 
-Titles and dates only, so the ceiling is about what a planner can hold rather
-than what a context window can take.
+A claim apiece rather than a whole document, so the ceiling is about what a
+planner can hold rather than what a context window can take.
 """
+
+
+def briefing_claim(hit: CorpusHit) -> str:
+    """What one corpus document says, as a listing of thirty can carry it.
+
+    The judged summary first, and the document's own abstract only where
+    nothing has judged it — which inverts the narrow tier's preference on
+    purpose. That tier answers a reader who asked about one document, and an
+    abstract is the better answer there because the author wrote it. This is a
+    listing, and the summary is the field written to be read in one: bounded at
+    :data:`SUMMARY_WORDS` by construction, and phrased as what the document
+    claims rather than as what kind of thing it is.
+
+    A document with neither is named as unjudged rather than dropped. It is a
+    real gap with a repair — ``corpus retag`` — and a briefing that quietly
+    listed it as a bare title would read exactly like a document that had been
+    read and found to say nothing.
+    """
+    if hit.summary:
+        return hit.summary
+    return hit.abstract or "not yet judged, so nothing here says what it claims"
 
 
 async def corpus_briefing(topic: str, *, limit: int = CORPUS_BRIEFING_LIMIT) -> str:
@@ -821,12 +842,18 @@ async def corpus_briefing(topic: str, *, limit: int = CORPUS_BRIEFING_LIMIT) -> 
     material before it writes a single research question is what lets a
     question be *about* a development instead of about a claim in the source.
 
-    Titles, dates and venues, not bodies: the planner is deciding what to ask,
-    and the stages after it can read any of these in full.
+    What each one *claims*, not merely that it exists. A title says what a
+    document is about, which is enough to decide whether to open it and not
+    enough to decide whether it moves anything: "AISI pre-deployment
+    evaluations" and "AISI found cyber-range performance doubling every five
+    months" are the same title and only one of them is a research question. The
+    judging pass already paid to read every document and wrote down what it
+    says; a briefing that listed titles over the top of that spent the reading
+    and threw the result away.
     """
     store = CorpusStore(root=corpus_root())
     answer = await search_corpus(
-        CorpusQuery(tier="browse", like=topic, limit=limit),
+        CorpusQuery(tier="narrow", like=topic, limit=limit),
         store,
         semantics=corpus_semantics(store),
     )
@@ -849,7 +876,10 @@ async def corpus_briefing(topic: str, *, limit: int = CORPUS_BRIEFING_LIMIT) -> 
         )
         for hit in answer.documents:
             dated = f" ({hit.published})" if hit.published else ""
-            yield f"- **{hit.title}**{dated} — {hit.venue or hit.organization}"
+            yield (
+                f"- **{hit.title}**{dated} — {hit.venue or hit.organization}\n"
+                f"  {briefing_claim(hit)}"
+            )
         yield (
             "\nRead this list for what the source material does not mention. "
             "A development here that the source predates is the strongest "

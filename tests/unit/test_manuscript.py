@@ -58,6 +58,7 @@ from inkwell.manuscript.ingest import (
 )
 from inkwell.manuscript import runner as runner_module
 from inkwell.manuscript.runner import (
+    PRODUCED_FILE,
     PartOutcome,
     PartRunObservers,
     PartRunWatch,
@@ -1164,6 +1165,32 @@ class TestARewriteThatLostItsHeadingIsRefused:
         assert outcome.ended() == "failed"
         assert "2.3.2 Cyber Risk" in outcome.failure
         assert (chapters / "02" / "03.md").read_text(encoding="utf-8") == before
+
+    @pytest.mark.asyncio
+    async def test_what_a_run_wrote_survives_a_splice_that_refused_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The prose is kept before it is placed, so the one copy of hours of
+        writing does not depend on the step after it succeeding."""
+        chapters = atlas_like(tmp_path)
+        work = read_manuscript(chapters)
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        async def unheaded(**passed: object) -> AgentSessionResult:
+            return AgentSessionResult(
+                session_id="s",
+                timestamp="",
+                output=WritingOutput(title="", content="Prose with no heading.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", unheaded)
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        outcome = await run_part(store, "atlas", work, node, session_id="s")
+
+        assert outcome.ended() == "failed"
+        kept = store.work_dir("atlas") / "runs" / "s" / PRODUCED_FILE
+        assert kept.read_text(encoding="utf-8") == "Prose with no heading.\n"
 
 
 class TestAPassSaysWhatItIsDoingWhileItIsDoingIt:

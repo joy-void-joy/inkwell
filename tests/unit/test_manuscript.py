@@ -65,9 +65,11 @@ from inkwell.manuscript.ingest import (
     read_manuscript,
 )
 from inkwell.manuscript import runner as runner_module
+from inkwell.manuscript.brief import BriefWriter
 from inkwell.manuscript.runner import (
     PRODUCED_FILE,
     PartOutcome,
+    PartRunAgents,
     PartRunObservers,
     PartRunWatch,
     around,
@@ -142,11 +144,9 @@ FIGURE_BLOCK = """
 class PassesThrough(InheritanceReader):
     """An inheritance pass that adopts the fresh draft exactly as it stands.
 
-    The seam every test that runs a part hands over, so a unit test never
-    reaches a model to settle two drafts it wrote itself. Adopting verbatim is
-    also what keeps these tests about what they were about: whatever the run
-    produced is what reaches the splice, as it did before there was a pass in
-    between.
+    Adopting verbatim keeps these tests about what they were about: whatever
+    the run produced is what reaches the splice, as it did before there was a
+    pass in between.
     """
 
     def __init__(self, dropped: tuple[Dropped, ...] = ()) -> None:
@@ -158,6 +158,23 @@ class PassesThrough(InheritanceReader):
             produced.read_text(encoding="utf-8"), encoding="utf-8"
         )
         return Audit(dropped=list(self.dropped))
+
+
+class PlansNothing(BriefWriter):
+    """A deriver that declines, so the run plans for itself as it always did."""
+
+    async def compose(self, task: str, root: Path) -> None:
+        return None
+
+
+OFFLINE = PartRunAgents(briefing=PlansNothing(), inheriting=PassesThrough())
+"""The whole set of readers a part run buys, stubbed.
+
+Handed over by every test here that runs a part, so a unit test never reaches a
+model. The set rather than a member apiece is the point: stubbing two of three
+seams leaves the third live, and a test that reaches a model finds out by taking
+four minutes instead of a second.
+"""
 
 
 def atlas_like(root: Path) -> Path:
@@ -837,7 +854,7 @@ class TestAPartIsWrittenAsTheWorkIsWrittenAs:
             node,
             session_id="s",
             scratch=tmp_path / "room",
-            inheriting=PassesThrough(),
+            agents=OFFLINE,
         )
 
         assert asked["target_format"] == "textbook"
@@ -870,7 +887,7 @@ class TestAPartIsWrittenAsTheWorkIsWrittenAs:
             node,
             session_id="s",
             scratch=tmp_path / "room",
-            inheriting=PassesThrough(),
+            agents=OFFLINE,
         )
 
         assert asked["target_format"] == "lesswrong"
@@ -1017,7 +1034,7 @@ class TestTheStandingTextIsMaterialRatherThanTheShape:
             work,
             node,
             session_id="s",
-            inheriting=PassesThrough(),
+            agents=OFFLINE,
         )
 
         assert asked["material_role"] == "source"
@@ -1205,9 +1222,7 @@ class TestAPartRunSharesTheWorksTermLedger:
             )
 
         monkeypatch.setattr(runner_module, "run_session", record)
-        await run_part(
-            store, "atlas", work, node, session_id="s", inheriting=PassesThrough()
-        )
+        await run_part(store, "atlas", work, node, session_id="s", agents=OFFLINE)
 
         scope = asked["glossary"]
         assert isinstance(scope, NodeGlossary)
@@ -1378,7 +1393,7 @@ class TestARewriteThatLostItsHeadingIsRefused:
             work,
             node,
             session_id="s",
-            inheriting=PassesThrough(),
+            agents=OFFLINE,
         )
 
         assert outcome.ended() == "failed"
@@ -1406,7 +1421,7 @@ class TestARewriteThatLostItsHeadingIsRefused:
         monkeypatch.setattr(runner_module, "run_session", unheaded)
         store = ManuscriptStore(root=tmp_path / "manuscripts")
         outcome = await run_part(
-            store, "atlas", work, node, session_id="s", inheriting=PassesThrough()
+            store, "atlas", work, node, session_id="s", agents=OFFLINE
         )
 
         assert outcome.ended() == "failed"
@@ -1456,7 +1471,7 @@ class TestAPassSaysWhatItIsDoingWhileItIsDoingIt:
             work,
             only=("02/03/2.3.2",),
             watching=watch,
-            inheriting=PassesThrough(),
+            agents=OFFLINE,
         )
 
         assert said == ["open 02/03/2.3.2", "closed 02/03/2.3.2 rewritten"]
@@ -1481,7 +1496,7 @@ class TestAPassSaysWhatItIsDoingWhileItIsDoingIt:
             work,
             only=("02/03/2.3.2",),
             watching=watch,
-            inheriting=PassesThrough(),
+            agents=OFFLINE,
         )
 
         assert said == ["open 02/03/2.3.2", "closed 02/03/2.3.2 failed"]

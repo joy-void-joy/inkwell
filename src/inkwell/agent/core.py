@@ -28,7 +28,12 @@ from lup.telemetry.trace import TraceLogger
 import inkwell.agent.config as config_mod
 from inkwell.agent.book import ChapterAssignment
 from inkwell.agent.glossary import GlossaryScope
-from inkwell.agent.models import AgentSessionResult, PipelineSnapshot, SourceRole
+from inkwell.agent.models import (
+    AgentSessionResult,
+    ArticlePlan,
+    PipelineSnapshot,
+    SourceRole,
+)
 from inkwell.agent.notes import PipelineNotes
 from inkwell.agent.pipeline import (
     DISPLAY_STAGES,
@@ -185,6 +190,7 @@ async def run_session(
     light: bool = False,
     skipped_stages: list[str] | None = None,
     writer_mode: str = "",
+    plan: ArticlePlan | None = None,
 ) -> AgentSessionResult:
     """Unified entry point for all writing sessions.
 
@@ -202,6 +208,10 @@ async def run_session(
       section, where the launch declares it. Empty leaves it to the ambient
       setting; a work of many parts declares it, because a book whose parts
       disagreed about it would be drafted two ways
+    - plan: A plan composed outside this run, where whoever launched it could
+      see more than the run can. The plan stage records it rather than
+      deriving one — a part of a book is planned by something that can see the
+      part's place in the book, which is not the run holding one subsection
     - material_role: What `sources` is to this run — 'source' to write from, or
       'revision_target' for the piece the run replaces
     - assignment: Which book this run writes a chapter of, and which chapter of
@@ -273,6 +283,7 @@ async def run_session(
                 light=light,
                 skipped_stages=skipped_stages or [],
                 writer_mode=writer_mode,
+                plan=plan,
             )
             output = await runner.run_from(snapshot, restart=bool(restart_from_stage))
         else:
@@ -293,6 +304,7 @@ async def run_session(
                 light=light,
                 skipped_stages=skipped_stages or [],
                 writer_mode=writer_mode,
+                plan=plan,
             )
     finally:
         setup.trace_logger.save()

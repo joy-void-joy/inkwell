@@ -3,6 +3,8 @@ import { Link, useParams } from "react-router-dom";
 import {
   answerWorkQuestion,
   clearWorkPart,
+  fetchWorkActivity,
+  fetchWorkHistory,
   fetchWhatItReaches,
   fetchWorkQuestions,
   fetchWorkTree,
@@ -11,8 +13,16 @@ import {
   startWorkRun,
 } from "../api/client";
 import { InFlight } from "../components/InFlight";
+import { WorkActivity, WorkHistory } from "../components/WorkActivity";
 import { stalenessLabel } from "../types";
-import type { PartNode, QuestionView, ReachedBy, WorkTree } from "../types";
+import type {
+  PartHistory,
+  PartNode,
+  QuestionView,
+  ReachedBy,
+  WorkActivity as Activity,
+  WorkTree,
+} from "../types";
 import { RunPanel } from "./RunPanel";
 
 // A work of two hundred parts is a tree, and a tree is what a terminal renders
@@ -36,6 +46,8 @@ export function WorkTreeView() {
   const { workId = "" } = useParams();
   const [tree, setTree] = useState<WorkTree | null>(null);
   const [questions, setQuestions] = useState<QuestionView[]>([]);
+  const [activity, setActivity] = useState<Activity | null>(null);
+  const [history, setHistory] = useState<PartHistory[]>([]);
   const [error, setError] = useState("");
   const [outstandingOnly, setOutstandingOnly] = useState(false);
   const [reached, setReached] = useState<ReachedBy | null>(null);
@@ -64,13 +76,17 @@ export function WorkTreeView() {
     let live = true;
     const load = async () => {
       try {
-        const [loaded, waiting] = await Promise.all([
+        const [loaded, waiting, happening, runs] = await Promise.all([
           fetchWorkTree(workId),
           fetchWorkQuestions(workId),
+          fetchWorkActivity(workId),
+          fetchWorkHistory(workId),
         ]);
         if (!live) return;
         setTree(loaded);
         setQuestions(waiting);
+        setActivity(happening);
+        setHistory(runs);
         setError("");
       } catch (failure) {
         if (live) setError(String(failure));
@@ -239,6 +255,10 @@ export function WorkTreeView() {
       />
 
       <InFlight parts={tree.in_flight} onChanged={reload} />
+
+      <WorkActivity activity={activity} />
+
+      <WorkHistory history={history} />
 
       {questions.length > 0 && (
         <section>

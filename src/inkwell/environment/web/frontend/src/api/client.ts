@@ -14,7 +14,9 @@ import type {
   SessionSummary,
   SuppliedValues,
   WorkImport,
+  WorkActivity,
   WorkLoopStatus,
+  PartHistory,
   WorkSummary,
   WorkTree,
   WouldRun,
@@ -309,6 +311,28 @@ export async function fetchWorkQuestions(
   work: string,
 ): Promise<QuestionView[]> {
   const res = await fetch(`${BASE}/works/${encodeURIComponent(work)}/questions`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function fetchWorkActivity(work: string): Promise<WorkActivity> {
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/activity`,
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function fetchWorkHistory(
+  work: string,
+  key = "",
+): Promise<PartHistory[]> {
+  const params = new URLSearchParams();
+  if (key) params.set("key", key);
+  const query = params.size > 0 ? `?${params}` : "";
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/history${query}`,
+  );
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

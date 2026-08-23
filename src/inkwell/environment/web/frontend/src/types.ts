@@ -103,6 +103,46 @@ export interface PartInFlight {
   reason: string;
 }
 
+export interface RunningAgent {
+  address: string;
+  kind: string;
+  task: string;
+  running: boolean;
+  summary: string;
+  error: string;
+}
+
+export interface WorkingAgent {
+  id: string;
+  kind: string;
+  about: string;
+  running: boolean;
+  opened_at: string;
+  detail: string;
+  failure: string;
+}
+
+// One atomic view of a work's three execution levels. Keeping the parts and
+// their agents in this reply avoids rendering either against a different poll.
+export interface WorkActivity {
+  work: string;
+  loop: WorkLoopStatus | null;
+  parts: PartInFlight[];
+  agents: Record<string, RunningAgent[]>;
+  working: WorkingAgent[];
+}
+
+export interface PartHistory {
+  session: string;
+  key: string;
+  title: string;
+  opened_at: string;
+  reasons: string[];
+  produced: boolean;
+  adopted: boolean;
+  built: boolean;
+}
+
 export interface WouldRun {
   work: string;
   parts: { key: string; staleness: Staleness; reasons: string[] }[];

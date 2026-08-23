@@ -1447,6 +1447,98 @@ textarea { resize: none; }
   font-size: 0.85rem;
 }
 
+/* The work's three execution levels, followed by runs that ended. */
+.work-activity,
+.work-history {
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 12px 0;
+}
+
+.work-activity h2,
+.work-history h2 {
+  margin-top: 0;
+}
+
+.activity-level,
+.activity-working,
+.activity-part {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.activity-level:first-of-type {
+  border-top: none;
+}
+
+.activity-inner-agent,
+.activity-agent,
+.activity-empty,
+.history-run-detail,
+.history-run-reasons {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
+.activity-inner-agent,
+.activity-agent {
+  padding: 2px 0 2px 16px;
+}
+
+.activity-agent-kind {
+  color: var(--accent);
+}
+
+.activity-agent-state {
+  float: right;
+  color: var(--text-muted);
+}
+
+.activity-failed .activity-agent-state {
+  color: var(--red);
+}
+
+.activity-working details {
+  margin-top: 4px;
+}
+
+.activity-working summary {
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.history-run {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.history-run:first-of-type {
+  border-top: none;
+}
+
+.history-run-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.85rem;
+}
+
+.history-run-heading > span {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
+.history-run-heading .history-current {
+  color: var(--green);
+}
+
+.history-run-reasons {
+  padding-left: 12px;
+}
+
 /* Being written now. Loud on purpose: a run in progress was the one thing the
    work page could not say, and a panel nobody notices would not have fixed
    that. */

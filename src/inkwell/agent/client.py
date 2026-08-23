@@ -18,7 +18,7 @@ import contextvars
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,9 +35,21 @@ from lup.adapters.claude.selection import CLAUDE_RUNTIME, claude_config
 from lup.runtime.selection import SessionAutonomy, SessionRequest
 from lup.hooks import LupHooksConfig, create_large_read_hook
 from lup.mcp import McpServerEntry
+from lup.runtime.contracts import EventStream, Session, Turn
 from lup.runtime.errors import TurnInterruptedError
 from lup.runtime.factory import SessionFactory
-from lup.runtime.models import AnyTurnBlock, SessionId, TurnResult, turn_request
+from lup.runtime.models import (
+    AnyTurnBlock,
+    BlockCompletedEvent,
+    LiveTurnEvent,
+    SessionHandle,
+    SessionId,
+    TurnEvent,
+    TurnHandle,
+    TurnRequest,
+    TurnResult,
+    turn_request,
+)
 from lup.runtime.usage import CostAccumulator
 from lup.runtime.wrappers import (
     DisplayConfig,
@@ -355,6 +367,98 @@ def display_sink(
     return show
 
 
+class ForwardingEventStream(EventStream):
+    """Forward completed blocks while preserving the turn's one event stream.
+
+    Provider events are the live side of a turn.  The display decorator above
+    deliberately receives only the completed replay, so using it for a browser
+    made a twenty-minute writer look silent and then delivered every block at
+    the same timestamp when the turn ended.  This wrapper observes the stream
+    already consumed by one-shot queries and cohort actors, without opening a
+    second consumer over a stream whose contract permits only one.
+    """
+
+    def __init__(
+        self, inner: EventStream, callback: BlockCallback, prefix: str
+    ) -> None:
+        self.inner = inner
+        self.callback = callback
+        self.prefix = prefix
+
+    async def forward[T: TurnEvent | LiveTurnEvent](
+        self, events: AsyncIterator[T]
+    ) -> AsyncIterator[T]:
+        async for event in events:
+            if isinstance(event, BlockCompletedEvent):
+                await self.callback(event.block, self.prefix)
+            yield event
+
+    def events(self) -> AsyncIterator[TurnEvent]:
+        return self.forward(self.inner.events())
+
+    def live(self) -> AsyncIterator[LiveTurnEvent]:
+        return self.forward(self.inner.live())
+
+
+class ReplayForwardingTurn[T: BaseModel | None](Turn[T]):
+    """Forward a completed replay when a runtime offers no event stream."""
+
+    def __init__(self, inner: Turn[T], callback: BlockCallback, prefix: str) -> None:
+        self.inner = inner
+        self.callback = callback
+        self.prefix = prefix
+
+    async def result(self) -> TurnResult[T]:
+        result = await self.inner.result()
+        for block in result.blocks:
+            await self.callback(block, self.prefix)
+        return result
+
+
+class BlockForwardingSession(Session):
+    """Give every accepted turn live block forwarding when it is available."""
+
+    def __init__(self, inner: Session, callback: BlockCallback, prefix: str) -> None:
+        self.inner = inner
+        self.callback = callback
+        self.prefix = prefix
+
+    async def start[T: BaseModel | None](
+        self, request: TurnRequest[T]
+    ) -> TurnHandle[T]:
+        handle = await self.inner.start(request)
+        if handle.events is None:
+            return TurnHandle[T](
+                turn=ReplayForwardingTurn(handle.turn, self.callback, self.prefix),
+                interrupt=handle.interrupt,
+                steer=handle.steer,
+            )
+        return TurnHandle[T](
+            turn=handle.turn,
+            events=ForwardingEventStream(handle.events, self.callback, self.prefix),
+            interrupt=handle.interrupt,
+            steer=handle.steer,
+        )
+
+
+def block_forwarding_factory(
+    inner: SessionFactory, callback: BlockCallback, prefix: str
+) -> SessionFactory:
+    """Wrap every session opened by ``inner`` with live block forwarding."""
+
+    @asynccontextmanager
+    async def open_forwarding(
+        resume: SessionId | None = None,
+    ) -> AsyncGenerator[SessionHandle]:
+        async with inner.open(resume) as handle:
+            yield SessionHandle(
+                session=BlockForwardingSession(handle.session, callback, prefix),
+                fork=handle.fork,
+            )
+
+    return SessionFactory(open_forwarding)
+
+
 def observed_factory(
     factory: SessionFactory,
     *,
@@ -369,7 +473,7 @@ def observed_factory(
     The stage label is bound here rather than read from ambient state, which
     is what lets two sections write concurrently and still bill apart.
     """
-    return decorated_session_factory(
+    decorated = decorated_session_factory(
         factory,
         tracing=(
             TracingConfig(sink=trace_sink(trace_logger))
@@ -382,11 +486,24 @@ def observed_factory(
             else None
         ),
         display=(
-            DisplayConfig(sink=display_sink(trace_logger, block_callback, prefix))
-            if trace_logger is not None or block_callback is not None
+            # Trace persistence still wants the complete replay. Browser
+            # callbacks use the live event stream below so a long turn does
+            # not flush its entire history only after it has finished.
+            DisplayConfig(sink=display_sink(trace_logger, None, prefix))
+            if trace_logger is not None
             else None
         ),
     )
+    if block_callback is None:
+        return decorated
+    return block_forwarding_factory(decorated, block_callback, prefix)
+
+
+async def drain_events(events: EventStream) -> None:
+    """Drive a one-shot turn's live forwarding and discard the event values."""
+
+    async for _event in events.events():
+        pass
 
 
 @overload
@@ -507,8 +624,20 @@ async def query(
                 turn = await opened.session.start(turn_request(prompt))
             else:
                 turn = await opened.session.start(turn_request(prompt, output_type))
-            async with beating(heartbeat, heartbeat_interval):
-                result = await turn.turn.result()
+            event_drain = (
+                asyncio.create_task(drain_events(turn.events))
+                if turn.events is not None
+                else None
+            )
+            try:
+                async with beating(heartbeat, heartbeat_interval):
+                    result = await turn.turn.result()
+            finally:
+                if event_drain is not None:
+                    # The adapter closes its event queue on both success and
+                    # failure. Waiting here keeps the final completed block
+                    # from racing the return of a short turn.
+                    await event_drain
             if policy is not None and label is not None:
                 await policy.capture(label, result.identifiers.session.value)
     finally:

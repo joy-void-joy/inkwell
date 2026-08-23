@@ -354,6 +354,28 @@ subsection should be answers from the subject and the subject is inexhaustible
 — 1,023 words in, 8,321 out; and what the reasons for the run license, because a
 part told nothing infers its scope from the size of what it is about.
 
+**The plan comes from outside the run too, for the same reason.** A run holding
+one subsection planned that subsection's existing sections, because that is all
+it could see — and twenty-five of its thirty research questions opened "The
+draft says…", which is what a planner shown only the draft has to ask. So a
+*brief* is composed first, from the part, the two files either side of it, its
+budget, its figures, and its slice of what the corpus established, and the plan
+stage records that instead of deriving one. It never opens the book: the bound
+is what keeps testing one subsection from costing a book read, and the other
+producer of the same artifact — a planner that reads the whole work and emits
+every part's brief at once, seeing cross-cutting staleness this cannot — is what
+a full pass wants. Both emit an `ArticlePlan`, so nothing downstream knows which
+one it got, and a deriver that comes back with nothing leaves the run planning
+for itself rather than failing.
+
+Recorded rather than skipped, deliberately. A declared skip would save exactly
+the same planner call and silently take the Plan tab, the section tabs, and the
+plan on disk with it; the first thing to notice would be whichever later stage
+opened the file. What a work *does* declare skipped is the stages that are
+genuinely optional for it — `manuscript import --skip voice --skip assumptions`
+— and a skip naming no stage is refused where it is declared, because a typo
+skips nothing and reads afterwards exactly like a stage that ran.
+
 **Adoption is what makes it affordable.** A work nothing has built is a work
 where every part is out of date. `manuscript import` stamps each part as built
 from the text it already holds — `make -t`, and the same argument — so the

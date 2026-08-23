@@ -3636,6 +3636,7 @@ class PipelineRunner:
         light: bool = False,
         skipped_stages: list[str] | None = None,
         writer_mode: str = "",
+        plan: ArticlePlan | None = None,
     ) -> None:
         self.sources = sources
         self.material_role: SourceRole = material_role
@@ -3655,6 +3656,7 @@ class PipelineRunner:
         self.explicit_light = light
         self.skipped_stages = skipped_stages or []
         self.declared_writer_mode = writer_mode
+        self.launched_plan = plan
 
         if cost_accumulator is None:
             cost_accumulator = CostAccumulator()
@@ -5150,7 +5152,38 @@ class PipelineRunner:
                 session_state=self.state,
             )
 
+    async def record_launched_plan(self, plan: ArticlePlan) -> None:
+        """Take the plan the launch handed over instead of deriving one.
+
+        Everything the plan stage does *besides* deriving still happens: the
+        artifact is written where every stage after this reads it, the Plan tab
+        and the section tabs are created, and the overview moves. Declaring the
+        stage skipped would have saved exactly the same planner call and taken
+        all of that with it silently — the run would reach the write stage with
+        no plan on disk and no Plan tab, and the first thing to notice would be
+        whichever stage opened the file.
+        """
+        await self.announce_stage("plan", f"Planning from a brief: {plan.title}")
+        await self.update_overview(active_stage="plan")
+        notes = self.ensure_notes()
+        notes.save_artifact("plan", plan)
+        self.snapshot.plan = plan
+        self.snapshot.stage = "plan"
+        self.state.title = plan.title
+        await self.save_snapshot()
+        await self.hooks.on_progress(
+            f"Brief: '{plan.title}' — {len(plan.sections)} sections, "
+            f"{len(plan.research_questions)} research questions, planned outside "
+            f"this run"
+        )
+        await self.write_plan_tab(plan)
+        await self.create_section_tabs(plan)
+        await self.update_overview()
+
     async def stage_plan(self) -> None:
+        if self.launched_plan is not None:
+            await self.record_launched_plan(self.launched_plan)
+            return
         await self.announce_stage("plan", "Planning article structure")
         await self.update_overview(active_stage="plan")
         notes = self.ensure_notes()
@@ -6637,6 +6670,7 @@ async def run_pipeline(
     light: bool = False,
     skipped_stages: list[str] | None = None,
     writer_mode: str = "",
+    plan: ArticlePlan | None = None,
 ) -> WritingOutput:
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
@@ -6656,5 +6690,6 @@ async def run_pipeline(
         light=light,
         skipped_stages=skipped_stages,
         writer_mode=writer_mode,
+        plan=plan,
     )
     return await runner.run()

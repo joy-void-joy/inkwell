@@ -69,6 +69,7 @@ from inkwell.agent.glossary import (
     NodeGlossary,
     load_chapter_glossary,
 )
+from inkwell.manuscript.brief import BriefWriter, compose
 from inkwell.manuscript.budget import LengthBudget, budget_for
 from inkwell.manuscript.facts import (
     Consumption,
@@ -147,6 +148,31 @@ class PartRunObservers(BaseModel):
     )
     trace: SessionTrace = Field(
         default_factory=SessionTrace, description="Where its turns are recorded"
+    )
+
+
+class PartRunAgents(BaseModel):
+    """Every reader a part run buys from a model, in one place.
+
+    One object rather than a parameter apiece, for the reason
+    :class:`PartRunObservers` is one: the set grows. Named separately, a caller
+    that stubs two of three seams silently gets the real thing for the third —
+    which for a test means a unit test that reaches a model, and finds out by
+    taking four minutes instead of one second. Handed as a set, "did I stub
+    everything" is one question with one answer.
+
+    Defaults are nothing, so a run that passes none buys the real readers and
+    behaves as it always did.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    briefing: BriefWriter | None = Field(
+        default=None, description="Who plans the part before the pipeline writes it"
+    )
+    inheriting: InheritanceReader | None = Field(
+        default=None,
+        description="Who settles the fresh draft against the standing text",
     )
 
 
@@ -464,17 +490,21 @@ async def run_part(
     vocabulary: tuple[Abbreviation, ...] = (),
     scratch: Path | None = None,
     observers: PartRunObservers | None = None,
-    inheriting: InheritanceReader | None = None,
+    agents: PartRunAgents | None = None,
     found: WorkFindings | None = None,
 ) -> PartOutcome:
     """Take one part through the pipeline and hand back what it produced.
 
-    Three things in order, and the order is the point. The pipeline writes the
-    part from the material; the inheritance pass settles that draft against the
-    text the work holds, so nothing the author put there goes missing without a
-    reason; and only then is the settled text spliced in. Each step's output is
-    kept in the run's own room before the next one runs, so what a run wrote
-    outlives the run whatever becomes of the steps after it.
+    Four things in order, and the order is the point. The brief is composed
+    from what only the work knows — where the part sits, what surrounds it,
+    what it is entitled to, what the research holds on it — because nothing
+    inside a run holding one subsection is in a position to plan that
+    subsection. The pipeline then writes the part from the material, working
+    to that plan; the inheritance pass settles the draft against the text the
+    work holds, so nothing the author put there goes missing without a reason;
+    and only then is the settled text spliced in. Each step's output is kept in
+    the run's own room before the next one runs, so what a run wrote outlives
+    the run whatever becomes of the steps after it.
 
     Does not touch the work's state, because the loop owns that and needs the
     outcome in hand before deciding anything.
@@ -505,25 +535,32 @@ async def run_part(
     settled = named_in(shared)
 
     watched = observers if observers is not None else PartRunObservers()
+    reading = agents if agents is not None else PartRunAgents()
+    research = briefing(
+        found if found is not None else store.load_findings(work), node.key
+    )
+    figures = inventory_of(current).figures
+    budget = budget_for(manuscript, node)
+    instruction = part_instruction(
+        manuscript, node, reasons, figures=figures, budget=budget, research=research
+    )
     result = await run_session(
-        sources=[
-            str(material),
-            part_instruction(
-                manuscript,
-                node,
-                reasons,
-                figures=inventory_of(current).figures,
-                budget=budget_for(manuscript, node),
-                research=briefing(
-                    found if found is not None else store.load_findings(work),
-                    node.key,
-                ),
-            ),
-        ],
+        sources=[str(material), instruction],
         material_role="source",
         target_format=manuscript.target_format,
         writer_mode=manuscript.writer_mode,
         skipped_stages=list(manuscript.skipped_stages),
+        plan=await compose(
+            manuscript,
+            node,
+            material,
+            room,
+            instruction=instruction,
+            figures=figures,
+            budget=budget,
+            found=found if found is not None else store.load_findings(work),
+            writer=reading.briefing,
+        ),
         glossary=shared,
         session_id=session_id,
         listener=watched.listener,
@@ -540,7 +577,9 @@ async def run_part(
         )
     (room / PRODUCED_FILE).write_text(produced, encoding="utf-8")
 
-    adoption = await settle(material, room / PRODUCED_FILE, room, reader=inheriting)
+    adoption = await settle(
+        material, room / PRODUCED_FILE, room, reader=reading.inheriting
+    )
     if not adoption.settled():
         logger.warning("Nothing was adopted for %s: %s", node.key, adoption.render())
         return PartOutcome(key=node.key, session=session_id, failure=adoption.render())

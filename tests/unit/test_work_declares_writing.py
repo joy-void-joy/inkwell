@@ -17,8 +17,9 @@ from inkwell.agent.models import AgentSessionResult, WritingOutput
 from inkwell.agent.pipeline import PipelineRunner
 from inkwell.manuscript import runner as runner_module
 from inkwell.manuscript.ingest import read_manuscript
+from inkwell.manuscript.brief import BriefWriter
 from inkwell.manuscript.inheritance import ADOPTED_FILE, Audit, InheritanceReader
-from inkwell.manuscript.runner import PRODUCED_FILE, run_part
+from inkwell.manuscript.runner import PRODUCED_FILE, PartRunAgents, run_part
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import DEFAULT_WRITER_MODE, Manuscript
 
@@ -45,6 +46,17 @@ class PassesThrough(InheritanceReader):
             (room / PRODUCED_FILE).read_text(encoding="utf-8"), encoding="utf-8"
         )
         return Audit()
+
+
+class PlansNothing(BriefWriter):
+    """Declines to plan, so the run plans for itself as it always did."""
+
+    async def compose(self, task: str, root: Path) -> None:
+        return None
+
+
+OFFLINE = PartRunAgents(briefing=PlansNothing(), inheriting=PassesThrough())
+"""Every reader a part run buys, stubbed — handed over as the set."""
 
 
 def atlas_like(root: Path) -> Path:
@@ -79,7 +91,7 @@ async def asked_of_a_run(
         work,
         node,
         session_id="s",
-        inheriting=PassesThrough(),
+        agents=OFFLINE,
     )
     return asked
 

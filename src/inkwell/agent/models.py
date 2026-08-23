@@ -32,6 +32,24 @@ either way. It is declared by the entry point, which already knows.
 """
 
 
+type QuestionChannel = Literal["document", "handback"]
+"""Where a run's open questions reach somebody who can answer them.
+
+'document' posts them as comments on the run's Google Doc, which is right when
+that document is the deliverable and the author is reading it.
+
+'handback' returns them on the output and posts nothing, which is right when
+the document is a scratch surface one run of one part created and will not
+outlive. A pass over a book of two hundred parts creates two hundred documents;
+posting each part's questions into its own is filing them where nobody is
+looking. The work has a mailbox that outlives every run, and what comes back
+goes there.
+
+Declared by the entry point, which knows what its document is for. The pipeline
+cannot recover it: a Doc is a Doc either way.
+"""
+
+
 class AuthorNote(BaseModel):
     """A note from any pipeline stage addressed to the author."""
 

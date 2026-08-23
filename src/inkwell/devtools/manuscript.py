@@ -291,6 +291,24 @@ def status_cmd(
         if found.settled()
         else f"{len(found.dirty())} part(s) outstanding"
     )
+    stranded = state.abandoned()
+    if stranded:
+        typer.echo(
+            f"\n{len(stranded)} part(s) have read 'running' for longer than a run "
+            f"lasts. A pass leaves a held part alone, so one whose run is gone "
+            f"waits for good:"
+        )
+        for record in stranded:
+            typer.echo(
+                f"  {record.key:<24} held by {record.holder or 'nobody named'} "
+                f"since {record.changed_at:%Y-%m-%d %H:%M}"
+            )
+        typer.echo(
+            "Check the run is really gone before clearing one — nothing here can "
+            "tell a dead process from a slow one, and two runs writing one part "
+            "is what the lease prevents. Then: "
+            f"`manuscript clear {work} <key>`"
+        )
 
 
 @app.command("clear")

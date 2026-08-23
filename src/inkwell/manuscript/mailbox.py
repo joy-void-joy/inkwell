@@ -27,7 +27,7 @@ this module in the resolver's vocabulary rather than the work's.
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import datetime
 from hashlib import blake2b
 from pathlib import Path
@@ -116,20 +116,92 @@ def question_id(key: str, prompt: str) -> str:
     return f"{flattened(key)}.{digest}"
 
 
-def escalated_to(manuscript: Manuscript, key: str) -> str:
-    """The part a question from ``key`` is addressed to.
+def ancestors_of(manuscript: Manuscript, key: str) -> tuple[str, ...]:
+    """Every part above one part, nearest last.
 
-    Its nearest ancestor, which is what "escalate up the tree" means with a
-    key that is already a path. A part with no ancestor — a chapter, or a
-    work that is one flat list — addresses the work itself, and that is the
-    empty answer rather than a special one.
+    The work itself is not among them and is the empty string instead, which
+    is what a question that has run out of parts to escalate to addresses.
     """
-    ancestors = [
+    above = [
         node.key
         for node in manuscript.walk()
         if key.startswith(f"{node.key}/") and node.key != key
     ]
-    return max(ancestors, key=len) if ancestors else ""
+    return tuple(sorted(above, key=len))
+
+
+def names(prompt: str, held: str) -> bool:
+    """Whether a question names this part, as words rather than as characters.
+
+    Character containment finds a chapter called "02" inside "2026" and would
+    address a question about a date to that chapter, which is both wrong and
+    the kind of wrong nobody traces. Compared as words, a name is found where a
+    reader would find it and nowhere else.
+    """
+    if not held:
+        return False
+    words = prompt.split()
+    wanted = held.split()
+    return any(
+        words[at : at + len(wanted)] == wanted
+        for at in range(len(words) - len(wanted) + 1)
+    )
+
+
+def concerns(manuscript: Manuscript, prompt: str) -> tuple[str, ...]:
+    """Every part of the work a question names, by key.
+
+    Matched on the title the authors gave a part and on the key state uses,
+    because those are what a run writing a question actually says: "does 2.3.1
+    Bio Risk already define this" names a part, and it is the difference
+    between a question about this subsection and a question about two.
+    """
+    return tuple(
+        node.key
+        for node in manuscript.walk()
+        if names(prompt, node.key) or names(prompt, node.title)
+    )
+
+
+def common_ancestor(manuscript: Manuscript, keys: Iterable[str]) -> str:
+    """The nearest part holding all of these, empty where only the work does.
+
+    Read off the keys rather than by walking, because a key *is* the path down
+    the tree: the deepest ancestor every key shares is the deepest one that is
+    an ancestor of the first and a prefix of all the rest.
+    """
+    held = tuple(keys)
+    if not held:
+        return ""
+    shared = [
+        one
+        for one in ancestors_of(manuscript, held[0]) + (held[0],)
+        if all(other == one or other.startswith(f"{one}/") for other in held)
+    ]
+    return shared[-1] if shared else ""
+
+
+def escalated_to(manuscript: Manuscript, key: str, prompt: str = "") -> str:
+    """The part a question from ``key`` is addressed to.
+
+    Its nearest ancestor by default, which is what "escalate up the tree"
+    means with a key that is already a path. But a question that *names* other
+    parts is not a question about this one: "should this and 4.2 both define
+    the term, or only one of them" cannot be answered by the section holding
+    only this part, and addressing it there means it waits at a level that has
+    to escalate it again by hand. So a question that names parts is addressed
+    to the nearest part holding all of them and the asker — which for two parts
+    in different chapters is the work, correctly.
+
+    A part with no ancestor — a chapter, or a work that is one flat list —
+    addresses the work itself, and that is the empty answer rather than a
+    special one.
+    """
+    named = concerns(manuscript, prompt)
+    if named and tuple(sorted({*named, key})) != (key,):
+        return common_ancestor(manuscript, {*named, key})
+    above = ancestors_of(manuscript, key)
+    return above[-1] if above else ""
 
 
 class PartMailbox(BaseModel, frozen=True):

@@ -78,6 +78,7 @@ from inkwell.agent.models import (
     ClassifiedComment,
     MergedDraft,
     PipelineSnapshot,
+    QuestionChannel,
     SourceRole,
     ResearchCompilation,
     RestartQueue,
@@ -3486,8 +3487,18 @@ async def surface_assumptions(
     compute_tool_names: list[str] | None = None,
     trace_logger: TraceLogger | None = None,
     cost_accumulator: CostAccumulator | None = None,
+    asking: QuestionChannel = "document",
 ) -> AssumptionsList:
-    """Surface uncertainties and questions as GDoc comments."""
+    """Surface uncertainties, and put them where somebody will see them.
+
+    Recorded on the session state whatever the channel, because that is what
+    reaches whoever launched the run: a part of a work carries its questions
+    back to the work's mailbox, where they park the part and wait for an answer
+    that outlives the run. Comments are the *other* channel, and are posted only
+    where the document is one somebody is reading — a pass over two hundred
+    parts creates two hundred documents, and filing each part's questions in its
+    own is filing them where nobody is looking.
+    """
     plan_path = notes.artifact_path("plan")
     assumptions_path = notes.artifact_path("assumptions")
     collector = AssumptionsCollector(assumptions_path)
@@ -3539,7 +3550,14 @@ async def surface_assumptions(
     else:
         result = AssumptionsList(items=[])
 
-    if result.items:
+    for item in result.items:
+        session_state.add_question(
+            f"{item.content} (best guess: {item.best_guess})"
+            if item.best_guess
+            else item.content
+        )
+
+    if result.items and asking == "document":
         specs = [
             CommentSpec(
                 content=(
@@ -3637,6 +3655,7 @@ class PipelineRunner:
         skipped_stages: list[str] | None = None,
         writer_mode: str = "",
         plan: ArticlePlan | None = None,
+        asking: QuestionChannel = "document",
     ) -> None:
         self.sources = sources
         self.material_role: SourceRole = material_role
@@ -3657,6 +3676,7 @@ class PipelineRunner:
         self.skipped_stages = skipped_stages or []
         self.declared_writer_mode = writer_mode
         self.launched_plan = plan
+        self.asking: QuestionChannel = asking
 
         if cost_accumulator is None:
             cost_accumulator = CostAccumulator()
@@ -5296,12 +5316,18 @@ class PipelineRunner:
                 compute_tool_names=sc.tool_names,
                 trace_logger=self.trace_logger,
                 cost_accumulator=self.cost_accumulator,
+                asking=self.asking,
             )
         self.snapshot.stage = "assumptions"
         await self.save_snapshot()
         if assumptions.items:
+            placed = (
+                "as GDoc comments"
+                if self.asking == "document"
+                else "for whoever launched this run to answer"
+            )
             await self.hooks.on_progress(
-                f"Posted {len(assumptions.items)} questions/assumptions as GDoc comments"
+                f"Raised {len(assumptions.items)} questions/assumptions {placed}"
             )
         await self.update_overview()
 
@@ -6671,6 +6697,7 @@ async def run_pipeline(
     skipped_stages: list[str] | None = None,
     writer_mode: str = "",
     plan: ArticlePlan | None = None,
+    asking: QuestionChannel = "document",
 ) -> WritingOutput:
     """Run the complete writing pipeline."""
     runner = PipelineRunner(
@@ -6691,5 +6718,6 @@ async def run_pipeline(
         skipped_stages=skipped_stages,
         writer_mode=writer_mode,
         plan=plan,
+        asking=asking,
     )
     return await runner.run()

@@ -547,6 +547,7 @@ async def run_part(
     result = await run_session(
         sources=[str(material), instruction],
         material_role="source",
+        asking="handback",
         target_format=manuscript.target_format,
         writer_mode=manuscript.writer_mode,
         skipped_stages=list(manuscript.skipped_stages),

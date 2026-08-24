@@ -160,7 +160,11 @@ from inkwell.agent.glossary import (
     seed_glossary,
 )
 from inkwell.agent.segmenter import reader
-from inkwell.agent.extract_agent import assemble_sources, run_extraction_agent
+from inkwell.agent.extract_agent import (
+    assemble_sources,
+    guess_origin,
+    run_extraction_agent,
+)
 from inkwell.corpus.retrieval import CorpusHit, CorpusQuery, search_corpus
 from inkwell.corpus.storage import CorpusStore
 from inkwell.pdf import reads_by_page
@@ -4983,7 +4987,11 @@ class PipelineRunner:
         unrecovered = list(
             dict.fromkeys(
                 assembled.unrecovered
-                + [value for value in original_inputs if value not in covered]
+                + [
+                    value
+                    for value in original_inputs
+                    if value not in covered and guess_origin(value) != "inline"
+                ]
             )
         )
         source_set = {src for src in self.sources}

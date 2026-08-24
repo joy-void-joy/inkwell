@@ -160,3 +160,59 @@ class TestStageExtractGuard:
         assert not (
             manifest.references_absent_source and not manifest.has_concrete_source
         )
+
+
+class TestStageExtractRecovery:
+    """Only source-shaped inputs enter deterministic fallback extraction."""
+
+    async def test_multiline_instructions_are_not_fetched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        source = tmp_path / "part.md"
+        source.write_text("## Part\n", encoding="utf-8")
+        instructions = "Write this part.\n\nKeep its heading."
+        runner = PipelineRunner(
+            sources=[str(source), instructions],
+            notes=PipelineNotes(tmp_path / "notes"),
+        )
+
+        async def noop(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        monkeypatch.setattr(runner, "announce_stage", noop)
+        monkeypatch.setattr(runner, "update_overview", noop)
+
+        async def fake_extract(*_args: object, **_kwargs: object) -> ExtractionManifest:
+            return ExtractionManifest(
+                instructions=instructions,
+                sources=[
+                    ExtractedSource(
+                        raw_input=str(source),
+                        role="source",
+                        origin="file",
+                        local_path=str(source),
+                    )
+                ],
+            )
+
+        attempted: list[str] = []
+
+        async def record_fetch(value: str, _doc_id: str | None) -> str:
+            attempted.append(value)
+            return ""
+
+        class SnapshotSaved(Exception):
+            pass
+
+        async def stop_after_snapshot() -> None:
+            raise SnapshotSaved
+
+        monkeypatch.setattr(runner, "save_snapshot", stop_after_snapshot)
+        monkeypatch.setattr(pipeline_module, "run_extraction_agent", fake_extract)
+        monkeypatch.setattr(pipeline_module, "extract_single_source", record_fetch)
+
+        with pytest.raises(SnapshotSaved):
+            await runner.stage_extract()
+        assert attempted == []
+        assert runner.snapshot.author_instructions == instructions
+        assert runner.snapshot.conversation.endswith("## Part\n")

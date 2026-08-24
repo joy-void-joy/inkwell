@@ -131,6 +131,8 @@ class SessionStateSnapshot(BaseModel):
     stage: str = "starting"
     sections: list[SectionInfo] = Field(default_factory=list)
     pending_questions: list[str] = Field(default_factory=list)
+    drafted_words: int = 0
+    target_words: int = 0
 
 
 class CompletionOutput(BaseModel):

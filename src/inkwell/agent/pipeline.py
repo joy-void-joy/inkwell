@@ -19,6 +19,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Coroutine,
+    Iterable,
     Iterator,
 )
 from contextlib import asynccontextmanager
@@ -112,6 +113,7 @@ from inkwell.agent.diversity import (
     recorded_citations,
 )
 from inkwell.agent.notes import PipelineNotes
+from inkwell.agent.prose import markdown_blocks
 from inkwell.agent.reader_feedback import (
     ReaderFeedback,
     ReaderFeedbackTree,
@@ -1354,6 +1356,39 @@ def render_research_progress(research_path: Path) -> str:
     return "\n".join(lines())
 
 
+type DraftCallback = Callable[[str], Coroutine[None, None, None]]
+"""Called with a draft's whole text each time the file behind it changes."""
+
+
+def comparable(value: str) -> str:
+    """One title as it compares against another, past casing and punctuation.
+
+    A writer that plans "Discovery Got Cheap; Remediation Did Not" and writes
+    "Discovery got cheap - remediation did not" wrote the section it planned.
+    """
+    return " ".join(
+        "".join(one if one.isalnum() else " " for one in value.lower()).split()
+    )
+
+
+def sections_landed(content: str, titles: Iterable[str]) -> list[str]:
+    """Which of the planned sections this draft has visibly arrived at.
+
+    A section announces itself as a heading in a piece written with headings,
+    and as the bold run a paragraph opens with in one written as continuous
+    prose. Neither is owed: a writer rewords as it goes, and a part of a book
+    carries one heading for the whole part and none for its sections. So this
+    reports what it can recognise and never concludes anything from silence —
+    a caller marks what landed and leaves the rest as it found them.
+    """
+    announced = {
+        comparable(block.plain if block.is_heading else block.bold_opening)
+        for block in markdown_blocks(content)
+        if block.is_heading or block.bold_opening
+    }
+    return [title for title in titles if comparable(title) in announced]
+
+
 class DraftSyncer:
     """Polls a draft file and pushes changes to a GDoc tab in real time.
 
@@ -1370,6 +1405,7 @@ class DraftSyncer:
         tab_name: str = "",
         session_state: WritingSessionState | None = None,
         interval: float = 5.0,
+        on_draft: DraftCallback | None = None,
     ) -> None:
         self.doc_id = doc_id
         self.tab_id = tab_id
@@ -1377,6 +1413,7 @@ class DraftSyncer:
         self.file_path = file_path
         self.session_state = session_state
         self.interval = interval
+        self.on_draft = on_draft
         self.last_content = ""
         self.task: asyncio.Task[None] | None = None
 
@@ -1407,6 +1444,11 @@ class DraftSyncer:
         if content == self.last_content or not content.strip():
             return
         self.last_content = content
+        # Before the document write rather than after it: the draft on disk is
+        # what changed, and a doc the author never opened being unreachable is
+        # no reason for the run's own surface to stop moving.
+        if self.on_draft is not None:
+            await self.on_draft(content)
         async with gdoc_nonfatal(f"sync draft {self.file_path.name}"):
             from inkwell.agent.tools.google_docs import TAB_CONTINUATION_CHARS
 
@@ -5721,6 +5763,24 @@ class PipelineRunner:
         await self.save_snapshot()
         await self.update_overview()
 
+    async def draft_advanced(self, content: str) -> None:
+        """Take what the draft on disk now says, and tell whoever is watching.
+
+        One writer drafting a whole piece marks no section off, so the only
+        thing that moved for the whole stage was a clock — a section counter
+        that could never leave zero beside a heartbeat that counted seconds.
+        Both of those are here in the file every eight seconds, unread.
+        """
+        plan = self.snapshot.plan
+        sections = [one.title for one in plan.sections] if plan else []
+        for title in sections_landed(content, sections):
+            self.state.update_section_status(title, "drafted")
+        budget = plan.word_budget if plan is not None else None
+        self.state.record_draft(
+            len(content.split()), budget.maximum if budget is not None else 0
+        )
+        await self.hooks.on_state_change()
+
     async def write_single_draft(self) -> None:
         """writer_mode='single': one writer drafts the whole piece, no merge."""
         await self.announce_stage("write", "Writing the full draft (single writer)")
@@ -5746,6 +5806,7 @@ class PipelineRunner:
                 tab_name="Draft",
                 session_state=self.state,
                 interval=8.0,
+                on_draft=self.draft_advanced,
             )
             await syncer.start()
             try:

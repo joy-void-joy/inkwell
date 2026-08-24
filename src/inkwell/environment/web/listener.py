@@ -89,6 +89,8 @@ class WebListener(PipelineListener):
                 for s in state.sections
             ],
             pending_questions=list(state.pending_questions),
+            drafted_words=state.drafted_words,
+            target_words=state.target_words,
         )
 
     async def on_block(self, block_type: str, content: str, prefix: str) -> None:

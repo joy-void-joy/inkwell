@@ -337,6 +337,8 @@ export interface SessionStateSnapshot {
   stage: string;
   sections: SectionInfo[];
   pending_questions: string[];
+  drafted_words: number;
+  target_words: number;
 }
 
 export interface SessionSummary {

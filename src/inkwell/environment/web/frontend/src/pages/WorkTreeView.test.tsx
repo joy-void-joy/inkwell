@@ -179,6 +179,8 @@ describe("session event identity", () => {
         stage: "brief",
         sections: [],
         pending_questions: [],
+        drafted_words: 0,
+        target_words: 0,
       },
       cost: {
         total_cost_usd: 0,

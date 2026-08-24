@@ -290,6 +290,8 @@ function SessionDetailInner() {
         stages={pipelineStages}
         completedStages={completedStages}
         sections={state.sessionState?.sections ?? []}
+        draftedWords={state.sessionState?.drafted_words ?? 0}
+        targetWords={state.sessionState?.target_words ?? 0}
       />
 
       <div className="info-bar">

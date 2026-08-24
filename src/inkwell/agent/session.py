@@ -236,6 +236,8 @@ class WritingSessionState:
         self.source_doc_id: str = ""
         self.stage: str = "starting"
         self.sections: list[SectionStatus] = []
+        self.drafted_words: int = 0
+        self.target_words: int = 0
         self.pending_questions: list[str] = []
         self.seen_comments = CommentLedger(name="seen_comments")
         self.agent_comments = CommentLedger(name="agent_ids")
@@ -266,6 +268,18 @@ class WritingSessionState:
             if section["title"] == title:
                 section["status"] = status
                 return
+
+    def record_draft(self, words: int, target: int = 0) -> None:
+        """Take the draft's length as it stands, against the length it targets.
+
+        What a surface can show while one writer works through a whole piece.
+        Recognising a planned section in the prose depends on the writer
+        announcing it, and a part of a book written as continuous prose
+        announces none — so the length is the progress that always exists, and
+        the one a watching author reads against the target anyway.
+        """
+        self.drafted_words = words
+        self.target_words = target
 
     def add_question(self, question: str) -> None:
         self.pending_questions.append(question)

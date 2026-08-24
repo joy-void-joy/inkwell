@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from lup.runtime.background import BackgroundAgent, BackgroundConfig
 from lup.runtime.errors import TurnError
 from lup.runtime.models import TurnResult, turn_request
-from inkwell.agent.client import provider_factory, query
+from inkwell.agent.client import query, required_agent_surface
 from lup.mcp import LupMcpTool, ToolError, create_mcp_server, lup_tool
 
 from inkwell.agent.config import stage_model
@@ -337,7 +337,9 @@ def watcher_agent(
         claims.release()
 
     return BackgroundAgent(
-        factory=provider_factory(
+        factory=required_agent_surface().session_factory(
+            prefix=f"[{name}] ",
+            address=name,
             model=stage_model("classify"),
             system_prompt=system_prompt,
             tool_servers={name: server},

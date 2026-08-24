@@ -26,9 +26,12 @@ up next pass and fail the same way for the same reason, forever.
 """
 
 import asyncio
+import fcntl
 import logging
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
+from typing import TextIO
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -74,6 +77,72 @@ A backstop, not the mechanism: propagation settles on its own, and a loop that
 reaches this has found a work whose parts really do keep moving each other,
 which is worth reporting rather than grinding through.
 """
+
+WORK_RUN_LOCK_FILE = "run.lock"
+"""The cross-process lease proving one loop owns a work."""
+
+
+class WorkAlreadyRunning(Exception):
+    """Raised when another process or task already owns a work's loop."""
+
+
+class WorkLease:
+    """An exclusive, crash-safe lease over one work's state writer.
+
+    The file stays as the stable lock address; ownership is the kernel lock on
+    its open handle. A process exit releases it, so a crashed run cannot leave
+    a stale marker that blocks the book forever.
+    """
+
+    def __init__(self, path: Path, handle: TextIO) -> None:
+        self.path = path
+        self.handle: TextIO | None = handle
+
+    @classmethod
+    def acquire(cls, store: ManuscriptStore, work: str) -> "WorkLease":
+        """Claim one work immediately, refusing rather than waiting."""
+        path = store.work_dir(work) / WORK_RUN_LOCK_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as failure:
+            handle.close()
+            raise WorkAlreadyRunning(f"{work} already has a loop running") from failure
+        return cls(path, handle)
+
+    def release(self) -> None:
+        """Release this lease once; repeated cleanup is harmless."""
+        handle = self.handle
+        if handle is None:
+            return
+        self.handle = None
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def __enter__(self) -> "WorkLease":
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: object,
+        _exc: object,
+        _traceback: object,
+    ) -> None:
+        self.release()
+
+
+def work_is_running(store: ManuscriptStore, work: str) -> bool:
+    """Whether any process currently owns the loop over this work."""
+    try:
+        lease = WorkLease.acquire(store, work)
+    except WorkAlreadyRunning:
+        return True
+    lease.release()
+    return False
+
 
 HELD_STANDINGS = ("running", "parked")
 """Standings a pass leaves alone: work in flight, and work awaiting an answer."""
@@ -458,6 +527,7 @@ async def run_loop(
     reporting: Callable[[PassReport], None] | None = None,
     watching: PartRunWatch | None = None,
     agents: PartRunAgents | None = None,
+    lease: WorkLease | None = None,
 ) -> tuple[PassReport, ...]:
     """Pass over a work until it settles, or until the cap says to stop.
 
@@ -478,6 +548,10 @@ async def run_loop(
     ``watching`` is finer than that again, and for the same reason: a pass over
     a long work is itself long, so what is being written *now* is a question
     nobody can answer from a report that arrives once the pass is over.
+
+    ``lease`` is supplied by a surface that must claim the work before it
+    replies that a background loop started. Direct callers acquire the same
+    cross-process lease here, so no launch path can bypass exclusivity.
     """
 
     async def taken() -> AsyncIterator[PassReport]:
@@ -502,4 +576,6 @@ async def run_loop(
             if not report.scheduled or report.settled():
                 return
 
-    return tuple([report async for report in taken()])
+    held = lease if lease is not None else WorkLease.acquire(store, work)
+    with held:
+        return tuple([report async for report in taken()])

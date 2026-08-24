@@ -44,9 +44,12 @@ from inkwell.manuscript.loop import (
     DEFAULT_CONCURRENCY,
     DEFAULT_PASSES,
     NotPicked,
+    WorkAlreadyRunning,
+    WorkLease,
     narrowed,
     schedulable,
     unpicked,
+    work_is_running,
 )
 from inkwell.manuscript.inheritance import ADOPTED_FILE
 from inkwell.manuscript.mailbox import PartAnswer, PartMailbox, PartQuestion
@@ -121,6 +124,29 @@ def set_loops(manager: WorkLoopManager) -> None:
 def get_loops() -> WorkLoopManager:
     """The manager these routes run loops through."""
     return holder.require()
+
+
+def loop_running(store: ManuscriptStore, work: str) -> bool:
+    """Whether this process or another one owns the work's loop."""
+    return holder.running(work) or work_is_running(store, work)
+
+
+def loop_status(store: ManuscriptStore, work: str) -> WorkLoopStatus | None:
+    """The local report, with cross-process ownership reflected as running."""
+    local = holder.status_of(work)
+    if local is not None and local.running:
+        return local
+    if work_is_running(store, work):
+        return WorkLoopStatus(work=work, running=True)
+    return local
+
+
+def claim_mutation(store: ManuscriptStore, work: str) -> WorkLease:
+    """Reserve a work for one state mutation, refusing an active loop."""
+    try:
+        return WorkLease.acquire(store, work)
+    except WorkAlreadyRunning as already:
+        raise HTTPException(status_code=409, detail=str(already)) from already
 
 
 class WorkSummary(BaseModel):
@@ -314,6 +340,12 @@ class RunRequest(BaseModel):
     )
 
 
+class RunPartRequest(BaseModel):
+    """The optional instruction attached to running one selected part."""
+
+    reason: str = Field(default="", description="What should change in this part")
+
+
 class WouldRun(BaseModel):
     """What a loop would pick up, answered without spending anything.
 
@@ -502,24 +534,21 @@ def record_work(request: ImportRequest) -> WorkImport:
         raise HTTPException(
             status_code=422, detail=f"No such directory on the server: {chapters}"
         )
-    if holder.running(request.work):
-        raise HTTPException(
-            status_code=409,
-            detail=f"{request.work} has a loop running — stop it before re-importing",
-        )
+    store = manuscript_store()
     refusal = unknown_format(request.target_format)
     if refusal:
         raise HTTPException(status_code=422, detail=refusal)
     declared = Path(request.vocabulary).expanduser() if request.vocabulary else None
-    return import_work(
-        manuscript_store(),
-        request.work,
-        chapters,
-        title=request.title,
-        target_format=request.target_format,
-        vocabulary=declared,
-        adopt=request.adopt,
-    )
+    with claim_mutation(store, request.work):
+        return import_work(
+            store,
+            request.work,
+            chapters,
+            title=request.title,
+            target_format=request.target_format,
+            vocabulary=declared,
+            adopt=request.adopt,
+        )
 
 
 @router.get("/{work}")
@@ -547,7 +576,7 @@ def work_tree(work: str) -> WorkTree:
         outstanding=len(found.dirty()),
         blocked=len(found.blocked()),
         settled=found.settled(),
-        loop=holder.status_of(work),
+        loop=loop_status(store, work),
         in_flight=in_flight(store, work),
     )
 
@@ -583,7 +612,7 @@ def in_flight(store: ManuscriptStore, work: str) -> tuple[PartInFlight, ...]:
     tree = tree_of(store, work)
     state = store.load_state(work)
     sessions = holder.loops.sessions if holder.loops else None
-    looping = holder.running(work)
+    looping = loop_running(store, work)
 
     def held() -> Iterator[PartInFlight]:
         """One entry per part a run has taken and not yet given back."""
@@ -682,8 +711,9 @@ async def start_run(work: str, request: RunRequest) -> WorkLoopStatus:
 @router.get("/{work}/run")
 def run_status(work: str) -> WorkLoopStatus:
     """Where the loop over this work stands, pass by pass."""
-    tree_of(manuscript_store(), work)
-    return holder.status_of(work) or WorkLoopStatus(work=work, running=False)
+    store = manuscript_store()
+    tree_of(store, work)
+    return loop_status(store, work) or WorkLoopStatus(work=work, running=False)
 
 
 @router.post("/{work}/run/stop")
@@ -696,6 +726,87 @@ async def stop_run(work: str) -> WorkLoopStatus:
     """
     tree_of(manuscript_store(), work)
     return await get_loops().stop(work)
+
+
+@router.post("/{work}/parts/{key:path}/run", status_code=202)
+async def start_part_run(
+    work: str, key: str, request: RunPartRequest
+) -> WorkLoopStatus:
+    """Atomically select, prepare, and run one part.
+
+    The work is claimed before an up-to-date part is marked requested. That
+    keeps the button one operation: losing a race to another surface cannot
+    leave a request behind that the user never meant to queue.
+    """
+    store = manuscript_store()
+    tree = tree_of(store, work)
+    gone = missing_root(tree)
+    if gone is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{work} was imported from {gone}, which is not there — "
+            "restore that checkout or re-import the work",
+        )
+    manager = get_loops()
+    try:
+        lease = manager.claim(store, work)
+    except LoopAlreadyRunning as already:
+        raise HTTPException(status_code=409, detail=str(already)) from already
+
+    opening: WorkState | None = None
+    changed = False
+    try:
+        selected = one_part(store, work, key)
+        if not selected.leaf:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{key} contains parts and cannot itself be run",
+            )
+        if selected.staleness == "source-gone":
+            raise HTTPException(
+                status_code=409,
+                detail=f"{key} has no source text at {selected.path}",
+            )
+        if selected.standing != "idle":
+            raise HTTPException(
+                status_code=409,
+                detail=f"{key} is {selected.standing} and cannot be started",
+            )
+
+        opening = store.load_state(work)
+        changed = bool(request.reason) or selected.staleness == "fresh"
+        if changed:
+            store.publish_state(
+                work, opening.declared(key, "requested", request.reason)
+            )
+
+        preview = would_run(store, work, 0, (key,))
+        if preview.passed_over:
+            skipped = preview.passed_over[0]
+            raise HTTPException(
+                status_code=409,
+                detail=f"{skipped.key} is not being run: {skipped.reason}",
+            )
+        if not preview.parts:
+            raise HTTPException(status_code=409, detail=f"{key} would not run")
+
+        return manager.start(
+            store,
+            work,
+            tree,
+            vocabulary=vocabulary_of(store, work),
+            passes=1,
+            limit=0,
+            only=(key,),
+            concurrency=1,
+            reconciling=True,
+            lease=lease,
+        )
+    except Exception:
+        if changed and opening is not None:
+            store.publish_state(work, opening)
+        lease.release()
+        raise
 
 
 @router.get("/{work}/questions")
@@ -741,17 +852,24 @@ def answer_question(work: str, question: str, request: AnswerRequest) -> Questio
     store = manuscript_store()
     tree_of(store, work)
     mailbox = PartMailbox(root=store.work_dir(work))
-    asked = next((held for held in mailbox.open() if held.id == question), None)
-    if asked is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No question of {work} is waiting under {question!r}",
-        )
-    if not mailbox.answer(
-        PartAnswer(id=question, value=request.value, answered_by=request.answered_by)
-    ):
-        raise HTTPException(status_code=409, detail=f"{question} was already answered")
-    released(store, work, mailbox, asked, request.value)
+    with claim_mutation(store, work):
+        asked = next((held for held in mailbox.open() if held.id == question), None)
+        if asked is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No question of {work} is waiting under {question!r}",
+            )
+        if not mailbox.answer(
+            PartAnswer(
+                id=question,
+                value=request.value,
+                answered_by=request.answered_by,
+            )
+        ):
+            raise HTTPException(
+                status_code=409, detail=f"{question} was already answered"
+            )
+        released(store, work, mailbox, asked, request.value)
     return QuestionView(
         id=asked.id,
         asker=asked.asker,
@@ -764,26 +882,25 @@ def answer_question(work: str, question: str, request: AnswerRequest) -> Questio
 def request_part(work: str, key: str, request: RequestRevision) -> PartNode:
     """Ask for one part to be revised, which is what makes it outstanding.
 
-    Refused while a run holds the part, for the reason clearing one is: the
-    standing being written over is the lease, and the run named in it is the
-    only record of who to follow to see what is happening. Overwriting that
-    loses the link to a run which then finishes and writes its prose in
-    anyway, over the top of whatever was asked for here.
+    Refused while a loop owns the work. The loop is the single state writer,
+    so even asking for a different part waits until the current pass has
+    published everything it learned rather than racing that publication.
     """
     store = manuscript_store()
     tree = tree_of(store, work)
     if tree.node(key) is None:
         raise HTTPException(status_code=404, detail=f"{work} has no part {key!r}")
-    running = store.load_state(work).record(key)
-    if running is not None and running.standing == "running":
-        raise HTTPException(
-            status_code=409,
-            detail=f"{key} is being run right now by {running.holder} — "
-            "wait for that run, or stop the work's loop first",
+    with claim_mutation(store, work):
+        running = store.load_state(work).record(key)
+        if running is not None and running.standing == "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"{key} is being run right now by {running.holder} — "
+                "wait for that run, or stop the work's loop first",
+            )
+        store.publish_state(
+            work, store.load_state(work).declared(key, "requested", request.reason)
         )
-    store.publish_state(
-        work, store.load_state(work).declared(key, "requested", request.reason)
-    )
     return one_part(store, work, key)
 
 
@@ -804,12 +921,8 @@ def clear_part(work: str, key: str) -> PartNode:
     tree = tree_of(store, work)
     if tree.node(key) is None:
         raise HTTPException(status_code=404, detail=f"{work} has no part {key!r}")
-    if holder.running(work):
-        raise HTTPException(
-            status_code=409,
-            detail=f"{work} has a loop running — stop it before clearing a part",
-        )
-    store.publish_state(work, store.load_state(work).declared(key, "idle", ""))
+    with claim_mutation(store, work):
+        store.publish_state(work, store.load_state(work).declared(key, "idle", ""))
     return one_part(store, work, key)
 
 
@@ -981,7 +1094,7 @@ def activity(work: str) -> WorkActivity:
     held = in_flight(store, work)
     return WorkActivity(
         work=work,
-        loop=holder.status_of(work),
+        loop=loop_status(store, work),
         parts=held,
         agents={
             one.key: agents_of(one.session, holder.session_manager())

@@ -79,6 +79,7 @@ from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.loop import (
     DEFAULT_CONCURRENCY,
     DEFAULT_PASSES,
+    WorkAlreadyRunning,
     narrowed,
     run_loop,
     schedulable,
@@ -491,19 +492,23 @@ def run_cmd(
             typer.echo(f"  {verdict.render()}")
         raise typer.Exit(1 if stuck else 0)
 
-    reports = asyncio.run(
-        run_loop(
-            store,
-            work,
-            tree,
-            vocabulary=vocabulary,
-            passes=passes,
-            limit=limit,
-            only=only,
-            concurrency=concurrency,
-            reconciling=reconcile_wave,
+    try:
+        reports = asyncio.run(
+            run_loop(
+                store,
+                work,
+                tree,
+                vocabulary=vocabulary,
+                passes=passes,
+                limit=limit,
+                only=only,
+                concurrency=concurrency,
+                reconciling=reconcile_wave,
+            )
         )
-    )
+    except WorkAlreadyRunning as already:
+        typer.echo(str(already), err=True)
+        raise typer.Exit(1) from already
     for number, report in enumerate(reports, start=1):
         typer.echo(f"pass {number}: {report.render()}")
         for held in report.results:

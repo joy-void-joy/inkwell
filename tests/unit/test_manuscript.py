@@ -1248,12 +1248,17 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
         work = read_manuscript(atlas_like(tmp_path))
         node = work.node("02/03/2.3.2")
         assert node is not None
+        owned: client.AgentSurface | None = None
 
         class Reports(PlansPart):
             async def compose(self, task: str, root: Path) -> ComposedBrief:
-                agent = client.context_value(client.active_agent_callback, None)
-                blocks = client.context_value(client.active_block_callback, None)
-                trace = client.context_value(client.active_trace_logger, None)
+                nonlocal owned
+                surface = client.current_agent_surface()
+                assert surface is not None
+                owned = surface
+                agent = surface.agent_callback
+                blocks = surface.block_callback
+                trace = surface.trace_logger
                 assert agent is not None
                 assert blocks is not None
                 assert trace is not None
@@ -1263,6 +1268,11 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
                 await blocks(TurnTextBlock(text="Planning the successor"), "brief")
                 await agent(started.model_copy(update={"status": "completed"}))
                 return await super().compose(task, root)
+
+        class ReportsInheritance(PassesThrough):
+            async def read(self, task: str, room: Path) -> Audit:
+                assert client.current_agent_surface() is owned
+                return await super().read(task, room)
 
         class Records(PipelineListener):
             def __init__(self) -> None:
@@ -1279,6 +1289,7 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
                 self.blocks = (*self.blocks, (content, prefix))
 
         async def raw_draft(**passed: object) -> AgentSessionResult:
+            assert client.current_agent_surface() is owned
             return AgentSessionResult(
                 session_id="s",
                 timestamp="",
@@ -1296,7 +1307,9 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
             session_id="s",
             observers=observers,
             agents=PartRunAgents(
-                briefing=Reports(), corpus=PushesNothing(), inheriting=PassesThrough()
+                briefing=Reports(),
+                corpus=PushesNothing(),
+                inheriting=ReportsInheritance(),
             ),
         )
 

@@ -72,7 +72,7 @@ from inkwell.agent.tools.extract import EXTRACT_TOOLS
 from inkwell.agent.tools.google_docs import GOOGLE_DOCS_TOOLS
 from inkwell.agent.tools.research.fetch import FETCH_TOOLS
 from inkwell.agent.tools.voice import VOICE_TOOLS
-from inkwell.agent.client import provider_factory
+from inkwell.agent.client import AgentSurface
 from lup.mcp import LupMcpTool, create_mcp_server, serve_stdio
 from lup.runtime.models import turn_request
 from lup.telemetry.metrics import configure_metrics, metrics_path
@@ -726,7 +726,9 @@ async def repl(
         prompt_continuation=FormattedText([("class:prompt-continuation", "··· ")]),
     )
 
-    factory = provider_factory(
+    factory = AgentSurface().session_factory(
+        prefix="[repl] ",
+        address="repl",
         model=effective_model,
         system_prompt=prompt,
         max_thinking_tokens=settings.max_thinking_tokens or (128_000 - 1),

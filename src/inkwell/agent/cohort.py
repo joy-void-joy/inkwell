@@ -54,13 +54,10 @@ from lup.workspace.paths import sessions_dir
 
 from inkwell.agent.client import (
     AgentCallback,
+    AgentSurface,
     BlockCallback,
-    active_agent_callback,
-    context_value,
+    current_agent_surface,
     is_interrupt,
-    observed_factory,
-    provider_factory,
-    stage_label,
 )
 
 COHORT_DIR = "cohort"
@@ -82,47 +79,36 @@ def stage_recipe(
     block_callback: BlockCallback | None = None,
     agent_callback: AgentCallback | None = None,
 ) -> ActorRecipe:
-    """How one stage's agent opens its session, given the hooks that reach it.
+    """How one stage's held agent opens through its run-owned surface.
 
     The same knobs :func:`~inkwell.agent.client.query` takes, wired the same
     way — the difference is that the session is held rather than closed after
-    a turn, and that the inbox hook is in the options it opened with. The
-    hooks are handed in rather than fetched, because delivery depends on their
-    being there: a recipe that had to remember to go and get them is one that
-    can be written without them, producing an agent that looks spawned and
-    reads nothing anyone sends it.
-
-    The block callback is passed rather than read from the contextvar
-    `query()` falls back to, because a recipe runs when the agent opens rather
-    than where the caller stood, and ambient state read at that moment belongs
-    to whichever task the cap admitted first.
-
-    The label is bound per agent rather than read from ambient state, which is
-    what lets two sections write at once and still bill and trace apart.
+    a turn. Capturing the active surface here keeps the run identity when the
+    population opens the session later under its concurrency cap. A stage
+    invoked directly owns a detached surface carrying the observers it was
+    explicitly handed.
     """
-
-    agent_callback = agent_callback or context_value(active_agent_callback, None)
-
-    def recipe(actor: ActorRef, hooks: LupHooksConfig) -> SessionFactory:
-        return observed_factory(
-            provider_factory(
-                model=model,
-                system_prompt=system_prompt,
-                tools=tools,
-                allowed_tools=allowed_tools,
-                autonomy=autonomy,
-                tool_servers=mcp_servers,
-                max_thinking_tokens=max_thinking_tokens,
-                hooks=hooks,
-            ),
-            label=stage_label(prefix),
-            prefix=prefix,
+    surface = current_agent_surface()
+    if surface is None:
+        surface = AgentSurface(
             trace_logger=trace_logger,
             cost_accumulator=cost_accumulator,
             block_callback=block_callback,
             agent_callback=agent_callback,
+        )
+
+    def recipe(actor: ActorRef, hooks: LupHooksConfig) -> SessionFactory:
+        return surface.session_factory(
+            prefix=prefix,
             model=model,
             address=actor.label(),
+            system_prompt=system_prompt,
+            tools=tools,
+            allowed_tools=allowed_tools,
+            autonomy=autonomy,
+            tool_servers=mcp_servers,
+            max_thinking_tokens=max_thinking_tokens,
+            hooks=hooks,
         )
 
     return recipe

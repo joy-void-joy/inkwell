@@ -24,8 +24,12 @@ DEFAULT_PORT = 4545
 def build_frontend() -> None:
     if not (FRONTEND_DIR / "package.json").exists():
         return
+    npm = sh.Command("npm")
+    if not (FRONTEND_DIR / "node_modules" / ".bin" / "tsc").exists():
+        typer.echo("Installing frontend dependencies…")
+        npm("ci", _cwd=str(FRONTEND_DIR))
     typer.echo("Building frontend…")
-    sh.Command("npm")("run", "build", _cwd=str(FRONTEND_DIR))
+    npm("run", "build", _cwd=str(FRONTEND_DIR))
 
 
 def port_available(host: str, port: int) -> bool:

@@ -324,7 +324,19 @@ class EditorialEvidence(BaseModel):
             f"## Why it is running\n\n{changed or 'It was selected directly.'}",
             f"## Immediate boundaries\n\n{nearby}" if nearby else "",
             self.budget.render(),
-            f"## Figures to preserve later\n\n{figures}" if figures else "",
+            (
+                "## Figures to preserve later\n\n"
+                f"{figures}\n\n"
+                "The numbers are the book's and the inheritance pass reproduces "
+                "them exactly, so they ascend through the finished text. That "
+                "places the figures relative to each other and says nothing "
+                "about the argument: it does not fix which section comes first, "
+                "and an opening that carries no figure is unconstrained by all "
+                "of them. A section order read off the figure numbers is the "
+                "order of whatever draft these numbers were assigned to."
+                if figures
+                else ""
+            ),
         )
         return "\n\n".join(one for one in blocks if one)
 

@@ -1437,6 +1437,22 @@ class TestAPartIsToldHowLongItsSiblingsRun:
 
         assert (held.floor(), held.ceiling()) == (666, 1500)
 
+    def test_the_work_says_how_much_its_parts_may_grow(self, tmp_path: Path) -> None:
+        """A part cannot raise its own ceiling, so the book has to be able to.
+
+        A subject that gained a year of evidence since the standing text needs
+        more room than half again, and the run that discovers this is the one
+        run in no position to grant it.
+        """
+        work = read_manuscript(atlas_like(tmp_path), growth_allowance=3.0)
+        node = work.node("02/03/2.3.2")
+        assert node is not None
+
+        held = budget_for(work, node)
+
+        assert held.allowance == 3.0
+        assert held.ceiling() == int(held.holds * 3.0)
+
     def test_the_budget_reads_as_a_delivery_contract(self) -> None:
         said = LengthBudget(holds=1000, chapter="Chapter 02", siblings=3).render()
 

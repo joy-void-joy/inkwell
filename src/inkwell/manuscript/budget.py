@@ -23,18 +23,7 @@ from pathlib import Path, PurePosixPath
 from pydantic import BaseModel, ConfigDict, Field
 
 from inkwell.manuscript.graph import source_text
-from inkwell.manuscript.tree import Manuscript, ManuscriptNode
-
-GROWTH_ALLOWANCE = 1.5
-"""How much longer than it stands a successor may be accepted.
-
-Half again leaves room for a development the part predates, but not a different
-piece of writing. A revision that must double a subsection first needs a new
-book-level allocation; the writing run cannot grant itself one.
-
-A default rather than a rule: it is an argument to :func:`budget_for`, so a work
-whose parts are stubs to be grown disagrees with it by passing something else.
-"""
+from inkwell.manuscript.tree import GROWTH_ALLOWANCE, Manuscript, ManuscriptNode
 
 
 class LengthBudget(BaseModel):
@@ -111,7 +100,7 @@ def budget_for(
     manuscript: Manuscript,
     node: ManuscriptNode,
     *,
-    allowance: float = GROWTH_ALLOWANCE,
+    allowance: float | None = None,
 ) -> LengthBudget:
     """How long this part may run, given what its chapter already runs to.
 
@@ -120,6 +109,10 @@ def budget_for(
     of every other subsection in its chapter is out of scale whatever the rest
     of the book does — and reading one chapter costs a handful of files where
     reading the work costs all of them, on every part of every pass.
+
+    The allowance comes from the work unless a caller states one, so a book
+    that means its parts to grow says so once at import instead of every
+    reader of this rediscovering that the default did not suit it.
     """
     root = Path(manuscript.root)
     # lup: ignore[dict-str-payload] — a cache keyed by whatever paths a work has
@@ -140,5 +133,5 @@ def budget_for(
         chapter=chapter.title if chapter is not None else "",
         chapter_words=sum(words(held) for held in siblings),
         siblings=len(siblings),
-        allowance=allowance,
+        allowance=(allowance if allowance is not None else manuscript.growth_allowance),
     )

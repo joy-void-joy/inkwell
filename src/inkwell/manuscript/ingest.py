@@ -33,6 +33,7 @@ from inkwell.corpus.discovery import slugified
 from inkwell.manuscript.tree import (
     DEFAULT_WORK_FORMAT,
     DEFAULT_WRITER_MODE,
+    GROWTH_ALLOWANCE,
     Manuscript,
     ManuscriptNode,
 )
@@ -282,6 +283,7 @@ def read_manuscript(
     title: str = "",
     target_format: str = DEFAULT_WORK_FORMAT,
     writer_mode: str = DEFAULT_WRITER_MODE,
+    growth_allowance: float = GROWTH_ALLOWANCE,
     skipped_stages: tuple[str, ...] = (),
 ) -> Manuscript:
     """Read a whole work from the directory holding its chapters.
@@ -304,6 +306,7 @@ def read_manuscript(
         root=str(root),
         target_format=target_format,
         writer_mode=writer_mode,
+        growth_allowance=growth_allowance,
         skipped_stages=skipped_stages,
         children=[chapter_node(directory, root) for directory in directories],
     )

@@ -56,6 +56,17 @@ pass one.
 MANUSCRIPT_SKIPPED_STAGES = ("assumptions",)
 """Stages settled by the work rather than rediscovered from each old part."""
 
+GROWTH_ALLOWANCE = 1.5
+"""How much longer than it stands a successor may be accepted.
+
+Half again leaves room for a development the part predates, but not a different
+piece of writing. A revision that must double a subsection first needs a new
+book-level allocation; the writing run cannot grant itself one.
+
+A default rather than a rule: the work carries it as a field, so a book whose
+parts are stubs to be grown disagrees with it at import.
+"""
+
 type NodeKind = Literal["work", "chapter", "section", "subsection", "group"]
 """What one node is, named rather than derived from its depth.
 
@@ -119,6 +130,17 @@ class Manuscript(BaseModel):
         description="How each part is drafted — 'single' for one writer over the "
         "subsection, 'parallel' for one per planned section and a merge after "
         "them, 'auto' to leave it to the ambient setting",
+    )
+    growth_allowance: float = Field(
+        default=GROWTH_ALLOWANCE,
+        gt=1.0,
+        description="How much longer than it stands a part of this work may "
+        "come back. A property of the work, because what a part is entitled to "
+        "is a question about the book's shape: one whose parts are stubs to be "
+        "grown disagrees with the default, and one whose chapters are finished "
+        "keeps it. A part run cannot raise its own, and a subject that has "
+        "gained a year of evidence since the standing text needs this changed "
+        "before the run rather than a run that quietly overruns",
     )
     skipped_stages: tuple[str, ...] = Field(
         default=MANUSCRIPT_SKIPPED_STAGES,

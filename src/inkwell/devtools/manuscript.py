@@ -100,6 +100,7 @@ from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import (
     DEFAULT_WORK_FORMAT,
     DEFAULT_WRITER_MODE,
+    GROWTH_ALLOWANCE,
     Manuscript,
     ManuscriptNode,
 )
@@ -226,6 +227,16 @@ def import_cmd(
             "'auto' to leave it to the ambient setting",
         ),
     ] = DEFAULT_WRITER_MODE,
+    growth_allowance: Annotated[
+        float,
+        typer.Option(
+            "--growth",
+            min=1.0,
+            help="How much longer than it stands a part of this work may come "
+            "back. Raise it for a work whose parts are stubs to be grown, or "
+            "whose subjects have gained evidence the standing text predates",
+        ),
+    ] = GROWTH_ALLOWANCE,
     skip: Annotated[
         list[str] | None,
         typer.Option(
@@ -266,6 +277,7 @@ def import_cmd(
             title=title,
             target_format=target_format,
             writer_mode=writer_mode,
+            growth_allowance=growth_allowance,
             skipped_stages=tuple(skip or ()),
             vocabulary=vocabulary,
             adopt=adopt,
@@ -277,6 +289,7 @@ def import_cmd(
     typer.echo(f"{work}: {recorded.parts} leaf part(s) recorded from {chapters}")
     typer.echo(f"  format: {recorded.target_format} — every run inherits it")
     typer.echo(f"  drafting: {recorded.writer_mode} writer per part")
+    typer.echo(f"  growth: up to {recorded.growth_allowance:g}x what a part holds")
     typer.echo(f"  stages skipped: {skipping}")
     typer.echo(f"  vocabulary: {recorded.vocabulary} declared term(s)")
     typer.echo(f"  dependencies: {recorded.dependencies} across the work")

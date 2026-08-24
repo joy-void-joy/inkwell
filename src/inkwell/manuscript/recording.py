@@ -22,7 +22,11 @@ from inkwell.agent.glossary import DECLARED_VOCABULARY, write_chapter_glossary
 from inkwell.manuscript.graph import adopted, readings
 from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.store import ManuscriptStore
-from inkwell.manuscript.tree import DEFAULT_WORK_FORMAT, DEFAULT_WRITER_MODE
+from inkwell.manuscript.tree import (
+    DEFAULT_WORK_FORMAT,
+    DEFAULT_WRITER_MODE,
+    GROWTH_ALLOWANCE,
+)
 from inkwell.manuscript.vocabulary import (
     Abbreviation,
     as_glossary,
@@ -59,6 +63,10 @@ class WorkImport(BaseModel):
         default="",
         description="How each part is drafted — one writer, or one per section",
     )
+    growth_allowance: float = Field(
+        default=GROWTH_ALLOWANCE,
+        description="How much longer than it stands a part may come back",
+    )
     skipped_stages: tuple[str, ...] = Field(
         default=(), description="Stages a part run of this work does not perform"
     )
@@ -76,6 +84,7 @@ def import_work(
     title: str = "",
     target_format: str = DEFAULT_WORK_FORMAT,
     writer_mode: str = DEFAULT_WRITER_MODE,
+    growth_allowance: float = GROWTH_ALLOWANCE,
     skipped_stages: tuple[str, ...] = (),
     vocabulary: Path | None = None,
     adopt: bool = True,
@@ -97,6 +106,7 @@ def import_work(
         title=title,
         target_format=target_format,
         writer_mode=writer_mode,
+        growth_allowance=growth_allowance,
         skipped_stages=skipped_stages,
     )
     store.publish_tree(work, tree)
@@ -123,6 +133,7 @@ def import_work(
         root=tree.root,
         target_format=tree.target_format,
         writer_mode=tree.writer_mode,
+        growth_allowance=tree.growth_allowance,
         skipped_stages=tree.skipped_stages,
         parts=len(held),
         vocabulary=len(abbreviations),

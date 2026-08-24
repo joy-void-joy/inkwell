@@ -15,7 +15,11 @@ from inkwell.agent.config import (
     subprocess_auth_env,
     use_settings,
 )
-from inkwell.agent.client import client_env, compatible_endpoint
+from inkwell.agent.client import (
+    client_env,
+    compatible_endpoint,
+    session_environment,
+)
 
 
 def make_settings(**overrides: str) -> Settings:
@@ -124,21 +128,21 @@ class TestCompatibleEndpoint:
             endpoint = compatible_endpoint()
             assert endpoint is not None
             routed = ClaudeCompatibilityTransform(endpoint).apply(
-                claude_config(SessionRequest(environment=client_env.get() or {}))
+                claude_config(SessionRequest(environment=session_environment()))
             )
         assert routed.environment["CLAUDE_CONFIG_DIR"] == "/tmp/cesia"
         assert routed.environment["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
 
 
 class TestUseSettings:
-    def test_scopes_settings_and_subprocess_env(self) -> None:
+    def test_scopes_settings_and_the_env_they_imply(self) -> None:
         s = make_settings(claude_config_dir="/tmp/cesia")
         s.openrouter_api_key = None
         with use_settings(s):
             assert current_settings() is s
-            assert client_env.get() == {"CLAUDE_CONFIG_DIR": "/tmp/cesia"}
+            assert session_environment() == {"CLAUDE_CONFIG_DIR": "/tmp/cesia"}
         assert current_settings() is config_mod.settings
-        assert client_env.get() is None
+        assert session_environment() == subprocess_auth_env(config_mod.settings)
 
     def test_resets_both_on_exception(self) -> None:
         s = make_settings(claude_config_dir="/tmp/cesia")
@@ -147,5 +151,15 @@ class TestUseSettings:
                 raise RuntimeError("boom")
         except RuntimeError:
             pass
-        assert client_env.get() is None
+        assert session_environment() == subprocess_auth_env(config_mod.settings)
         assert current_settings() is config_mod.settings
+
+    def test_an_env_a_caller_set_wins_over_the_settings(self) -> None:
+        """Because the settings imply an account, they do not dictate one."""
+        s = make_settings(claude_config_dir="/tmp/cesia")
+        token = client_env.set({"CLAUDE_CONFIG_DIR": "/tmp/perso"})
+        try:
+            with use_settings(s):
+                assert session_environment() == {"CLAUDE_CONFIG_DIR": "/tmp/perso"}
+        finally:
+            client_env.reset(token)

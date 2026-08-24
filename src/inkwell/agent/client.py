@@ -160,10 +160,33 @@ client_env: contextvars.ContextVar[EnvVars | None] = contextvars.ContextVar(
 The provider runs its CLI as a subprocess that authenticates from its own
 environment (``CLAUDE_CONFIG_DIR``, ``ANTHROPIC_*``), so the account billed for
 inference is decided there rather than by anything passed to ``query()``. Set
-this at the root of a session to route the subprocess to session-specific
-credentials. Each asyncio task tree gets its own copy, so concurrent profiles
-do not race.
+this at the root of a session to hand the subprocess an environment other than
+the one the settings in scope imply. Each asyncio task tree gets its own copy,
+so concurrent profiles do not race.
+
+Unset is not *nothing*: :func:`session_environment` answers from the active
+settings instead, so a run routes to the profile it was launched under without
+anybody remembering to put it here.
 """
+
+
+def session_environment() -> EnvVars:
+    """The environment every session opened in this context is given.
+
+    Read off the settings in scope rather than only from what a caller set,
+    because these are two names for one fact — which account pays for the
+    inference this run buys. Held apart, they had to be set in lockstep by
+    every entry point that opens a session, and an entry point that set the
+    settings alone still authenticated as whatever login its launching shell
+    exported: the profile's keys reaching the run while its account reached
+    nothing, silently, until the shell had no login to inherit either.
+    """
+    from inkwell.agent.config import current_settings, subprocess_auth_env
+
+    injected = client_env.get()
+    if injected is not None:
+        return injected
+    return subprocess_auth_env(current_settings())
 
 
 def is_interrupt(exc: BaseException) -> bool:
@@ -339,7 +362,7 @@ def provider_factory(
             max_turns=max_turns,
             max_thinking_tokens=max_thinking_tokens,
             cwd=cwd,
-            environment=client_env.get() or {},
+            environment=session_environment(),
             hooks=hooks if hooks is not None else create_large_read_hook(),
         )
     )

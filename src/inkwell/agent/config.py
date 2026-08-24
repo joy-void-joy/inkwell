@@ -619,19 +619,16 @@ def subprocess_auth_env(session_settings: Settings) -> EnvVars:
 
 @contextmanager
 def use_settings(session_settings: Settings) -> Iterator[None]:
-    """Scope a session's settings and subprocess auth env to the task.
+    """Scope a session's settings to the task.
 
-    Sets ``active_settings`` so ``current_settings()`` reflects the profile,
-    and lup's ``client_env`` so the spawned ``claude`` CLI bills the
-    profile's account. Both the web and CLI entry points wrap session
-    execution in this, so profile selection is honored end to end.
+    The spawned ``claude`` CLI bills the profile these name because
+    ``session_environment`` reads them, rather than because this also wrote
+    the auth env somewhere the client would look: an entry point that opens a
+    session without arriving here is then routed by the selection every other
+    load already answers from, instead of by whatever login it inherited.
     """
-    from inkwell.agent.client import client_env
-
     settings_token = active_settings.set(session_settings)
-    env_token = client_env.set(subprocess_auth_env(session_settings))
     try:
         yield
     finally:
-        client_env.reset(env_token)
         active_settings.reset(settings_token)

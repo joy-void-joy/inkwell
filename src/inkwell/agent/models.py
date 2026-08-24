@@ -154,6 +154,17 @@ class ArticlePlan(BaseModel):
     author_direction: str = Field(
         description="General direction and preferences from the author, in prose"
     )
+    direction_from: Literal["author", "planner"] = Field(
+        default="author",
+        description=(
+            "Who wrote author_direction and constraints. 'author' where a "
+            "person stated them, which makes them fixed. 'planner' where a "
+            "reader of the work composed them before research ran: they are "
+            "then the best available reading of the evidence rather than "
+            "anybody's instruction, and a later stage that finds evidence "
+            "against one may overturn it, saying in the plan that it did"
+        ),
+    )
     constraints: list[str] = Field(
         default_factory=list,
         description=(

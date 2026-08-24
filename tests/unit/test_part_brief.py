@@ -225,6 +225,28 @@ class TestWhatTheDeriverIsShown:
         assert [one.source for one in claims] == ["mythos/system-card"]
 
 
+class TestWhoWroteTheDirection:
+    """A composed brief is a reading of the evidence, not the author's word.
+
+    It is written before research runs, from one page of a corpus listing, so
+    a stage that finds evidence against one of its constraints has to be able
+    to tell that constraint apart from something a person asked for.
+    """
+
+    def test_a_composed_brief_says_a_planner_wrote_its_direction(
+        self, tmp_path: Path
+    ) -> None:
+        work, node = part_of(tmp_path)
+
+        held = planned(SETTLED, work, node, (), LengthBudget())
+
+        assert held.direction_from == "planner"
+
+    def test_a_plan_carries_the_author_by_default(self) -> None:
+        """Nothing composed it, so nothing may overturn it on evidence."""
+        assert ArticlePlan.model_fields["direction_from"].default == "author"
+
+
 class TestWhatTheDeriverIsNotAskedFor:
     """Most of a plan is not the deriver's to decide, and asking for it back is
     a way of getting a different answer."""

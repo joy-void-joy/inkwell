@@ -574,6 +574,7 @@ def planned(
         research_questions=composed.research_questions,
         source_quotes=composed.source_quotes,
         author_direction=composed.direction,
+        direction_from="planner",
         constraints=composed.constraints,
         deliverables=list(owed()),
         conventions=[],

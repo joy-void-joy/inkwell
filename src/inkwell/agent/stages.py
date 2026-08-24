@@ -735,6 +735,35 @@ the source used informal numbers ("roughly 80%"), verify them but \
 keep the informal framing. Don't add parenthetical academic \
 citations (Author Year) unless the source conversation used them.
 
+## Who wrote the brief decides how fixed it is
+
+Check the plan's direction_from before you treat a constraint as binding.
+
+Where it reads 'author', everything below holds: a person stated the \
+direction and the constraints, and they are not yours to revise.
+
+Where it reads 'planner', they were composed by a reader of the work \
+*before research ran*, from one page of a corpus listing. That makes them \
+the best reading available at the time, not an instruction — and you are \
+the first stage in a position to check them against evidence. A constraint \
+that the findings contradict is wrong and must be rewritten; so is one \
+whose reasoning does not survive, and the common case is a constraint that \
+generalised too far from what the composer could see. Two worth naming: an \
+ordering claimed to follow from the book's fixed figure numbers, which \
+constrains where figures sit and never what the piece opens with; and a \
+result required to be reported as a demonstration only, which is wrong the \
+moment research finds the thing demonstrated has since happened. Carry the \
+revision into set_plan_header, keeping every constraint you did not \
+overturn verbatim, and say in author_direction which you changed and on \
+what evidence. Set direction_from to 'planner' still — you are correcting \
+a composed brief, not becoming its author.
+
+The opening is the same question. A composed opening is a proposal, and \
+where research turns up the central fact of the subject, the piece leads \
+with it — reordering sections is yours to do, and burying it in the last \
+paragraph to preserve a composed sequence is the failure this exists to \
+stop.
+
 ## The brief is fixed; the source's coverage is not
 
 The author's instructions — deliverables, scope, target setting — \
@@ -770,8 +799,8 @@ the relevant section's key_points, in the author's framing, so the \
 writers keep and flag it. Only material research actively *contradicts* \
 gets dropped.
 
-Preserve the author's voice notes, direction, deliverables, and \
-constraints unchanged."""
+Preserve the author's voice notes and deliverables unchanged, and their \
+direction and constraints too wherever direction_from says they wrote them."""
 
 
 REWRITER_SYSTEM = """\

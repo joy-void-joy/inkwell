@@ -125,6 +125,17 @@ class SetPlanHeaderInput(BaseModel):
     author_direction: str = Field(
         description="General direction and preferences from the author, in prose"
     )
+    direction_from: Literal["author", "planner"] = Field(
+        default="author",
+        description=(
+            "Who wrote author_direction and constraints — copy what the plan "
+            "you are refining already says. 'author' means a person stated "
+            "them and they are fixed; 'planner' means a reader of the work "
+            "composed them before research ran, so evidence may overturn one. "
+            "Correcting a composed brief leaves this 'planner': you are "
+            "fixing its reading, not becoming its author"
+        ),
+    )
     constraints: list[str] = Field(
         default_factory=list,
         description=(

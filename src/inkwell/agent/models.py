@@ -122,6 +122,37 @@ class WordBudget(BaseModel, frozen=True):
         """Whether a finished piece satisfies this contract."""
         return self.minimum <= words <= self.maximum
 
+    def advisory(self, words: int) -> str:
+        """How a piece sits against this target, or nothing when inside it.
+
+        A target the author is told about rather than a gate the run enforces.
+        A part whose evidence needs more room than the work currently gives it
+        can only say so by overrunning; refusing the draft for that spends the
+        writing and keeps none of it, and the decision it forces — whether the
+        work's allocation moves — was never the run's to make.
+        """
+        if self.accepts(words):
+            return ""
+        side = "over" if words > self.maximum else "under"
+        return (
+            f"{words:,} words, {side} the {self.minimum:,}-{self.maximum:,} "
+            f"target this piece was planned against"
+        )
+
+
+class DraftLength(BaseModel, frozen=True):
+    """How long a piece came out, and how that sits against its target.
+
+    Carried together because every caller that counts a draft wants both: the
+    number it records, and the sentence it passes on when the number is worth
+    somebody's attention.
+    """
+
+    words: int = Field(ge=0, description="Words the piece holds")
+    advisory: str = Field(
+        default="", description="What to say about the length, empty when unremarkable"
+    )
+
 
 class ArticlePlan(BaseModel):
     """The structured plan extracted from source material."""

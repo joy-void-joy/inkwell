@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pytest
-from lup.mcp import ToolError
 
 import inkwell.agent.pipeline as pipeline
 from inkwell.agent.cohort import run_cohort
@@ -88,12 +87,17 @@ async def test_manuscript_citation_diversity_costs_only_the_counting(
     assert judged == [False]
 
 
-def test_word_budget_refuses_a_final_candidate_outside_its_contract() -> None:
+def test_word_budget_advises_on_a_final_candidate_outside_its_target() -> None:
     budget = WordBudget(minimum=2, maximum=3)
 
-    assert pipeline.enforce_word_budget("one two three", budget) == 3
-    with pytest.raises(pipeline.PipelineError, match="4 words"):
-        pipeline.enforce_word_budget("one two three four", budget)
+    inside = pipeline.counted("one two three", budget)
+    assert inside.words == 3
+    assert inside.advisory == ""
+
+    over = pipeline.counted("one two three four", budget)
+    assert over.words == 4
+    assert "over" in over.advisory
+    assert "4 words" in over.advisory
 
 
 async def test_non_authoritative_material_cannot_fall_back_to_self_planning(
@@ -111,18 +115,22 @@ async def test_non_authoritative_material_cannot_fall_back_to_self_planning(
         await runner.stage_plan()
 
 
-async def test_final_submission_saves_only_a_candidate_the_budget_accepts(
+async def test_final_submission_saves_an_overrun_and_says_it_overran(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "final.md"
     tool = pipeline.make_final_submission_tool(output, WordBudget(minimum=2, maximum=3))
 
-    with pytest.raises(ToolError, match="4 words"):
-        await tool.call_handler(pipeline.SubmitFinalInput(content="one two three four"))
-    assert not output.exists()
+    over = await tool.call_handler(
+        pipeline.SubmitFinalInput(content="one two three four")
+    )
+    assert over.word_count == 4
+    assert "4 words" in over.advisory
+    assert output.read_text(encoding="utf-8") == "one two three four"
 
-    accepted = await tool.call_handler(pipeline.SubmitFinalInput(content="one two"))
-    assert accepted.word_count == 2
+    inside = await tool.call_handler(pipeline.SubmitFinalInput(content="one two"))
+    assert inside.word_count == 2
+    assert inside.advisory == ""
     assert output.read_text(encoding="utf-8") == "one two"
 
 

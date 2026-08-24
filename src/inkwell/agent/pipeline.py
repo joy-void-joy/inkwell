@@ -40,13 +40,15 @@ from inkwell.agent.client import (
     current_agent_surface,
     is_interrupt,
     query,
+    quota_wait_message,
     result_text,
     session_policy,
 )
+from lup.runtime.quota import QuotaWaitEvent
 from inkwell.agent.cohort import run_cohort, stage_recipe
 from lup.actors.cohort import ActorCohort
 from lup.actors.refs import ActorRef
-from lup.mcp import LupMcpTool, McpServerEntry, ToolError, create_mcp_server, lup_tool
+from lup.mcp import LupMcpTool, McpServerEntry, create_mcp_server, lup_tool
 from lup.types import StringMap
 from lup.runtime.models import AnyTurnBlock, turn_request
 from lup.runtime.usage import CostAccumulator
@@ -92,6 +94,7 @@ from inkwell.agent.models import (
     SectionDraft,
     SectionPlan,
     WritingOutput,
+    DraftLength,
     WordBudget,
 )
 from inkwell.agent.content import ContentManifest
@@ -3247,20 +3250,26 @@ class SubmitFinalInput(BaseModel):
 
 
 class SubmitFinalOutput(BaseModel):
-    """The accepted candidate and the count that admitted it."""
+    """The saved candidate, and what its length is worth saying about."""
 
-    word_count: int = Field(description="Accepted word count")
+    word_count: int = Field(description="Saved word count")
+    advisory: str = Field(
+        default="",
+        description="How the length sits against its target, empty when inside it",
+    )
 
 
-def enforce_word_budget(content: str, budget: WordBudget | None) -> int:
-    """Return the count, or refuse content outside the plan's typed contract."""
+def counted(content: str, budget: WordBudget | None) -> DraftLength:
+    """The piece's length, and how that length sits against its target.
+
+    The advisory is empty whenever the piece is inside its target or none was
+    declared, so a caller reports what it holds without first asking whether
+    there is anything to report.
+    """
     words = len(content.split())
-    if budget is not None and not budget.accepts(words):
-        raise PipelineError(
-            f"Final draft has {words} words; contract accepts "
-            f"{budget.minimum}-{budget.maximum}."
-        )
-    return words
+    return DraftLength(
+        words=words, advisory=budget.advisory(words) if budget is not None else ""
+    )
 
 
 def make_final_submission_tool(
@@ -3269,18 +3278,17 @@ def make_final_submission_tool(
     """Build the only write capability a final rewriter receives."""
 
     @lup_tool(
-        "Submit the complete final piece. This validates the declared word "
-        "budget and saves only an accepted candidate. If rejected, revise the "
-        "piece and call this tool again in the same turn.",
+        "Submit the complete final piece. This saves what you send and reports "
+        "how its length sits against the piece's word target. The target is "
+        "advisory: a piece the evidence genuinely needs is worth more than a "
+        "piece cut to fit, so overrun deliberately and say why in a note to "
+        "the author rather than dropping material to land inside it.",
         name="submit_final",
     )
     async def submit_final(inp: SubmitFinalInput) -> SubmitFinalOutput:
-        try:
-            words = enforce_word_budget(inp.content, budget)
-        except PipelineError as exc:
-            raise ToolError(str(exc)) from exc
+        length = counted(inp.content, budget)
         output_path.write_text(inp.content, encoding="utf-8")
-        return SubmitFinalOutput(word_count=words)
+        return SubmitFinalOutput(word_count=length.words, advisory=length.advisory)
 
     return submit_final
 
@@ -3411,8 +3419,10 @@ async def rewrite_final(
     delivery = f"Write the final piece to: {output_path}"
     if plan is not None and plan.word_budget is not None:
         delivery = (
-            f"Call submit_final with the complete piece. It must contain "
-            f"{plan.word_budget.minimum}-{plan.word_budget.maximum} words"
+            f"Call submit_final with the complete piece. It targets "
+            f"{plan.word_budget.minimum}-{plan.word_budget.maximum} words — "
+            f"advisory, not a gate: if the material needs more room, overrun "
+            f"and tell the author what the extra words buy"
         )
     task = (
         f"Produce the final version of this piece.\n\n"
@@ -3462,14 +3472,16 @@ async def rewrite_final(
     else:
         raise PipelineError("Rewriter produced no output")
 
-    word_count = enforce_word_budget(content, plan.word_budget if plan else None)
+    length = counted(content, plan.word_budget if plan else None)
+    if length.advisory:
+        logger.warning("Rewriter delivered %s", length.advisory)
     title = plan.title if plan else "Untitled"
     summary = result_text(collector).strip()
 
     return WritingOutput(
         title=title,
         content=content,
-        word_count=word_count,
+        word_count=length.words,
         summary=summary,
         review_findings=findings,
     )
@@ -4181,11 +4193,15 @@ class PipelineRunner:
         async def forward_agent(update: AgentUpdate) -> None:
             await self.hooks.on_agent(update)
 
+        async def forward_quota(event: QuotaWaitEvent) -> None:
+            await self.hooks.on_progress(quota_wait_message(event))
+
         self.block_callback = forward_block
         self.agent_callback = forward_agent
         return AgentSurface(
             block_callback=forward_block,
             agent_callback=forward_agent,
+            quota_callback=forward_quota,
             trace_logger=self.trace_logger,
             cost_accumulator=self.cost_accumulator,
         )
@@ -6054,13 +6070,13 @@ class PipelineRunner:
         await self.announce_stage("format", f"Applying {chosen_format} formatting")
         await self.update_overview(active_stage="format")
         article_text = output.content or output.summary
-        final_words = enforce_word_budget(article_text, plan.word_budget)
+        length = counted(article_text, plan.word_budget)
 
         if chosen_format == "academic":
             final_content = await self.finalize_academic(article_text, plan)
         else:
             final_content = await apply_format(article_text, plan.title, chosen_format)
-            final_words = enforce_word_budget(final_content, plan.word_budget)
+            length = counted(final_content, plan.word_budget)
             async with gdoc_nonfatal("write final tab"):
                 from inkwell.agent.tools.google_docs import write_with_continuation
 
@@ -6083,7 +6099,9 @@ class PipelineRunner:
 
         output.google_doc_id = self.doc_id
         output.google_doc_url = self.doc_url
-        output.word_count = final_words
+        output.word_count = length.words
+        if length.advisory:
+            await self.hooks.on_progress(f"Final piece: {length.advisory}")
         self.snapshot.stage = "format"
         self.state.set_stage("complete")
         await self.save_snapshot()

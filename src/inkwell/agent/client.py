@@ -59,8 +59,10 @@ from lup.runtime.models import (
 )
 from lup.runtime.usage import CostAccumulator
 from lup.runtime.wrappers import (
+    CorrectionConfig,
     DisplayConfig,
     DisplayRecord,
+    RecoveryConfig,
     TraceRecord,
     TracingConfig,
     UsageConfig,
@@ -582,6 +584,26 @@ waiting out a real provider window.
 """
 
 
+CORRECTION = CorrectionConfig()
+"""How many times a reader that forgot to submit is asked for its answer again.
+
+A turn that did the work and then ended without calling its submission tool
+still holds the answer in its own context — the failure says as much, marking
+itself correctable. Asking again on that same session costs one short turn and
+keeps what the stage already paid a model to find out. Failing instead loses
+the whole reading, and loses it silently: what the reader established is left
+in a transcript nobody goes back to.
+"""
+
+RECOVERY = RecoveryConfig()
+"""How many times a turn the provider itself failed is started again.
+
+Distinct from the allowance waiter below: this is a turn that broke, not one
+the account cannot afford yet, so it is retried at once and few times rather
+than slept on until a window rolls.
+"""
+
+
 def quota_wait_message(event: QuotaWaitEvent) -> str:
     """What a run tells its watcher while it waits out the provider's allowance.
 
@@ -634,6 +656,8 @@ def observed_factory(
     """
     decorated = decorated_session_factory(
         factory,
+        correction=CORRECTION,
+        recovery=RECOVERY,
         tracing=(
             TracingConfig(sink=trace_sink(trace_logger))
             if trace_logger is not None

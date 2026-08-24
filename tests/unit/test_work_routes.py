@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from inkwell.agent.glossary import DECLARED_VOCABULARY, write_chapter_glossary
 from inkwell.environment.web import work_loops
+from inkwell.environment.web.models import StageEvent
 from inkwell.environment.web.routes import works
 from inkwell.environment.web.session_manager import SessionManager
 from inkwell.environment.web.work_loops import LoopAlreadyRunning, WorkLoopManager
@@ -604,6 +605,16 @@ class TestWhatIsBeingWrittenRightNow:
 
         assert flying[0].status == "running"
         assert flying[0].stage == "research"
+
+    def test_the_announced_preflight_stage_reaches_the_work_page(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        sessions = SessionManager()
+        works.set_loops(WorkLoopManager(sessions))
+        self.held(recorded, "run3")
+        sessions.adopt("run3").events = [StageEvent(stage="brief", description="Brief")]
+
+        assert works.in_flight(recorded, "work")[0].stage == "brief"
 
     def test_a_work_at_rest_has_nothing_in_flight(
         self, recorded: ManuscriptStore

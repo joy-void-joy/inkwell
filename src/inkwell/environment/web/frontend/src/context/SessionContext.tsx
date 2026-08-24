@@ -44,6 +44,12 @@ function reducer(state: SessionState, action: Action): SessionState {
       return { ...state, status: "running", events: [], error: null };
     case "EVENT": {
       const event = action.event;
+      const repeated = state.events.some((held) =>
+        event.sequence != null
+          ? held.sequence === event.sequence
+          : held.type === event.type && held.timestamp === event.timestamp,
+      );
+      if (repeated) return state;
       const startedAt = state.startedAt ?? event.timestamp;
       const events = [...state.events, event];
       switch (event.type) {

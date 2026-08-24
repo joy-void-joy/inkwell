@@ -241,7 +241,13 @@ export function NewSession() {
   const startable = entryPoints.filter((e) => e.starts_a_session);
 
   useEffect(() => {
-    fetchEntryPoints().then(setEntryPoints).catch(() => {});
+    fetchEntryPoints()
+      .then((loaded) => {
+        setEntryPoints(loaded);
+        const write = loaded.find((entry) => entry.name === "write") ?? null;
+        setDeclared(declaredDefaults(write));
+      })
+      .catch(() => {});
     fetchFormats().then(setFormats).catch(() => {});
     fetchProfiles()
       .then((p) => {
@@ -258,12 +264,6 @@ export function NewSession() {
       .catch(() => {});
   }, []);
 
-  // Every generic control starts at the default the declaration gave it, so a
-  // parameter added there arrives with its default rather than as undefined.
-  useEffect(() => {
-    setDeclared(declaredDefaults(entryPoint));
-  }, [entryPoint]);
-
   useEffect(() => {
     sessionStorage.setItem(FILES_KEY, JSON.stringify(files));
   }, [files]);
@@ -274,6 +274,12 @@ export function NewSession() {
 
   const setDeclaredValue = (name: string, next: SuppliedValue) => {
     setDeclared((prev) => ({ ...prev, [name]: next }));
+  };
+
+  const selectEntryPoint = (name: string) => {
+    setEntryPointName(name);
+    const selected = entryPoints.find((entry) => entry.name === name) ?? null;
+    setDeclared(declaredDefaults(selected));
   };
 
   const setStageModel = (stage: string, model: string) => {
@@ -469,7 +475,7 @@ export function NewSession() {
             <select
               id="entry-point"
               value={entryPointName}
-              onChange={(e) => setEntryPointName(e.target.value)}
+              onChange={(e) => selectEntryPoint(e.target.value)}
             >
               {startable.map((e) => (
                 <option key={e.name} value={e.name}>

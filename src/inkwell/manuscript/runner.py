@@ -766,8 +766,10 @@ async def execute_part(
     research = briefing(work_findings, node.key)
     figures = inventory_of(current).figures
     budget = budget_for(manuscript, node)
+    if watched.state is not None:
+        watched.state.title = node.title
     if watched.listener is not None:
-        await watched.listener.on_stage("plan", "Planning this part in its work")
+        await watched.listener.on_stage("brief", "Planning this part in its work")
         await watched.listener.on_progress("Retrieving corpus evidence for this part")
     corpus = await (reading.corpus or LocalCorpusPusher()).push(
         subsection_topic(manuscript, node)

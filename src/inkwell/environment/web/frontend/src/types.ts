@@ -391,18 +391,34 @@ export interface AgentUpdate {
   error: string;
 }
 
-export type ServerMessage =
-  | { type: "stage"; stage: string; description: string; timestamp: string }
-  | { type: "progress"; message: string; timestamp: string }
-  | { type: "message"; source: string; message: string; timestamp: string }
-  | { type: "block"; block_type: string; content: string; prefix: string; timestamp: string }
-  | { type: "agent"; agent: AgentUpdate; timestamp: string }
-  | { type: "complete"; output: CompletionOutput; timestamp: string }
-  | { type: "cost_update"; cost: CostSnapshot; timestamp: string }
-  | { type: "state_update"; state: SessionStateSnapshot; timestamp: string }
-  | { type: "collect_revision"; state: SessionStateSnapshot; timestamp: string }
-  | { type: "error"; message: string; timestamp: string }
-  | { type: "session_ended"; status: SessionStatus; timestamp: string };
+export type ServerMessage = {
+  sequence?: number | null;
+  timestamp: string;
+} & (
+  | { type: "stage"; stage: string; description: string }
+  | { type: "progress"; message: string }
+  | { type: "message"; source: string; message: string }
+  | { type: "block"; block_type: string; content: string; prefix: string }
+  | { type: "agent"; agent: AgentUpdate }
+  | { type: "complete"; output: CompletionOutput }
+  | { type: "cost_update"; cost: CostSnapshot }
+  | { type: "state_update"; state: SessionStateSnapshot }
+  | { type: "collect_revision"; state: SessionStateSnapshot }
+  | { type: "error"; message: string }
+  | { type: "session_ended"; status: SessionStatus }
+);
+
+export function completedStageNames(
+  events: ServerMessage[],
+  status: SessionStatus,
+): string[] {
+  const started = events
+    .filter((event) => event.type === "stage")
+    .map((event) => event.stage);
+  const stoppedAfterStage = status === "completed" || status === "paused";
+  const completed = stoppedAfterStage ? started : started.slice(0, -1);
+  return [...new Set(completed)];
+}
 
 // --- Profiles ---
 
@@ -438,6 +454,7 @@ export interface ServerCapabilities {
 // added on the server still renders rather than blanking the bar.
 export const STAGE_LABELS: Record<string, string> = {
   starting: "Starting",
+  brief: "Brief",
   extract: "Extract",
   voice: "Voice",
   book: "Book",

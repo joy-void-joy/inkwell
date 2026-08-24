@@ -102,6 +102,8 @@ class WebListener(PipelineListener):
 
     async def on_agent(self, update: AgentUpdate) -> None:
         await self.broadcast(AgentEvent(agent=update))
+        if update.status != "running":
+            await self.broadcast_cost()
 
     async def on_stage(self, stage: str, description: str) -> None:
         await self.broadcast(StageEvent(stage=stage, description=description))

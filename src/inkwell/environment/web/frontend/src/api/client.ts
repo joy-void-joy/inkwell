@@ -373,6 +373,23 @@ export async function requestWorkPart(
   return res.json();
 }
 
+export async function startWorkPart(
+  work: string,
+  key: string,
+  reason = "",
+): Promise<WorkLoopStatus> {
+  const res = await fetch(
+    `${BASE}/works/${encodeURIComponent(work)}/parts/${key}/run`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function clearWorkPart(
   work: string,
   key: string,

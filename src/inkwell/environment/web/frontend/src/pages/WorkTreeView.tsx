@@ -8,9 +8,8 @@ import {
   fetchWhatItReaches,
   fetchWorkQuestions,
   fetchWorkTree,
-  previewWorkRun,
   requestWorkPart,
-  startWorkRun,
+  startWorkPart,
 } from "../api/client";
 import { InFlight } from "../components/InFlight";
 import { WorkActivity, WorkHistory } from "../components/WorkActivity";
@@ -56,6 +55,7 @@ export function WorkTreeView() {
   const [asking, setAsking] = useState("");
   const [reason, setReason] = useState("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [selected, setSelected] = useState("");
 
   // Which part an action is in flight for, and what was done to the last one.
   //
@@ -127,29 +127,16 @@ export function WorkTreeView() {
   // subsection puts the parts leaning on it out of date and leaves them there,
   // which is what asking for one subsection meant.
   //
-  // Asked before started, the way the run panel asks before its own button: a
-  // part the sweep will not pick up is reported here rather than starting a
-  // pass that runs nothing and reads as a finished book.
+  // The server claims the work, prepares the selected part, and starts the
+  // pass as one operation. A second surface cannot win between those steps
+  // and leave this click looking queued when it never started.
   const runNow = async (node: PartNode, reason: string) => {
     setActing(node.key);
     setDone("");
     setError("");
     try {
-      // A pass picks up what is out of date, so a part that is already up to
-      // date has to be asked for before it can be run at all — and "run it
-      // again" is a thing an author wants without wanting anything in
-      // particular changed, so nothing here is a reason. A part that is
-      // outstanding already carries the reason it is outstanding, which is
-      // worth more on its row than an empty one written over the top.
-      if (reason || node.staleness === "fresh")
-        await requestWorkPart(workId, node.key, reason);
-      const would = await previewWorkRun(workId, 0, [node.key]);
-      const [skipped] = would.passed_over;
-      if (skipped) {
-        setError(`${skipped.key} is not being run: ${skipped.reason}`);
-        return;
-      }
-      await startWorkRun(workId, { passes: 1, parts: [node.key] });
+      const started = await startWorkPart(workId, node.key, reason);
+      setTree((held) => (held ? { ...held, loop: started } : held));
       setAsking("");
       setReason("");
       setDone(`Started a run of ${node.key} — it appears under Being written now`);
@@ -208,6 +195,14 @@ export function WorkTreeView() {
       (!outstandingOnly ||
         node.staleness !== "fresh" ||
         node.outstanding_below > 0),
+  );
+  const selectedPart = tree.nodes.find((node) => node.key === selected) ?? null;
+  const loopRunning = tree.loop?.running ?? false;
+  const selectedRunnable = Boolean(
+    tree.rooted &&
+      selectedPart?.leaf &&
+      selectedPart.staleness !== "source-gone" &&
+      selectedPart.standing === "idle",
   );
 
   return (
@@ -304,10 +299,32 @@ export function WorkTreeView() {
 
       <section>
         <h2>Parts</h2>
+        <div className="part-run-selection">
+          <span>
+            {selectedPart ? (
+              <>
+                Selected <code>{selectedPart.key}</code> — {selectedPart.title}
+              </>
+            ) : (
+              "Select one runnable part below"
+            )}
+          </span>
+          <button
+            className="run-start"
+            disabled={!selectedRunnable || Boolean(acting) || loopRunning}
+            onClick={() => selectedPart && runNow(selectedPart, "")}
+          >
+            {acting && acting === selected
+              ? "Starting…"
+              : loopRunning
+                ? "A work run is active"
+                : "Run selected part"}
+          </button>
+        </div>
         {shown.map((node) => (
           <div
             key={node.key}
-            className={`work-part ${stateClass(node)}`}
+            className={`work-part ${stateClass(node)} ${selected === node.key ? "work-part-selected" : ""}`}
             style={{ paddingLeft: `${node.depth * 16}px` }}
           >
             {!node.leaf && (
@@ -323,6 +340,19 @@ export function WorkTreeView() {
                 {collapsed[node.key] ? "▸" : "▾"}
               </button>
             )}
+            {node.leaf &&
+              node.staleness !== "source-gone" &&
+              node.standing === "idle" && (
+                <input
+                  className="work-part-select"
+                  type="radio"
+                  name="selected-part"
+                  checked={selected === node.key}
+                  disabled={loopRunning || Boolean(acting)}
+                  onChange={() => setSelected(node.key)}
+                  aria-label={`Select ${node.key}: ${node.title}`}
+                />
+              )}
             <span className="work-part-key">{node.key}</span>{" "}
             <span className="work-part-title">{node.title}</span>{" "}
             {node.leaf ? (
@@ -353,27 +383,16 @@ export function WorkTreeView() {
                 run {node.session.slice(0, 8)}
               </Link>
             )}
-            {node.leaf &&
-              node.staleness !== "source-gone" &&
-              node.standing === "idle" && (
-                <button
-                  disabled={acting === node.key}
-                  onClick={() => runNow(node, "")}
-                  title="Take this part through the pipeline now, and nothing else"
-                >
-                  {acting === node.key
-                    ? "Starting…"
-                    : node.staleness === "fresh"
-                      ? "Run it again"
-                      : "Run this part"}
-                </button>
-              )}
             {/* Not offered while a run holds the part: what asking would write
                 over is the lease, and the run named in it is the only way back
                 to what is being done to the part. */}
             {node.leaf && node.standing !== "running" && asking !== node.key && (
               <button
-                onClick={() => setAsking(node.key)}
+                disabled={loopRunning || Boolean(acting)}
+                onClick={() => {
+                  setSelected(node.key);
+                  setAsking(node.key);
+                }}
                 title="Run it with something particular to change"
               >
                 Revise…
@@ -381,7 +400,7 @@ export function WorkTreeView() {
             )}
             {node.leaf && node.standing !== "idle" && (
               <button
-                disabled={acting === node.key}
+                disabled={loopRunning || Boolean(acting)}
                 onClick={() => clear(node.key)}
                 title="Return it to idle"
               >
@@ -401,19 +420,21 @@ export function WorkTreeView() {
                   }}
                 />
                 <button
-                  disabled={acting === node.key}
+                  disabled={loopRunning || Boolean(acting)}
                   onClick={() => runNow(node, reason)}
                 >
                   {acting === node.key ? "Starting…" : "Revise it now"}
                 </button>
                 <button
-                  disabled={acting === node.key}
+                  disabled={loopRunning || Boolean(acting)}
                   onClick={() => askFor(node.key)}
                   title="Record it and leave it for the next loop over the work"
                 >
                   Queue it
                 </button>
-                <button onClick={() => setAsking("")}>Cancel</button>
+                <button disabled={Boolean(acting)} onClick={() => setAsking("")}>
+                  Cancel
+                </button>
               </span>
             )}
             {node.reasons.map((reason) => (

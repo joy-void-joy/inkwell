@@ -1309,6 +1309,26 @@ textarea { resize: none; }
   font-size: 0.88rem;
 }
 
+.part-run-selection {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-height: 2.5rem;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+}
+
+.work-part-selected {
+  background: color-mix(in srgb, var(--accent, #2f7fd0) 10%, transparent);
+}
+
+.work-part-select {
+  margin: 0 8px 0 2px;
+}
+
 .work-part-key {
   font-family: var(--mono, monospace);
   color: var(--text-dim);

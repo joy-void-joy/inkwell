@@ -36,6 +36,7 @@ export function RunPanel({
   const [error, setError] = useState("");
 
   const running = loop?.running ?? false;
+  const settingsDisabled = running || busy;
 
   const attempt = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -84,8 +85,11 @@ export function RunPanel({
             type="number"
             min={0}
             value={limit}
-            disabled={running}
-            onChange={(event) => setLimit(Number(event.target.value))}
+            disabled={settingsDisabled}
+            onChange={(event) => {
+              setLimit(Number(event.target.value));
+              setWould(null);
+            }}
           />
           <small>0 runs every outstanding part</small>
         </label>
@@ -95,8 +99,11 @@ export function RunPanel({
             type="number"
             min={1}
             value={passes}
-            disabled={running}
-            onChange={(event) => setPasses(Number(event.target.value))}
+            disabled={settingsDisabled}
+            onChange={(event) => {
+              setPasses(Number(event.target.value));
+              setWould(null);
+            }}
           />
         </label>
         <label>
@@ -105,16 +112,22 @@ export function RunPanel({
             type="number"
             min={1}
             value={concurrency}
-            disabled={running}
-            onChange={(event) => setConcurrency(Number(event.target.value))}
+            disabled={settingsDisabled}
+            onChange={(event) => {
+              setConcurrency(Number(event.target.value));
+              setWould(null);
+            }}
           />
         </label>
         <label className="run-checkbox">
           <input
             type="checkbox"
             checked={reconcile}
-            disabled={running}
-            onChange={(event) => setReconcile(event.target.checked)}
+            disabled={settingsDisabled}
+            onChange={(event) => {
+              setReconcile(event.target.checked);
+              setWould(null);
+            }}
           />
           Read each wave's rewrites against each other
         </label>

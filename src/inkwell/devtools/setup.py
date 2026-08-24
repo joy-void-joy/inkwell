@@ -206,7 +206,12 @@ def save_and_confirm(values: EnvVars) -> None:
         profile = resolve_profile()
         write_env_local(values, profile)
         target = env_file_for_profile(profile)
-        console.print(f"[green]Saved to {target.relative_to(PROJECT_ROOT)}[/]")
+        # A profile's env file lives in the checkout that holds `profiles/`,
+        # which from a worktree is not the one this is running in — so a path
+        # relative to here is not merely long-winded, there isn't one.
+        inside = target.is_relative_to(PROJECT_ROOT)
+        shown = target.relative_to(PROJECT_ROOT) if inside else target
+        console.print(f"[green]Saved to {shown}[/]")
 
 
 def mask(value: str, show: int = 6) -> str:

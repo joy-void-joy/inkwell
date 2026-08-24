@@ -17,13 +17,12 @@ display, the web tree — and can be thrown away without losing anything. The
 state cannot be recomputed from anything, and is the only file here that
 matters.
 
-**One writer, and it is the loop.** Node runs write prose, into their own
-spans, and hand back what they consumed and what they changed; the loop that
-scheduled them is the only thing that writes state. That is a stronger
-guarantee than a lock and a cheaper one, and the ``running`` standing with its
-holder is what makes it checkable — a part already held by a run is one the
-loop will not schedule twice. Each write is a temp-and-rename, so anything
-reading alongside the loop sees one whole state or the one before it.
+**One writer at a time.** A loop holds the work's exclusive lease for its
+whole lifetime; bounded mutations such as requesting or clearing a part hold
+the same lease for one write. Node runs write prose into disjoint spans and
+hand back what they consumed and changed, leaving the loop as the only state
+writer while a pass is active. Each write is a temp-and-rename, so anything
+reading alongside it sees one whole state or the one before it.
 """
 
 import logging

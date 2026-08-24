@@ -29,7 +29,12 @@ from lup.channels.models import utc_now
 
 from inkwell.environment.web.models import SessionStatus
 from inkwell.environment.web.session_manager import SessionManager
-from inkwell.manuscript.loop import PassReport, run_loop
+from inkwell.manuscript.loop import (
+    PassReport,
+    WorkAlreadyRunning,
+    WorkLease,
+    run_loop,
+)
 from inkwell.manuscript.runner import PartOutcome, PartRunObservers, PartRunWatch
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript
@@ -136,6 +141,7 @@ class WorkLoop(BaseModel):
 
     work: str = Field(description="The work")
     task: asyncio.Task[tuple[PassReport, ...]] = Field(description="The running loop")
+    lease: WorkLease = Field(description="The cross-process claim over this work")
     started_at: datetime = Field(default_factory=utc_now, description="When it began")
     finished_at: datetime | None = Field(default=None, description="When it stopped")
     passes: list[PassReport] = Field(
@@ -195,18 +201,21 @@ class WorkLoopManager:
         only: tuple[str, ...] = (),
         concurrency: int,
         reconciling: bool,
+        lease: WorkLease | None = None,
     ) -> WorkLoopStatus:
         """Take this work to rest in the background, and hand back where it stands.
 
         Refuses where a loop is already in flight, because the loop owns the
         work's state and a second one would lease parts the first had leased.
         """
+        claimed = lease if lease is not None else self.claim(store, work)
         if self.running(work):
+            claimed.release()
             raise LoopAlreadyRunning(f"{work} already has a loop running")
 
-        held = WorkLoop(
-            work=work,
-            task=asyncio.create_task(
+        task: asyncio.Task[tuple[PassReport, ...]] | None = None
+        try:
+            task = asyncio.create_task(
                 run_loop(
                     store,
                     work,
@@ -219,14 +228,29 @@ class WorkLoopManager:
                     reconciling=reconciling,
                     reporting=lambda report: self.recorded(work, report),
                     watching=self.watching,
+                    lease=claimed,
                 ),
                 name=f"inkwell-work-loop-{work}",
-            ),
-        )
+            )
+            held = WorkLoop(work=work, task=task, lease=claimed)
+        except Exception:
+            if task is not None:
+                task.cancel()
+            claimed.release()
+            raise
         self.loops[work] = held
-        held.task.add_done_callback(lambda task: self.finished(work, task))
+        held.task.add_done_callback(lambda task: self.finished(held, task))
         logger.info("Loop over %s started: %d pass(es) at most", work, passes)
         return held.status()
+
+    def claim(self, store: ManuscriptStore, work: str) -> WorkLease:
+        """Claim one work before any state-changing launch preparation."""
+        if self.running(work):
+            raise LoopAlreadyRunning(f"{work} already has a loop running")
+        try:
+            return WorkLease.acquire(store, work)
+        except WorkAlreadyRunning as already:
+            raise LoopAlreadyRunning(str(already)) from already
 
     def recorded(self, work: str, report: PassReport) -> None:
         """Keep what a pass did, so a watcher hears it before the loop ends."""
@@ -234,20 +258,20 @@ class WorkLoopManager:
         if held is not None:
             held.passes.append(report)
 
-    def finished(self, work: str, task: asyncio.Task[tuple[PassReport, ...]]) -> None:
+    def finished(
+        self, held: WorkLoop, task: asyncio.Task[tuple[PassReport, ...]]
+    ) -> None:
         """Record how the loop ended, including the ways that are not success."""
-        held = self.loop_for(work)
-        if held is None:
-            return
+        held.lease.release()
         held.finished_at = utc_now()
         if task.cancelled():
             held.stopped = True
-            logger.info("Loop over %s was stopped", work)
+            logger.info("Loop over %s was stopped", held.work)
             return
         failure = task.exception()
         if failure is not None:
             held.failure = str(failure) or failure.__class__.__name__
-            logger.error("Loop over %s raised: %s", work, held.failure)
+            logger.error("Loop over %s raised: %s", held.work, held.failure)
 
     async def stop(self, work: str) -> WorkLoopStatus:
         """Stop the loop over one work, and wait for it to actually be gone.

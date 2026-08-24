@@ -11,6 +11,7 @@ part still waiting on something else does not.
 import asyncio
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -21,8 +22,13 @@ from inkwell.agent.glossary import DECLARED_VOCABULARY, write_chapter_glossary
 from inkwell.environment.web import work_loops
 from inkwell.environment.web.routes import works
 from inkwell.environment.web.session_manager import SessionManager
-from inkwell.environment.web.work_loops import WorkLoopManager
-from inkwell.manuscript.loop import PassReport
+from inkwell.environment.web.work_loops import LoopAlreadyRunning, WorkLoopManager
+from inkwell.manuscript.loop import (
+    PassReport,
+    WorkAlreadyRunning,
+    WorkLease,
+    run_loop,
+)
 from inkwell.manuscript.runner import PartOutcome
 from inkwell.manuscript.graph import adopted, readings
 from inkwell.manuscript.ingest import read_manuscript
@@ -384,6 +390,66 @@ class TestALoopIsRefusedWhereItCouldNotHelp:
 
         assert not works.run_status("work").running
 
+    def test_a_loop_owned_by_another_process_still_reports_as_running(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.set_loops(WorkLoopManager())
+
+        with WorkLease.acquire(recorded, "work"):
+            assert works.run_status("work").running
+
+    async def test_the_shared_loop_entrypoint_cannot_bypass_the_work_lease(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        tree = recorded.load_tree("work")
+        assert tree is not None
+
+        with WorkLease.acquire(recorded, "work"):
+            with pytest.raises(WorkAlreadyRunning):
+                await run_loop(recorded, "work", tree)
+
+    async def test_two_managers_cannot_run_the_same_work(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = WorkLoopManager()
+        second = WorkLoopManager()
+        tree = recorded.load_tree("work")
+        assert tree is not None
+        release = asyncio.Event()
+
+        async def waiting(
+            store: ManuscriptStore, work: str, manuscript: object, **held: object
+        ) -> tuple[PassReport, ...]:
+            await release.wait()
+            return ()
+
+        monkeypatch.setattr(work_loops, "run_loop", waiting)
+        first.start(
+            recorded,
+            "work",
+            tree,
+            passes=1,
+            limit=0,
+            concurrency=1,
+            reconciling=True,
+        )
+
+        with pytest.raises(LoopAlreadyRunning):
+            second.start(
+                recorded,
+                "work",
+                tree,
+                passes=1,
+                limit=0,
+                concurrency=1,
+                reconciling=True,
+            )
+
+        release.set()
+        held = first.loop_for("work")
+        assert held is not None
+        await held.task
+
 
 class TestAPartRunIsASessionLikeAnyOther:
     """It always was one — a trace, a stage, a document, a spend — but one the
@@ -583,6 +649,52 @@ class TestAPostedRunActuallySchedulesThePass:
         assert await held.task == ()
         assert asked == ["work"]
 
+    async def test_selecting_a_fresh_part_and_running_it_is_one_request(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        works.set_loops(WorkLoopManager())
+        asked: list[tuple[str, ...]] = []
+
+        async def scheduled(
+            store: ManuscriptStore, work: str, manuscript: object, **held: object
+        ) -> tuple[PassReport, ...]:
+            asked.append(cast(tuple[str, ...], held["only"]))
+            return ()
+
+        monkeypatch.setattr(work_loops, "run_loop", scheduled)
+        routed = FastAPI()
+        routed.include_router(works.router)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=routed), base_url="http://work"
+        ) as browser:
+            answered = await browser.post(f"/api/works/work/parts/{CYBER}/run", json={})
+
+        assert answered.status_code == 202
+        held = works.get_loops().loop_for("work")
+        assert held is not None
+        assert await held.task == ()
+        assert asked == [(CYBER,)]
+        assert recorded.load_state("work").standing(CYBER) == "requested"
+
+    async def test_losing_the_work_lease_leaves_no_part_request_behind(
+        self, recorded: ManuscriptStore
+    ) -> None:
+        works.set_loops(WorkLoopManager())
+        routed = FastAPI()
+        routed.include_router(works.router)
+
+        with WorkLease.acquire(recorded, "work"):
+            async with AsyncClient(
+                transport=ASGITransport(app=routed), base_url="http://work"
+            ) as browser:
+                answered = await browser.post(
+                    f"/api/works/work/parts/{CYBER}/run", json={}
+                )
+
+        assert answered.status_code == 409
+        assert recorded.load_state("work").standing(CYBER) == "idle"
+
 
 class TestClearingIsTheWayOutOfAStickyStanding:
     def test_a_requested_part_can_be_taken_back(
@@ -607,14 +719,11 @@ class TestClearingIsTheWayOutOfAStickyStanding:
         assert works.clear_part("work", CYBER).standing == "idle"
 
     def test_clearing_is_refused_while_a_loop_holds_the_work(
-        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+        self, recorded: ManuscriptStore
     ) -> None:
-        loops = WorkLoopManager()
-        works.set_loops(loops)
-        monkeypatch.setattr(loops, "running", lambda work: True)
-
-        with pytest.raises(HTTPException) as raised:
-            works.clear_part("work", CYBER)
+        with WorkLease.acquire(recorded, "work"):
+            with pytest.raises(HTTPException) as raised:
+                works.clear_part("work", CYBER)
 
         assert raised.value.status_code == 409
 

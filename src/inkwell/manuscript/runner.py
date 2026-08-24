@@ -64,7 +64,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from lup.channels.models import utc_now
 
-from inkwell.agent.client import AgentSurface, AgentUpdate, CostAccumulator
+from inkwell.agent.client import (
+    AgentSurface,
+    AgentUpdate,
+    CostAccumulator,
+    quota_wait_message,
+)
+from lup.runtime.quota import QuotaWaitEvent
 from inkwell.agent.core import SessionTrace, run_session
 from inkwell.agent.pipeline import PipelineListener
 from inkwell.agent.session import WritingSessionState
@@ -287,9 +293,14 @@ class PartRunObservers(BaseModel):
             if listener is not None:
                 await listener.on_agent(update)
 
+        async def forward_quota(event: QuotaWaitEvent) -> None:
+            if listener is not None:
+                await listener.on_progress(quota_wait_message(event))
+
         return AgentSurface(
             block_callback=forward_block if listener is not None else None,
             agent_callback=forward_agent if listener is not None else None,
+            quota_callback=forward_quota if listener is not None else None,
             trace_logger=self.trace.trace_logger,
             cost_accumulator=self.cost,
         )

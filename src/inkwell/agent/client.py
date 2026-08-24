@@ -39,6 +39,12 @@ from lup.mcp import McpServerEntry
 from lup.runtime.contracts import EventStream, Session, Turn
 from lup.runtime.errors import TurnInterruptedError
 from lup.runtime.factory import SessionFactory
+from lup.runtime.quota import (
+    QuotaWaitConfig,
+    QuotaWaitEvent,
+    QuotaWaitSink,
+    quota_waiting_session_factory,
+)
 from lup.runtime.models import (
     AnyTurnBlock,
     BlockCompletedEvent,
@@ -567,6 +573,42 @@ def observing_factory(
     return SessionFactory(open_forwarding)
 
 
+QUOTA_WAIT = QuotaWaitConfig()
+"""How long a run holds when the account allowance is gone.
+
+Declared here rather than built at the composition site so the policy is one
+value to read and one to change — and so a test can shorten it instead of
+waiting out a real provider window.
+"""
+
+
+def quota_wait_message(event: QuotaWaitEvent) -> str:
+    """What a run tells its watcher while it waits out the provider's allowance.
+
+    Phrased as a wait rather than a failure, and carrying the moment it ends,
+    because the difference an author needs is between "this run is over" and
+    "this run continues at 21:00" — the same silence otherwise.
+    """
+    match event.phase:
+        case "wake":
+            return "Allowance reset — resuming where the run left off"
+        case "sleep":
+            resumes = (
+                event.reset_at.astimezone().strftime("%H:%M")
+                if event.reset_at is not None
+                else f"in {round(event.wait_seconds / 60)} min"
+            )
+            return f"Account allowance exhausted — waiting, resuming {resumes}"
+
+
+async def unwatched_quota_wait(event: QuotaWaitEvent) -> None:
+    """The allowance sink for a run nobody is watching.
+
+    The waiter logs the sleep and the wake itself, so a run with no listener
+    needs somewhere for the event to go rather than anything done with it.
+    """
+
+
 def observed_factory(
     factory: SessionFactory,
     *,
@@ -576,13 +618,19 @@ def observed_factory(
     cost_accumulator: CostAccumulator | None,
     block_callback: BlockCallback | None,
     agent_callback: AgentCallback | None,
+    quota_callback: QuotaWaitSink | None = None,
     model: str | None,
     address: str | None = None,
 ) -> SessionFactory:
-    """Wire this call's trace, display, and billing onto a built factory.
+    """Wire this call's trace, display, billing, and allowance waiting.
 
     The stage label is bound here rather than read from ambient state, which
     is what lets two sections write concurrently and still bill apart.
+
+    Allowance waiting is applied here and unconditionally, because this is the
+    one site every model session in the application is built through — a
+    one-shot query, a held cohort actor, and a part run all arrive here — and
+    an exhausted account is the provider saying "not yet" rather than "no".
     """
     decorated = decorated_session_factory(
         factory,
@@ -605,16 +653,27 @@ def observed_factory(
             else None
         ),
     )
-    if block_callback is None and agent_callback is None:
-        return decorated
-    return observing_factory(
-        decorated,
-        block_callback=block_callback,
-        agent_callback=agent_callback,
-        label=label or prefix.strip() or "agent",
-        address=address or prefix.strip() or label or "agent",
-        prefix=prefix,
-        model=model,
+    observed = (
+        decorated
+        if block_callback is None and agent_callback is None
+        else observing_factory(
+            decorated,
+            block_callback=block_callback,
+            agent_callback=agent_callback,
+            label=label or prefix.strip() or "agent",
+            address=address or prefix.strip() or label or "agent",
+            prefix=prefix,
+            model=model,
+        )
+    )
+    # Outside the observers rather than inside them: the waiter restarts the
+    # identical request on the identical session, and from here that restart
+    # re-enters the observed path, so the retried turn is traced, billed, and
+    # announced like any other instead of running unwatched.
+    return quota_waiting_session_factory(
+        observed,
+        QUOTA_WAIT.model_copy(update={"profile": label}),
+        quota_callback if quota_callback is not None else unwatched_quota_wait,
     )
 
 
@@ -632,6 +691,7 @@ class AgentSurface(BaseModel):
 
     block_callback: BlockCallback | None = None
     agent_callback: AgentCallback | None = None
+    quota_callback: QuotaWaitSink | None = None
     trace_logger: TraceLogger | None = None
     cost_accumulator: CostAccumulator | None = None
 
@@ -681,6 +741,7 @@ class AgentSurface(BaseModel):
             cost_accumulator=self.cost_accumulator,
             block_callback=self.block_callback,
             agent_callback=self.agent_callback,
+            quota_callback=self.quota_callback,
             model=model,
             address=address,
         )

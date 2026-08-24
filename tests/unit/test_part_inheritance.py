@@ -4,8 +4,9 @@ The pass exists because the anchoring fix removes the thing that used to keep
 the author's material in the book: the standing text is no longer the piece the
 run replaces, so nothing but this stops a fresh draft quietly shipping without
 Figure 2.13. What is worth pinning is that the audit is *subtracted* rather than
-believed, that a loss with a reason is allowed and a loss without one is not,
-and that a pass told what it missed is asked again rather than accepted.
+believed, that a pass told what it missed is asked again rather than accepted,
+and that a loss nobody ever accounted for is carried out of the pass named — so
+the part is adopted with the loss on its record rather than thrown away whole.
 """
 
 from pathlib import Path
@@ -165,6 +166,44 @@ class TestAPassIsAskedAgainWithWhatItMissed:
 
         assert not adoption.settled()
         assert adoption.text == ""
+
+
+class TestAnUnaccountedLossIsCarriedRatherThanRefused:
+    """Refusing cost the whole run — its brief, research and drafting — over a
+    figure the audit could not match back, and the author saw a failed part
+    rather than the sentence naming what went missing."""
+
+    @pytest.mark.asyncio
+    async def test_a_pass_that_never_accounts_for_its_losses_is_still_adoptable(
+        self, tmp_path: Path
+    ) -> None:
+        standing, produced, room = staged(tmp_path)
+        reader = Scripted(*[(FRESH, ())] * 3)
+
+        adoption = await settle(standing, produced, room, reader=reader)
+
+        assert not adoption.settled()
+        assert adoption.adoptable()
+
+    @pytest.mark.asyncio
+    async def test_each_unaccounted_loss_reads_as_a_drop_nobody_decided_on(
+        self, tmp_path: Path
+    ) -> None:
+        standing, produced, room = staged(tmp_path)
+        reader = Scripted(*[(FRESH, ())] * 3)
+
+        adoption = await settle(standing, produced, room, reader=reader)
+
+        assert adoption.unexplained()
+        assert any("Figure 2.13" in one.subject for one in adoption.unexplained())
+        assert all("no reason" in one.reason for one in adoption.unexplained())
+
+    def test_prose_nobody_produced_is_not_adoptable(self) -> None:
+        assert not Adoption(text="", failure="the reader came back empty").adoptable()
+        assert not Adoption(text="").adoptable()
+
+    def test_a_settled_pass_has_nothing_unexplained_to_carry(self) -> None:
+        assert Adoption(text="the part").unexplained() == ()
 
 
 class TestWhatWasDroppedIsKept:

@@ -102,7 +102,12 @@ from inkwell.manuscript.facts import (
     consumption_of,
 )
 from inkwell.manuscript.findings import WorkFindings, briefing
-from inkwell.manuscript.inheritance import Dropped, InheritanceReader, settle
+from inkwell.manuscript.inheritance import (
+    Adoption,
+    Dropped,
+    InheritanceReader,
+    settle,
+)
 from inkwell.manuscript.inventory import Figure, inventory_of
 from inkwell.manuscript.links import links_from
 from inkwell.manuscript.splice import (
@@ -404,6 +409,39 @@ class PartOutcome(BaseModel):
     def succeeded(self) -> bool:
         """Whether there is prose here to put back into the work."""
         return self.ended() != "failed"
+
+
+async def unaccounted_said(
+    adoption: Adoption,
+    node: ManuscriptNode,
+    working_doc: str,
+    listener: PipelineListener | None,
+) -> None:
+    """Say what the successor stopped carrying and nobody explained.
+
+    The part is adopted either way, so this is the whole of the author's
+    warning and it goes everywhere the author might be: the run's own surface
+    while it is watching, and the part's document, where it waits for whenever
+    they open it. A document that cannot take the comment is not worth failing
+    an adopted part over — the loss is on the outcome and in the run's record
+    regardless.
+    """
+    said = (
+        f"Adopted {node.title!r} with {len(adoption.unexplained())} thing(s) the "
+        f"standing text carried and this rewrite does not, none of them "
+        f"accounted for:\n{adoption.unaccounted.render()}"
+    )
+    logger.warning("Adopted %s with unaccounted losses: %s", node.key, said)
+    if listener is not None:
+        await listener.on_progress(said)
+    if not working_doc:
+        return
+    from inkwell.agent.tools.google_docs import do_insert_comment
+
+    try:
+        await do_insert_comment(working_doc, said)
+    except (RuntimeError, OSError) as failure:
+        logger.warning("Could not comment the unaccounted losses: %s", failure)
 
 
 def placed(manuscript: Manuscript, node: ManuscriptNode) -> str:
@@ -866,9 +904,11 @@ async def execute_part(
     adoption = await settle(
         material, room / PRODUCED_FILE, room, reader=reading.inheriting
     )
-    if not adoption.settled():
+    if not adoption.adoptable():
         logger.warning("Nothing was adopted for %s: %s", node.key, adoption.render())
         return PartOutcome(key=node.key, session=session_id, failure=adoption.render())
+    if not adoption.settled():
+        await unaccounted_said(adoption, node, working_doc, watched.listener)
 
     try:
         written_back(manuscript, node, adoption.text)
@@ -900,7 +940,7 @@ async def execute_part(
         key=node.key,
         session=session_id,
         text=adoption.text,
-        dropped=adoption.dropped,
+        dropped=(*adoption.dropped, *adoption.unexplained()),
         consumed=consumption_of(
             (
                 bears_on(node.key),

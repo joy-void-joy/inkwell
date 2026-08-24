@@ -114,6 +114,13 @@ that opens with anything else has nowhere to go.
 """
 
 
+UNEXPLAINED = (
+    "the standing text carried this and the successor does not; the run gave "
+    "no reason, so nobody has decided it should go"
+)
+"""The reason recorded where the audit found a loss and named no cause for it."""
+
+
 class Dropped(BaseModel):
     """One thing the standing text carried that the successor does not.
 
@@ -174,8 +181,36 @@ class Adoption(BaseModel):
     )
 
     def settled(self) -> bool:
-        """Whether there is a successor here the work can take."""
+        """Whether there is a successor here that accounted for everything."""
         return bool(self.text) and self.unaccounted.empty() and not self.failure
+
+    def adoptable(self) -> bool:
+        """Whether there is a successor here the work can take at all.
+
+        Weaker than :meth:`settled` on purpose. A rewrite that lost something
+        nobody explained is still this part rewritten, and refusing it threw
+        away the whole run — its brief, its research and its drafting — over a
+        citation the audit could not match back. What went unaccounted is
+        recorded as a drop with no reason given, which is the honest name for
+        it, and said to whoever is watching the run.
+        """
+        return bool(self.text) and not self.failure
+
+    def unexplained(self) -> tuple[Dropped, ...]:
+        """Each unaccounted loss, in the same shape a deliberate drop takes.
+
+        Filed beside the drops the run gave reasons for rather than in a list
+        of its own, so whoever reads what a run did sees the whole of what the
+        part stopped carrying without having to know which list to look in.
+        """
+
+        def each() -> Iterator[Dropped]:
+            for figure in self.unaccounted.figures:
+                yield Dropped(subject=figure.render(), reason=UNEXPLAINED)
+            for citation in self.unaccounted.citations:
+                yield Dropped(subject=citation, reason=UNEXPLAINED)
+
+        return tuple(each())
 
     def render(self) -> str:
         """Why this adoption did not settle, as the part's failure reads it."""

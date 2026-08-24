@@ -32,6 +32,7 @@ from lup.types import EnvVars
 
 from inkwell.agent.client import PROVIDER_LOGIN, RUNTIME
 from inkwell.agent.config import PROFILES_DIR, active_profile, select_profile
+from inkwell.agent.google_auth import grant_fault
 
 app = typer.Typer(
     help="Interactive setup wizard",
@@ -275,12 +276,39 @@ def print_test_user_guidance() -> None:
 # =====================================================================
 
 
+class GoogleStanding(BaseModel):
+    """Where a profile's Google authorization stands, as a status row reads it."""
+
+    authorized: bool = Field(description="Whether a run could open a document now")
+    detail: str = Field(description="What the check found, in the row's own words")
+
+
+def google_standing(google: GooglePaths) -> GoogleStanding:
+    """Whether a run could open a document with this profile, and what says so.
+
+    Asked by refreshing the token rather than by finding it, because a grant
+    Google has stopped honoring leaves the file it was written to exactly
+    where it was: presence answered "authorized" for a token every run was
+    already dying on, which is the one state a status table exists to catch.
+    """
+    if not google.token.exists():
+        return GoogleStanding(
+            authorized=False,
+            detail="credentials present, not yet authorized"
+            if google.credentials.exists()
+            else "not configured",
+        )
+    fault = grant_fault(str(google.token))
+    if fault is not None:
+        return GoogleStanding(authorized=False, detail=fault)
+    return GoogleStanding(authorized=True, detail="authorized")
+
+
 def build_status_table(profile: str | None = None) -> Table:
     """Build a rich table showing configuration status."""
     profile = profile or resolve_profile()
     env = read_env_local(profile)
     google = google_paths_for_profile(profile)
-    google_creds, google_token = google.credentials, google.token
 
     title = f"Profile: [bold]{profile}[/]" if profile else "Default configuration"
     table = Table(title=title, show_header=False, box=None, padding=(0, 2))
@@ -296,18 +324,11 @@ def build_status_table(profile: str | None = None) -> Table:
         config_dir if login_ok else f"using default (shared with {RUNTIME.name})",
     )
 
-    google_ok = google_token.exists()
-    google_creds_ok = google_creds.exists()
-    if google_ok:
-        detail = "authorized"
-    elif google_creds_ok:
-        detail = "credentials present, not yet authorized"
-    else:
-        detail = "not configured"
+    standing = google_standing(google)
     table.add_row(
-        "[green]OK[/]" if google_ok else "[red]--[/]",
+        "[green]OK[/]" if standing.authorized else "[red]--[/]",
         "Google (Docs + Drive)",
-        detail,
+        standing.detail,
     )
 
     exa_ok = bool(env_value(env, "EXA_API_KEY"))

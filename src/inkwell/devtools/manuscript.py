@@ -35,6 +35,7 @@ from pydantic import ValidationError
 from lup.devtools.utils import JSON_OPT, output_json
 
 from inkwell.agent.config import corpus_root, manuscript_store, verdict_store
+from inkwell.agent.google_auth import GoogleAuthError
 from inkwell.agent.references import (
     DEFAULT_REFERENCE_CONCURRENCY,
     distinct,
@@ -567,9 +568,9 @@ def run_cmd(
                 reconciling=reconcile_wave,
             )
         )
-    except WorkAlreadyRunning as already:
-        typer.echo(str(already), err=True)
-        raise typer.Exit(1) from already
+    except (WorkAlreadyRunning, GoogleAuthError) as refused:
+        typer.echo(str(refused), err=True)
+        raise typer.Exit(1) from refused
     for number, report in enumerate(reports, start=1):
         typer.echo(f"pass {number}: {report.render()}")
         for held in report.results:

@@ -35,6 +35,7 @@ from typing import TextIO
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from inkwell.agent.google_auth import GoogleAuthError, document_fault
 from inkwell.manuscript.graph import WorkSweep, readings, sweep
 from inkwell.manuscript.runner import PartRunAgents
 from inkwell.manuscript.mailbox import (
@@ -552,6 +553,13 @@ async def run_loop(
     ``lease`` is supplied by a surface that must claim the work before it
     replies that a background loop started. Direct callers acquire the same
     cross-process lease here, so no launch path can bypass exclusivity.
+
+    Refuses before scheduling anything where the parts could not be written
+    even if they ran: every part is written into a document, so a document
+    surface nobody can open is a fault about the environment, and a loop that
+    meets it per part meets it after each part has already bought a plan. Asked
+    inside the lease, because a work another loop owns is answered by saying so
+    rather than by a round trip to Google.
     """
 
     async def taken() -> AsyncIterator[PassReport]:
@@ -578,4 +586,7 @@ async def run_loop(
 
     held = lease if lease is not None else WorkLease.acquire(store, work)
     with held:
+        fault = document_fault()
+        if fault is not None:
+            raise GoogleAuthError(fault)
         return tuple([report async for report in taken()])

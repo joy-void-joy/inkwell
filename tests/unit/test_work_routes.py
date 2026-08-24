@@ -18,7 +18,9 @@ from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
+import inkwell.manuscript.loop as loop_mod
 from inkwell.agent.glossary import DECLARED_VOCABULARY, write_chapter_glossary
+from inkwell.agent.google_auth import GoogleAuthError
 from inkwell.environment.web import work_loops
 from inkwell.environment.web.models import StageEvent
 from inkwell.environment.web.routes import works
@@ -408,6 +410,23 @@ class TestALoopIsRefusedWhereItCouldNotHelp:
         with WorkLease.acquire(recorded, "work"):
             with pytest.raises(WorkAlreadyRunning):
                 await run_loop(recorded, "work", tree)
+
+    async def test_a_loop_that_could_not_write_a_part_buys_no_plan(
+        self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every part is written into a document, so no document is every part."""
+        tree = recorded.load_tree("work")
+        assert tree is not None
+        passes: list[str] = []
+        monkeypatch.setattr(
+            loop_mod, "document_fault", lambda: "Failed to refresh Google token"
+        )
+        monkeypatch.setattr(loop_mod, "run_pass", lambda *a, **k: passes.append("ran"))
+
+        with pytest.raises(GoogleAuthError, match="Failed to refresh"):
+            await run_loop(recorded, "work", tree)
+
+        assert passes == []
 
     async def test_two_managers_cannot_run_the_same_work(
         self, recorded: ManuscriptStore, monkeypatch: pytest.MonkeyPatch

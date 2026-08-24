@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal, NotRequired, Protocol, TypedDict, Unpack, overload
 
 import httplib2
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -213,6 +213,44 @@ def load_credentials(token_path: str) -> Credentials:
     logger.info("Refreshed Google OAuth token at %s", token_path)
 
     return creds
+
+
+def grant_fault(token_path: str) -> str | None:
+    """Why this token cannot reach Google yet, if anything.
+
+    Asked by refreshing it, because that is what a run does, and a grant
+    Google has stopped honoring leaves the file it was written to exactly
+    where it was — so finding that file answers "authorized" for a token
+    every run is already dying on.
+    """
+    try:
+        load_credentials(token_path)
+    except (GoogleAuthError, TransportError) as fault:
+        return str(fault)
+    return None
+
+
+def document_fault() -> str | None:
+    """Why no run can open a document under these settings yet, if anything.
+
+    Everything written here is written into a document, so a grant Google has
+    stopped honoring is a fact about the environment rather than about any one
+    piece of work.
+
+    Answered up front, it is one message before anything is leased or bought.
+    Rediscovered instead by whatever first needs a document, it is the same
+    message once per piece of work, each having already paid for the plan it
+    will not get to write.
+    """
+    from inkwell.agent.config import current_settings
+
+    token_path = current_settings().google_token_path
+    if not token_path:
+        return (
+            "GOOGLE_TOKEN_PATH is not set. "
+            "Run `inkwell setup` to configure Google integration."
+        )
+    return grant_fault(token_path)
 
 
 class GoogleErrorDetail(BaseModel):

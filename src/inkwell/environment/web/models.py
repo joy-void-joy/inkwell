@@ -189,10 +189,17 @@ class SessionEvent(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    sequence: int | None = Field(
+        default=None, description="Monotonic identity within this session's event log"
+    )
     timestamp: str = Field(
         default_factory=lambda: datetime.now().isoformat(),
         description="When the event was raised, ISO-8601",
     )
+
+    def announced_stage(self) -> str | None:
+        """The stage this event announces, where it is a stage boundary."""
+        return None
 
 
 class StageEvent(SessionEvent):
@@ -201,6 +208,9 @@ class StageEvent(SessionEvent):
     type: Literal["stage"] = "stage"
     stage: str
     description: str
+
+    def announced_stage(self) -> str | None:
+        return self.stage
 
 
 class ProgressEvent(SessionEvent):

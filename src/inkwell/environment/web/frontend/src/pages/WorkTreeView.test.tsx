@@ -1,10 +1,23 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import * as api from "../api/client";
-import type { PartNode, WorkLoopStatus, WorkTree } from "../types";
+import {
+  completedStageNames,
+  type PartNode,
+  type ServerMessage,
+  type WorkLoopStatus,
+  type WorkTree,
+} from "../types";
+import { SessionProvider } from "../context/SessionContext";
+import { useSession } from "../context/session";
 import { WorkTreeView } from "./WorkTreeView";
+
+const socket = vi.hoisted(() => ({
+  deliver: null as ((event: ServerMessage) => void) | null,
+  send: vi.fn(),
+}));
 
 vi.mock("../api/client", () => ({
   answerWorkQuestion: vi.fn(),
@@ -14,8 +27,22 @@ vi.mock("../api/client", () => ({
   fetchWorkHistory: vi.fn(),
   fetchWorkQuestions: vi.fn(),
   fetchWorkTree: vi.fn(),
+  fetchPipelineStages: vi.fn(),
+  getSession: vi.fn(),
   requestWorkPart: vi.fn(),
+  resumeSession: vi.fn(),
   startWorkPart: vi.fn(),
+  restartSession: vi.fn(),
+}));
+
+vi.mock("../api/ws", () => ({
+  useSessionWebSocket: (
+    _session: string | undefined,
+    deliver: (event: ServerMessage) => void,
+  ) => {
+    socket.deliver = deliver;
+    return { send: socket.send };
+  },
 }));
 
 const key = "02/03/2.3.2";
@@ -62,6 +89,7 @@ afterEach(cleanup);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.fetchPipelineStages).mockResolvedValue(["extract", "plan"]);
   vi.mocked(api.fetchWorkTree).mockResolvedValue(tree);
   vi.mocked(api.fetchWorkQuestions).mockResolvedValue([]);
   vi.mocked(api.fetchWorkHistory).mockResolvedValue([]);
@@ -78,6 +106,10 @@ beforeEach(() => {
     started_at: "2026-08-24T12:00:00Z",
   });
 });
+
+function EventCount() {
+  return <div>{useSession().state.events.length} received</div>;
+}
 
 describe("running one selected work part", () => {
   it("starts exactly the part selected in the tree", async () => {
@@ -115,5 +147,58 @@ describe("running one selected work part", () => {
       name: "A work run is active",
     }) as HTMLButtonElement;
     expect(active.disabled).toBe(true);
+  });
+});
+
+describe("session event identity", () => {
+  it("does not infer skipped stages from the current stage's position", () => {
+    const plan: ServerMessage = {
+      type: "stage",
+      stage: "plan",
+      description: "Planning",
+      timestamp: "2026-08-24T02:21:24Z",
+    };
+    expect(completedStageNames([plan], "running")).toEqual([]);
+  });
+
+  it("does not append an event replayed after the REST snapshot", async () => {
+    const event: ServerMessage = {
+      type: "progress",
+      message: "Briefing",
+      sequence: 0,
+      timestamp: "2026-08-24T02:21:24Z",
+    };
+    vi.mocked(api.getSession).mockResolvedValue({
+      session_id: "run",
+      title: "A part",
+      status: "running",
+      state: {
+        doc_id: "",
+        doc_url: "",
+        title: "A part",
+        stage: "brief",
+        sections: [],
+        pending_questions: [],
+      },
+      cost: {
+        total_cost_usd: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        duration_s: 0,
+        stages: {},
+      },
+      created_at: "2026-08-24T02:21:23Z",
+      profile: null,
+      events: [event],
+      checkpoints: [],
+    });
+    render(
+      <SessionProvider sessionId="run">
+        <EventCount />
+      </SessionProvider>,
+    );
+    expect(await screen.findByText("1 received")).toBeTruthy();
+    act(() => socket.deliver?.(event));
+    expect(screen.getByText("1 received")).toBeTruthy();
   });
 });

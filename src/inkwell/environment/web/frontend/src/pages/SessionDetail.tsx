@@ -11,6 +11,7 @@ import { ActionBar } from "../components/ActionBar";
 import { PromptPanel } from "../components/PromptPanel";
 import { DeclaredFields } from "../components/DeclaredFields";
 import {
+  completedStageNames,
   declaredDefaults,
   mergedParameters,
   stageLabel,
@@ -125,15 +126,15 @@ function ResumeControls() {
 
   useEffect(() => {
     fetchProfiles().then(setProfiles).catch(() => {});
-    fetchEntryPoints().then(setEntryPoints).catch(() => {});
+    fetchEntryPoints()
+      .then((loaded) => {
+        setEntryPoints(loaded);
+        const resume = loaded.find((entry) => entry.name === "resume") ?? null;
+        const restart = loaded.find((entry) => entry.name === "restart") ?? null;
+        setDeclared({ ...declaredDefaults(resume), ...declaredDefaults(restart) });
+      })
+      .catch(() => {});
   }, []);
-
-  useEffect(() => {
-    setDeclared({
-      ...declaredDefaults(resumeDeclaration),
-      ...declaredDefaults(restartDeclaration),
-    });
-  }, [resumeDeclaration, restartDeclaration]);
 
   const setDeclaredValue = (name: string, next: SuppliedValue) => {
     setDeclared((prev) => ({ ...prev, [name]: next }));
@@ -262,9 +263,10 @@ function SessionDetailInner() {
   const docUrl = state.sessionState?.doc_url ?? "";
   const currentStageLabel = stageLabel(state.stage);
   const inStandby = isRunning && state.output != null;
-  // A cleanly completed run reads as all-complete even if its last stage event
-  // was a backbone stage rather than the standby poll.
+  // A cleanly completed run has no active chip; which stages completed still
+  // comes from its history, so omitted stages are never painted as successful.
   const barStage = state.status === "completed" ? "done" : state.stage;
+  const completedStages = completedStageNames(state.events, state.status);
 
   return (
     <div className="page session-detail">
@@ -286,6 +288,7 @@ function SessionDetailInner() {
       <StageProgress
         currentStage={barStage}
         stages={pipelineStages}
+        completedStages={completedStages}
         sections={state.sessionState?.sections ?? []}
       />
 

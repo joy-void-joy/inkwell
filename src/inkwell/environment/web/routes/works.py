@@ -628,7 +628,7 @@ def in_flight(store: ManuscriptStore, work: str) -> tuple[PartInFlight, ...]:
                 session=record.holder,
                 since=record.changed_at,
                 reason=record.reason,
-                stage=handle.state.stage if handle else "",
+                stage=handle.display_stage() if handle else "",
                 status=standing_of(handle, looping),
                 cost_usd=handle.cost.total.cost_usd if handle else 0.0,
                 doc_url=handle.state.doc_url if handle else "",

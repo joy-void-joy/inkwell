@@ -349,6 +349,29 @@ class TestTheThreeLevelsAreOneReply:
         assert detail is not None
         assert len(detail.events) == 250
 
+    async def test_session_events_receive_one_monotonic_identity(self) -> None:
+        sessions = SessionManager()
+        sessions.adopt("s")
+
+        await sessions.broadcast("s", ProgressEvent(message="first"))
+        await sessions.broadcast("s", ProgressEvent(message="second"))
+
+        detail = sessions.get_session_detail("s")
+        assert detail is not None
+        assert [event.sequence for event in detail.events] == [0, 1]
+
+    async def test_a_finished_agent_refreshes_the_session_cost(self) -> None:
+        sessions = SessionManager()
+        handle = sessions.adopt("s")
+        finished = AgentUpdate(label="brief", address="brief", status="completed")
+
+        await handle.listener.on_agent(finished)
+
+        assert [event.model_dump()["type"] for event in handle.events] == [
+            "agent",
+            "cost_update",
+        ]
+
     def test_a_pass_reading_documents_does_not_look_idle(
         self, recorded: ManuscriptStore
     ) -> None:

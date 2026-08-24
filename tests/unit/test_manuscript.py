@@ -896,6 +896,7 @@ class TestAPartIsWrittenAsTheWorkIsWrittenAs:
         )
 
         assert asked["target_format"] == "textbook"
+        assert asked["skipped_stages"] == ["assumptions"]
 
     @pytest.mark.asyncio
     async def test_a_work_declaring_another_format_carries_that_one(
@@ -1279,6 +1280,10 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
                 super().__init__()
                 self.agents: tuple[client.AgentUpdate, ...] = ()
                 self.blocks: tuple[tuple[str, str], ...] = ()
+                self.stages: tuple[str, ...] = ()
+
+            async def on_stage(self, stage: str, description: str) -> None:
+                self.stages = (*self.stages, stage)
 
             async def on_agent(self, update: client.AgentUpdate) -> None:
                 self.agents = (*self.agents, update)
@@ -1315,6 +1320,8 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
 
         assert [one.status for one in listener.agents] == ["running", "completed"]
         assert listener.blocks == (("Planning the successor", "brief"),)
+        assert listener.stages == ("brief",)
+        assert observers.state.title == "2.3.2 Cyber Risk"
         trace_path = observers.trace.save()
         assert trace_path is not None
         assert "Planning the successor" in trace_path.read_text(encoding="utf-8")

@@ -154,16 +154,16 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         handle.status,
         len(handle.events),
     )
-    handle.attach_client(websocket)
-
-    replayed = len(handle.events)
-    for event in handle.events[:replayed]:
-        try:
-            await websocket.send_text(event.model_dump_json())
-        except (RuntimeError, OSError, ConnectionError):
-            logger.info("WS %s: send failed during handle replay", session_id)
-            mgr.remove_client(session_id, websocket)
-            return
+    async with handle.event_lock:
+        replayed = len(handle.events)
+        for event in handle.events[:replayed]:
+            try:
+                await websocket.send_text(event.model_dump_json())
+            except (RuntimeError, OSError, ConnectionError):
+                logger.info("WS %s: send failed during handle replay", session_id)
+                return
+        if handle.status == "running":
+            handle.attach_client(websocket)
 
     if handle.status != "running":
         logger.info(

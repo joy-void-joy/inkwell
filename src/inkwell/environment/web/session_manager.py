@@ -98,6 +98,7 @@ class SessionHandle(BaseModel):
     result: AgentSessionResult | None = None
     created_at: datetime = Field(default_factory=datetime.now)
     events: list[SerializeAsAny[SessionEvent]] = Field(default_factory=list)
+    event_lock: asyncio.Lock = Field(default_factory=asyncio.Lock)
 
     def attach_client(self, ws: WebSocket) -> None:
         """Start streaming this session's events to `ws`."""
@@ -108,6 +109,17 @@ class SessionHandle(BaseModel):
         """Stop streaming to `ws`, whether or not it is still attached."""
         if ws in self.clients:
             self.clients.remove(ws)
+
+    def display_stage(self) -> str:
+        """The latest stage the run announced, or its underlying state."""
+        return next(
+            (
+                stage
+                for event in reversed(self.events)
+                if (stage := event.announced_stage()) is not None
+            ),
+            self.state.stage,
+        )
 
 
 class SessionManager:
@@ -336,7 +348,13 @@ class SessionManager:
         try:
             raw: JsonValue = json.loads(events_file.read_text(encoding="utf-8"))
             if isinstance(raw, list):
-                return [SessionEvent.model_validate(entry) for entry in raw]
+                loaded = [SessionEvent.model_validate(entry) for entry in raw]
+                return [
+                    event
+                    if event.sequence is not None
+                    else event.model_copy(update={"sequence": index})
+                    for index, event in enumerate(loaded)
+                ]
         except (json.JSONDecodeError, OSError, ValidationError):
             logger.warning("Failed to load events for session %s", session_id)
         return []
@@ -385,7 +403,7 @@ class SessionManager:
                         else handle.state.title
                     ),
                     status=handle.status,
-                    stage=handle.state.stage,
+                    stage=handle.display_stage(),
                     cost_usd=handle.cost.total.cost_usd,
                     duration_s=handle.cost.total.duration.total_seconds(),
                     doc_url=handle.state.doc_url,
@@ -472,7 +490,7 @@ class SessionManager:
                 doc_id=handle.state.doc_id,
                 doc_url=handle.state.doc_url,
                 title=handle.state.title,
-                stage=handle.state.stage,
+                stage=handle.display_stage(),
                 sections=[
                     SectionInfo(title=s["title"], tab_id=s["tab_id"])
                     for s in handle.state.sections
@@ -619,15 +637,16 @@ class SessionManager:
         if not handle:
             return
 
-        handle.events.append(event)
-        payload = event.model_dump_json()
-
-        stale: list[WebSocket] = []
-        for ws in list(handle.clients):
-            try:
-                await ws.send_text(payload)
-            except Exception:
-                stale.append(ws)
+        async with handle.event_lock:
+            numbered = event.model_copy(update={"sequence": len(handle.events)})
+            handle.events.append(numbered)
+            payload = numbered.model_dump_json()
+            stale: list[WebSocket] = []
+            for ws in list(handle.clients):
+                try:
+                    await ws.send_text(payload)
+                except Exception:
+                    stale.append(ws)
 
         for ws in stale:
             handle.drop_client(ws)

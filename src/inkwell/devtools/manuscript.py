@@ -50,7 +50,15 @@ from inkwell.manuscript.chapters import (
     unrouted,
 )
 from inkwell.manuscript.attending import WorkAgent
-from inkwell.manuscript.planner import plan_work
+from inkwell.manuscript.brief import (
+    LocalCorpusPusher,
+    asked,
+    evidence_for,
+    subsection_topic,
+)
+from inkwell.manuscript.budget import budget_for
+from inkwell.manuscript.inventory import inventory_of
+from inkwell.manuscript.planner import held_text_for, plan_work
 from inkwell.manuscript.research import (
     cited_by_part,
     distil_started,
@@ -351,6 +359,46 @@ def clear_cmd(
     standing = state.standing(key)
     store.publish_state(work, state.declared(key, "idle", ""))
     typer.echo(f"{key}: {standing} → idle")
+
+
+@app.command("brief")
+def brief_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    key: Annotated[str, typer.Argument(help="Which part to brief")],
+) -> None:
+    """Show the evidence one part's run would be handed, without running it.
+
+    The question a status line cannot answer: not whether this part is out of
+    date, but whether what it would be planned from is the right material. A
+    part briefed on the wrong documents still runs, still passes every check,
+    and comes back a competent piece about the wrong thing — and the brief is
+    the last place that is cheap to see.
+
+    Spends one pair of retrievals and nothing else. No model is asked
+    anything, so this costs a corpus read and answers in a second.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    node = tree.node(key)
+    if node is None:
+        typer.echo(f"{work} has no part called {key!r}", err=True)
+        raise typer.Exit(1)
+    text = held_text_for(tree, node)
+    claims = asyncio.run(LocalCorpusPusher().push(subsection_topic(tree, node), text))
+    held = store.load_state(work).record(key)
+    typer.echo(
+        asked(
+            evidence_for(
+                tree,
+                node,
+                store.load_findings(work),
+                reasons=(held.reason,) if held is not None and held.reason else (),
+                corpus=claims,
+                figures=inventory_of(text).figures,
+                budget=budget_for(tree, node),
+            )
+        )
+    )
 
 
 @app.command("request")

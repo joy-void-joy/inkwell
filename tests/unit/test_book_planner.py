@@ -228,7 +228,9 @@ class TestTheLedgerReachesThePlanner:
         assert node is not None
 
         class PushesOne(CorpusPusher):
-            async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+            async def push(
+                self, topic: str, subject: str = ""
+            ) -> tuple[PushedCorpusClaim, ...]:
                 return (
                     PushedCorpusClaim(
                         title="A current system card",

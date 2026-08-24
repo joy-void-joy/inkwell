@@ -188,6 +188,42 @@ class TestWhatTheDeriverIsShown:
         assert {one.depth for one in claims} == {"judged", "distilled"}
         assert any("GitHub incident" in one.claim for one in claims)
 
+    @pytest.mark.asyncio
+    async def test_asking_both_ways_does_not_brief_one_document_twice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The place and the subject reach the same document, which is normal.
+
+        A briefing that listed it once per way of asking would spend its size
+        on repeats and read as two independent sources for one claim.
+        """
+        store = CorpusStore(root=tmp_path / "corpus")
+        store.save(
+            SourceShard(
+                source="mythos",
+                documents=[
+                    StoredDocument(
+                        slug="system-card",
+                        url="https://example.test/glasswing",
+                        title="Project Glasswing system card",
+                        summary="The system evaluates autonomous cyber work.",
+                        tags=DocumentTags(judged=True),
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr("inkwell.agent.config.corpus_root", lambda: store.root)
+        monkeypatch.setattr(
+            "inkwell.agent.config.corpus_semantics",
+            lambda held: SemanticLayer(store=held, enabled=False),
+        )
+
+        claims = await LocalCorpusPusher().push(
+            "Risks > Misuse Risks > Cyber Risk", "Prose about autonomous cyber work."
+        )
+
+        assert [one.source for one in claims] == ["mythos/system-card"]
+
 
 class TestWhatTheDeriverIsNotAskedFor:
     """Most of a plan is not the deriver's to decide, and asking for it back is

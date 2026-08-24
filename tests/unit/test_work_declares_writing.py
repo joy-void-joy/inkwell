@@ -74,7 +74,9 @@ class PlansPart(BriefWriter):
 class PushesNothing(CorpusPusher):
     """An empty corpus, so unit runs do no external retrieval."""
 
-    async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+    async def push(
+        self, topic: str, subject: str = ""
+    ) -> tuple[PushedCorpusClaim, ...]:
         return ()
 
 

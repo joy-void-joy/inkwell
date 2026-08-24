@@ -386,7 +386,12 @@ async def push_for_parts(
     held = tuple(nodes)
     reader = pusher or LocalCorpusPusher()
     claims = await asyncio.gather(
-        *(reader.push(subsection_topic(manuscript, node)) for node in held)
+        *(
+            reader.push(
+                subsection_topic(manuscript, node), held_text_for(manuscript, node)
+            )
+            for node in held
+        )
     )
     return tuple(
         PartCorpus(key=node.key, claims=found)
@@ -625,7 +630,14 @@ async def settle_reviews(
 
 
 def held_text_for(manuscript: Manuscript, node: ManuscriptNode) -> str:
-    """Standing bytes used only for identity and protected-figure inventory."""
+    """Standing bytes, for identity, protected figures, and what to retrieve on.
+
+    Never for the plan. Retrieval is the one place the old prose earns its
+    keep: it is the only statement of what this part is *about*, and a query
+    made of declared titles alone reaches documents about the shape of the
+    book instead. What comes back is evidence, which the deriver is free to
+    arrange any way it likes — the prose itself never reaches it.
+    """
     from pathlib import Path
 
     from inkwell.manuscript.graph import source_text

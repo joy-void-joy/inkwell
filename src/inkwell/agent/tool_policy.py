@@ -22,7 +22,21 @@ BUILTIN_TOOLS: tuple[str, ...] = (
 )
 """The built-in tools a stage of this pipeline may be granted."""
 
+CORPUS_TOOLS: tuple[str, ...] = (
+    "mcp__research__corpus_overview",
+    "mcp__research__corpus_search",
+)
+"""Asking the corpus a question, rather than reading what it was handed.
+
+Named apart from the rest of research because the stages that need it are not
+only the ones that gather. A stage deciding what a piece establishes plans
+around whatever its briefing happened to carry: it is told how many documents
+matched and given no way to reach the ones below the cap, so a subject the
+first page missed reads as a subject the corpus does not hold.
+"""
+
 RESEARCH_TOOLS: tuple[str, ...] = (
+    *CORPUS_TOOLS,
     "mcp__research__exa_search",
     "mcp__research__search_arxiv",
     "mcp__research__fetch_arxiv",
@@ -34,8 +48,6 @@ RESEARCH_TOOLS: tuple[str, ...] = (
     "mcp__research__polymarket_price",
     "mcp__research__wiki_search",
     "mcp__research__fetch_wikipedia",
-    "mcp__research__corpus_overview",
-    "mcp__research__corpus_search",
     "mcp__research__top_up_corpus",
 )
 """The research MCP tools the research-capable stages share."""
@@ -55,6 +67,16 @@ def research_tool_names() -> list[str]:
     )
 
 
+def planning_tool_names() -> list[str]:
+    """What a stage that decides a piece's structure may call.
+
+    The corpus and the files it is pointed at, and nothing that gathers from
+    outside — a planner is choosing among evidence, not collecting it, and the
+    stage that collects runs after this one with the whole research surface.
+    """
+    return sorted({"Read", "Glob", "Grep", *CORPUS_TOOLS})
+
+
 def review_tool_names() -> list[str]:
     return sorted(
         {
@@ -66,7 +88,6 @@ def review_tool_names() -> list[str]:
             "mcp__research__exa_search",
             "mcp__research__wiki_search",
             "mcp__research__fetch_wikipedia",
-            "mcp__research__corpus_overview",
-            "mcp__research__corpus_search",
+            *CORPUS_TOOLS,
         }
     )

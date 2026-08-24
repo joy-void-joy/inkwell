@@ -772,7 +772,7 @@ async def execute_part(
         await watched.listener.on_stage("brief", "Planning this part in its work")
         await watched.listener.on_progress("Retrieving corpus evidence for this part")
     corpus = await (reading.corpus or LocalCorpusPusher()).push(
-        subsection_topic(manuscript, node)
+        subsection_topic(manuscript, node), current
     )
     evidence = evidence_for(
         manuscript,

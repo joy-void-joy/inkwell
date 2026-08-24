@@ -199,7 +199,9 @@ class PlansPart(BriefWriter):
 class PushesNothing(CorpusPusher):
     """An empty corpus, so unit part runs do no external retrieval."""
 
-    async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+    async def push(
+        self, topic: str, subject: str = ""
+    ) -> tuple[PushedCorpusClaim, ...]:
         return ()
 
 
@@ -1145,9 +1147,13 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
         class PushesCurrent(CorpusPusher):
             def __init__(self) -> None:
                 self.topic = ""
+                self.subject = ""
 
-            async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+            async def push(
+                self, topic: str, subject: str = ""
+            ) -> tuple[PushedCorpusClaim, ...]:
                 self.topic = topic
+                self.subject = subject
                 return (
                     PushedCorpusClaim(
                         title="Mythos system card",
@@ -1206,6 +1212,7 @@ class TestASelectedSubsectionPlansFromItsPushedEvidence:
         assert "Prose about cyber risk" not in planner.task
         assert "Cyber Risk" in corpus.topic
         assert "Prose about cyber risk" not in corpus.topic
+        assert "Prose about cyber risk" in corpus.subject
 
     @pytest.mark.asyncio
     async def test_a_missing_prose_blind_brief_stops_before_the_pipeline(

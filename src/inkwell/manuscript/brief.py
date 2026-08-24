@@ -32,7 +32,9 @@ and silently taken all of that with it.
 import logging
 from hashlib import sha256
 from abc import ABC, abstractmethod
+from asyncio import gather
 from collections.abc import Iterator
+from itertools import zip_longest
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -40,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from inkwell.agent.client import query
 from inkwell.agent.config import stage_model
+from inkwell.agent.tool_policy import planning_tool_names
 from inkwell.agent.models import (
     ArticlePlan,
     ResearchQuestion,
@@ -92,6 +95,15 @@ argument to the stated budget, respect its place between its neighbours, and \
 leave preservation of standing claims, citations, figures, and voice to the \
 inheritance pass after drafting.
 
+The pushed listing is one page of a larger corpus, and it says how many \
+documents matched. Where it reads thin on the part's actual subject, or \
+where what it carries is adjacent rather than central, use corpus_search to \
+ask for yourself — page past the listing with offset, narrow by tag or by \
+date, and read a document whole where the summary will not settle it. A \
+subject the first page happened to miss is not a subject the corpus lacks, \
+and this is the last stage in a position to notice the difference: every \
+stage after this one plans inside the structure you choose here.
+
 Be specific and brief. Give every section one or two checkable key points.
 """
 
@@ -124,34 +136,79 @@ class PushedCorpusClaim(BaseModel):
 
 
 class CorpusPusher(ABC):
-    """Who retrieves corpus claims before a subsection chooses its intent."""
+    """Who retrieves corpus claims before a subsection chooses its intent.
+
+    ``subject`` is the part as it stands, and it never reaches the deriver —
+    it is a query, not a plan. Retrieval is the one place the old prose is
+    worth reading, because it is the only account of what the part is about;
+    everything downstream still sees evidence and no old arrangement.
+    """
 
     @abstractmethod
-    async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
-        """Return judged claims nearest to a prose-free subsection topic."""
+    async def push(
+        self, topic: str, subject: str = ""
+    ) -> tuple[PushedCorpusClaim, ...]:
+        """Return judged claims nearest a subsection's place and its subject."""
 
 
 class LocalCorpusPusher(CorpusPusher):
-    """The same narrow semantic retrieval used by the ordinary plan stage."""
+    """The ordinary plan stage's narrow retrieval, asked both ways at once.
 
-    async def push(self, topic: str) -> tuple[PushedCorpusClaim, ...]:
+    Asked only where the part sits, the corpus answers with documents about
+    that: a query reading "Risks > Misuse Risks > Cyber Risk" is nearest to
+    papers on risk taxonomy and assurance frameworks, and a subsection on
+    cyber attacks is briefed on three-lines-of-defence and tort law. The
+    part's own text is the only statement of its subject anything here holds,
+    so it asks a second time on that and merges the two rankings.
+    """
+
+    async def push(
+        self, topic: str, subject: str = ""
+    ) -> tuple[PushedCorpusClaim, ...]:
         from inkwell.agent.config import corpus_root, corpus_semantics
         from inkwell.agent.pipeline import CORPUS_BRIEFING_LIMIT, briefing_claim
         from inkwell.corpus.distillation import read_distillation
-        from inkwell.corpus.retrieval import CorpusQuery, read_index, search_corpus
+        from inkwell.corpus.retrieval import (
+            CorpusHit,
+            CorpusQuery,
+            read_index,
+            search_corpus,
+        )
         from inkwell.corpus.storage import CorpusStore
 
         store = CorpusStore(root=corpus_root())
-        answer = await search_corpus(
-            CorpusQuery(tier="narrow", like=topic, limit=CORPUS_BRIEFING_LIMIT),
-            store,
-            semantics=corpus_semantics(store),
-        )
+        semantics = corpus_semantics(store)
+
+        async def nearest(question: str) -> tuple[CorpusHit, ...]:
+            """What the corpus places nearest one way of asking."""
+            answer = await search_corpus(
+                CorpusQuery(tier="narrow", like=question, limit=CORPUS_BRIEFING_LIMIT),
+                store,
+                semantics=semantics,
+            )
+            return answer.documents
+
+        def both_ways(
+            placed: tuple[CorpusHit, ...], about: tuple[CorpusHit, ...]
+        ) -> tuple[CorpusHit, ...]:
+            """Both rankings a turn at a time, each document only once.
+
+            Alternated rather than concatenated: a briefing that runs one
+            ranking out before starting the other is the first ranking, with
+            the second appended past the limit where nothing reads it.
+            """
+            turns = (hit for pair in zip_longest(placed, about) for hit in pair if hit)
+            return tuple({f"{one.source}/{one.slug}": one for one in turns}.values())
+
+        ranked = await gather(nearest(topic), nearest(subject or topic))
+        # lup: ignore[silent-truncation] — CORPUS_BRIEFING_LIMIT is the
+        # briefing's declared size, which the two ways of asking now share
+        documents = both_ways(*ranked)[:CORPUS_BRIEFING_LIMIT]
         entries = read_index(store).entries
 
         def claims() -> Iterator[PushedCorpusClaim]:
             """Judged summaries, plus cached full reads of the top matches."""
-            for at, hit in enumerate(answer.documents):
+            for at, hit in enumerate(documents):
                 source = f"{hit.source}/{hit.slug}"
                 yield PushedCorpusClaim(
                     title=hit.title,
@@ -455,12 +512,17 @@ class ModelBrief(BriefWriter):
         self.model = model
 
     async def compose(self, task: str, root: Path) -> ComposedBrief | None:
+        from inkwell.agent.pipeline import build_research_servers
+
         return await query(
             task,
             output_type=ComposedBrief,
             model=self.model or stage_model(BRIEF_STAGE),
             system_prompt=BRIEF_SYSTEM,
-            tools=[],
+            tools=["Read", "Glob", "Grep"],
+            mcp_servers=build_research_servers(),
+            allowed_tools=planning_tool_names(),
+            cwd=root,
             autonomy="unattended",
             prefix="brief",
         )

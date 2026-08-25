@@ -111,28 +111,49 @@ function EventCount() {
   return <div>{useSession().state.events.length} received</div>;
 }
 
-describe("running one selected work part", () => {
-  it("starts exactly the part selected in the tree", async () => {
-    const user = userEvent.setup();
-    render(
-      <MemoryRouter initialEntries={["/work/work"]}>
-        <Routes>
-          <Route path="/work/:workId" element={<WorkTreeView />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+function showTree() {
+  render(
+    <MemoryRouter initialEntries={["/work/work"]}>
+      <Routes>
+        <Route path="/work/:workId" element={<WorkTreeView />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
 
-    const selection = await screen.findByRole("radio", {
-      name: `Select ${key}: ${part.title}`,
+describe("finding the part to act on", () => {
+  it("carries no selection, so acting on a part needs no second control", async () => {
+    showTree();
+
+    await screen.findByRole("button", { name: "Run" });
+    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+  });
+
+  it("puts the tree above what is only read after a part is found", async () => {
+    showTree();
+
+    await screen.findByRole("button", { name: "Run" });
+    const parts = screen.getByRole("heading", { name: "Parts" });
+    const reaches = screen.getByRole("heading", {
+      name: "What a change would reach",
     });
-    const run = screen.getByRole("button", {
-      name: "Run selected part",
-    }) as HTMLButtonElement;
-    expect(run.disabled).toBe(true);
+    expect(
+      parts.compareDocumentPosition(reaches) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});
 
-    await user.click(selection);
-    expect(run.disabled).toBe(false);
-    vi.mocked(api.fetchWorkTree).mockResolvedValue({ ...tree, loop: { ...loop, running: true } });
+describe("running one work part", () => {
+  it("starts exactly the part whose row was acted on", async () => {
+    const user = userEvent.setup();
+    showTree();
+
+    const run = await screen.findByRole("button", { name: "Run" });
+    vi.mocked(api.fetchWorkTree).mockResolvedValue({
+      ...tree,
+      loop: { ...loop, running: true },
+    });
     await user.click(run);
 
     await waitFor(() =>
@@ -143,10 +164,58 @@ describe("running one selected work part", () => {
         `Started a run of ${key} — it appears under Being written now`,
       ),
     ).toBeTruthy();
-    const active = screen.getByRole("button", {
-      name: "A work run is active",
-    }) as HTMLButtonElement;
-    expect(active.disabled).toBe(true);
+  });
+
+  it("shows the part running before the server has been asked again", async () => {
+    const user = userEvent.setup();
+    let release: (status: WorkLoopStatus) => void = () => {};
+    vi.mocked(api.startWorkPart).mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    showTree();
+
+    await user.click(await screen.findByRole("button", { name: "Run" }));
+
+    // The row has moved on the click, with the request still in flight and no
+    // tree fetched since: what used to take a round trip and four refetches.
+    expect(screen.getByText("running")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Starting…" })).toBeTruthy();
+
+    await act(async () => {
+      release({ ...loop, running: true });
+    });
+  });
+
+  it("puts a row back as it was when its action is refused", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.clearWorkPart).mockRejectedValue(new Error("held by a run"));
+    vi.mocked(api.fetchWorkTree).mockResolvedValue({
+      ...tree,
+      nodes: [{ ...part, standing: "failed" }],
+    });
+    showTree();
+
+    await user.click(await screen.findByRole("button", { name: "Clear" }));
+
+    await waitFor(() => expect(screen.getByText(/held by a run/)).toBeTruthy());
+    expect(screen.getByText("failed")).toBeTruthy();
+  });
+
+  it("takes the node the server answered with rather than refetching", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchWorkTree).mockResolvedValue({
+      ...tree,
+      nodes: [{ ...part, standing: "failed" }],
+    });
+    vi.mocked(api.clearWorkPart).mockResolvedValue({ ...part, standing: "idle" });
+    showTree();
+
+    await user.click(await screen.findByRole("button", { name: "Clear" }));
+
+    await waitFor(() => expect(api.clearWorkPart).toHaveBeenCalledWith("work", key));
+    expect(await screen.findByRole("button", { name: "Run" })).toBeTruthy();
   });
 });
 

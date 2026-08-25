@@ -1304,43 +1304,116 @@ textarea { resize: none; }
 }
 
 .work-part {
-  padding: 4px 8px;
+  padding: 2px 8px;
   border-left: 3px solid transparent;
   font-size: 0.88rem;
 }
 
-.part-run-selection {
+/* The row is the unit that gets acted on, so its buttons sit on it — pushed
+   right, and held out of the way until the row is under the pointer. Two
+   hundred rows each showing three buttons is a wall; two hundred rows showing
+   them one at a time is a list. */
+.work-part-line {
   display: flex;
-  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 1.9rem;
+}
+
+.work-part-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-part-actions {
+  display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 2.5rem;
-  padding: 8px 12px;
-  margin-bottom: 8px;
-  border: 1px solid var(--border, #333);
-  border-radius: 6px;
+  gap: 4px;
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity 90ms ease-in;
 }
 
-.work-part-selected {
-  background: color-mix(in srgb, var(--accent, #2f7fd0) 10%, transparent);
+.work-part:hover .work-part-actions,
+.work-part:focus-within .work-part-actions {
+  opacity: 1;
 }
 
-.work-part-select {
-  margin: 0 8px 0 2px;
+/* A row mid-action keeps its buttons visible wherever the pointer went, so the
+   thing that says "Starting…" cannot disappear while it is still true. */
+.work-part-actions:has(button[disabled]) {
+  opacity: 1;
+}
+
+.part-action {
+  font-size: 0.78rem;
+  padding: 2px 8px;
+  line-height: 1.5;
+}
+
+.part-action-primary {
+  border-color: var(--accent, #2f7fd0);
+}
+
+.part-action-quiet {
+  background: none;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+
+.work-part-withheld {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 .work-part-key {
   font-family: var(--mono, monospace);
   color: var(--text-dim);
+  flex: 0 0 auto;
 }
 
 .work-part-state {
   font-size: 0.8rem;
   color: var(--text-dim);
+  flex: 0 0 auto;
 }
 
 .work-part-questions {
   font-size: 0.8rem;
+  flex: 0 0 auto;
+}
+
+.work-parts-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.work-parts-header h2 {
+  margin: 0;
+}
+
+.work-parts-count {
+  flex: 1 1 auto;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.work-parts-filter {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+.work-parts-note {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin: 0 0 8px;
 }
 
 .work-part-reason {
@@ -1485,21 +1558,34 @@ textarea { resize: none; }
   color: var(--text-dim);
   cursor: pointer;
   padding: 0 4px;
+  flex: 0 0 auto;
+}
+
+/* A leaf has no triangle, and its key still has to line up under its siblings'
+   rather than sliding left into the depth its parent occupies. */
+.work-fold-gap {
+  flex: 0 0 auto;
+  width: 1.05rem;
 }
 
 .work-part-rollup,
 .work-part-session {
   font-size: 0.8rem;
   color: var(--text-dim);
+  flex: 0 0 auto;
 }
 
-.work-part-session {
-  margin-left: 8px;
+.work-part-ask {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 6px 1.05rem;
 }
 
 .work-part-ask input {
-  min-width: 20rem;
-  margin-right: 6px;
+  flex: 1 1 auto;
+  min-width: 12rem;
+  max-width: 32rem;
 }
 
 .work-recorded {

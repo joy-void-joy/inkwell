@@ -139,6 +139,28 @@ class WordBudget(BaseModel, frozen=True):
             f"keep material that did not earn its place."
         )
 
+    def scope(self) -> str:
+        """This target as the sentence a stage that decides scope is handed.
+
+        The interval binds a plan where it only guides a draft, and the two
+        sentences differ for one reason: a draft refused for its length is
+        writing paid for and thrown away, while a plan that does not fit is
+        corrected before anything has been written. So the stage commissioning
+        sections is told the allocation is a bound and the stage writing them
+        is told to aim at it — see ``aim``.
+        """
+        return (
+            f"This piece was allocated {self.minimum:,} to {self.maximum:,} "
+            f"words. Plan inside it: the sections you commission, and the "
+            f"quotes and figures you oblige each of them to carry, have to be "
+            f"deliverable in that room by a writer who is told to deliver every "
+            f"one of them. Commissioning more than fits does not buy the piece "
+            f"more room — it makes the overrun mandatory and leaves the writer "
+            f"to discover it. Where the material genuinely cannot be covered in "
+            f"that room, plan the piece that fits and say so with a note to the "
+            f"author, whose allocation it is to move."
+        )
+
     def advisory(self, words: int) -> str:
         """How a piece sits against this target, or nothing when inside it.
 

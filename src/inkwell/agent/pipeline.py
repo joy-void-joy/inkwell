@@ -2042,6 +2042,16 @@ async def refine_plan(
     output_servers = {**output_servers, **note_servers}
     output_tool_names = output_tool_names + note_tool_names
 
+    # The refiner may add sections research revealed as necessary, and until it
+    # is told the allocation that licence has no bound: a part whose length sat
+    # only in an advisory constraint came back with seven sections and 32
+    # obliged quotes against room for five, which no later stage can undo
+    # because the writer is told to deliver the plan entire.
+    allocation = (
+        f"{current.word_budget.scope()}\n\n"
+        if current is not None and current.word_budget is not None
+        else ""
+    )
     manifest = ContentManifest()
     manifest.add(plan_path, "plan", "Current plan")
     add_voice_refs(manifest, voice_file_paths or [])
@@ -2056,6 +2066,7 @@ async def refine_plan(
         f"Use list_research to browse all research findings, then read_finding for details.\n\n"
         f"{suggested_additions_block(notes)}"
         f"{reader_feedback_block(manifest)}"
+        f"{allocation}"
         f"Read the plan, then build the refined plan using "
         f"set_plan_header, add_section, add_research_question, and add_source_quote."
     )

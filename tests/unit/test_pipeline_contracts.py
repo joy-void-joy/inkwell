@@ -154,6 +154,52 @@ async def test_refinement_cannot_drop_the_launch_word_budget(
     assert refined.word_budget == budget
 
 
+async def test_the_refiner_is_told_the_room_the_plan_has_to_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refiner may add sections research revealed as necessary, and nothing
+    downstream can undo an over-commissioned plan: the writer is told to deliver
+    it entire, so the overrun stops being a choice by the time anyone can count
+    the words. Carrying the budget on the plan is not the same as saying it —
+    a run whose length sat only in an advisory constraint came back with seven
+    sections against room for five."""
+    notes = PipelineNotes(tmp_path / "notes")
+    notes.save_artifact(
+        "plan", article_plan(budget=WordBudget(minimum=682, maximum=1534))
+    )
+    asked: list[str] = []
+
+    async def refine(task: str, *_args: object, **_kwargs: object) -> None:
+        asked.append(task)
+
+    monkeypatch.setattr(pipeline, "query", refine)
+
+    await pipeline.refine_plan(notes)
+
+    assert "allocated 682 to 1,534 words" in asked[0]
+    assert "makes the overrun mandatory" in asked[0]
+
+
+async def test_a_plan_with_no_budget_tells_the_refiner_nothing_about_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A piece nobody allocated room to has no allocation to plan inside, and
+    an interval invented here would be this stage answering a question about
+    the work's shape that it is in no position to ask."""
+    notes = PipelineNotes(tmp_path / "notes")
+    notes.save_artifact("plan", article_plan())
+    asked: list[str] = []
+
+    async def refine(task: str, *_args: object, **_kwargs: object) -> None:
+        asked.append(task)
+
+    monkeypatch.setattr(pipeline, "query", refine)
+
+    await pipeline.refine_plan(notes)
+
+    assert "allocated" not in asked[0]
+
+
 async def test_format_checks_measure_the_actual_formatted_final(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

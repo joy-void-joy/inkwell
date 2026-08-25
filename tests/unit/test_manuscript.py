@@ -1453,10 +1453,13 @@ class TestAPartIsToldHowLongItsSiblingsRun:
         assert held.allowance == 3.0
         assert held.ceiling() == int(held.holds * 3.0)
 
-    def test_the_budget_reads_as_a_delivery_contract(self) -> None:
+    def test_the_budget_reads_as_a_target_and_not_a_gate(self) -> None:
+        """Nothing enforces it, so a sentence saying otherwise is simply false —
+        and it is the one sentence the deriver plans the part against."""
         said = LengthBudget(holds=1000, chapter="Chapter 02", siblings=3).render()
 
-        assert "accepted only inside that interval" in said
+        assert "Nothing rejects a submission outside that interval" in said
+        assert "costs a note telling them what the extra words buy" in said
 
     def test_a_part_with_no_text_is_given_no_budget(self) -> None:
         """Nothing to be measured against, and a range around zero would read

@@ -2433,6 +2433,8 @@ async def write_full_draft(
         manifest.add(feedback_path, "feedback", "Author feedback")
 
     format_guidance = get_format_guidance(target_format, declared_format_checks(notes))
+    planned = notes.load_artifact("plan", ArticlePlan)
+    aim = planned.word_budget.aim() if planned and planned.word_budget else ""
     task = (
         f"Write the complete piece — every section of the plan, in order, "
         f"as one coherent document.\n\n"
@@ -2444,6 +2446,8 @@ async def write_full_draft(
     task += reader_feedback_block(manifest)
     if format_guidance:
         task += f"{format_guidance}\n\n"
+    if aim:
+        task += f"{aim}\n\n"
     task += (
         f"Write the draft to: {output_path}\n\n"
         f"Build it incrementally: Write the file with the opening, then "
@@ -3461,10 +3465,7 @@ async def rewrite_final(
     delivery = f"Write the final piece to: {output_path}"
     if plan is not None and plan.word_budget is not None:
         delivery = (
-            f"Call submit_final with the complete piece. It targets "
-            f"{plan.word_budget.minimum}-{plan.word_budget.maximum} words — "
-            f"advisory, not a gate: if the material needs more room, overrun "
-            f"and tell the author what the extra words buy"
+            f"Call submit_final with the complete piece. {plan.word_budget.aim()}"
         )
     task = (
         f"Produce the final version of this piece.\n\n"

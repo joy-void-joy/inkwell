@@ -360,7 +360,8 @@ class TestBothProducersEmitTheSameThing:
         held = article_plan(work, node, SETTLED)
 
         assert any("opening with its own heading" in one for one in held.deliverables)
-        assert any("words" in one for one in held.deliverables)
+        assert not any("words" in one for one in held.deliverables)
+        assert any("words" in one for one in held.constraints)
 
     def test_the_explicit_editorial_opening_leads_over_stale_order(
         self, tmp_path: Path

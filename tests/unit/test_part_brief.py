@@ -300,9 +300,7 @@ class TestTheContractTheRunIsMeasuredOn:
 
         assert any("opening with its own heading" in one for one in held.deliverables)
 
-    def test_the_length_range_is_a_typed_delivery_contract(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_length_range_is_carried_typed(self, tmp_path: Path) -> None:
         work, node = part_of(tmp_path)
 
         held = planned(SETTLED, work, node, (), LengthBudget(holds=900))
@@ -319,20 +317,28 @@ class TestTheContractTheRunIsMeasuredOn:
 
         assert any("Figure 2.13" in one for one in held.deliverables)
 
-    def test_the_length_is_owed_where_the_part_has_one(self, tmp_path: Path) -> None:
+    def test_the_length_is_advised_and_not_owed(self, tmp_path: Path) -> None:
+        """Nothing enforces the target, so stating it as a deliverable makes
+        every stage but the last one act on a gate that is not there: the
+        writer treats it as scope the author asked for, and the narrative
+        reviewer raises the overrun as critical."""
         work, node = part_of(tmp_path)
 
         held = planned(SETTLED, work, node, (), LengthBudget(holds=1000))
 
-        assert any("1,500 words" in one for one in held.deliverables)
+        assert not any("words" in one for one in held.deliverables)
+        advice = [one for one in held.constraints if "1,500 words" in one]
+        assert len(advice) == 1
+        assert "nothing rejects a piece outside it" in advice[0]
 
-    def test_a_part_with_no_text_is_owed_no_length(self, tmp_path: Path) -> None:
+    def test_a_part_with_no_text_is_advised_no_length(self, tmp_path: Path) -> None:
         """A range around zero would read as an instruction to write nothing."""
         work, node = part_of(tmp_path)
 
         held = planned(SETTLED, work, node, (), LengthBudget())
 
         assert not any("words" in one for one in held.deliverables)
+        assert not any("words" in one for one in held.constraints)
 
 
 class TestComposingKeepsWhatItComposed:

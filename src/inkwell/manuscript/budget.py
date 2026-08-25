@@ -76,11 +76,14 @@ class LengthBudget(BaseModel):
         return (
             f"This part runs to {self.holds:,} words as the work holds it."
             f"{placed} Land between {self.floor():,} and "
-            f"{self.ceiling():,} words. The final submission is accepted only "
-            f"inside that interval. This rules out growing past it because the subject is "
-            f"large, which every subject is — a part that arrives at several "
-            f"times the length of its siblings has answered a question about "
-            f"the book's shape that nothing in this run was in a position to ask."
+            f"{self.ceiling():,} words. Nothing rejects a submission outside "
+            f"that interval, but it is the room the work gives this part, so "
+            f"write to it. Running past it says the allocation is wrong, which "
+            f"is the author's to settle and costs a note telling them what the "
+            f"extra words buy. That the subject is large is not such a reason, "
+            f"because every subject is: a part that arrives at several times "
+            f"the length of its siblings has answered a question about the "
+            f"book's shape that nothing in this run was in a position to ask."
         )
 
 

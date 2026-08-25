@@ -560,8 +560,11 @@ def planned(
     The fields the deriver was not asked for are filled from what already knows
     them — the work says the format, the node says the title — rather than from
     a second reading. ``deliverables`` is the contract every stage is measured
-    on, so what a part run owes is stated here once: this part, its heading, its
-    figures, and its length.
+    on, so what a part run owes is stated here once: this part, its heading, and
+    its figures. The length is not owed and sits in ``constraints`` instead —
+    stated as a deliverable it reads to the writer as scope the author asked
+    for and to a reviewer as a critical miss, which is how a target nothing
+    enforces still ends up cutting material to fit.
     """
 
     def owed() -> Iterator[str]:
@@ -572,8 +575,16 @@ def planned(
                 f"every one of its {len(figures)} figure(s), reproduced as the "
                 f"book numbers them: {', '.join(one.render() for one in figures)}"
             )
+
+    def aimed() -> Iterator[str]:
+        """The length target: what the run writes to, but not a gate on it."""
         if budget.holds:
-            yield (f"a piece between {budget.floor():,} and {budget.ceiling():,} words")
+            yield (
+                f"land between {budget.floor():,} and {budget.ceiling():,} words "
+                f"— nothing rejects a piece outside it, but running past it says "
+                f"the allocation is wrong and costs a note to the author saying "
+                f"what the extra words buy"
+            )
 
     return ArticlePlan(
         title=node.title,
@@ -587,7 +598,7 @@ def planned(
         source_quotes=composed.source_quotes,
         author_direction=composed.direction,
         direction_from="planner",
-        constraints=composed.constraints,
+        constraints=[*composed.constraints, *aimed()],
         deliverables=list(owed()),
         conventions=[],
         voice_notes="",

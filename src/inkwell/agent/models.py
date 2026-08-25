@@ -106,10 +106,10 @@ class SectionPlan(BaseModel):
 
 
 class WordBudget(BaseModel, frozen=True):
-    """The word-count interval a finished piece is allowed to occupy."""
+    """The word-count interval a finished piece was planned to occupy."""
 
-    minimum: int = Field(default=0, ge=0, description="Fewest accepted words")
-    maximum: int = Field(ge=1, description="Most accepted words")
+    minimum: int = Field(default=0, ge=0, description="Fewest words aimed for")
+    maximum: int = Field(ge=1, description="Most words aimed for")
 
     @model_validator(mode="after")
     def ordered(self) -> WordBudget:
@@ -119,8 +119,25 @@ class WordBudget(BaseModel, frozen=True):
         return self
 
     def accepts(self, words: int) -> bool:
-        """Whether a finished piece satisfies this contract."""
+        """Whether a finished piece landed inside the target it was planned to."""
         return self.minimum <= words <= self.maximum
+
+    def aim(self) -> str:
+        """This target as the sentence a stage hands its writer.
+
+        Rendered from the interval rather than written out again by each stage
+        that states it: a stage composing its own is free to call the target a
+        gate, and while nothing enforced one, every stage that stated it did.
+        """
+        return (
+            f"Land between {self.minimum:,} and {self.maximum:,} words. Nothing "
+            f"rejects a piece outside that — a draft refused for its length is "
+            f"writing paid for and thrown away — but the interval is what this "
+            f"piece was planned to be, so write to it. Running past it says the "
+            f"allocation is wrong, which is the author's to settle and costs a "
+            f"note telling them what the extra words buy. It is not room to "
+            f"keep material that did not earn its place."
+        )
 
     def advisory(self, words: int) -> str:
         """How a piece sits against this target, or nothing when inside it.
@@ -163,7 +180,12 @@ class ArticlePlan(BaseModel):
         description="Output format: 'academic', 'lesswrong', 'twitter', 'blog', 'dialog', 'memo', or 'custom:<description>'. Choose based on what best fits the content."
     )
     word_budget: WordBudget | None = Field(
-        default=None, description="Accepted final word-count interval, when declared"
+        default=None,
+        description=(
+            "Advisory final word-count interval, when declared. Reported "
+            "against, never enforced: a piece outside it is saved and the "
+            "overrun is told to the author, whose allocation it is to move"
+        ),
     )
     placement: ChapterPlacement | None = Field(
         default=None,

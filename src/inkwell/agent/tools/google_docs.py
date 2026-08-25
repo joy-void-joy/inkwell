@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+import httplib2
 from googleapiclient.errors import HttpError
 from pydantic import BaseModel, Field, ValidationError
 
@@ -128,12 +129,27 @@ async def fetch_document(request: GoogleRequest) -> Document:
     return Document.model_validate(await execute_with_retry(request))
 
 
-DRIVE_FAILURES = (HttpError, OSError, TimeoutError, ToolError, GoogleAuthError)
+DRIVE_FAILURES = (
+    HttpError,
+    OSError,
+    TimeoutError,
+    ToolError,
+    GoogleAuthError,
+    httplib2.HttpLib2Error,
+)
 """What a Google call raises when the service cannot answer it.
 
 Named once because two boundaries catch the same set for different reasons — a
 write degrades the live Doc to stale, a comment read reports itself unreachable
 — and a set spelled at each of them drifts apart.
+
+The transport's own failures are here beside the service's. A name that does
+not resolve and a connection that drops arrive as ``HttpLib2Error``, which
+descends from ``Exception`` rather than from ``OSError`` — so a laptop that
+lost its network mid-run took the run down with it, through the one boundary
+whose whole purpose is that an unreachable display surface never does.
+:mod:`inkwell.agent.google_auth` already reads that type as a transport lapse;
+this is the same reading at the other end of the same client.
 """
 
 COMMENT_READ_FAILURES = (*DRIVE_FAILURES, ValidationError)

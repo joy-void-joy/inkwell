@@ -66,8 +66,25 @@ def test_a_part_that_announces_nothing_leaves_every_section_where_it_was() -> No
     assert pipeline.sections_landed(prose, PLANNED) == []
 
 
+@pytest.fixture
+def undocumented(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A syncer with the Google Doc taken out from under it.
+
+    The document is the other half of what a sync does and none of what these
+    are about, so it is replaced rather than reached — a unit test that talks
+    to Drive is one that fails on a train.
+    """
+    written: list[str] = []
+
+    async def write_tab(_doc: str, _tab: str, content: str, **_rest: object) -> None:
+        written.append(content)
+
+    monkeypatch.setattr(pipeline, "do_write_tab", write_tab)
+    return written
+
+
 async def test_the_length_reaches_a_watcher_even_when_no_section_is_named(
-    tmp_path: Path,
+    tmp_path: Path, undocumented: list[str]
 ) -> None:
     """The case the badge was stuck on: continuous prose, nothing to count."""
     draft = tmp_path / "output.md"
@@ -79,17 +96,21 @@ async def test_the_length_reaches_a_watcher_even_when_no_section_is_named(
         seen.append(content)
         state.record_draft(len(content.split()), target=1534)
 
-    syncer = pipeline.DraftSyncer("", "", draft, session_state=state, on_draft=watched)
+    syncer = pipeline.DraftSyncer(
+        "doc", "tab", draft, session_state=state, on_draft=watched
+    )
     await syncer.sync()
 
     assert seen == ["one two three four five"]
+    assert undocumented == ["one two three four five"]
     assert state.drafted_words == 5
     assert state.target_words == 1534
 
 
 async def test_a_draft_that_did_not_change_says_nothing_again(
-    tmp_path: Path,
+    tmp_path: Path, undocumented: list[str]
 ) -> None:
+    del undocumented
     draft = tmp_path / "output.md"
     draft.write_text("one two", encoding="utf-8")
     calls: list[str] = []
@@ -97,7 +118,7 @@ async def test_a_draft_that_did_not_change_says_nothing_again(
     async def watched(content: str) -> None:
         calls.append(content)
 
-    syncer = pipeline.DraftSyncer("", "", draft, on_draft=watched)
+    syncer = pipeline.DraftSyncer("doc", "tab", draft, on_draft=watched)
     await syncer.sync()
     await syncer.sync()
 

@@ -21,6 +21,7 @@ from collections.abc import (
     Coroutine,
     Iterable,
     Iterator,
+    Sequence,
 )
 from contextlib import asynccontextmanager
 from functools import partial
@@ -419,6 +420,61 @@ class PipelineInterrupted(PipelineError):
             f"Pipeline interrupted during {where} before producing output — "
             "resume to continue"
         )
+
+
+class WaveIncomplete(PipelineError):
+    """Raised when a stage that fans out came back short, naming what was lost.
+
+    A stage that reports what came back cannot tell a short wave from a
+    decision, and both of ours failed the same way. Review's whole product is
+    findings, so an empty list is a draft nobody objected to; write's is prose,
+    so a lost section is the literal string ``[Section failed: ...]`` sitting
+    in the piece. Both ship, and both look exactly like work — one run lost all
+    three reviewers to an expired token, annotated nothing, and rewrote against
+    the silence.
+
+    Neither is a failure with nothing behind it. The snapshot before the stage
+    is intact and every worker that did return has already saved what it made,
+    so resuming the run retakes this stage and nothing else — for write, only
+    the sections that did not land.
+    """
+
+    def __init__(self, stage: str, lost: tuple[str, ...]) -> None:
+        self.stage = stage
+        self.lost = lost
+        super().__init__(
+            f"The {stage} stage lost {', '.join(lost)}. Everything upstream is "
+            f"saved, and so is everything that did return — resume the run to "
+            f"take {stage} again."
+        )
+
+
+def came_back_whole[T](
+    stage: str, over: Iterable[str], results: Sequence[T | BaseException]
+) -> list[T]:
+    """Every result of a wave, or the failure saying the wave was short.
+
+    The rule every fan-out stage answers to, in one place: a worker that raised
+    costs the stage rather than costing only itself, because a stage reporting
+    what came back cannot say whether the rest disagreed or never ran.
+
+    A cancellation is re-raised where it is found instead. The wave hands those
+    back positionally like any other outcome, and a stage folding one into
+    "the fact-checker failed" would report a run somebody stopped as a run that
+    decided something, then invite them to resume over it.
+    """
+
+    def lost() -> Iterator[str]:
+        for name, result in zip(over, results, strict=True):
+            if isinstance(result, BaseException) and not isinstance(result, Exception):
+                raise result
+            if isinstance(result, BaseException):
+                logger.error("%s: %s did not return: %s", stage, name, result)
+                yield name
+
+    if missing := tuple(lost()):
+        raise WaveIncomplete(stage, missing)
+    return [result for result in results if not isinstance(result, BaseException)]
 
 
 class PipelineStopRequested(Exception):
@@ -3114,13 +3170,9 @@ async def review_all(
     )
 
     def reported() -> Iterator[ReviewFinding]:
-        """Findings from the reviewers that returned; a failure is logged, not raised,
-        so one reviewer going down does not cost the others their findings."""
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.error("Reviewer failed: %s", result)
-                continue
-            yield from result.findings
+        """Every finding of a wave that came back whole."""
+        for output in came_back_whole("review", passes, results):
+            yield from output.findings
 
     return list(reported())
 
@@ -5755,22 +5807,19 @@ class PipelineRunner:
             write_for, list(writers.values()), task="write section"
         )
 
+        # Marked before the stage is judged, because the placeholder is what a
+        # resumed write reads to know which sections to take again — recording
+        # it is what keeps the sections that did land from being redrafted.
         for section, result in zip(pending, results):
             if isinstance(result, BaseException):
-                logger.error("Section '%s' failed: %s", section.title, result)
                 self.snapshot.section_drafts[section.title] = SectionDraft(
                     title=section.title,
                     content=f"[Section failed: {result}]",
                     word_count=0,
                 )
-
+        await self.save_snapshot()
         await self.post_author_notes()
-        if self.write_stage_produced_nothing():
-            sample = next(iter(self.snapshot.section_drafts.values()), None)
-            raise PipelineError(
-                "Write stage produced no usable sections: "
-                + (sample.content if sample else "no sections")
-            )
+        came_back_whole("write", [one.title for one in pending], results)
         self.snapshot.stage = "write"
         await self.save_snapshot()
         await self.update_overview()
@@ -6481,12 +6530,15 @@ class PipelineRunner:
         results = await self.cohort().work_all(
             rewrite_for, revisers, task="rewrite section"
         )
-        for i, result in enumerate(results):
-            if isinstance(result, BaseException):
-                logger.error("Rewrite/add failed: %s", result)
-            else:
-                result.title = all_plans[i].title
-                self.snapshot.section_drafts[all_plans[i].title] = result
+        # A lost reviser used to leave its section holding round one's draft,
+        # which is the quietest of the three: the piece ships whole, reads
+        # whole, and simply has one section the review never reached.
+        for revised, revised_plan in zip(
+            came_back_whole("rewrite", [one.title for one in all_plans], results),
+            all_plans,
+        ):
+            revised.title = revised_plan.title
+            self.snapshot.section_drafts[revised_plan.title] = revised
 
     def drop_section(self, section: str) -> None:
         """Forget a section's draft, which is what dropping one leaves."""

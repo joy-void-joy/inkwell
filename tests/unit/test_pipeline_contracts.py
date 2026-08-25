@@ -1,5 +1,6 @@
 """Typed contracts that distinguish a manuscript-part run from an article."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,102 @@ async def test_manuscript_review_owns_only_three_independent_concerns(
     )
 
     assert set(called) == {"narrative", "facts", "style"}
+
+
+def wave(monkeypatch: pytest.MonkeyPatch, **outcomes: object) -> None:
+    """Stand in for each reviewer, returning findings or raising what it is given."""
+
+    def reviewer(outcome: object):
+        async def review(*_args: object, **_kwargs: object) -> ReviewOutput:
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return ReviewOutput(findings=[])
+
+        return review
+
+    for name, outcome in outcomes.items():
+        monkeypatch.setattr(pipeline, f"review_{name}", reviewer(outcome))
+    monkeypatch.setattr(pipeline, "load_source_registry", lambda _path: [])
+
+
+async def test_a_reviewer_that_did_not_return_fails_the_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Findings are the only thing review makes, so a short wave has no result
+    to report: an empty list and a draft nobody objected to are the same bytes,
+    and the rewrite reads the silence as approval. The run that lost all three
+    reviewers to an expired token annotated nothing and shipped a misattributed
+    statistic the same fact-checker had caught the run before."""
+    wave(
+        monkeypatch,
+        narrative=ReviewOutput(findings=[]),
+        facts=RuntimeError("OAuth session expired and could not be refreshed"),
+        style=ReviewOutput(findings=[]),
+    )
+
+    with pytest.raises(pipeline.WaveIncomplete) as failed:
+        await pipeline.review_all(
+            PipelineNotes(tmp_path / "notes"),
+            tmp_path / "draft.md",
+            profile="manuscript_part",
+            cohort=run_cohort(tmp_path / "cohort"),
+        )
+
+    assert failed.value.lost == ("facts",)
+    assert failed.value.stage == "review"
+    assert "resume the run" in str(failed.value)
+
+
+async def test_an_interrupted_review_is_not_reported_as_a_lost_reviewer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wave hands a cancellation back positionally like any other outcome.
+    Folding one into "the fact-checker failed" would report a run somebody
+    stopped as a run that decided something, and would tell them to resume over
+    a draft they had just interrupted."""
+    wave(
+        monkeypatch,
+        narrative=ReviewOutput(findings=[]),
+        facts=asyncio.CancelledError(),
+        style=ReviewOutput(findings=[]),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.review_all(
+            PipelineNotes(tmp_path / "notes"),
+            tmp_path / "draft.md",
+            profile="manuscript_part",
+            cohort=run_cohort(tmp_path / "cohort"),
+        )
+
+
+def test_a_wave_that_came_back_whole_is_every_result_in_order() -> None:
+    """The ordinary case, and the one the rule must not disturb."""
+    assert pipeline.came_back_whole("review", ["a", "b"], ["one", "two"]) == [
+        "one",
+        "two",
+    ]
+
+
+def test_a_lost_worker_costs_its_stage_rather_than_only_itself() -> None:
+    """Every fan-out stage answers to this, because a stage reporting what came
+    back cannot say whether the rest disagreed or never ran. Review's silence
+    reads as approval; a lost section ships the string "[Section failed: ...]"
+    into the prose."""
+    with pytest.raises(pipeline.WaveIncomplete) as failed:
+        pipeline.came_back_whole(
+            "write", ["intro", "body"], ["drafted", RuntimeError("gone")]
+        )
+
+    assert failed.value.stage == "write"
+    assert failed.value.lost == ("body",)
+
+
+def test_a_cancelled_worker_is_re_raised_rather_than_named_as_lost() -> None:
+    """Reported as a lost worker it would read as a run that decided
+    something, and would invite somebody to resume over a run they stopped."""
+    with pytest.raises(asyncio.CancelledError):
+        pipeline.came_back_whole("review", ["facts"], [asyncio.CancelledError()])
 
 
 async def test_manuscript_citation_diversity_costs_only_the_counting(

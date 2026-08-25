@@ -47,6 +47,7 @@ from inkwell.manuscript.mailbox import (
 from inkwell.manuscript.reconcile import reconcile
 from inkwell.manuscript.runner import (
     PartOutcome,
+    PartResumption,
     PartRunWatch,
     TurnEnding,
     run_part,
@@ -512,6 +513,124 @@ async def run_pass(
         remaining=len(schedulable(closing, settled)),
         blocked=len(closing.blocked()),
     )
+
+
+class CannotResume(Exception):
+    """Raised when a part has no run to continue, saying what it has instead."""
+
+
+async def resume_part(
+    store: ManuscriptStore,
+    work: str,
+    manuscript: Manuscript,
+    key: str,
+    *,
+    redo: str = "",
+    vocabulary: tuple[Abbreviation, ...] = (),
+    watching: PartRunWatch | None = None,
+    agents: PartRunAgents | None = None,
+    lease: WorkLease | None = None,
+) -> PartResult:
+    """Continue the run one failed part already holds, rather than writing it again.
+
+    A part run is one ordinary run, so its stages checkpoint like any other's
+    and a run that failed inside one still holds everything the stages before
+    it made. Nothing could say so: the loop only ever started runs, so the way
+    back from an outage in review was to clear the part and pay for the brief,
+    the research and the draft a second time to arrive where it failed.
+
+    ``redo`` rewinds to a stage and runs it again. Empty picks up from the last
+    stage that finished, which is what a failure inside a stage wants — that
+    stage never checkpointed, so continuing from the one before it already
+    redoes it.
+
+    Recorded through the same function a pass records through, and under the
+    same lease, because a resumed run ends the four ways any run ends and the
+    loop stays the single writer of the work's state.
+    """
+    held = lease if lease is not None else WorkLease.acquire(store, work)
+    try:
+        state = store.load_state(work)
+        record = state.record(key)
+        standing = record.standing if record else "idle"
+        # A lease this old is one nobody is honouring, and holding the work's
+        # own lease already proves no pass is running. Left out, the single way
+        # back from a run whose process died between the pipeline returning and
+        # the splice was `clear`, which throws that run away entire.
+        continuable = record is not None and (
+            standing == "failed" or record.abandoned()
+        )
+        if record is None or not continuable:
+            raise CannotResume(
+                f"{key} stands {standing!r}, and a run is continued from a "
+                f"failure or from a lease nobody honoured. A part that is idle "
+                f"or requested is written by a pass; one that is parked is "
+                f"waiting on an answer; one still running is being written now."
+            )
+        # The holder is the run that failed. It is kept on a failure precisely
+        # so somebody can open that run's transcript, which is also what makes
+        # the run resumable rather than merely readable.
+        if not record.holder:
+            raise CannotResume(
+                f"{key} failed before any run was recorded against it, so there "
+                f"are no saved stages to continue from. A pass will write it."
+            )
+        session = record.holder
+        found = [one for one in readings(manuscript, vocabulary) if one.node.key == key]
+        if not found:
+            raise CannotResume(f"{work} holds no part {key!r}")
+        reading = found[0]
+        verdict = next(
+            one for one in sweep(state, [reading]).verdicts if one.key == key
+        )
+
+        watch = watching if watching is not None else PartRunWatch()
+        mailbox = PartMailbox(root=store.work_dir(work))
+        store.publish_state(
+            work, state.declared(key, "running", f"resuming {session}", session)
+        )
+        # Gathered rather than awaited so an interrupt comes back as a value
+        # like any other ending: this is the one call in the function that can
+        # leave the part reading ``running`` with nothing coming to correct it.
+        (ending,) = await asyncio.gather(
+            run_part(
+                store,
+                work,
+                manuscript,
+                reading.node,
+                session_id=session,
+                reasons=verdict.reasons,
+                vocabulary=vocabulary,
+                observers=watch.opening(key, session),
+                agents=agents,
+                found=store.load_findings(work),
+                resuming=PartResumption(redo=redo),
+            ),
+            return_exceptions=True,
+        )
+        # Named by its class where it carries no message, for the reason
+        # `recording` gives: the exception that carries none is cancellation,
+        # and a part closed as failed for no stated reason is the thing
+        # somebody stares at wondering what they did wrong.
+        watch.closed(
+            key,
+            session,
+            PartOutcome(
+                key=key,
+                session=session,
+                failure=str(ending) or type(ending).__name__,
+            )
+            if isinstance(ending, BaseException)
+            else ending,
+        )
+        step = recording(
+            store.load_state(work), verdict, ending, mailbox, manuscript, work, session
+        )
+        store.publish_state(work, step.state)
+        return step.result
+    finally:
+        if lease is None:
+            held.release()
 
 
 async def run_loop(

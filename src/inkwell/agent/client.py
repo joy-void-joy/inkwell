@@ -19,7 +19,14 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+)
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,7 +44,7 @@ from lup.runtime.selection import SessionAutonomy, SessionRequest
 from lup.hooks import LupHooksConfig, create_large_read_hook
 from lup.mcp import McpServerEntry
 from lup.runtime.contracts import EventStream, Session, Turn
-from lup.runtime.errors import TurnInterruptedError
+from lup.runtime.errors import TurnError, TurnInterruptedError
 from lup.runtime.factory import SessionFactory
 from lup.runtime.quota import (
     QuotaWaitConfig,
@@ -604,6 +611,153 @@ than slept on until a window rolls.
 """
 
 
+CREDENTIAL_MARKERS = ("failed to authenticate", "could not be refreshed")
+"""What the runtime says when a turn died for want of a usable credential.
+
+Matched on the message because no typed error carries the distinction: every
+provider failure arrives as one class, and holding all of them would sit a
+stage down for seconds over a turn that broke for any other reason. Both
+markers have to appear, so a turn that merely mentions authentication is not
+slept on.
+"""
+
+
+class CredentialRetryConfig(BaseModel, frozen=True):
+    """How long a turn waits on an unusable credential, and how many times.
+
+    Short and few. This absorbs a refresh two agents raced each other for,
+    which resolves in seconds or not at all — a credential genuinely revoked
+    wants somebody to log in again, and sleeping on it only delays their
+    finding out.
+    """
+
+    attempts: int = Field(default=3, ge=1)
+    first_wait_seconds: float = Field(default=4.0, gt=0)
+    backoff: float = Field(default=3.0, ge=1)
+
+    def wait_after(self, attempt: int) -> float:
+        """How long to hold before starting attempt ``attempt`` again.
+
+        Growing, so agents that raced each other into the same failure come
+        back at different moments rather than re-racing on one schedule.
+        """
+        return self.first_wait_seconds * (self.backoff**attempt)
+
+
+CREDENTIALS = CredentialRetryConfig()
+"""How long a turn holds for a credential the runtime could not refresh.
+
+Distinct from the recovery retry above, which starts a broken turn again at
+once — the whole repair for a turn that simply broke. An unrefreshable
+credential is the one provider failure where *at once* is the wrong moment:
+the refresh that failed is usually one this process is racing, and a second
+attempt in the same millisecond loses the same race. Three reviewers opened
+fifty milliseconds apart, all met one expired token, and all failed inside 1.6
+seconds; the stage three minutes behind them authenticated without trouble.
+
+It matters more now than it did, because a lost worker costs its whole stage:
+without this, a one-second token race would stop a run that used to recover on
+its own.
+"""
+
+
+def lost_credential(error: TurnError) -> bool:
+    """Whether this failure is a credential the runtime could not refresh."""
+    said = str(error).casefold()
+    return all(marker in said for marker in CREDENTIAL_MARKERS)
+
+
+class CredentialRetryingTurn[T: BaseModel | None](Turn[T]):
+    """Start the identical request on the identical session after a pause."""
+
+    def __init__(
+        self,
+        session: Session,
+        request: TurnRequest[T],
+        handle: TurnHandle[T],
+        config: CredentialRetryConfig,
+        sleeper: Callable[[float], Awaitable[None]],
+    ) -> None:
+        self.session = session
+        self.request = request
+        self.handle = handle
+        self.config = config
+        self.sleeper = sleeper
+
+    async def result(self) -> TurnResult[T]:
+        for attempt in range(self.config.attempts):
+            try:
+                return await self.handle.turn.result()
+            except TurnError as error:
+                last = attempt == self.config.attempts - 1
+                if last or not lost_credential(error):
+                    raise
+                delay = self.config.wait_after(attempt)
+                logger.warning(
+                    "Credential unusable (%s); holding %.0fs before attempt %d of %d",
+                    error,
+                    delay,
+                    attempt + 2,
+                    self.config.attempts,
+                )
+                await self.sleeper(delay)
+                self.handle = await self.session.start(self.request)
+        raise RuntimeError("the last attempt re-raises rather than falling through")
+
+
+class CredentialRetryingSession(Session):
+    """Attach credential waiting to every turn started on a session."""
+
+    def __init__(
+        self,
+        inner: Session,
+        config: CredentialRetryConfig,
+        sleeper: Callable[[float], Awaitable[None]],
+    ) -> None:
+        self.inner = inner
+        self.config = config
+        self.sleeper = sleeper
+
+    async def start[T: BaseModel | None](
+        self, request: TurnRequest[T]
+    ) -> TurnHandle[T]:
+        handle = await self.inner.start(request)
+        return TurnHandle[T](
+            turn=CredentialRetryingTurn(
+                self.inner, request, handle, self.config, self.sleeper
+            ),
+            events=handle.events,
+            interrupt=handle.interrupt,
+            steer=handle.steer,
+        )
+
+
+def credential_retrying_session_factory(
+    inner: SessionFactory,
+    config: CredentialRetryConfig,
+    *,
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> SessionFactory:
+    """The same factory, with every turn it opens holding on a lost credential.
+
+    Belongs upstream beside the allowance waiter, where a delay on
+    ``RecoveryConfig`` would make this one setting rather than a decorator.
+    Here until it is.
+    """
+
+    @asynccontextmanager
+    async def open_holding(
+        resume: SessionId | None = None,
+    ) -> AsyncGenerator[SessionHandle]:
+        async with inner.open(resume) as handle:
+            yield SessionHandle(
+                session=CredentialRetryingSession(handle.session, config, sleeper),
+                fork=handle.fork,
+            )
+
+    return SessionFactory(open_holding)
+
+
 def quota_wait_message(event: QuotaWaitEvent) -> str:
     """What a run tells its watcher while it waits out the provider's allowance.
 
@@ -690,12 +844,12 @@ def observed_factory(
             model=model,
         )
     )
-    # Outside the observers rather than inside them: the waiter restarts the
+    # Outside the observers rather than inside them: each waiter restarts the
     # identical request on the identical session, and from here that restart
     # re-enters the observed path, so the retried turn is traced, billed, and
     # announced like any other instead of running unwatched.
     return quota_waiting_session_factory(
-        observed,
+        credential_retrying_session_factory(observed, CREDENTIALS),
         QUOTA_WAIT.model_copy(update={"profile": label}),
         quota_callback if quota_callback is not None else unwatched_quota_wait,
     )

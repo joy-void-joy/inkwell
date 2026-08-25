@@ -52,9 +52,11 @@ from inkwell.manuscript.inheritance import (
 )
 from inkwell.manuscript.inventory import inventory_of
 from inkwell.manuscript.loop import (
+    CannotResume,
     Recorded,
     narrowed,
     recording,
+    resume_part,
     run_pass,
     schedulable,
     unpicked,
@@ -83,6 +85,7 @@ from inkwell.manuscript.brief import (
 )
 from inkwell.manuscript.planner import PartPlan, WorkBriefs
 from inkwell.manuscript.runner import (
+    BRIEF_FILE,
     HANDOFF_FILE,
     PRODUCED_FILE,
     PartOutcome,
@@ -105,7 +108,13 @@ from inkwell.manuscript.splice import (
     opens_with,
     spliced,
 )
-from inkwell.manuscript.state import WorkState, digest_of
+from inkwell.manuscript.state import (
+    LEASE_TERM,
+    NodeStanding,
+    WorkState,
+    digest_of,
+    utc_now,
+)
 from inkwell.manuscript.store import ManuscriptStore
 from inkwell.manuscript.tree import Manuscript, ManuscriptNode
 from inkwell.manuscript.vocabulary import (
@@ -1867,6 +1876,209 @@ class TestAPassSaysWhatItIsDoingWhileItIsDoingIt:
             "atlas", state.declared("02/03/2.3.2", "requested", "sharpen it")
         )
         return store, work
+
+
+class TestAFailedPartCanBeContinuedRatherThanRewritten:
+    """A part run is one ordinary run, so it checkpoints at every stage. The
+    loop only ever started runs, so the way back from an outage in review was
+    to clear the part and pay for the brief, the research and the draft again
+    to arrive where it failed — and the run that lost three reviewers to an
+    expired token had all three of those saved on disk the whole time.
+    """
+
+    def failed(
+        self,
+        tmp_path: Path,
+        *,
+        holder: str = "abc123",
+        standing: NodeStanding = "failed",
+    ) -> tuple[ManuscriptStore, Manuscript]:
+        """A work whose one part failed, with its run's room and brief saved."""
+        work = read_manuscript(atlas_like(tmp_path))
+        store = ManuscriptStore(root=tmp_path / "manuscripts")
+        store.publish_tree("atlas", work)
+        state = adopted(WorkState(), readings(work))
+        store.publish_state(
+            "atlas",
+            state.declared("02/03/2.3.2", standing, "review lost a reviewer", holder),
+        )
+        if holder:
+            room = store.work_dir("atlas") / "runs" / holder
+            room.mkdir(parents=True, exist_ok=True)
+            (room / BRIEF_FILE).write_text(
+                ArticlePlan(
+                    title="2.3.2 Cyber Risk",
+                    thesis="Claim",
+                    target_format="textbook",
+                    sections=[],
+                    research_questions=[],
+                    source_quotes=[],
+                    author_direction="",
+                    voice_notes="",
+                ).model_dump_json(),
+                encoding="utf-8",
+            )
+        return store, work
+
+    @pytest.mark.asyncio
+    async def test_it_continues_the_run_the_part_already_holds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failed run's session is the resume address, so its saved stages
+        are the ones picked up. Minting a fresh one would start from nothing
+        while reporting itself as a resume."""
+        passed: list[dict[str, object]] = []
+
+        async def record(**given: object) -> AgentSessionResult:
+            passed.append(given)
+            return AgentSessionResult(
+                session_id="abc123",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        store, work = self.failed(tmp_path)
+
+        result = await resume_part(store, "atlas", work, "02/03/2.3.2", agents=OFFLINE)
+
+        assert result.outcome == "rewritten"
+        assert passed[0]["resume_session_id"] == "abc123"
+        assert passed[0]["session_id"] == "abc123"
+        assert passed[0]["restart_from_stage"] is None
+
+    @pytest.mark.asyncio
+    async def test_naming_a_stage_rewinds_to_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure inside a stage needs no rewind — that stage never
+        checkpointed. Naming one is for the other case: the stage finished and
+        what it produced is what was wrong."""
+        passed: list[dict[str, object]] = []
+
+        async def record(**given: object) -> AgentSessionResult:
+            passed.append(given)
+            return AgentSessionResult(
+                session_id="abc123",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        store, work = self.failed(tmp_path)
+
+        await resume_part(
+            store, "atlas", work, "02/03/2.3.2", redo="write", agents=OFFLINE
+        )
+
+        assert passed[0]["restart_from_stage"] == "write"
+
+    @pytest.mark.asyncio
+    async def test_it_works_to_the_brief_the_failed_run_was_planned_against(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stages already on disk were written against that brief, so a
+        freshly derived one would leave the resumed run working to a plan its
+        own snapshots disagree with — and would spend the planning call to do
+        it."""
+        composed: list[str] = []
+
+        async def deriving(*_args: object, **_kwargs: object) -> ComposedBrief | None:
+            composed.append("derived")
+            return None
+
+        async def record(**given: object) -> AgentSessionResult:
+            return AgentSessionResult(
+                session_id="abc123",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        monkeypatch.setattr(runner_module, "compose", deriving)
+        store, work = self.failed(tmp_path)
+
+        result = await resume_part(store, "atlas", work, "02/03/2.3.2", agents=OFFLINE)
+
+        assert composed == []
+        assert result.outcome == "rewritten"
+
+    @pytest.mark.asyncio
+    async def test_a_part_that_did_not_fail_has_no_run_to_continue(
+        self, tmp_path: Path
+    ) -> None:
+        """An idle or requested part is written by a pass, and a parked one is
+        waiting on an answer. Resuming any of them would continue whatever run
+        happened to be named last."""
+        store, work = self.failed(tmp_path, standing="parked")
+
+        with pytest.raises(CannotResume, match="from a failure or from a lease"):
+            await resume_part(store, "atlas", work, "02/03/2.3.2", agents=OFFLINE)
+
+    @pytest.mark.asyncio
+    async def test_a_part_still_being_written_is_left_alone(
+        self, tmp_path: Path
+    ) -> None:
+        """Two runs writing one part's span is the thing the lease exists to
+        prevent, and a fresh one is a run that has simply not finished."""
+        store, work = self.failed(tmp_path, standing="running")
+
+        with pytest.raises(CannotResume, match="being written now"):
+            await resume_part(store, "atlas", work, "02/03/2.3.2", agents=OFFLINE)
+
+    @pytest.mark.asyncio
+    async def test_a_lease_nobody_honoured_is_continued_like_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run whose process died between the pipeline returning and the
+        splice leaves its part reading `running` for as long as anybody leaves
+        it, with every surface reporting a rewrite in progress. Nothing
+        reclaims that lease, and until now the only door out was `clear` —
+        which throws the whole run away to escape a process that is already
+        gone. Holding the work's own lease proves no pass is running.
+        """
+
+        async def record(**_given: object) -> AgentSessionResult:
+            return AgentSessionResult(
+                session_id="abc123",
+                timestamp="",
+                output=WritingOutput(title="", content="## 2.3.2 Cyber Risk\n\nNew.\n"),
+            )
+
+        monkeypatch.setattr(runner_module, "run_session", record)
+        store, work = self.failed(tmp_path, standing="running")
+        state = store.load_state("atlas")
+        held = state.record("02/03/2.3.2")
+        assert held is not None
+        store.publish_state(
+            "atlas",
+            state.model_copy(
+                update={
+                    "records": (
+                        *(one for one in state.records if one.key != "02/03/2.3.2"),
+                        held.model_copy(
+                            update={"changed_at": utc_now() - LEASE_TERM * 2}
+                        ),
+                    )
+                }
+            ),
+        )
+
+        result = await resume_part(store, "atlas", work, "02/03/2.3.2", agents=OFFLINE)
+
+        assert result.outcome == "rewritten"
+
+    @pytest.mark.asyncio
+    async def test_a_failure_with_no_run_behind_it_cannot_be_continued(
+        self, tmp_path: Path
+    ) -> None:
+        """A part can fail before its run was ever recorded — prose-blind
+        planning refusing, or the text being gone — and there is nothing saved
+        to pick up. Saying so beats resuming into an empty room."""
+        store, work = self.failed(tmp_path, holder="")
+
+        with pytest.raises(CannotResume, match="no saved stages"):
+            await resume_part(store, "atlas", work, "02/03/2.3.2", agents=OFFLINE)
 
 
 class TestAPassCanBeKeptToOnePart:

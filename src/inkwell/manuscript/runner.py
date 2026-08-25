@@ -191,6 +191,32 @@ class PartRun(BaseModel):
     )
 
 
+class PartResumption(BaseModel):
+    """Where a part's run picks the pipeline up, rather than starting one.
+
+    A part run is one ordinary run, so it keeps the same per-stage snapshots
+    any run does and has the same right to be continued from one. What it
+    lacked was anybody able to say so: the loop only ever started runs, so a
+    part that lost its reviewers to an expired token had to be cleared back to
+    idle and written from nothing — paying for the plan, the research and the
+    draft a second time to reach the stage that actually failed.
+
+    Which run is resumed is the session the part is already run under, so it is
+    not repeated here. ``redo`` names a stage to rewind to and run again;
+    empty picks up from the last stage that finished, which is what a failure
+    *inside* a stage wants — that stage never checkpointed, so continuing from
+    the one before it is already redoing it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    redo: str = Field(
+        default="",
+        description="Stage to rewind to and run again, discarding it and "
+        "everything after; empty picks up from the last stage that finished",
+    )
+
+
 class PartHandoff(BaseModel):
     """The settled successor that was committed after the pipeline draft."""
 
@@ -627,6 +653,22 @@ async def planned_for(
     )
 
 
+def held_brief(room: Path) -> ArticlePlan | None:
+    """The brief this run was already working to, off its own room.
+
+    Written by whichever reader composed it, so a resume reads one file rather
+    than working out which of the two to ask again.
+    """
+    path = room / BRIEF_FILE
+    if not path.is_file():
+        return None
+    try:
+        return ArticlePlan.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError:
+        logger.exception("The brief saved under %s could not be read back", room)
+        return None
+
+
 def own_change(key: str) -> ProposedChange:
     """The fact every rewrite publishes: this part's text is not what it was.
 
@@ -728,6 +770,7 @@ async def run_part(
     agents: PartRunAgents | None = None,
     found: WorkFindings | None = None,
     publisher: PartPublisher | None = None,
+    resuming: PartResumption | None = None,
 ) -> PartOutcome:
     """Run one part with observation active from its first phase to its last."""
     watched = observers if observers is not None else PartRunObservers()
@@ -747,6 +790,7 @@ async def run_part(
                 agents=agents,
                 found=found,
                 publisher=publisher,
+                resuming=resuming,
             )
         finally:
             watched.trace.save()
@@ -766,6 +810,7 @@ async def execute_part(
     agents: PartRunAgents | None = None,
     found: WorkFindings | None = None,
     publisher: PartPublisher | None = None,
+    resuming: PartResumption | None = None,
 ) -> PartOutcome:
     """Take one part through the pipeline and hand back what it produced.
 
@@ -786,6 +831,12 @@ async def execute_part(
     ``found`` is what the research has been placed on this part, read off the
     store where a caller does not already hold it. A pass holds it, because a
     pass reads it once for two hundred parts.
+
+    ``resuming`` continues the run this session already holds instead of
+    opening one. The brief is then read back from the run's own room rather
+    than composed again — a resumed run has to work to the plan its snapshots
+    were written against, and re-deriving would spend the prose-blind planning
+    call to arrive at a plan the stages downstream have already been built on.
     """
     target = Path(manuscript.root) / node.path
     if not target.is_file():
@@ -841,22 +892,34 @@ async def execute_part(
         research=research,
     )
     if watched.listener is not None:
-        await watched.listener.on_progress("Composing this part's editorial brief")
-    plan = await planned_for(
-        store,
-        work,
-        manuscript,
-        node,
-        material,
-        room,
-        evidence=evidence,
-        writer=reading.briefing,
+        await watched.listener.on_progress(
+            "Reading back this part's editorial brief"
+            if resuming is not None
+            else "Composing this part's editorial brief"
+        )
+    plan = (
+        held_brief(room)
+        if resuming is not None
+        else await planned_for(
+            store,
+            work,
+            manuscript,
+            node,
+            material,
+            room,
+            evidence=evidence,
+            writer=reading.briefing,
+        )
     )
     if plan is None:
         return PartOutcome(
             key=node.key,
             session=session_id,
-            failure="prose-blind planning produced no brief; pipeline not started",
+            failure=(
+                f"no brief saved under {room}; nothing to resume against"
+                if resuming is not None
+                else "prose-blind planning produced no brief; pipeline not started"
+            ),
         )
     result = await run_session(
         sources=[str(material), instruction],
@@ -871,6 +934,8 @@ async def execute_part(
         glossary=shared,
         existing_doc_id=store.load_docs(work).working_doc(node.key) or None,
         session_id=session_id,
+        resume_session_id=session_id if resuming is not None else None,
+        restart_from_stage=resuming.redo if resuming and resuming.redo else None,
         listener=watched.listener,
         trace=watched.trace,
         session_state=watched.state,

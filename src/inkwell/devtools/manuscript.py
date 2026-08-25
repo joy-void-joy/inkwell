@@ -88,8 +88,10 @@ from inkwell.manuscript.ingest import read_manuscript
 from inkwell.manuscript.loop import (
     DEFAULT_CONCURRENCY,
     DEFAULT_PASSES,
+    CannotResume,
     WorkAlreadyRunning,
     narrowed,
+    resume_part,
     run_loop,
     schedulable,
     unpicked,
@@ -585,6 +587,58 @@ def run_cmd(
         typer.echo(
             f"\n{work} has work outstanding — run again, or answer what is asked"
         )
+
+
+@app.command("resume")
+def resume_cmd(
+    work: Annotated[str, typer.Argument(help="The recorded work")],
+    key: Annotated[str, typer.Argument(help="Which failed part to continue")],
+    redo: Annotated[
+        str,
+        typer.Option(
+            "--from",
+            help="Rewind to this stage and run it again, discarding it and "
+            "everything after. Omit to pick up from the last stage that "
+            "finished. Stages: extract, voice, book, plan, research, "
+            "assumptions, refine, write, merge, review, rewrite, format",
+        ),
+    ] = "",
+) -> None:
+    """Continue a failed part's run instead of writing it from nothing.
+
+    A part run is one ordinary run, so it checkpoints at every stage and a run
+    that failed in review still holds its brief, its research and its draft.
+    `clear` is the other door and throws all of that away: it returns the part
+    to idle so a pass writes it again, which is right when the failure was in
+    what the run decided and wasteful when it was in the weather.
+
+    Costs the stages from the resume point onward. A review that lost its
+    reviewers to an expired token costs review, rewrite and format — not the
+    plan and research that preceded them.
+    """
+    store = manuscript_store()
+    tree = held_work(store, work)
+    refuse_unrooted(work, tree)
+    try:
+        result = asyncio.run(
+            resume_part(
+                store,
+                work,
+                tree,
+                key,
+                redo=redo,
+                vocabulary=declared_vocabulary(store, work),
+            )
+        )
+    except (CannotResume, WorkAlreadyRunning, GoogleAuthError) as refused:
+        typer.echo(str(refused), err=True)
+        raise typer.Exit(1) from refused
+    typer.echo(
+        f"{result.key}: {result.outcome}"
+        f"{f' — {result.detail}' if result.detail else ''}"
+    )
+    if result.outcome != "rewritten":
+        raise typer.Exit(1)
 
 
 @app.command("questions")
